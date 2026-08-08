@@ -9,7 +9,9 @@ option(PARAMCAD_BUILD_TESTS "Build ParametricCAD tests" ON)
 
 add_library(ParametricCADCore
     src/Core/Document/CadDocument.cpp
+    src/Core/Document/ObjectRegistry.cpp
     src/Core/Document/PartDocument.cpp
+    src/Core/Recompute/DocumentRecomputeEngine.cpp
     src/Core/Parameter/Parameter.cpp
     src/Core/Parameter/ParameterManager.cpp
     src/Core/Material/Material.cpp
@@ -60,6 +62,8 @@ if(PARAMCAD_BUILD_TESTS)
     add_executable(ParametricCADCoreTests
         tests/CoreSmokeTests.cpp
         tests/DependencyGraphTests.cpp
+        tests/ObjectRegistryTests.cpp
+        tests/DocumentRecomputeTests.cpp
         tests/SerializationTests.cpp
     )
     target_link_libraries(ParametricCADCoreTests PRIVATE ParametricCADCore GTest::gtest_main)

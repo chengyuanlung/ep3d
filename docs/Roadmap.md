@@ -14,12 +14,21 @@ Exit criterion: tests compile and run.
 - PartDocument.
 - ParameterManager.
 - Body / Feature base classes.
-- Compute state and dirty propagation.
-- Native JSON serialization skeleton.
+- Compute state and dirty propagation (generic DependencyGraph).
+- Native JSON serialization (schema v1) with stable-id restore.
 
 Exit criterion: create/save/load a Part with scalar parameters and feature metadata.
 
-## M2 — Kernel adapter + primitive solid
+## M2 — Document Recompute Infrastructure
+- Document-local ObjectRegistry (stable ObjectId → object lookup, non-owning handles).
+- PartDocument integrates the DependencyGraph and a DocumentRecomputeEngine behind a façade (single registration path, safe deletion).
+- Parameters participate as dirty-source nodes; ParameterState vs ComputeState semantics documented (ADR-011).
+- Topological incremental recompute with failure blocking (`BlockedByDependency`), deterministic retry, suppression rule.
+- Schema v2 persists explicit dependency edges; registry and graph are rebuilt during load (ADR-012).
+
+Exit criterion: change a Parameter and only its dependent nodes recompute, in order, with failures blocking downstream and retry recovering — proven by the release-gate scenario test.
+
+## M3 — Kernel adapter + primitive solid
 - Add OpenCASCADE wrapper target.
 - Create a box from Width/Height/Length.
 - Keep TopoDS_Shape inside Kernel implementation only.
@@ -27,7 +36,7 @@ Exit criterion: create/save/load a Part with scalar parameters and feature metad
 
 Exit criterion: change Width and receive rebuilt mass properties.
 
-## M3 — Qt viewer
+## M4 — Qt viewer
 - Qt Widgets shell.
 - Feature tree.
 - Property panel.
@@ -36,7 +45,7 @@ Exit criterion: change Width and receive rebuilt mass properties.
 
 Exit criterion: edit Width 100 → 120 and see 3D update.
 
-## M4 — Sketch v1
+## M5 — Sketch v1
 - Points, lines, circles, arcs.
 - 2D view.
 - Basic constraints.
@@ -44,21 +53,21 @@ Exit criterion: edit Width 100 → 120 and see 3D update.
 
 Exit criterion: constrained rectangle controlled by Width/Height.
 
-## M5 — Features v1
+## M6 — Features v1
 - Sketch-to-wire conversion.
 - Pad.
 - Pocket.
 
 Exit criterion: rectangular block with editable circular through-hole.
 
-## M6 — DXF v1
+## M7 — DXF v1
 - LINE, ARC, CIRCLE, LWPOLYLINE.
 - DIMENSION parsing.
 - First dimension-to-constraint mapping.
 
 Exit criterion: import a simple dimensioned flange sketch, edit a recognized dimension, rebuild 3D.
 
-## M7 — Assembly foundation
+## M8 — Assembly foundation
 - AssemblyDocument.
 - ComponentInstance.
 - Reference frame linkage.
@@ -66,21 +75,21 @@ Exit criterion: import a simple dimensioned flange sketch, edit a recognized dim
 
 Exit criterion: assemble several Parts and interactively change one joint coordinate.
 
-## M8 — Collision
+## M9 — Collision
 - Broad phase bounding boxes/BVH.
 - Minimum clearance.
 - Exact interference.
 - Collision rules.
 - Last-safe joint position.
 
-## M9 — Robot foundation
+## M10 — Robot foundation
 - Robot link/joint chain.
 - FK.
 - User/Tool frames.
 - Joint jogging.
 - IK interface.
 
-## M10 — Dynamics / Digital Twin
+## M11 — Dynamics / Digital Twin
 - Consume Part mass/COM/inertia.
 - Gravity/load calculations.
 - Physics engine adapter.

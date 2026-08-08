@@ -1,5 +1,6 @@
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/PlaceholderFeature.h"
+#include "Core/Recompute/IRecomputable.h"
 #include "Core/Serialization/JsonValue.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include <gtest/gtest.h>
@@ -43,8 +44,8 @@ constexpr const char* kMinimalDocument = R"({
 
 TEST(SerializationTests, RoundTripPreservesAllFields) {
     PartDocument original("RoundTrip");
-    Parameter& width = original.parameters().add("Width", 120.0, UnitType::Millimeter);
-    Parameter& depth = original.parameters().add("Depth", 60.5, UnitType::Millimeter);
+    Parameter& width = original.addParameter("Width", 120.0, UnitType::Millimeter);
+    Parameter& depth = original.addParameter("Depth", 60.5, UnitType::Millimeter);
     depth.setExpression("Width / 2"); // round-trips as data; also sets state Dirty
     ASSERT_EQ(depth.state(), ParameterState::Dirty);
 
@@ -143,7 +144,7 @@ TEST(SerializationTests, HeaderValidationErrors) {
     EXPECT_EQ(result.document, nullptr);
 
     std::string futureVersion = kMinimalDocument;
-    futureVersion.replace(futureVersion.find("\"schemaVersion\": 1"), 18, "\"schemaVersion\": 2");
+    futureVersion.replace(futureVersion.find("\"schemaVersion\": 1"), 18, "\"schemaVersion\": 9");
     result = loadFromString(futureVersion);
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error, SerializationError::UnsupportedSchemaVersion);
@@ -224,7 +225,7 @@ TEST(SerializationTests, UnknownKeysAreIgnored) {
 
 TEST(SerializationTests, LoadedIdsNeverCollideWithNewObjects) {
     PartDocument original("Collision");
-    original.parameters().add("Width", 10.0, UnitType::Millimeter);
+    original.addParameter("Width", 10.0, UnitType::Millimeter);
     Body& body = original.addBody("Body001");
     body.addFeature<PlaceholderFeature>("Pad001", "Placeholder");
 
@@ -244,7 +245,7 @@ TEST(SerializationTests, LoadedIdsNeverCollideWithNewObjects) {
 
     // Every object created after the load gets an id strictly greater than
     // anything in the file.
-    Parameter& newParameter = copy.parameters().add("Depth", 5.0, UnitType::Millimeter);
+    Parameter& newParameter = copy.addParameter("Depth", 5.0, UnitType::Millimeter);
     Body& newBody = copy.addBody("Body002");
     Feature& newFeature = newBody.addFeature<PlaceholderFeature>("Pad002", "Placeholder");
     EXPECT_GT(newParameter.id(), maxLoadedId);
@@ -303,7 +304,7 @@ TEST(SerializationTests, SuppressedFeatureStateRoundTrips) {
 
 TEST(SerializationTests, FileRoundTripThroughRealFile) {
     PartDocument original("FileRoundTrip");
-    original.parameters().add("Width", 42.0, UnitType::Millimeter);
+    original.addParameter("Width", 42.0, UnitType::Millimeter);
 
     const ::testing::TestInfo* info = ::testing::UnitTest::GetInstance()->current_test_info();
     const std::string path = std::string(info->name()) + ".pcad.json";
@@ -443,7 +444,7 @@ TEST(SerializationTests, NanParameterValueSavesAsZeroValidJson) {
     // value is silently persisted as 0 (valid JSON, reloads cleanly). The
     // silent value change is flagged in the TEST report as an observation.
     PartDocument document("NanDoc");
-    Parameter& p = document.parameters().add("W", 1.0, UnitType::Millimeter);
+    Parameter& p = document.addParameter("W", 1.0, UnitType::Millimeter);
     p.setValue(std::numeric_limits<double>::quiet_NaN());
 
     const std::string saved = saveToString(document);
@@ -510,7 +511,7 @@ TEST(SerializationTests, MalformedIdStringsRejected) {
 
 TEST(SerializationTests, SpecialCharacterStringsRoundTrip) {
     PartDocument original("Name \"with\" \\backslash\\ and\nnewline\ttab");
-    original.parameters().add("\xE5\xAF\xAC\xE5\xBA\xA6 (width)", 12.5, UnitType::Millimeter);
+    original.addParameter("\xE5\xAF\xAC\xE5\xBA\xA6 (width)", 12.5, UnitType::Millimeter);
     Body& body = original.addBody(""); // empty body name is preserved
     body.addFeature<PlaceholderFeature>("Pad \"1\"\\", "Placeholder");
 
@@ -701,8 +702,7 @@ TEST(SerializationTests, SequentialLoadsRemainCollisionFree) {
     // New objects created after both loads exceed both files' max ids and
     // collide with neither document.
     const ObjectId maxPersisted = base + 24;
-    Parameter& newParameter =
-        loadedA.document->parameters().add("Fresh", 2.0, UnitType::Millimeter);
+    Parameter& newParameter = loadedA.document->addParameter("Fresh", 2.0, UnitType::Millimeter);
     Body& newBody = loadedB.document->addBody("Body002");
     EXPECT_GT(newParameter.id(), maxPersisted);
     EXPECT_GT(newBody.id(), maxPersisted);
@@ -712,13 +712,193 @@ TEST(SerializationTests, SequentialLoadsRemainCollisionFree) {
     expectPairwiseDistinct(idsA);
 }
 
+// ---------------------------------------------------------------------------
+// M2 schema v2 (explicit dependency edges, ADR-012).
+// ---------------------------------------------------------------------------
+
+// Minimal recomputable stub for the stub-edges-not-persisted test.
+class StubRecomputable final : public IRecomputable {
+public:
+    StubRecomputable() : id_(ObjectIdGenerator::Next()) {}
+    ObjectId id() const noexcept override { return id_; }
+    RecomputeResult recompute(const RecomputeContext&) override {
+        return {RecomputeStatus::Success, {}};
+    }
+
+private:
+    ObjectId id_;
+};
+
+// Crafted v2 document with two parameters (6002, 6003) and one body (6004);
+// the dependencies array is injected by each test.
+std::string v2DocumentWithDependencies(const std::string& dependenciesJson) {
+    return std::string(R"({
+      "format": "ParametricCAD", "schemaVersion": 2, "documentType": "Part",
+      "id": "6001", "name": "V2",
+      "parameters": [ {"id": "6002", "name": "A", "value": 1.0, "unit": "Millimeter",
+                       "expression": "", "state": "Valid"},
+                      {"id": "6003", "name": "B", "value": 2.0, "unit": "Millimeter",
+                       "expression": "", "state": "Valid"} ],
+      "bodies": [ {"id": "6004", "name": "Body001", "features": []} ],
+      "dependencies": )") + dependenciesJson + "\n}";
+}
+
+TEST(SerializationV2Test, M2_SER_001_StableIdsSurviveRoundTrip) {
+    PartDocument original("V2Ids");
+    Parameter& a = original.addParameter("A", 1.0, UnitType::Millimeter);
+    Parameter& b = original.addParameter("B", 2.0, UnitType::Millimeter);
+    Body& body = original.addBody("Body001");
+    ASSERT_TRUE(original.addDependency(b.id(), a.id())); // A -> B
+
+    const std::string saved = saveToString(original);
+    EXPECT_NE(saved.find("\"schemaVersion\": 2"), std::string::npos);
+    const LoadResult loaded = loadFromString(saved);
+    ASSERT_TRUE(loaded) << loaded.message;
+    EXPECT_EQ(loaded.document->id(), original.id());
+    ASSERT_EQ(loaded.document->parameters().items().size(), 2u);
+    EXPECT_EQ(loaded.document->parameters().items()[0]->id(), a.id());
+    EXPECT_EQ(loaded.document->parameters().items()[1]->id(), b.id());
+    ASSERT_EQ(loaded.document->bodies().size(), 1u);
+    EXPECT_EQ(loaded.document->bodies()[0]->id(), body.id());
+}
+
+TEST(SerializationV2Test, M2_SER_002_DependencyEdgesSurviveRoundTrip) {
+    PartDocument original("V2Edges");
+    Parameter& a = original.addParameter("A", 1.0, UnitType::Millimeter);
+    Parameter& b = original.addParameter("B", 2.0, UnitType::Millimeter);
+    ASSERT_TRUE(original.addDependency(b.id(), a.id())); // A -> B
+
+    const std::string firstSave = saveToString(original);
+    EXPECT_NE(firstSave.find("\"dependencies\""), std::string::npos);
+    EXPECT_NE(firstSave.find("\"prerequisite\""), std::string::npos);
+
+    const LoadResult loaded = loadFromString(firstSave);
+    ASSERT_TRUE(loaded) << loaded.message;
+    const DependencyGraph& graph = loaded.document->dependencyGraph();
+    EXPECT_EQ(graph.dependentsOf(a.id()), std::vector<ObjectId>{b.id()});
+    EXPECT_EQ(graph.prerequisitesOf(b.id()), std::vector<ObjectId>{a.id()});
+
+    // Graph states are NOT persisted: every node starts Dirty after load ...
+    EXPECT_EQ(graph.state(a.id()), ComputeState::Dirty);
+    EXPECT_EQ(graph.state(b.id()), ComputeState::Dirty);
+    // ... and the first recompute covers everything.
+    EXPECT_TRUE(loaded.document->recompute().success);
+    EXPECT_EQ(loaded.document->dependencyGraph().state(b.id()), ComputeState::Valid);
+
+    // Canonical v2 output is byte-identical across a round trip.
+    EXPECT_EQ(saveToString(*loaded.document), firstSave);
+}
+
+TEST(SerializationV2Test, M2_SER_003_ObjectRegistryRebuiltAfterLoad) {
+    PartDocument original("V2Registry");
+    Parameter& parameter = original.addParameter("A", 1.0, UnitType::Millimeter);
+    Body& body = original.addBody("Body001");
+
+    const LoadResult loaded = loadFromString(saveToString(original));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const ObjectRegistry& registry = loaded.document->objectRegistry();
+    EXPECT_TRUE(registry.contains(parameter.id()));
+    EXPECT_TRUE(registry.contains(body.id()));
+
+    // Lookup resolves the loaded document's own runtime objects.
+    const ObjectRegistry::ObjectRef* parameterRef = registry.find(parameter.id());
+    ASSERT_NE(parameterRef, nullptr);
+    EXPECT_EQ(std::get<Parameter*>(*parameterRef),
+              loaded.document->parameters().findById(parameter.id()));
+    const ObjectRegistry::ObjectRef* bodyRef = registry.find(body.id());
+    ASSERT_NE(bodyRef, nullptr);
+    EXPECT_EQ(std::get<Body*>(*bodyRef), loaded.document->bodies()[0].get());
+}
+
+TEST(SerializationV2Test, M2_SER_004_V1FileStillLoads) {
+    // kMinimalDocument is schema v1 (no dependencies array).
+    const LoadResult minimal = loadFromString(kMinimalDocument);
+    ASSERT_TRUE(minimal) << minimal.message;
+    EXPECT_EQ(minimal.document->dependencyGraph().nodeCount(), 0u);
+
+    // A v1 file with a parameter: the parameter gets a graph node (Dirty).
+    std::string v1WithParameter = kMinimalDocument;
+    v1WithParameter.replace(v1WithParameter.find("\"parameters\": []"), 16,
+                            "\"parameters\": [ {\"id\": \"4005\", \"name\": \"W\", \"value\": 1.0, "
+                            "\"unit\": \"Millimeter\", \"expression\": \"\", \"state\": \"Valid\"} ]");
+    const LoadResult loaded = loadFromString(v1WithParameter);
+    ASSERT_TRUE(loaded) << loaded.message;
+    ASSERT_EQ(loaded.document->parameters().items().size(), 1u);
+    const ObjectId parameterId = loaded.document->parameters().items()[0]->id();
+    EXPECT_TRUE(loaded.document->dependencyGraph().hasNode(parameterId));
+    EXPECT_EQ(loaded.document->dependencyGraph().state(parameterId), ComputeState::Dirty);
+    EXPECT_TRUE(loaded.document->dependencyGraph().dependentsOf(parameterId).empty());
+}
+
+TEST(SerializationV2Test, M2_SER_005_StubEdgesNotPersisted) {
+    PartDocument document("V2Stubs");
+    Parameter& width = document.addParameter("Width", 1.0, UnitType::Millimeter);
+    StubRecomputable stub; // runtime-only, externally owned
+    ASSERT_TRUE(document.addRecomputableNode(stub));
+    ASSERT_TRUE(document.addDependency(stub.id(), width.id())); // Width -> stub
+
+    const std::string saved = saveToString(document);
+    // The stub id appears nowhere in the file; the edge touching it is not saved.
+    EXPECT_EQ(saved.find(std::to_string(stub.id())), std::string::npos);
+
+    const LoadResult loaded = loadFromString(saved);
+    ASSERT_TRUE(loaded) << loaded.message;
+    EXPECT_FALSE(loaded.document->dependencyGraph().hasNode(stub.id()));
+    EXPECT_TRUE(loaded.document->dependencyGraph().dependentsOf(width.id()).empty());
+}
+
+TEST(SerializationV2Test, M2_SER_006_UnknownDependencyIdRejected) {
+    // Endpoint that is no object in the file at all.
+    LoadResult result = loadFromString(v2DocumentWithDependencies(
+        R"([ {"prerequisite": "6002", "dependent": "9999"} ])"));
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, SerializationError::UnknownDependencyId);
+    EXPECT_EQ(result.document, nullptr);
+    EXPECT_NE(result.message.find("9999"), std::string::npos) << result.message;
+
+    // Endpoint that is a persisted object but not a graph-node object (body).
+    result = loadFromString(v2DocumentWithDependencies(
+        R"([ {"prerequisite": "6002", "dependent": "6004"} ])"));
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, SerializationError::UnknownDependencyId);
+    EXPECT_EQ(result.document, nullptr);
+}
+
+TEST(SerializationV2Test, M2_SER_007_InvalidDependencyRejected) {
+    // Self-edge.
+    LoadResult result = loadFromString(v2DocumentWithDependencies(
+        R"([ {"prerequisite": "6002", "dependent": "6002"} ])"));
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, SerializationError::InvalidDependency);
+    EXPECT_EQ(result.document, nullptr);
+
+    // Two-edge cycle.
+    result = loadFromString(v2DocumentWithDependencies(
+        R"([ {"prerequisite": "6002", "dependent": "6003"},
+             {"prerequisite": "6003", "dependent": "6002"} ])"));
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, SerializationError::InvalidDependency);
+    EXPECT_EQ(result.document, nullptr);
+
+    // A well-formed edge in the same crafted file loads fine.
+    result = loadFromString(v2DocumentWithDependencies(
+        R"([ {"prerequisite": "6002", "dependent": "6003"} ])"));
+    ASSERT_TRUE(result) << result.message;
+    ASSERT_EQ(result.document->parameters().items().size(), 2u);
+    const ObjectId a = result.document->parameters().items()[0]->id();
+    const ObjectId b = result.document->parameters().items()[1]->id();
+    EXPECT_EQ(result.document->dependencyGraph().dependentsOf(a), std::vector<ObjectId>{b});
+}
+
 // Defense-in-depth layer under the serializer cap: even a direct
 // AdvancePast(max uint64) clamps to kMaxObjectId and never wraps the counter.
-// NOTE: this permanently advances the shared generator to 2^63, so it is
-// registered LAST; assertions use monotonicity (not exact equality) so the
-// test passes both under gtest_discover_tests (one process per test) and in a
-// single-process full-suite run.
-TEST(SerializationTests, AdvancePastMaxUint64DoesNotWrapGenerator) {
+// NOTE: this permanently advances the shared generator to 2^63, so it lives
+// in its own suite whose first (and only) registration is the LAST test in
+// the last translation unit -- gtest runs whole suites in first-registration
+// order, so every other test precedes it in a single-process run; assertions
+// use monotonicity (not exact equality) so the test also passes under
+// gtest_discover_tests (one process per test).
+TEST(GeneratorLimitTest, AdvancePastMaxUint64DoesNotWrapGenerator) {
     const ObjectId sane = ObjectIdGenerator::Next();
     ObjectIdGenerator::AdvancePast(std::numeric_limits<ObjectId>::max());
     const ObjectId next1 = ObjectIdGenerator::Next();

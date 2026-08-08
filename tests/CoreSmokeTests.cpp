@@ -7,7 +7,7 @@ using namespace paramcad;
 
 TEST(CoreSmokeTests, ParameterAndBodyCreation) {
     PartDocument part("TestPart");
-    auto& width = part.parameters().add("Width", 100.0, UnitType::Millimeter);
+    auto& width = part.addParameter("Width", 100.0, UnitType::Millimeter);
     EXPECT_NE(width.id(), kInvalidObjectId);
     EXPECT_EQ(part.parameters().findByName("Width"), &width);
 

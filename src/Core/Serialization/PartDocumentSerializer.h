@@ -7,11 +7,15 @@
 
 namespace paramcad {
 
-// Native JSON serialization of PartDocument, schema v1.
+// Native JSON serialization of PartDocument, schema v2 (loader also accepts
+// v1 files; save always writes v2).
 // Covered: document header, scalar parameters (expression round-trips as an
-// uninterpreted string), bodies, and feature metadata (restored as
-// PlaceholderFeature). Not serialized: frames, connectors, material, mass
-// properties, sketches, dependency-graph contents (derived/deferred data).
+// uninterpreted string), bodies, feature metadata (restored as
+// PlaceholderFeature), and explicit dependency edges (ADR-012: only edges
+// whose BOTH endpoints are persisted document objects; edges touching
+// runtime-only IRecomputable stubs are never saved). Graph node ComputeStates
+// are NOT persisted (derived data) -- after load every node starts Dirty.
+// Not serialized: frames, connectors, material, mass properties, sketches.
 // ObjectIds are stored as decimal strings (uint64 exceeds double precision);
 // schema v1 accepts ids in [1, kMaxObjectId] only (larger values are rejected
 // with InvalidFieldType so the id generator can never wrap), and every id in a
@@ -31,7 +35,9 @@ enum class SerializationError {
     MissingField,
     InvalidFieldType,
     InvalidEnumValue,
-    DuplicateId
+    DuplicateId,
+    UnknownDependencyId, // dependency endpoint is not a graph-node object in this file
+    InvalidDependency    // dependency edge is a self-edge or would create a cycle
 };
 
 struct SaveResult {

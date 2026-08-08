@@ -18,6 +18,16 @@ Parameter& ParameterManager::restore(ObjectId id, std::string name, double value
     return ref;
 }
 
+bool ParameterManager::remove(ObjectId id) noexcept {
+    for (auto it = items_.begin(); it != items_.end(); ++it) {
+        if ((*it)->id() == id) {
+            items_.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
 Parameter* ParameterManager::findById(ObjectId id) noexcept {
     for (auto& item : items_) if (item->id() == id) return item.get();
     return nullptr;
@@ -25,6 +35,16 @@ Parameter* ParameterManager::findById(ObjectId id) noexcept {
 
 Parameter* ParameterManager::findByName(std::string_view name) noexcept {
     for (auto& item : items_) if (item->name() == name) return item.get();
+    return nullptr;
+}
+
+const Parameter* ParameterManager::findById(ObjectId id) const noexcept {
+    for (const auto& item : items_) if (item->id() == id) return item.get();
+    return nullptr;
+}
+
+const Parameter* ParameterManager::findByName(std::string_view name) const noexcept {
+    for (const auto& item : items_) if (item->name() == name) return item.get();
     return nullptr;
 }
 

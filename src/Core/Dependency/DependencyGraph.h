@@ -44,6 +44,10 @@ public:
 
     bool hasNode(ObjectId id) const noexcept;
     std::size_t nodeCount() const noexcept;
+    // All node ids in insertion order (read-only; needed for deterministic
+    // edge serialization at the document layer -- the graph itself stays
+    // generic and learns no CAD types).
+    std::vector<ObjectId> nodes() const;
 
     // Rejects unknown ids (NodeNotFound), self-edges and any cycle
     // (WouldCreateCycle); the graph is unchanged on failure. A duplicate

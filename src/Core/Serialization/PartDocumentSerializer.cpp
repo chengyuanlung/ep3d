@@ -1,4 +1,5 @@
 #include "Core/Serialization/PartDocumentSerializer.h"
+#include "Core/Dependency/DependencyGraph.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Serialization/JsonValue.h"
 #include <algorithm>
@@ -15,7 +16,8 @@ namespace paramcad {
 
 namespace {
 
-constexpr int kSchemaVersion = 1;
+constexpr int kSchemaVersion = 2;           // written on save
+constexpr int kMinSupportedSchemaVersion = 1; // v1 files (no edges) still load
 constexpr std::string_view kFormatName = "ParametricCAD";
 constexpr std::string_view kDefaultFeatureType = "Placeholder";
 
@@ -142,6 +144,32 @@ JsonValue toJson(const PartDocument& document) {
         bodies.add(std::move(bodyEntry));
     }
     root.set("bodies", std::move(bodies));
+
+    // ADR-012: persist explicit edges whose BOTH endpoints are persisted
+    // document objects; edges touching runtime-only recomputables (test
+    // stubs) are never saved. Written in graph insertion order for
+    // deterministic output.
+    std::unordered_set<ObjectId> persistedIds;
+    for (const auto& parameter : document.parameters().items())
+        persistedIds.insert(parameter->id());
+    for (const auto& body : document.bodies()) {
+        persistedIds.insert(body->id());
+        for (const auto& feature : body->features())
+            persistedIds.insert(feature->id());
+    }
+    JsonValue dependencies = JsonValue::makeArray();
+    const DependencyGraph& graph = document.dependencyGraph();
+    for (ObjectId prerequisite : graph.nodes()) {
+        if (persistedIds.count(prerequisite) == 0) continue;
+        for (ObjectId dependent : graph.dependentsOf(prerequisite)) {
+            if (persistedIds.count(dependent) == 0) continue;
+            JsonValue edge = JsonValue::makeObject();
+            edge.set("prerequisite", JsonValue::makeString(idToString(prerequisite)));
+            edge.set("dependent", JsonValue::makeString(idToString(dependent)));
+            dependencies.add(std::move(edge));
+        }
+    }
+    root.set("dependencies", std::move(dependencies));
     return root;
 }
 
@@ -240,9 +268,12 @@ LoadResult loadPartDocument(std::istream& in) {
     const JsonValue* schemaVersion =
         requireField(root, "schemaVersion", JsonType::Number, documentContext, err);
     if (schemaVersion == nullptr) return loadFailure(err.error, err.message);
-    if (schemaVersion->asNumber() != static_cast<double>(kSchemaVersion)) {
+    const double schemaVersionValue = schemaVersion->asNumber();
+    if (schemaVersionValue < static_cast<double>(kMinSupportedSchemaVersion) ||
+        schemaVersionValue > static_cast<double>(kSchemaVersion) ||
+        schemaVersionValue != static_cast<double>(static_cast<int>(schemaVersionValue))) {
         std::ostringstream message;
-        message << "unsupported schema version " << schemaVersion->asNumber();
+        message << "unsupported schema version " << schemaVersionValue;
         return loadFailure(SerializationError::UnsupportedSchemaVersion, message.str());
     }
 
@@ -387,6 +418,69 @@ LoadResult loadPartDocument(std::istream& in) {
         bodyData.push_back(std::move(body));
     }
 
+    // Dependencies (schema v2; optional array). Validated fully BEFORE any
+    // document construction on a scratch graph holding exactly the node set
+    // the real document will have (parameter nodes), so a bad edge can never
+    // leave a partial document nor advance the id generator.
+    struct EdgeData {
+        ObjectId prerequisite;
+        ObjectId dependent;
+    };
+    std::vector<EdgeData> edgeData;
+    const JsonValue* dependencies = root.find("dependencies");
+    if (dependencies != nullptr) {
+        if (dependencies->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'dependencies' has the wrong JSON type");
+        std::unordered_set<ObjectId> parameterIds;
+        for (const auto& parameter : parameterData) parameterIds.insert(parameter.id);
+        DependencyGraph scratch;
+        for (ObjectId id : parameterIds) scratch.addNode(id);
+
+        const auto endpoint = [&](const JsonValue& entry, const char* key,
+                                  const std::string& context,
+                                  FieldError& fieldErr) -> std::optional<ObjectId> {
+            const JsonValue* field = requireField(entry, key, JsonType::String, context, fieldErr);
+            if (field == nullptr) return std::nullopt;
+            const auto id = idFromString(field->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId) {
+                fieldErr = fieldError(SerializationError::InvalidFieldType,
+                                      context + ": field '" + key +
+                                          "' is not a valid decimal ObjectId string");
+                return std::nullopt;
+            }
+            return id;
+        };
+
+        for (std::size_t i = 0; i < dependencies->items().size(); ++i) {
+            const JsonValue& entry = dependencies->items()[i];
+            const std::string context = "dependencies[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            const auto prerequisite = endpoint(entry, "prerequisite", context, err);
+            if (!prerequisite.has_value()) return loadFailure(err.error, err.message);
+            const auto dependent = endpoint(entry, "dependent", context, err);
+            if (!dependent.has_value()) return loadFailure(err.error, err.message);
+
+            for (ObjectId endpointId : {*prerequisite, *dependent}) {
+                if (parameterIds.count(endpointId) != 0) continue;
+                const bool persisted = seenIds.count(endpointId) != 0;
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   context + ": id " + idToString(endpointId) +
+                                       (persisted ? " is not a dependency-graph node"
+                                                  : " is not an object in this document"));
+            }
+            const GraphResult applied = scratch.addDependency(*dependent, *prerequisite);
+            if (!applied)
+                return loadFailure(SerializationError::InvalidDependency,
+                                   context + ": edge " + idToString(*prerequisite) + " -> " +
+                                       idToString(*dependent) +
+                                       " is a self-edge or would create a cycle");
+            edgeData.push_back(EdgeData{*prerequisite, *dependent});
+        }
+    }
+
     // Construction. Advance the generator past the file's MAXIMUM persisted id
     // first: restore allocates fresh ids along the way (the Origin frame in
     // the PartDocument restore ctor), and those must not collide with
@@ -403,16 +497,26 @@ LoadResult loadPartDocument(std::istream& in) {
     }
     ObjectIdGenerator::AdvancePast(maxPersistedId);
 
+    // All restore goes through the document facade so ObjectRegistry and
+    // DependencyGraph are rebuilt during load (M2-SER-003). Graph states are
+    // not persisted: every restored node starts Dirty.
     auto document = std::make_unique<PartDocument>(*documentId, name->asString());
     for (auto& parameter : parameterData)
-        document->parameters().restore(parameter.id, std::move(parameter.name), parameter.value,
-                                       parameter.unit, std::move(parameter.expression),
-                                       parameter.state);
+        document->restoreParameter(parameter.id, std::move(parameter.name), parameter.value,
+                                   parameter.unit, std::move(parameter.expression),
+                                   parameter.state);
     for (auto& body : bodyData) {
         Body& restored = document->restoreBody(body.id, std::move(body.name));
         for (auto& feature : body.features)
             restored.addFeature<PlaceholderFeature>(feature.id, std::move(feature.name),
                                                     feature.state, std::move(feature.type));
+    }
+    for (const EdgeData& edge : edgeData) {
+        const GraphResult applied = document->addDependency(edge.dependent, edge.prerequisite);
+        if (!applied) // defensive: pre-validated on the scratch graph
+            return loadFailure(SerializationError::InvalidDependency,
+                               "failed to re-apply dependency " + idToString(edge.prerequisite) +
+                                   " -> " + idToString(edge.dependent));
     }
     return LoadResult{std::move(document), SerializationError::None, {}};
 }

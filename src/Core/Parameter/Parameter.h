@@ -34,6 +34,12 @@ public:
     void setValue(double value) noexcept;
     void setExpression(std::string expression);
 
+    // ADR-011 bridge: ParameterState is the EVALUATION validity of the
+    // value/expression; the document recompute engine transitions it when the
+    // parameter's graph node is visited (scalar evaluation is trivial in M2).
+    void markEvaluationDirty() noexcept { state_ = ParameterState::Dirty; }
+    void markEvaluated() noexcept { state_ = ParameterState::Valid; }
+
 private:
     ObjectId id_;
     std::string name_;

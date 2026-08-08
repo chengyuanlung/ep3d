@@ -60,6 +60,10 @@ std::size_t DependencyGraph::nodeCount() const noexcept {
     return nodes_.size();
 }
 
+std::vector<ObjectId> DependencyGraph::nodes() const {
+    return insertionOrder_;
+}
+
 bool DependencyGraph::reaches(ObjectId from, ObjectId to) const {
     std::unordered_set<ObjectId> visited;
     std::vector<ObjectId> stack{from};

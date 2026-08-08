@@ -14,8 +14,11 @@ public:
     // persisted id and state.
     Parameter& restore(ObjectId id, std::string name, double value, UnitType unit,
                        std::string expression, ParameterState state);
+    bool remove(ObjectId id) noexcept; // false if unknown
     Parameter* findById(ObjectId id) noexcept;
     Parameter* findByName(std::string_view name) noexcept;
+    const Parameter* findById(ObjectId id) const noexcept;
+    const Parameter* findByName(std::string_view name) const noexcept;
     const std::vector<std::unique_ptr<Parameter>>& items() const noexcept { return items_; }
 
 private:

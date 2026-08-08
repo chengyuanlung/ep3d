@@ -11,13 +11,13 @@ This starter repository is the architectural foundation for a Windows-first para
 - GoogleTest
 - Git
 
-## First milestone
-1. Create a PartDocument.
-2. Add parameters Width, Height, Length.
-3. Recompute a simple parametric solid through a kernel adapter.
-4. Recalculate volume, mass, center of mass, and inertia.
-5. Save/load the document.
-6. Keep Core free of Qt and OpenCASCADE types.
+## Milestone status
+- M0 — Repository and Core conventions: COMPLETE.
+- M1 — Parametric Part Core (data model, generic DependencyGraph, JSON schema v1, GoogleTest): COMPLETE.
+- M2 — Document Recompute Infrastructure (ObjectRegistry, PartDocument recompute façade, parameter dirty sources, schema v2 dependency persistence): COMPLETE.
+- M3 — Kernel adapter + primitive solid: NEXT.
+
+Note: `MassProperties` is a data model only until the Kernel milestone (M3) — no volume/mass/inertia computation exists yet.
 
 See `docs/Architecture.md` and `docs/Roadmap.md`.
 
