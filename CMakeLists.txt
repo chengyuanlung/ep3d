@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(PARAMCAD_BUILD_TESTS "Build ParametricCAD tests" ON)
+option(PARAMCAD_BUILD_KERNEL_OCCT "Build the OpenCASCADE geometry kernel" ON)
 
 add_library(ParametricCADCore
     src/Core/Document/CadDocument.cpp
@@ -19,8 +20,11 @@ add_library(ParametricCADCore
     src/Core/Reference/ReferenceFrame.cpp
     src/Core/Body/Body.cpp
     src/Core/Dependency/DependencyGraph.cpp
+    src/Core/Feature/BoxFeature.cpp
     src/Core/Feature/Feature.cpp
     src/Core/Feature/PlaceholderFeature.cpp
+    src/Core/Kernel/KernelShape.cpp
+    src/Core/Physics/MassPropertiesNode.cpp
     src/Core/Serialization/JsonValue.cpp
     src/Core/Serialization/PartDocumentSerializer.cpp
     src/Core/Sketch/Sketch.cpp
@@ -41,6 +45,56 @@ if(MSVC)
     target_compile_options(ParametricCADApp PRIVATE /utf-8)
 endif()
 
+# --- OCCT-backed geometry kernel (M3, ADR-M3-001/003) -----------------------
+# OCCT discovery is configurable (spec 16): never a hard-coded developer path.
+# Configure with -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+# so find_package(OpenCASCADE CONFIG) resolves portably; the vcpkg x64-windows
+# triplet is dynamic, and VCPKG_APPLOCAL_DEPS (default ON with the vcpkg
+# toolchain) copies the required OCCT DLLs next to each executable post-build.
+# src/Core (ParametricCADCore) gains NO new include path or link dependency
+# here -- this block only ever touches the new ParametricCADKernelOcct target.
+# NO_CMAKE_(SYSTEM_)PACKAGE_REGISTRY: a stray export(PACKAGE OpenCASCADE) left
+# behind by an unrelated OCCT build elsewhere on a developer machine can
+# register itself in CMake's user/system package registry and get picked up
+# here instead of the intended toolchain-provided install -- exactly the kind
+# of accidental developer-machine-specific path spec 16 prohibits. Disabling
+# the registry means discovery is driven ONLY by CMAKE_TOOLCHAIN_FILE /
+# CMAKE_PREFIX_PATH / OpenCASCADE_DIR, all portable/explicit.
+if(PARAMCAD_BUILD_KERNEL_OCCT)
+    find_package(OpenCASCADE CONFIG QUIET
+        NO_CMAKE_PACKAGE_REGISTRY
+        NO_CMAKE_SYSTEM_PACKAGE_REGISTRY
+    )
+endif()
+
+if(PARAMCAD_BUILD_KERNEL_OCCT AND OpenCASCADE_FOUND)
+    add_library(ParametricCADKernelOcct
+        src/Kernel/Occt/OcctGeometryKernel.cpp
+    )
+    target_include_directories(ParametricCADKernelOcct PRIVATE ${OpenCASCADE_INCLUDE_DIR})
+    target_link_libraries(ParametricCADKernelOcct
+        PUBLIC ParametricCADCore
+        PRIVATE ${OpenCASCADE_LIBRARIES}
+    )
+    target_compile_features(ParametricCADKernelOcct PUBLIC cxx_std_20)
+    if(MSVC)
+        target_compile_options(ParametricCADKernelOcct PRIVATE /utf-8)
+    endif()
+    message(STATUS "ParametricCADKernelOcct: OCCT ${OpenCASCADE_VERSION} found -- "
+                    "OCCT-backed geometry kernel will be built.")
+else()
+    message(STATUS "ParametricCADKernelOcct: OCCT not found or "
+                    "PARAMCAD_BUILD_KERNEL_OCCT=OFF -- skipping the OCCT-dependent "
+                    "kernel and its tests. Core and Core-only tests still build normally.")
+endif()
+
+if(TARGET ParametricCADKernelOcct)
+    # Only src/App/main.cpp ever constructs a concrete kernel (ADR-M3-003);
+    # BoxFeature/Core never name ParametricCADKernelOcct or OcctGeometryKernel.
+    target_link_libraries(ParametricCADApp PRIVATE ParametricCADKernelOcct)
+    target_compile_definitions(ParametricCADApp PRIVATE PARAMCAD_HAVE_OCCT_KERNEL)
+endif()
+
 if(PARAMCAD_BUILD_TESTS)
     include(CTest)
     enable_testing()
@@ -59,11 +113,22 @@ if(PARAMCAD_BUILD_TESTS)
         FetchContent_MakeAvailable(googletest)
     endif()
 
+    # NOTE ordering: tests/SerializationTests.cpp contains
+    # GeneratorLimitTest.AdvancePastMaxUint64DoesNotWrapGenerator, which
+    # permanently advances the shared ObjectId generator to ~2^63 for the rest
+    # of the process. It must stay the LAST translation unit in this list (its
+    # own registration order is the last within the file, and gtest schedules
+    # suites in link/registration order in a single-process run) so no other
+    # test observes a poisoned generator. Add new test files ABOVE this
+    # comment, never below tests/SerializationTests.cpp.
     add_executable(ParametricCADCoreTests
         tests/CoreSmokeTests.cpp
         tests/DependencyGraphTests.cpp
         tests/ObjectRegistryTests.cpp
         tests/DocumentRecomputeTests.cpp
+        tests/BoxFeatureTests.cpp
+        tests/MassPropertiesNodeTests.cpp
+        tests/SerializationV3Tests.cpp
         tests/SerializationTests.cpp
     )
     target_link_libraries(ParametricCADCoreTests PRIVATE ParametricCADCore GTest::gtest_main)
@@ -73,4 +138,24 @@ if(PARAMCAD_BUILD_TESTS)
 
     include(GoogleTest)
     gtest_discover_tests(ParametricCADCoreTests)
+
+    # OCCT-linked test suite (M3-KERNEL-*, Mass, Inertia, real-geometry
+    # recompute integration, and the mandatory release gate). Built and
+    # registered ONLY when the OCCT-backed kernel target exists -- this is
+    # also a linker-verifiable architecture check: ParametricCADCoreTests
+    # above links ParametricCADCore only, never ParametricCADKernelOcct, so it
+    # can pull in zero OCCT symbols regardless of this block.
+    if(TARGET ParametricCADKernelOcct)
+        add_executable(ParametricCADKernelOcctTests
+            tests/Kernel/OcctGeometryKernelTests.cpp
+            tests/Kernel/OcctRecomputeIntegrationTests.cpp
+        )
+        target_link_libraries(ParametricCADKernelOcctTests
+            PRIVATE ParametricCADCore ParametricCADKernelOcct GTest::gtest_main
+        )
+        if(MSVC)
+            target_compile_options(ParametricCADKernelOcctTests PRIVATE /utf-8)
+        endif()
+        gtest_discover_tests(ParametricCADKernelOcctTests)
+    endif()
 endif()

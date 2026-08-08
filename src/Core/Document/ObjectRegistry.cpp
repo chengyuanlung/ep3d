@@ -1,6 +1,7 @@
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Body/Body.h"
 #include "Core/Feature/Feature.h"
+#include "Core/Material/Material.h"
 #include "Core/Parameter/Parameter.h"
 #include "Core/Recompute/IRecomputable.h"
 

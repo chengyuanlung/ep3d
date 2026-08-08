@@ -28,13 +28,14 @@ Exit criterion: create/save/load a Part with scalar parameters and feature metad
 
 Exit criterion: change a Parameter and only its dependent nodes recompute, in order, with failures blocking downstream and retry recovering — proven by the release-gate scenario test.
 
-## M3 — Kernel adapter + primitive solid
-- Add OpenCASCADE wrapper target.
-- Create a box from Width/Height/Length.
-- Keep TopoDS_Shape inside Kernel implementation only.
-- Compute volume, center of mass, inertia.
+## M3 — Geometry Kernel Adapter & First Parametric Solid
+- Kernel-neutral `IGeometryKernel`/`KernelShape` live in `src/Core/Kernel` (zero OCCT); `src/Kernel/Occt` is the only OCCT-linked target (`OcctGeometryKernel`, `BRepPrimAPI_MakeBox`/`BRepGProp`).
+- `BoxFeature` (Width/Height/Depth) and the document-singleton `MassPropertiesNode` join the M2 dependency graph and recompute engine; kernel access is injected via `RecomputeContext::kernel`, never instantiated by `BoxFeature` directly.
+- Required graph shape: Width/Height/Depth → BoxFeature → MassPropertiesNode ← Material. Density-only changes recompute mass/COM/inertia without rebuilding geometry.
+- Exact Volume, Mass, COM, and inertia tensor (kg·m²) with a single traceable mm→m conversion site; invalid dimensions/density fail transactionally (last valid shape retained, marked stale) and recover deterministically.
+- Schema v3 persists BoxFeature/Material semantic records; Feature-owned and MassPropertiesNode edges are always re-derived from semantic id fields on load (never replayed from the generic edge list).
 
-Exit criterion: change Width and receive rebuilt mass properties.
+Exit criterion: change Width and receive rebuilt mass properties through real OCCT geometry — proven by the release-gate scenario test (spec §19).
 
 ## M4 — Qt viewer
 - Qt Widgets shell.

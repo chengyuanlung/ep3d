@@ -45,7 +45,7 @@ DocumentRecomputeReport DocumentRecomputeEngine::recomputeFrom(ObjectId id) {
 DocumentRecomputeReport DocumentRecomputeEngine::run() {
     DependencyGraph& graph = document_.graph_;
     ObjectRegistry& registry = document_.registry_;
-    const RecomputeContext context{document_, registry};
+    const RecomputeContext context{document_, registry, document_.geometryKernel()};
 
     // Invocation log: which node callbacks actually ran, in execution order.
     // This is what distinguishes Failed from BlockedByDependency afterwards.

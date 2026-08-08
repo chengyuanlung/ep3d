@@ -751,7 +751,10 @@ TEST(SerializationV2Test, M2_SER_001_StableIdsSurviveRoundTrip) {
     ASSERT_TRUE(original.addDependency(b.id(), a.id())); // A -> B
 
     const std::string saved = saveToString(original);
-    EXPECT_NE(saved.find("\"schemaVersion\": 2"), std::string::npos);
+    // Save always writes the CURRENT schema version (v3 as of M3), even
+    // though this document only exercises v2-era features (parameters +
+    // generic dependency edges, no Material/BoxFeature).
+    EXPECT_NE(saved.find("\"schemaVersion\": 3"), std::string::npos);
     const LoadResult loaded = loadFromString(saved);
     ASSERT_TRUE(loaded) << loaded.message;
     EXPECT_EQ(loaded.document->id(), original.id());

@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -33,6 +34,8 @@ class TestFeature final : public Feature {
 public:
     TestFeature(std::string name, bool succeeds)
         : Feature(std::move(name)), succeeds_(succeeds) {}
+
+    std::string_view typeName() const noexcept override { return "Test"; }
 
     bool recompute() override {
         setState(succeeds_ ? ComputeState::Valid : ComputeState::Failed);

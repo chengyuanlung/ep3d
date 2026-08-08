@@ -15,9 +15,10 @@ This starter repository is the architectural foundation for a Windows-first para
 - M0 — Repository and Core conventions: COMPLETE.
 - M1 — Parametric Part Core (data model, generic DependencyGraph, JSON schema v1, GoogleTest): COMPLETE.
 - M2 — Document Recompute Infrastructure (ObjectRegistry, PartDocument recompute façade, parameter dirty sources, schema v2 dependency persistence): COMPLETE.
-- M3 — Kernel adapter + primitive solid: NEXT.
+- M3 — Geometry Kernel Adapter & First Parametric Solid (kernel-neutral `IGeometryKernel` in Core, OCCT-backed `Kernel/Occt` adapter, `BoxFeature`/`MassPropertiesNode` real recompute, schema v3): IN PROGRESS.
+- M4 — Qt viewer: NEXT.
 
-Note: `MassProperties` is a data model only until the Kernel milestone (M3) — no volume/mass/inertia computation exists yet.
+`MassProperties` now holds real computed Volume/Mass/COM/Inertia once a `BoxFeature` recomputes through an injected `IGeometryKernel` (see `docs/DecisionLog.md` ADR-M3-002).
 
 See `docs/Architecture.md` and `docs/Roadmap.md`.
 
