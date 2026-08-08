@@ -7,8 +7,20 @@ PartDocument::PartDocument(std::string name)
     addFrame("Origin");
 }
 
+PartDocument::PartDocument(ObjectId id, std::string name)
+    : CadDocument(id, std::move(name)) {
+    addFrame("Origin");
+}
+
 Body& PartDocument::addBody(std::string name) {
     auto item = std::make_unique<Body>(std::move(name));
+    auto& ref = *item;
+    bodies_.push_back(std::move(item));
+    return ref;
+}
+
+Body& PartDocument::restoreBody(ObjectId id, std::string name) {
+    auto item = std::make_unique<Body>(id, std::move(name));
     auto& ref = *item;
     bodies_.push_back(std::move(item));
     return ref;

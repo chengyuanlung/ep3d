@@ -12,6 +12,9 @@ namespace paramcad {
 class Body {
 public:
     explicit Body(std::string name);
+    // Restore constructor (deserialization): keeps the persisted id and
+    // advances the id generator past it so future ids cannot collide.
+    Body(ObjectId id, std::string name);
 
     ObjectId id() const noexcept { return id_; }
     const std::string& name() const noexcept { return name_; }

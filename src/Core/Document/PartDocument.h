@@ -15,13 +15,22 @@ namespace paramcad {
 class PartDocument final : public CadDocument {
 public:
     explicit PartDocument(std::string name);
+    // Restore constructor (deserialization): keeps the persisted document id.
+    // Frames are not serialized in schema v1, so the Origin frame is
+    // auto-created with a fresh id, exactly as in the fresh constructor.
+    PartDocument(ObjectId id, std::string name);
 
     DocumentType type() const noexcept override { return DocumentType::Part; }
 
     ParameterManager& parameters() noexcept { return parameters_; }
     const ParameterManager& parameters() const noexcept { return parameters_; }
 
+    const std::vector<std::unique_ptr<Body>>& bodies() const noexcept { return bodies_; }
+    const std::vector<std::unique_ptr<ReferenceFrame>>& frames() const noexcept { return frames_; }
+
     Body& addBody(std::string name);
+    // Restore path (deserialization): adds a body that keeps its persisted id.
+    Body& restoreBody(ObjectId id, std::string name);
     ReferenceFrame& addFrame(std::string name, ObjectId parentFrameId = kInvalidObjectId);
     Connector& addConnector(std::string name, ConnectorRole role, ObjectId frameId);
 

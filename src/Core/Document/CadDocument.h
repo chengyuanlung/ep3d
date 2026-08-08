@@ -18,6 +18,11 @@ public:
 
     virtual DocumentType type() const noexcept = 0;
 
+protected:
+    // Restore constructor (deserialization): keeps the persisted id and
+    // advances the id generator past it so future ids cannot collide.
+    CadDocument(ObjectId id, std::string name);
+
 private:
     ObjectId id_;
     std::string name_;

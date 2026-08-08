@@ -19,6 +19,10 @@ enum class ParameterState { Valid, Dirty, Failed };
 class Parameter {
 public:
     Parameter(std::string name, double value, UnitType unit);
+    // Restore constructor (deserialization): keeps the persisted id and state
+    // and advances the id generator past the id so future ids cannot collide.
+    Parameter(ObjectId id, std::string name, double value, UnitType unit,
+              std::string expression, ParameterState state);
 
     ObjectId id() const noexcept { return id_; }
     const std::string& name() const noexcept { return name_; }

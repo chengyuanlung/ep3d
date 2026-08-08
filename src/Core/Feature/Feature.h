@@ -21,6 +21,10 @@ public:
     virtual bool recompute() = 0;
 
 protected:
+    // Restore constructor (deserialization): keeps the persisted id and state
+    // and advances the id generator past the id so future ids cannot collide.
+    Feature(ObjectId id, std::string name, ComputeState state);
+
     void setState(ComputeState state) noexcept { state_ = state; }
 
 private:
