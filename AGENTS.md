@@ -25,7 +25,9 @@ Hard rules:
 7. Build and run tests before reporting completion.
 8. If an architectural conflict is discovered, document it instead of silently redesigning the project.
 
-Current target: M2 — Document Recompute Infrastructure (see `docs/Roadmap.md` and `docs/M2_Implementation_and_Evaluation.md`).
+M3 — Geometry Kernel Adapter & First Parametric Solid — is COMPLETE (independent review APPROVE 97/100; see `docs/reviews/M3_CompletionReport.md`).
+
+Current target: M4 — Qt viewer (see `docs/Roadmap.md`).
 
 ## Independent Review Role
 

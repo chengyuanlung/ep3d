@@ -1,6 +1,8 @@
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Core/Dependency/DependencyGraph.h"
+#include "Core/Feature/BoxFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
+#include "Core/Material/Material.h"
 #include "Core/Serialization/JsonValue.h"
 #include <algorithm>
 #include <charconv>
@@ -16,10 +18,9 @@ namespace paramcad {
 
 namespace {
 
-constexpr int kSchemaVersion = 2;           // written on save
-constexpr int kMinSupportedSchemaVersion = 1; // v1 files (no edges) still load
+constexpr int kSchemaVersion = 3;           // written on save
+constexpr int kMinSupportedSchemaVersion = 1; // v1 (no edges) and v2 files still load
 constexpr std::string_view kFormatName = "ParametricCAD";
-constexpr std::string_view kDefaultFeatureType = "Placeholder";
 
 // --- enum <-> string (serializer-owned; enum headers stay minimal) ---------
 
@@ -99,12 +100,6 @@ std::optional<ObjectId> idFromString(std::string_view text) {
 
 // --- save -------------------------------------------------------------------
 
-std::string_view featureTypeName(const Feature& feature) {
-    if (const auto* placeholder = dynamic_cast<const PlaceholderFeature*>(&feature))
-        return placeholder->typeName();
-    return kDefaultFeatureType; // concrete geometry types arrive in later schemas
-}
-
 JsonValue toJson(const PartDocument& document) {
     JsonValue root = JsonValue::makeObject();
     root.set("format", JsonValue::makeString(std::string(kFormatName)));
@@ -126,18 +121,54 @@ JsonValue toJson(const PartDocument& document) {
     }
     root.set("parameters", std::move(parameters));
 
+    // Material (v3, ADR-M3-005): a single optional document-level record,
+    // null when no material is assigned.
+    if (document.material()) {
+        const Material& material = *document.material();
+        JsonValue materialJson = JsonValue::makeObject();
+        materialJson.set("id", JsonValue::makeString(idToString(material.id())));
+        materialJson.set("name", JsonValue::makeString(material.name()));
+        materialJson.set("densityKgPerM3", JsonValue::makeNumber(material.density()));
+        materialJson.set("elasticModulusPa", JsonValue::makeNumber(material.elasticModulusPa));
+        materialJson.set("poissonRatio", JsonValue::makeNumber(material.poissonRatio));
+        materialJson.set("yieldStrengthPa", JsonValue::makeNumber(material.yieldStrengthPa));
+        JsonValue contact = JsonValue::makeObject();
+        contact.set("staticFriction", JsonValue::makeNumber(material.contact.staticFriction));
+        contact.set("dynamicFriction", JsonValue::makeNumber(material.contact.dynamicFriction));
+        contact.set("restitution", JsonValue::makeNumber(material.contact.restitution));
+        materialJson.set("contact", std::move(contact));
+        root.set("material", std::move(materialJson));
+    } else {
+        root.set("material", JsonValue::makeNull());
+    }
+
     JsonValue bodies = JsonValue::makeArray();
+    std::unordered_set<ObjectId> featureIds; // Option B edges: re-derived, never in "dependencies"
     for (const auto& body : document.bodies()) {
         JsonValue bodyEntry = JsonValue::makeObject();
         bodyEntry.set("id", JsonValue::makeString(idToString(body->id())));
         bodyEntry.set("name", JsonValue::makeString(body->name()));
         JsonValue features = JsonValue::makeArray();
         for (const auto& feature : body->features()) {
+            featureIds.insert(feature->id());
             JsonValue featureEntry = JsonValue::makeObject();
             featureEntry.set("id", JsonValue::makeString(idToString(feature->id())));
             featureEntry.set("name", JsonValue::makeString(feature->name()));
-            featureEntry.set("type", JsonValue::makeString(std::string(featureTypeName(*feature))));
+            // Feature type dispatch is keyed by the typeName() virtual call
+            // (ADR-M3-005) -- no dynamic_cast probing to determine WHICH type
+            // this is. A dynamic_cast is still used below solely to reach the
+            // already-known concrete type's extra accessors.
+            featureEntry.set("type", JsonValue::makeString(std::string(feature->typeName())));
             featureEntry.set("state", JsonValue::makeString(std::string(toString(feature->state()))));
+            if (const auto* box = dynamic_cast<const BoxFeature*>(feature.get())) {
+                featureEntry.set("widthParameterId",
+                                 JsonValue::makeString(idToString(box->widthParameterId())));
+                featureEntry.set("heightParameterId",
+                                 JsonValue::makeString(idToString(box->heightParameterId())));
+                featureEntry.set("depthParameterId",
+                                 JsonValue::makeString(idToString(box->depthParameterId())));
+                featureEntry.set("materialId", JsonValue::makeString(idToString(box->materialId())));
+            }
             features.add(std::move(featureEntry));
         }
         bodyEntry.set("features", std::move(features));
@@ -145,10 +176,12 @@ JsonValue toJson(const PartDocument& document) {
     }
     root.set("bodies", std::move(bodies));
 
-    // ADR-012: persist explicit edges whose BOTH endpoints are persisted
-    // document objects; edges touching runtime-only recomputables (test
-    // stubs) are never saved. Written in graph insertion order for
-    // deterministic output.
+    // ADR-012/ADR-M3-005: persist explicit Option-A edges whose BOTH
+    // endpoints are persisted document objects and whose dependent is NOT a
+    // Feature (Feature-owned edges, and every MassPropertiesNode edge, are
+    // Option B: re-derived from semantic id fields, never written here).
+    // Edges touching runtime-only recomputables (test stubs) are never
+    // saved. Written in graph insertion order for deterministic output.
     std::unordered_set<ObjectId> persistedIds;
     for (const auto& parameter : document.parameters().items())
         persistedIds.insert(parameter->id());
@@ -163,6 +196,7 @@ JsonValue toJson(const PartDocument& document) {
         if (persistedIds.count(prerequisite) == 0) continue;
         for (ObjectId dependent : graph.dependentsOf(prerequisite)) {
             if (persistedIds.count(dependent) == 0) continue;
+            if (featureIds.count(dependent) != 0) continue; // Option B
             JsonValue edge = JsonValue::makeObject();
             edge.set("prerequisite", JsonValue::makeString(idToString(prerequisite)));
             edge.set("dependent", JsonValue::makeString(idToString(dependent)));
@@ -215,7 +249,7 @@ std::optional<ObjectId> requireIdField(const JsonValue& object, const std::strin
     if (*id > kMaxObjectId) {
         err = fieldError(SerializationError::InvalidFieldType,
                          context + ": field 'id' value " + field->asString() +
-                             " exceeds the maximum ObjectId (2^63 - 1) allowed by schema v1");
+                             " exceeds the maximum ObjectId (2^63 - 1)");
         return std::nullopt;
     }
     return id;
@@ -225,11 +259,45 @@ LoadResult loadFailure(SerializationError error, std::string message) {
     return LoadResult{nullptr, error, std::move(message)};
 }
 
+// Save/load symmetry guard: anything savePartDocument accepts must be
+// loadable. The load path rejects a BoxFeature whose widthParameterId /
+// heightParameterId / depthParameterId is not a parameter in the file, but the
+// save path used to write those ids unchecked -- so removing a Parameter that a
+// BoxFeature still references (reachable through the public
+// PartDocument::removeObject) produced a file that saved cleanly and then
+// failed to load forever, with the only copy of the data already overwritten.
+//
+// Failing the save instead surfaces the dangling reference while the in-memory
+// document is still intact and repairable. The message deliberately mirrors the
+// load-side wording so the two report the same defect recognisably.
+SaveResult validateSaveable(const PartDocument& document) {
+    std::unordered_set<ObjectId> parameterIds;
+    for (const auto& parameter : document.parameters().items())
+        parameterIds.insert(parameter->id());
+
+    for (const auto& body : document.bodies()) {
+        for (const auto& feature : body->features()) {
+            const auto* box = dynamic_cast<const BoxFeature*>(feature.get());
+            if (box == nullptr) continue;
+            for (ObjectId referenced :
+                 {box->widthParameterId(), box->heightParameterId(), box->depthParameterId()}) {
+                if (parameterIds.count(referenced) != 0) continue;
+                return SaveResult{SerializationError::UnknownDependencyId,
+                                  "feature " + idToString(box->id()) + " (" + box->name() +
+                                      "): box parameter id " + idToString(referenced) +
+                                      " is not a parameter in this document"};
+            }
+        }
+    }
+    return SaveResult{};
+}
+
 } // namespace
 
 // --- public API -------------------------------------------------------------
 
 SaveResult savePartDocument(const PartDocument& document, std::ostream& out) {
+    if (const SaveResult invalid = validateSaveable(document); !invalid) return invalid;
     const std::string text = writeJson(toJson(document));
     out << text << '\n';
     if (!out.good())
@@ -327,11 +395,25 @@ LoadResult loadPartDocument(std::istream& in) {
         std::string name;
         std::string type;
         ComputeState state;
+        // Box-specific (ADR-M3-005; only meaningful when type == "Box").
+        ObjectId widthParameterId = kInvalidObjectId;
+        ObjectId heightParameterId = kInvalidObjectId;
+        ObjectId depthParameterId = kInvalidObjectId;
+        ObjectId materialId = kInvalidObjectId; // kInvalidObjectId == "no material"
     };
     struct BodyData {
         ObjectId id;
         std::string name;
         std::vector<FeatureData> features;
+    };
+    struct MaterialData {
+        ObjectId id;
+        std::string name;
+        double densityKgPerM3;
+        double elasticModulusPa;
+        double poissonRatio;
+        double yieldStrengthPa;
+        ContactProperties contact;
     };
 
     std::vector<ParameterData> parameterData;
@@ -367,6 +449,59 @@ LoadResult loadPartDocument(std::istream& in) {
 
         parameterData.push_back(ParameterData{*id, paramName->asString(), value->asNumber(),
                                               *unitValue, expression->asString(), *stateValue});
+    }
+    std::unordered_set<ObjectId> parameterIds;
+    for (const auto& parameter : parameterData) parameterIds.insert(parameter.id);
+
+    // Material (v3, ADR-M3-005): a single optional document-level record.
+    // Parsed before bodies so BoxFeature.materialId references can be
+    // validated against it.
+    std::optional<MaterialData> materialData;
+    const JsonValue* materialField = root.find("material");
+    if (materialField != nullptr && materialField->type() != JsonType::Null) {
+        const std::string context = "material";
+        if (materialField->type() != JsonType::Object)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               context + ": field has the wrong JSON type");
+        const auto id = requireIdField(*materialField, context, err);
+        if (!id.has_value()) return loadFailure(err.error, err.message);
+        if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+        const JsonValue* materialName =
+            requireField(*materialField, "name", JsonType::String, context, err);
+        if (materialName == nullptr) return loadFailure(err.error, err.message);
+        const JsonValue* density =
+            requireField(*materialField, "densityKgPerM3", JsonType::Number, context, err);
+        if (density == nullptr) return loadFailure(err.error, err.message);
+        const JsonValue* elastic =
+            requireField(*materialField, "elasticModulusPa", JsonType::Number, context, err);
+        if (elastic == nullptr) return loadFailure(err.error, err.message);
+        const JsonValue* poisson =
+            requireField(*materialField, "poissonRatio", JsonType::Number, context, err);
+        if (poisson == nullptr) return loadFailure(err.error, err.message);
+        const JsonValue* yield =
+            requireField(*materialField, "yieldStrengthPa", JsonType::Number, context, err);
+        if (yield == nullptr) return loadFailure(err.error, err.message);
+        const JsonValue* contactField =
+            requireField(*materialField, "contact", JsonType::Object, context, err);
+        if (contactField == nullptr) return loadFailure(err.error, err.message);
+        const std::string contactContext = context + ".contact";
+        const JsonValue* staticFriction = requireField(*contactField, "staticFriction",
+                                                        JsonType::Number, contactContext, err);
+        if (staticFriction == nullptr) return loadFailure(err.error, err.message);
+        const JsonValue* dynamicFriction = requireField(*contactField, "dynamicFriction",
+                                                         JsonType::Number, contactContext, err);
+        if (dynamicFriction == nullptr) return loadFailure(err.error, err.message);
+        const JsonValue* restitution = requireField(*contactField, "restitution", JsonType::Number,
+                                                    contactContext, err);
+        if (restitution == nullptr) return loadFailure(err.error, err.message);
+
+        ContactProperties contact;
+        contact.staticFriction = staticFriction->asNumber();
+        contact.dynamicFriction = dynamicFriction->asNumber();
+        contact.restitution = restitution->asNumber();
+        materialData = MaterialData{*id,          materialName->asString(), density->asNumber(),
+                                    elastic->asNumber(), poisson->asNumber(), yield->asNumber(),
+                                    contact};
     }
 
     std::vector<BodyData> bodyData;
@@ -412,16 +547,69 @@ LoadResult loadPartDocument(std::istream& in) {
                                    featureContext + ": unknown feature state '" +
                                        featureState->asString() + "'");
 
-            body.features.push_back(FeatureData{*featureId, featureName->asString(),
-                                                featureType->asString(), *stateValue});
+            FeatureData featureData{*featureId, featureName->asString(), featureType->asString(),
+                                    *stateValue};
+            if (featureData.type == "Box") {
+                // Feature type dispatch (which concrete type to construct) is
+                // keyed by this string, not dynamic_cast probing
+                // (ADR-M3-005).
+                const JsonValue* widthField = requireField(featureEntry, "widthParameterId",
+                                                           JsonType::String, featureContext, err);
+                if (widthField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* heightField = requireField(featureEntry, "heightParameterId",
+                                                            JsonType::String, featureContext, err);
+                if (heightField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* depthField = requireField(featureEntry, "depthParameterId",
+                                                           JsonType::String, featureContext, err);
+                if (depthField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* materialIdField = requireField(featureEntry, "materialId",
+                                                                JsonType::String, featureContext, err);
+                if (materialIdField == nullptr) return loadFailure(err.error, err.message);
+
+                const auto widthId = idFromString(widthField->asString());
+                const auto heightId = idFromString(heightField->asString());
+                const auto depthId = idFromString(depthField->asString());
+                const auto boxMaterialId = idFromString(materialIdField->asString());
+                if (!widthId || !heightId || !depthId || !boxMaterialId || *widthId > kMaxObjectId ||
+                    *heightId > kMaxObjectId || *depthId > kMaxObjectId ||
+                    *boxMaterialId > kMaxObjectId) {
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext +
+                                           ": box parameter/material id is not a valid decimal "
+                                           "ObjectId string");
+                }
+                for (ObjectId referenced : {*widthId, *heightId, *depthId}) {
+                    if (parameterIds.count(referenced) == 0)
+                        return loadFailure(SerializationError::UnknownDependencyId,
+                                           featureContext + ": box parameter id " +
+                                               idToString(referenced) +
+                                               " is not a parameter in this document");
+                }
+                if (*boxMaterialId != kInvalidObjectId &&
+                    (!materialData.has_value() || materialData->id != *boxMaterialId)) {
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext + ": box materialId " +
+                                           idToString(*boxMaterialId) +
+                                           " does not match this document's material");
+                }
+                featureData.widthParameterId = *widthId;
+                featureData.heightParameterId = *heightId;
+                featureData.depthParameterId = *depthId;
+                featureData.materialId = *boxMaterialId;
+            }
+
+            body.features.push_back(std::move(featureData));
         }
         bodyData.push_back(std::move(body));
     }
 
-    // Dependencies (schema v2; optional array). Validated fully BEFORE any
-    // document construction on a scratch graph holding exactly the node set
-    // the real document will have (parameter nodes), so a bad edge can never
-    // leave a partial document nor advance the id generator.
+    // Dependencies (Option A, ADR-012/ADR-M3-005; optional array). Validated
+    // fully BEFORE any document construction on a scratch graph holding
+    // exactly the node set the real document will have (parameter nodes --
+    // Feature/MassPropertiesNode edges are Option B and never appear here),
+    // so a bad edge can never leave a partial document nor advance the id
+    // generator. parameterIds was already built above (also used to validate
+    // BoxFeature references).
     struct EdgeData {
         ObjectId prerequisite;
         ObjectId dependent;
@@ -432,8 +620,6 @@ LoadResult loadPartDocument(std::istream& in) {
         if (dependencies->type() != JsonType::Array)
             return loadFailure(SerializationError::InvalidFieldType,
                                "document: field 'dependencies' has the wrong JSON type");
-        std::unordered_set<ObjectId> parameterIds;
-        for (const auto& parameter : parameterData) parameterIds.insert(parameter.id);
         DependencyGraph scratch;
         for (ObjectId id : parameterIds) scratch.addNode(id);
 
@@ -490,6 +676,7 @@ LoadResult loadPartDocument(std::istream& in) {
     ObjectId maxPersistedId = *documentId;
     for (const auto& parameter : parameterData)
         maxPersistedId = std::max(maxPersistedId, parameter.id);
+    if (materialData.has_value()) maxPersistedId = std::max(maxPersistedId, materialData->id);
     for (const auto& body : bodyData) {
         maxPersistedId = std::max(maxPersistedId, body.id);
         for (const auto& feature : body.features)
@@ -499,17 +686,34 @@ LoadResult loadPartDocument(std::istream& in) {
 
     // All restore goes through the document facade so ObjectRegistry and
     // DependencyGraph are rebuilt during load (M2-SER-003). Graph states are
-    // not persisted: every restored node starts Dirty.
+    // not persisted: every restored node starts Dirty. Order matters: Material
+    // before bodies/features, since a BoxFeature's Material->MassPropertiesNode
+    // edge (Option B, ADR-M3-005) requires the Material to already be a graph
+    // node when restoreBoxFeature wires it.
     auto document = std::make_unique<PartDocument>(*documentId, name->asString());
     for (auto& parameter : parameterData)
         document->restoreParameter(parameter.id, std::move(parameter.name), parameter.value,
                                    parameter.unit, std::move(parameter.expression),
                                    parameter.state);
+    if (materialData.has_value()) {
+        document->restoreMaterial(materialData->id, std::move(materialData->name),
+                                  materialData->densityKgPerM3, materialData->elasticModulusPa,
+                                  materialData->poissonRatio, materialData->yieldStrengthPa,
+                                  materialData->contact);
+    }
     for (auto& body : bodyData) {
         Body& restored = document->restoreBody(body.id, std::move(body.name));
-        for (auto& feature : body.features)
-            restored.addFeature<PlaceholderFeature>(feature.id, std::move(feature.name),
-                                                    feature.state, std::move(feature.type));
+        for (auto& feature : body.features) {
+            if (feature.type == "Box") {
+                document->restoreBoxFeature(restored, feature.id, std::move(feature.name),
+                                            feature.state, feature.widthParameterId,
+                                            feature.heightParameterId, feature.depthParameterId,
+                                            feature.materialId);
+            } else {
+                restored.addFeature<PlaceholderFeature>(feature.id, std::move(feature.name),
+                                                        feature.state, std::move(feature.type));
+            }
+        }
     }
     for (const EdgeData& edge : edgeData) {
         const GraphResult applied = document->addDependency(edge.dependent, edge.prerequisite);

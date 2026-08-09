@@ -15,9 +15,15 @@ This starter repository is the architectural foundation for a Windows-first para
 - M0 — Repository and Core conventions: COMPLETE.
 - M1 — Parametric Part Core (data model, generic DependencyGraph, JSON schema v1, GoogleTest): COMPLETE.
 - M2 — Document Recompute Infrastructure (ObjectRegistry, PartDocument recompute façade, parameter dirty sources, schema v2 dependency persistence): COMPLETE.
-- M3 — Kernel adapter + primitive solid: NEXT.
+- M3 — Geometry Kernel Adapter & First Parametric Solid (kernel-neutral `IGeometryKernel` in Core, OCCT-backed `Kernel/Occt` adapter, `BoxFeature`/`MassPropertiesNode` real recompute, schema v3): COMPLETE.
+- M4 — Qt viewer: READY.
 
-Note: `MassProperties` is a data model only until the Kernel milestone (M3) — no volume/mass/inertia computation exists yet.
+`MassProperties` now holds real computed Volume/Mass/COM/Inertia once a `BoxFeature` recomputes through an injected `IGeometryKernel` (see `docs/DecisionLog.md` ADR-M3-002).
+
+OCCT 8.0.1, discovered via a vcpkg toolchain file; build with
+`-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake`. Without OCCT the
+Core library and its 157 Core-only tests still configure and build normally --
+only `ParametricCADKernelOcct` and its test target are skipped.
 
 See `docs/Architecture.md` and `docs/Roadmap.md`.
 

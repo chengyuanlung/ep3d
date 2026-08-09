@@ -10,6 +10,7 @@ namespace paramcad {
 class Parameter;
 class Body;
 class Feature;
+class Material;
 class IRecomputable;
 
 // Document-local ObjectId -> object lookup (ADR-010). Stores type-safe
@@ -22,7 +23,7 @@ class IRecomputable;
 // serialized. Average O(1) lookup; never a scan of document containers.
 class ObjectRegistry {
 public:
-    using ObjectRef = std::variant<Parameter*, Body*, Feature*, IRecomputable*>;
+    using ObjectRef = std::variant<Parameter*, Body*, Feature*, Material*, IRecomputable*>;
 
     // Rejects kInvalidObjectId, duplicate ids, null handles, and handles
     // whose ->id() differs from the registered id (returns false).

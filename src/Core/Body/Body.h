@@ -28,6 +28,12 @@ public:
         return ref;
     }
 
+    // Destroys the owned feature with this id; false if this body owns no such
+    // feature. Called by PartDocument::removeObject, which is responsible for
+    // detaching the feature from the graph and registry FIRST -- a feature
+    // still reachable from either of those must never be destroyed here.
+    bool removeFeature(ObjectId id);
+
 private:
     ObjectId id_;
     std::string name_;
