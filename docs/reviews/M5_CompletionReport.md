@@ -15,8 +15,9 @@
 
 **Baseline:** `3734740` — the project-owner-accepted M4 state on `master`.
 
-**Final commit:** `1967238` on branch `m5-wip` — "M5: parameter-driven
-constrained Sketch". Not yet squashed into `master`.
+**Final commit:** `7238548` on `master` — "M5: parameter-driven constrained
+Sketch", squashed from `m5-wip` (`1967238`, `afaa25f`). Verified on master:
+clean build, 498/498.
 
 ---
 
