@@ -2,7 +2,7 @@
 
 **Milestone:** M4 — Sketch/Profile Foundation, Pad/Extrude & Basic 3D Viewer
 **Baseline:** `f583f29` on `master` (M3 COMPLETE, independent review APPROVE 97/100)
-**Final commit:** `d9e2f75` on branch `m4-wip`
+**Final commit:** `4c84194` on `master`
 **Date:** 2026-08-09
 
 ---
@@ -255,6 +255,31 @@ suggested the command was broken; the toolbar button worked, which separated
 9. Toolbar is text-only; no icon set ships in M4.
 10. DPI 125/150/200% were verified by the UI reviewer but are not in any
     automated check.
+
+---
+
+## Commit
+
+**`master` = `4c84194`** — "M4: sketch/profile foundation, Pad/Extrude, and a Qt
+CAD shell". 73 files, +12205 / −89. Squashed from `m4-wip` so `master` keeps one
+clean commit per milestone:
+
+```
+4c84194  M4: sketch/profile foundation, Pad/Extrude, and a Qt CAD shell
+cc48eaa  docs: record the master milestone commit in the M3 completion report
+f583f29  M3: geometry kernel adapter and first parametric solid
+8245c89  M2: document recompute infrastructure
+34f67cf  M1: native JSON serialization (schema v1) + GoogleTest adoption
+2f9768a  Initial commit
+```
+
+The squashed result was re-verified rather than assumed equivalent: clean
+configure and build from an empty tree, **322/322 in Debug and Release**, Core
+boundary scan 0 matches. The tree is byte-identical to `m4-wip` at `ceb56ac`.
+
+`m4-wip` retains the development history — `d9e2f75` (implementation) →
+`fcfd0b4` (completion report) → `6ad5b3b` / `db5a1a9` (user validation) →
+`ceb56ac` (M4 complete).
 
 ---
 
