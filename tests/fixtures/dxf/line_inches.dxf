@@ -1,0 +1,46 @@
+999
+Fixture G (M6 spec 15): the SAME numbers as line.dxf, declared in INCHES.
+999
+Analytically (0,0) -> (2540, 1270) mm, because an inch is 25.4 mm exactly.
+999
+Identical coordinates and a different unit, so a test that passed for both
+999
+files with the same expectations would prove the conversion never runs.
+0
+SECTION
+2
+HEADER
+9
+$ACADVER
+1
+AC1015
+9
+$INSUNITS
+70
+1
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+0
+10
+0.0
+20
+0.0
+30
+0.0
+11
+100.0
+21
+50.0
+31
+0.0
+0
+ENDSEC
+0
+EOF

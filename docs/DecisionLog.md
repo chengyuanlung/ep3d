@@ -1676,3 +1676,118 @@ containing an `=`.
 
 Twice was a coincidence. Three times is a category: an argument the program does
 not understand must fail, never default.
+
+---
+
+# M6 — DXF Import to Stable Sketch Entities
+
+## ADR-M6-001 — DXF parser selection: libdxfrw, and what its licence costs (M6)
+Status: Accepted by explicit owner decision.
+
+| | |
+|---|---|
+| Library | **libdxfrw** |
+| Version | `2025-09-25` (vcpkg port) |
+| Licence | **GPL-2.0-only** |
+| Linkage | vcpkg `x64-windows` triplet — dynamic |
+| Target | `ParametricCADImportDxf` **only** |
+| Crosses into Core? | **No** — see ADR-M6-003 |
+
+**The owner was asked and chose this**, which is what spec 20 requires: "No new
+GPL dependency may be introduced into the commercial application without an
+explicit owner decision."
+
+**What the alternatives were**, recorded so the decision can be revisited on its
+merits rather than re-argued from memory:
+
+| Option | Licence | Why not chosen |
+|---|---|---|
+| **libdxfrw** | GPL-2.0-only | **Chosen.** Closest fit to the requirement; mature; reads ASCII and binary DXF. |
+| `dime` (Coin3D) | BSD-3-Clause | Permissive and would have carried no licence consequence; a larger surface than M6 needs. |
+| Own minimal ASCII reader | n/a | Zero dependency and zero licence risk. M6 requires only LINE, CIRCLE and ARC, and DXF group-code parsing for those is small — the same reasoning that produced the project's own solver (ADR-M5-003). |
+
+**The consequence, stated once and not softened.** GPL-2.0-only is a copyleft
+licence. Linking it — statically or dynamically — generally makes the combined
+work a derivative, which must then be distributed under GPL-2.0-compatible
+terms, including corresponding source. If EP3D is ever to be distributed as
+closed-source commercial software, this dependency has to be removed or replaced
+first. That is a distribution question, not a build question, and nothing in the
+code will warn about it.
+
+**What limits the damage, and it is required anyway.** libdxfrw is confined to a
+single CMake target that Core never links, and it reaches the document only
+through a format-neutral representation (ADR-M6-003). Swapping it for `dime` or
+for an own reader is therefore an exercise in replacing one translation unit —
+the same replaceability ADR-M5-003 gave the sketch solver, for the same reason.
+A binary-level check asserts Core carries no libdxfrw symbol, so the boundary is
+measured rather than asserted.
+
+## ADR-M6-002 — DXF unit policy (M6)
+Status: Accepted
+
+DXF stores lengths as unitless numbers plus a header variable, `$INSUNITS`,
+which says what those numbers mean. It is frequently absent or `0`
+("unitless"), so a policy is required rather than a lookup.
+
+- **One conversion boundary.** Conversion happens exactly once, in the importer,
+  as DXF units enter the format-neutral representation. Nothing downstream
+  converts again, and no caller may guess (spec 8).
+- **Internal geometry stays in millimetres**, unchanged from M4/M5.
+- **`$INSUNITS` is honoured when present and recognised.** The mapping covers
+  the values a real file carries: unitless(0), inches(1), feet(2), millimetres(4),
+  centimetres(5), metres(6), and the remaining ISO units libdxfrw exposes.
+- **Absent, zero, or unrecognised `$INSUNITS` means MILLIMETRES**, and the
+  import diagnostics say so explicitly. Silently assuming a unit and not
+  reporting it is how a drawing arrives 25.4x wrong with nothing to point at.
+- **The assumption is reported, not hidden**: the import result carries the unit
+  actually used and whether it was read from the file or defaulted.
+
+Chosen over "reject unitless files" because a large share of real DXF output is
+unitless and rejecting them would make the importer useless for the files it
+exists to read; chosen over "ask the user" because M6's UI scope is a file
+picker (spec 19), and a policy that depends on a dialog cannot be tested.
+
+## ADR-M6-003 — Import architecture and the Core boundary (M6)
+Status: Accepted
+
+```
+DXF file -> libdxfrw -> ImportedSketchGeometry (format-neutral) -> importer -> PartDocument API -> Sketch entities
+```
+
+- `src/Core` gains **no** DXF type, header or link dependency. The check is the
+  same one M5 used for Eigen and M3 used for OCCT: a source scan plus
+  `dumpbin` on the Core test binary, which links neither the importer nor
+  libdxfrw and therefore cannot pull a symbol from either.
+- The format-neutral representation carries **semantic geometry and import
+  metadata only**: coordinates already converted to millimetres, radii, angles,
+  and a source description. No parser pointer, no `DRW_*` type, no file offset,
+  no library handle (spec 6).
+- The importer writes through the ordinary `PartDocument` / `Sketch` API, so an
+  imported entity is indistinguishable from one created natively — which is the
+  property spec 3 requires and Gate G proves by driving a Pad from it.
+
+The layering follows M4's viewer split exactly: the document-facing half is free
+of the third-party type and is unit-testable without it; only the adapter names
+`libdxfrw`.
+
+## ADR-M6-004 — Imported entity identity (M6)
+Status: Accepted
+
+**DXF order is not identity, and a DXF handle is not identity.**
+
+Every imported entity receives an ordinary `SketchEntityId` from the shared
+generator, exactly as `Sketch::addLine` produces. After import there is nothing
+about the entity that says it came from DXF, and that is the point: the M5
+identity, persistence and solving contracts apply unchanged (spec 7).
+
+- Vector position is not identity, file offset is not identity, memory address
+  is not identity, DXF handle is not identity.
+- A DXF handle **may** be kept as informational metadata, but no correctness
+  claim may depend on it. Nothing in M6.1 reads one.
+- Save/load preserves ParametricCAD identity. It does **not** re-derive identity
+  from DXF ordering, which is what Gate E and the shuffled-order adversarial
+  test exist to prove.
+
+Two separate imports of the same file are not required to produce equal ids
+(spec 13); identity stability is required across save/load of **one** imported
+document.
