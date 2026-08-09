@@ -22,6 +22,7 @@ namespace paramcad {
 class IRecomputable;
 class IGeometryKernel;
 class BoxFeature;
+class ISketchSolver;
 class PadFeature;
 
 // DEPENDENCY DIRECTION (single rule, ADR-007/ADR-012): an edge points
@@ -88,6 +89,15 @@ public:
     // False if the document has no Material.
     bool assignMaterialToFeatures();
 
+    // Replacing the document's Material unhooks the OUTGOING one from the
+    // registry and the graph first. Without that, the old Material is destroyed
+    // (its shared_ptr use_count is 1) while the registry still resolves its id
+    // to the freed address -- and MassPropertiesNode::resolveMaterial then
+    // reads density out of freed memory. In Release that returned the STALE
+    // value and the document reported a plausible but wrong mass as CURRENT,
+    // with RecomputeStatus::Success and no diagnostic anywhere.
+    void detachCurrentMaterial() noexcept;
+
     Material& restoreMaterial(ObjectId id, std::string name, double densityKgPerM3,
                               double elasticModulusPa, double poissonRatio,
                               double yieldStrengthPa, ContactProperties contact);
@@ -105,6 +115,11 @@ public:
     // overload too, so restricting it churns ~20 unrelated call sites for no
     // behavioural gain. Candidate M4 cleanup alongside the ADR-M3-004
     // Feature/IRecomputable collapse.
+    // The auto-created mass-properties node's id. It is a document object like
+    // any other -- registered, graph-scheduled, removable -- so callers that
+    // need to name it should not have to guess.
+    ObjectId massPropertiesNodeId() const noexcept;
+
     MassProperties& massProperties() noexcept { return massProperties_; }
     const MassProperties& massProperties() const noexcept { return massProperties_; }
 
@@ -126,11 +141,14 @@ public:
                                   ObjectId depthParameterId, ObjectId materialId);
 
 
-    // --- Sketch (M4, ADR-M4-001/002/005) -----------------------------------
-    // Creates a Sketch, registers it, and adds a graph node. A Sketch is a
-    // DIRTY SOURCE like Parameter and Material (ADR-011's pattern reused
-    // unchanged), not an IRecomputable: it has no derived state of its own.
-    // Editing its geometry and calling markDirty propagates to dependent Pads.
+    // --- Sketch (M4, ADR-M4-001/002/005; M5) -------------------------------
+    // Creates a Sketch, registers it, and adds a graph node.
+    //
+    // In M4 a Sketch was a DIRTY SOURCE like Parameter and Material, because it
+    // had no derived state of its own. Since M5 it does -- solved geometry is
+    // derived from its constraints and their bound Parameters -- so it is a
+    // RECOMPUTABLE node instead. A constraint-free sketch behaves exactly as it
+    // did in M4: its recompute succeeds without touching geometry.
     Sketch& addSketch(std::string name, SketchFrame frame = SketchFrame::WorldXY());
     // Restore path (deserialization): keeps the persisted id and frame.
     Sketch& restoreSketch(ObjectId id, std::string name, SketchFrame frame);
@@ -164,6 +182,41 @@ public:
     // something the document cannot see. Prefer editSketch.
     bool markSketchDirty(ObjectId sketchId);
 
+    // --- Sketch constraints (M5) -------------------------------------------
+    // THE path for adding a constraint. Adds it to the sketch AND wires the
+    // graph edge from any Parameter the constraint binds, so a dimension edit
+    // propagates through the existing M2 machinery rather than through anything
+    // new. Adding a constraint straight to the Sketch would leave the graph
+    // unaware that the sketch now depends on that Parameter -- the same hazard
+    // editSketch exists to remove.
+    //
+    // Returns kInvalidSketchConstraintId if the sketch id is unknown or the
+    // sketch rejects the constraint; in that case no edge is wired and nothing
+    // is dirtied.
+    SketchConstraintId addSketchConstraint(ObjectId sketchId, SketchConstraintData data);
+
+    // Removes a constraint, dropping the Parameter edge only if no remaining
+    // constraint on that sketch still binds the same Parameter.
+    bool removeSketchConstraint(ObjectId sketchId, SketchConstraintId constraintId);
+
+    // Removes a sketch entity, cascading to every constraint referencing it
+    // (ADR-M5-009) and dropping any Parameter edge those constraints were the
+    // last to hold. False if the sketch or the entity is unknown.
+    //
+    // Sketch::removeEntity does the cascade but cannot touch the graph, so this
+    // is the path callers should use -- the Parameter would otherwise keep
+    // dirtying a sketch that no longer reads it.
+    bool removeSketchEntity(ObjectId sketchId, SketchEntityId entityId);
+
+    // Constraints anywhere in this document that bind `parameterId`. Empty if
+    // none do, which is exactly the condition under which the Parameter can be
+    // deleted (see removeObject).
+    std::vector<SketchConstraintId> constraintsBindingParameter(ObjectId parameterId) const;
+
+    // Features that read this sketch. Empty is exactly the condition under
+    // which the sketch can be deleted (see removeObject).
+    std::vector<ObjectId> featuresReferencingSketch(ObjectId sketchId) const;
+
     // --- Pad feature (M4, spec 12) -----------------------------------------
     // Creates a PadFeature in body, registers it as a graph node, wires the
     // Sketch and Length prerequisite edges, and (re)wires the document's
@@ -179,8 +232,25 @@ public:
     // subsequent recompute()/recomputeFrom() call (ADR-M3-003, mirrors
     // ADR-010's externally-owned IRecomputable lifetime pattern).
     // PartDocument never constructs a kernel itself.
-    void setGeometryKernel(IGeometryKernel* kernel) noexcept { kernel_ = kernel; }
+    // Both setters DIRTY the nodes that depend on the backend they replace.
+    //
+    // Without that, correcting the input never cleared the failure: a sketch
+    // that recomputed with no solver is left Failed, and DependencyGraph skips
+    // any node that is not Dirty, so injecting the real solver afterwards left
+    // the sketch -- and every feature downstream of it -- permanently blocked.
+    // ADR-M5-004 promises that "correcting the input and recomputing" recovers;
+    // for this input it did not, and "load a file, then inject the backend" is
+    // an ordinary ordering because loadPartDocument returns a document with
+    // neither backend set.
+    void setGeometryKernel(IGeometryKernel* kernel) noexcept;
     IGeometryKernel* geometryKernel() const noexcept { return kernel_; }
+
+    // Same non-owning contract as the kernel, for the same reason (ADR-M3-003
+    // extended to M5): the caller owns the concrete solver and keeps it alive
+    // for every subsequent recompute. PartDocument never constructs one, so
+    // Core keeps no dependency on Eigen (ADR-M5-003).
+    void setSketchSolver(ISketchSolver* solver) noexcept;
+    ISketchSolver* sketchSolver() const noexcept { return sketchSolver_; }
 
     // --- Recompute infrastructure facade -----------------------------------
     // Registers an externally owned recomputable (e.g. a test stub) and gives
@@ -240,6 +310,39 @@ private:
     // Mutable lookup, private so every edit goes through editSketch().
     Sketch* findSketchForEdit(ObjectId id) noexcept;
 
+    // Makes the graph's Parameter -> Sketch edges match the sketch's CURRENT
+    // constraint set exactly: adds what is bound, removes what is not.
+    //
+    // It OWNS every Parameter -> Sketch edge. One added by hand through
+    // addDependency is therefore revoked by the next recompute pass -- correct,
+    // because such an edge has no constraint behind it and the loader would not
+    // re-derive it, so keeping it would make the document behave differently
+    // before and after a save/load. Stated here because it is surprising: the
+    // call succeeds and the edge later disappears.
+    //
+    // Every mutation path calls this rather than each adjusting edges itself.
+    // The per-path version left two holes that independent review found: a
+    // constraint added through editSketch (which hands out a mutable Sketch&,
+    // and which the shipped viewer uses) wired no edge at all, so the document
+    // behaved differently before and after a save/load -- the loader re-derives
+    // edges from the constraints, so one appeared out of nowhere. And a
+    // cascaded entity removal through the same path left a PHANTOM edge, so a
+    // Parameter kept re-solving a sketch that no longer read it.
+    void reconcileSketchParameterEdges(ObjectId sketchId);
+
+    // Reconciles every sketch. Called at the start of each recompute pass as a
+    // NET, not as the primary mechanism: `addSketch` hands back a mutable
+    // `Sketch&`, so `Sketch::addConstraint` is reachable without going through
+    // any facade at all -- a fifth mutation path ADR-M5-013 did not list and
+    // the header two screens up claims does not exist. Through it a dimension
+    // edit silently did nothing, and the document behaved differently before
+    // and after a save/load, because the loader re-derives edges and the live
+    // document had none.
+    //
+    // Reconciling per pass makes the graph agree with the constraint set
+    // whatever route a caller took, at the cost of one walk over the sketches.
+    void reconcileAllSketchParameterEdges();
+
     ParameterManager parameters_;
     std::vector<std::unique_ptr<Body>> bodies_;
     std::vector<std::unique_ptr<ReferenceFrame>> frames_;
@@ -251,6 +354,7 @@ private:
     DependencyGraph graph_;
     MassPropertiesNode massPropertiesNode_;
     IGeometryKernel* kernel_ = nullptr;
+    ISketchSolver* sketchSolver_ = nullptr;
     DocumentRecomputeEngine engine_{*this};
 };
 

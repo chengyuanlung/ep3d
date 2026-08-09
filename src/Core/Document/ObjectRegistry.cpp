@@ -5,6 +5,7 @@
 #include "Core/Parameter/Parameter.h"
 #include "Core/Recompute/IRecomputable.h"
 #include "Core/Sketch/Sketch.h"
+#include <type_traits>
 
 namespace paramcad {
 
@@ -43,8 +44,23 @@ const ObjectRegistry::ObjectRef* ObjectRegistry::find(ObjectId id) const noexcep
 IRecomputable* ObjectRegistry::findRecomputable(ObjectId id) const noexcept {
     const ObjectRef* ref = find(id);
     if (ref == nullptr) return nullptr;
-    if (auto* const* recomputable = std::get_if<IRecomputable*>(ref)) return *recomputable;
-    return nullptr;
+    // Whether an object is recomputable is a property of its TYPE, not of which
+    // handle alternative the caller happened to register it under. Matching only
+    // the IRecomputable* alternative made that distinction by accident: a Sketch
+    // registered as Sketch* (so PadFeature can resolve its profile) would have
+    // reported "not recomputable" and silently never solved, while registering
+    // it as IRecomputable* instead would have made every Pad lose its sketch.
+    // Upcasting from the concrete alternative removes the choice entirely.
+    return std::visit(
+        [](auto* object) -> IRecomputable* {
+            using T = std::remove_pointer_t<decltype(object)>;
+            if constexpr (std::is_base_of_v<IRecomputable, T>) {
+                return object; // implicit derived-to-base upcast
+            } else {
+                return nullptr;
+            }
+        },
+        *ref);
 }
 
 std::size_t ObjectRegistry::size() const noexcept {

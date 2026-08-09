@@ -95,6 +95,7 @@ inline QString kindTag(OutlineKind kind) {
         case OutlineKind::Document: return QStringLiteral("[Part]");
         case OutlineKind::Parameter: return QStringLiteral("[Par]");
         case OutlineKind::Sketch: return QStringLiteral("[Skt]");
+        case OutlineKind::Constraint: return QStringLiteral("[Cst]");
         case OutlineKind::Solid: return QStringLiteral("[Sld]");
         case OutlineKind::MassProperties: return QStringLiteral("[Phy]");
         case OutlineKind::Material: return QStringLiteral("[Mat]");

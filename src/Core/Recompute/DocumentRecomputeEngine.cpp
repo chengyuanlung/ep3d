@@ -43,9 +43,15 @@ DocumentRecomputeReport DocumentRecomputeEngine::recomputeFrom(ObjectId id) {
 }
 
 DocumentRecomputeReport DocumentRecomputeEngine::run() {
+    // Sketch constraints can be mutated through a raw Sketch& (see
+    // reconcileAllSketchParameterEdges), so the graph is made to agree with the
+    // constraint set before the pass rather than assumed to already agree.
+    document_.reconcileAllSketchParameterEdges();
+
     DependencyGraph& graph = document_.graph_;
     ObjectRegistry& registry = document_.registry_;
-    const RecomputeContext context{document_, registry, document_.geometryKernel()};
+    const RecomputeContext context{document_, registry, document_.geometryKernel(),
+                                   document_.sketchSolver()};
 
     // Invocation log: which node callbacks actually ran, in execution order.
     // This is what distinguishes Failed from BlockedByDependency afterwards.

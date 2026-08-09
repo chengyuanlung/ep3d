@@ -3,6 +3,10 @@
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Recompute/IRecomputable.h"
+#include <algorithm>
+#include <cassert>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <variant>
 
@@ -36,9 +40,22 @@ Parameter& PartDocument::addParameter(std::string name, double value, UnitType u
 Parameter& PartDocument::restoreParameter(ObjectId id, std::string name, double value,
                                           UnitType unit, std::string expression,
                                           ParameterState state) {
+    // Rejected BEFORE anything is stored. Storing first and throwing afterwards
+    // left the duplicate Parameter in ParameterManager, and the document then
+    // saved cleanly and could never be loaded back ("duplicate ObjectId").
+    // Adding the check without adding the rollback replaced one silent failure
+    // with another.
+    if (registry_.contains(id))
+        throw std::runtime_error("restoreParameter: id " + std::to_string(id) +
+                                 " is already registered in this document");
+
     Parameter& parameter =
         parameters_.restore(id, std::move(name), value, unit, std::move(expression), state);
-    registry_.registerObject(parameter.id(), &parameter);
+    if (!registry_.registerObject(parameter.id(), &parameter)) {
+        parameters_.remove(parameter.id());
+        throw std::runtime_error("restoreParameter: id " + std::to_string(id) +
+                                 " could not be registered");
+    }
     graph_.addNode(parameter.id()); // starts Dirty; graph states are not persisted
     return parameter;
 }
@@ -66,7 +83,11 @@ Body& PartDocument::restoreBody(ObjectId id, std::string name) {
     auto item = std::make_unique<Body>(id, std::move(name));
     auto& ref = *item;
     bodies_.push_back(std::move(item));
-    registry_.registerObject(ref.id(), &ref);
+    if (!registry_.registerObject(ref.id(), &ref)) {
+        bodies_.pop_back();
+        throw std::runtime_error("restoreBody: id " + std::to_string(id) +
+                                 " is already registered in this document");
+    }
     return ref;
 }
 
@@ -84,9 +105,24 @@ Connector& PartDocument::addConnector(std::string name, ConnectorRole role, Obje
     return ref;
 }
 
+void PartDocument::detachCurrentMaterial() noexcept {
+    if (!material_) return;
+    const ObjectId previous = material_->id();
+    // The mass-properties node holds the material id BY VALUE, so a source
+    // pointing at a material about to be destroyed has to be dropped too.
+    if (massPropertiesNode_.materialId() == previous)
+        massPropertiesNode_.setSource(massPropertiesNode_.boxFeatureId(), kInvalidObjectId);
+    graph_.removeNode(previous);
+    registry_.unregisterObject(previous);
+}
+
 Material& PartDocument::addMaterial(std::string name, double densityKgPerM3) {
     auto item = std::make_shared<Material>(std::move(name), densityKgPerM3);
     Material& ref = *item;
+    // Unhook the outgoing material BEFORE the assignment destroys it. Doing it
+    // afterwards would unregister the id the NEW material has just been given
+    // in the id-reuse case, and leaving it undone is a read-after-free.
+    detachCurrentMaterial();
     material_ = std::move(item);
     registry_.registerObject(ref.id(), &ref);
     graph_.addNode(ref.id());
@@ -99,13 +135,33 @@ Material& PartDocument::addMaterial(std::string name, double densityKgPerM3) {
 Material& PartDocument::restoreMaterial(ObjectId id, std::string name, double densityKgPerM3,
                                         double elasticModulusPa, double poissonRatio,
                                         double yieldStrengthPa, ContactProperties contact) {
+    // Checked BEFORE material_ is replaced. Assigning first and throwing after
+    // DESTROYED the previous Material (its shared_ptr use_count was 1) while
+    // the registry still held its address -- and the next recompute read the
+    // density out of freed memory. The check existed; the ordering made it a
+    // read-after-free instead of a rejection.
+    if (registry_.contains(id))
+        throw std::runtime_error("restoreMaterial: id " + std::to_string(id) +
+                                 " is already registered in this document");
+
     auto item = std::make_shared<Material>(id, std::move(name), densityKgPerM3, elasticModulusPa,
                                            poissonRatio, yieldStrengthPa, contact);
     Material& ref = *item;
+    if (!registry_.registerObject(ref.id(), &ref))
+        throw std::runtime_error("restoreMaterial: id " + std::to_string(id) +
+                                 " could not be registered");
+    // Registration succeeded, so the replacement is going ahead: unhook the
+    // outgoing material before the assignment destroys it. The round-3 fix
+    // moved the CHECK above the mutation, which made the throw path safe and
+    // left the success path -- one line down -- still dangling.
+    detachCurrentMaterial();
     material_ = std::move(item);
-    registry_.registerObject(ref.id(), &ref);
     graph_.addNode(ref.id()); // starts Dirty; graph states are not persisted
     return ref;
+}
+
+ObjectId PartDocument::massPropertiesNodeId() const noexcept {
+    return massPropertiesNode_.id();
 }
 
 bool PartDocument::assignMaterialToFeatures() {
@@ -139,6 +195,25 @@ bool PartDocument::setMaterialDensity(double densityKgPerM3) {
     return true;
 }
 
+void PartDocument::setGeometryKernel(IGeometryKernel* kernel) noexcept {
+    if (kernel_ == kernel) return;
+    kernel_ = kernel;
+    // Everything that builds geometry through the kernel is now stale by
+    // definition -- including anything left Failed by the previous kernel's
+    // absence, which the graph would otherwise never invoke again.
+    for (const std::unique_ptr<Body>& body : bodies_)
+        for (const std::unique_ptr<Feature>& feature : body->features())
+            graph_.markDirty(feature->id());
+    syncFeatureStatesFromGraph();
+}
+
+void PartDocument::setSketchSolver(ISketchSolver* solver) noexcept {
+    if (sketchSolver_ == solver) return;
+    sketchSolver_ = solver;
+    for (const std::unique_ptr<Sketch>& sketch : sketches_) graph_.markDirty(sketch->id());
+    syncFeatureStatesFromGraph();
+}
+
 void PartDocument::wireBoxFeature(BoxFeature& feature, ObjectId widthParameterId,
                                   ObjectId heightParameterId, ObjectId depthParameterId,
                                   ObjectId materialId) {
@@ -157,6 +232,13 @@ void PartDocument::rewireMassPropertiesSource(ObjectId solidFeatureId, ObjectId 
     // MassPropertiesNode joins the graph on first use (see the constructors'
     // comment): a document that never adds a solid feature must not carry a
     // permanently Dirty, permanently failing, edge-less recompute node.
+    // Registry AND graph, together. removeObject(massPropertiesNodeId)
+    // unregisters the node, and re-adding only the graph node left a node the
+    // engine could schedule but not resolve -- "missing registry object" on
+    // every recompute, permanently, in violation of the invariant
+    // ObjectRegistry's own header states.
+    if (!registry_.contains(massPropertiesNode_.id()))
+        registry_.registerObject(massPropertiesNode_.id(), &massPropertiesNode_);
     if (!graph_.hasNode(massPropertiesNode_.id())) graph_.addNode(massPropertiesNode_.id());
 
     // Detach any previous source's edges FIRST so the graph never accumulates
@@ -185,8 +267,19 @@ Sketch& PartDocument::addSketch(std::string name, SketchFrame frame) {
     item->setFrame(frame);
     Sketch& ref = *item;
     sketches_.push_back(std::move(item));
-    registry_.registerObject(ref.id(), &ref);
-    graph_.addNode(ref.id()); // dirty source, exactly like Parameter/Material
+    // Checked, not ignored: registerObject returns false on a duplicate id, and
+    // a silently unregistered sketch is invisible to both the recompute engine
+    // and PadFeature's profile lookup (see restoreSketch).
+    const bool registered = registry_.registerObject(ref.id(), &ref);
+    (void)registered;
+    assert(registered && "sketch id collided with an existing document object");
+    // Since M5 a Sketch is a RECOMPUTABLE node, not a bare dirty source: its
+    // geometry is derived from its constraints. The engine reaches it through
+    // ObjectRegistry::findRecomputable, which upcasts from the Sketch*
+    // alternative -- so this stays registerObject rather than
+    // addRecomputableNode, and PadFeature can still resolve the same handle as
+    // a Sketch* to read its profile.
+    graph_.addNode(ref.id());
     return ref;
 }
 
@@ -194,7 +287,19 @@ Sketch& PartDocument::restoreSketch(ObjectId id, std::string name, SketchFrame f
     auto item = std::make_unique<Sketch>(id, std::move(name), frame);
     Sketch& ref = *item;
     sketches_.push_back(std::move(item));
-    registry_.registerObject(ref.id(), &ref);
+    // Registered as Sketch*, NOT via addRecomputableNode: the registry answers
+    // "is this recomputable?" from the static type, so one handle serves both
+    // the recompute engine and PadFeature's profile lookup.
+    //
+    // The return value is CHECKED. Ignoring it is how a reloaded document ended
+    // up with a sketch that was never registered -- resolvable only as the
+    // MassPropertiesNode it collided with -- while every save/load test passed,
+    // because they all ran in one process where no collision was possible.
+    if (!registry_.registerObject(ref.id(), &ref)) {
+        sketches_.pop_back();
+        throw std::runtime_error("restoreSketch: id " + std::to_string(id) +
+                                 " is already registered in this document");
+    }
     graph_.addNode(ref.id()); // starts Dirty; graph states are not persisted
     return ref;
 }
@@ -218,16 +323,155 @@ Sketch* PartDocument::findSketchForEdit(ObjectId id) noexcept {
     return nullptr;
 }
 
+void PartDocument::reconcileSketchParameterEdges(ObjectId sketchId) {
+    const Sketch* sketch = findSketch(sketchId);
+    if (sketch == nullptr) return;
+
+    std::vector<ObjectId> wanted;
+    for (const SketchConstraint& constraint : sketch->constraints()) {
+        const ObjectId parameterId = BoundParameterId(constraint.data);
+        if (parameterId == kInvalidObjectId) continue;
+        // Only PARAMETER ids, because only Parameter prerequisites are removed
+        // below. Adding an edge for a bound id that is not a Parameter -- a
+        // Material id, say, reachable through editSketch -- wired an edge this
+        // function could never take away again: after the offending constraint
+        // was deleted the edge survived, and a density edit kept re-solving a
+        // sketch that read nothing from it. That is verbatim the phantom-edge
+        // defect this reconciler was written to eliminate, re-created by it.
+        // Add and remove must range over the same set or they cannot agree.
+        if (parameters_.findById(parameterId) == nullptr) continue;
+        if (std::find(wanted.begin(), wanted.end(), parameterId) == wanted.end())
+            wanted.push_back(parameterId);
+    }
+
+    // Drop edges from Parameters this sketch no longer binds. Only PARAMETER
+    // prerequisites are touched: a sketch has no other kind today, but saying
+    // so explicitly keeps this from quietly eating a future edge kind.
+    for (ObjectId prerequisite : graph_.prerequisitesOf(sketchId)) {
+        if (parameters_.findById(prerequisite) == nullptr) continue;
+        if (std::find(wanted.begin(), wanted.end(), prerequisite) != wanted.end()) continue;
+        removeDependency(sketchId, prerequisite);
+    }
+    for (ObjectId parameterId : wanted) addDependency(sketchId, parameterId);
+}
+
+void PartDocument::reconcileAllSketchParameterEdges() {
+    for (const std::unique_ptr<Sketch>& sketch : sketches_)
+        reconcileSketchParameterEdges(sketch->id());
+}
+
 bool PartDocument::editSketch(ObjectId sketchId, const std::function<void(Sketch&)>& edit) {
     Sketch* sketch = findSketchForEdit(sketchId);
     if (sketch == nullptr || !edit) return false;
     edit(*sketch);
+    // The callback may have added, removed or cascaded constraints through
+    // Sketch's own API, so the graph is reconciled here rather than trusted.
+    reconcileSketchParameterEdges(sketchId);
     // Dirtying is not optional and not the caller's responsibility: an edited
     // sketch whose dependents were never marked stale would keep reporting a
     // solid built from geometry that no longer exists.
     graph_.markDirty(sketchId);
     syncFeatureStatesFromGraph();
     return true;
+}
+
+SketchConstraintId PartDocument::addSketchConstraint(ObjectId sketchId,
+                                                    SketchConstraintData data) {
+    Sketch* sketch = findSketchForEdit(sketchId);
+    if (sketch == nullptr) return kInvalidSketchConstraintId;
+
+    // The bound id must actually BE a Parameter. Without this the facade
+    // accepted a Length bound to a Body id, or to nothing at all: the graph
+    // edge silently failed to wire (no such node), the document looked fine,
+    // and then every save failed forever with a validation error the user had
+    // no way to connect to what they did. The save-side validator was the only
+    // thing standing between that and a file the loader would reject.
+    // The bound id must exist AND be a Parameter.
+    //
+    // Rejecting only the "not a Parameter" half left the "bound to nothing"
+    // half open, and that half was worse: the solve problem was built with
+    // target = 0.0 and no complaint -- asking the solver to drive a line to
+    // zero length -- while validateSaveable skipped its check for an invalid
+    // id, so the document SAVED CLEANLY and the loader then refused it forever
+    // ("missing required field 'parameterId'"). A file that saves and can
+    // never be loaded back is exactly what ADR-M3-008 exists to prevent, and
+    // it was reachable through the facade hardened for this very finding.
+    const ObjectId parameterId = BoundParameterId(data);
+    if (IsDimensional(data)) {
+        if (parameterId == kInvalidObjectId) return kInvalidSketchConstraintId;
+        if (parameters_.findById(parameterId) == nullptr) return kInvalidSketchConstraintId;
+    }
+
+    const SketchConstraintId id = sketch->addConstraint(std::move(data));
+    if (id == kInvalidSketchConstraintId) return id;
+
+    // Parameter -> Sketch. This edge is the whole reason the facade exists: it
+    // is what makes "edit Width, the sketch re-solves" fall out of M2's
+    // propagation instead of needing a mechanism of its own.
+    reconcileSketchParameterEdges(sketchId);
+
+    graph_.markDirty(sketchId);
+    syncFeatureStatesFromGraph();
+    return id;
+}
+
+bool PartDocument::removeSketchConstraint(ObjectId sketchId,
+                                          SketchConstraintId constraintId) {
+    Sketch* sketch = findSketchForEdit(sketchId);
+    if (sketch == nullptr) return false;
+    const SketchConstraint* constraint = sketch->findConstraint(constraintId);
+    if (constraint == nullptr) return false;
+
+    const ObjectId parameterId = BoundParameterId(constraint->data);
+    if (!sketch->removeConstraint(constraintId)) return false;
+
+    // One reconciler, not a per-path rule: it drops the edge only when nothing
+    // else on this sketch still binds that Parameter, because two dimensions
+    // legitimately share one.
+    (void)parameterId;
+    reconcileSketchParameterEdges(sketchId);
+
+    graph_.markDirty(sketchId);
+    syncFeatureStatesFromGraph();
+    return true;
+}
+
+bool PartDocument::removeSketchEntity(ObjectId sketchId, SketchEntityId entityId) {
+    Sketch* sketch = findSketchForEdit(sketchId);
+    if (sketch == nullptr) return false;
+
+    const Sketch::EntityRemoval removal = sketch->removeEntityCascading(entityId);
+    if (!removal.removed) return false;
+
+    // The released list is not a removal list -- a surviving constraint may
+    // still bind the same Parameter -- so the edges are reconciled against the
+    // constraint set that actually remains.
+    (void)removal;
+    reconcileSketchParameterEdges(sketchId);
+
+    graph_.markDirty(sketchId);
+    syncFeatureStatesFromGraph();
+    return true;
+}
+
+std::vector<SketchConstraintId> PartDocument::constraintsBindingParameter(
+    ObjectId parameterId) const {
+    std::vector<SketchConstraintId> ids;
+    if (parameterId == kInvalidObjectId) return ids;
+    for (const std::unique_ptr<Sketch>& sketch : sketches_)
+        for (const SketchConstraint& constraint : sketch->constraints())
+            if (BoundParameterId(constraint.data) == parameterId) ids.push_back(constraint.id);
+    return ids;
+}
+
+std::vector<ObjectId> PartDocument::featuresReferencingSketch(ObjectId sketchId) const {
+    std::vector<ObjectId> ids;
+    if (sketchId == kInvalidObjectId) return ids;
+    for (const std::unique_ptr<Body>& body : bodies_)
+        for (const std::unique_ptr<Feature>& feature : body->features())
+            if (const auto* pad = dynamic_cast<const PadFeature*>(feature.get()))
+                if (pad->sketchId() == sketchId) ids.push_back(pad->id());
+    return ids;
 }
 
 bool PartDocument::markSketchDirty(ObjectId sketchId) {
@@ -259,6 +503,9 @@ PadFeature& PartDocument::addPadFeature(Body& body, std::string name, ObjectId s
 PadFeature& PartDocument::restorePadFeature(Body& body, ObjectId id, std::string name,
                                             ComputeState state, ObjectId sketchId,
                                             ObjectId lengthParameterId, ObjectId materialId) {
+    if (registry_.contains(id))
+        throw std::runtime_error("restorePadFeature: id " + std::to_string(id) +
+                                 " is already registered in this document");
     PadFeature& feature = body.addFeature<PadFeature>(id, std::move(name), state, sketchId,
                                                       lengthParameterId, materialId);
     wirePadFeature(feature, sketchId, lengthParameterId, materialId);
@@ -279,6 +526,13 @@ BoxFeature& PartDocument::restoreBoxFeature(Body& body, ObjectId id, std::string
                                             ComputeState state, ObjectId widthParameterId,
                                             ObjectId heightParameterId, ObjectId depthParameterId,
                                             ObjectId materialId) {
+    // ADR-M5-018 said "every restored type" and meant four; there are six.
+    // Without this, a duplicate feature id threw nothing, left two features
+    // with the same id in one Body, and the document saved cleanly and reloaded
+    // with "duplicate ObjectId" -- C2's symptom on the types the fix skipped.
+    if (registry_.contains(id))
+        throw std::runtime_error("restoreBoxFeature: id " + std::to_string(id) +
+                                 " is already registered in this document");
     BoxFeature& feature = body.addFeature<BoxFeature>(id, std::move(name), state,
                                                        widthParameterId, heightParameterId,
                                                        depthParameterId, materialId);
@@ -411,20 +665,79 @@ bool PartDocument::removeObject(ObjectId id) {
     if (found == nullptr) return false;
     const ObjectRegistry::ObjectRef handle = *found; // copy before unregistering
 
+    // A Parameter bound by a sketch constraint is REFUSED, not cascaded
+    // (ADR-M5-009). The asymmetry with entity deletion is deliberate: a
+    // constraint's entity is private to its sketch and is gone for good, but a
+    // Parameter is a named, shared, document-level object the user can see and
+    // re-point. Silently deleting their dimensional constraints as a side
+    // effect of deleting a parameter destroys more than was asked for.
+    //
+    // Checked BEFORE anything is unhooked, so a refusal leaves the document
+    // byte-for-byte unchanged rather than half-removed.
+    if (std::holds_alternative<Parameter*>(handle) &&
+        !constraintsBindingParameter(id).empty())
+        return false;
+
+    // NOT extended to Sketches, deliberately.
+    //
+    // Independent review recommended refusing to delete a Sketch a Pad reads,
+    // by analogy with the Parameter rule above. That would OVERTURN an accepted
+    // M4 contract: M4's own review took this exact case (MAJOR2/MAJOR3) and
+    // settled on "deletion is allowed, the Pad fails LOUDLY, and save refuses
+    // to write a document with a dangling Pad" -- so a broken document can
+    // never overwrite a good file, and the user recovers by deleting the Pad.
+    // Three accepted tests encode that.
+    //
+    // The reviewer's underlying complaint is real: until the Pad is removed,
+    // every save fails. But that is the accepted design working, not a defect
+    // introduced by M5, and reversing a reviewed milestone decision is the
+    // owner's call, not a side effect of fixing something else. Recorded as an
+    // open question in the M5 review response instead.
+
     // Order matters (spec 12): graph first (edges cleaned in both directions,
     // former dependents dirtied per ADR-007), then registry, then owner.
     graph_.removeNode(id); // NodeNotFound is fine -- bodies have no graph node
     registry_.unregisterObject(id);
 
+    // Removing the mass-properties node also removes the only thing that could
+    // keep its result current. Leaving massProperties_.valid true meant the
+    // status bar went on reporting a stale volume as CURRENT through every
+    // later edit -- the currency invariant of ADR-M3-004, broken silently,
+    // because syncFeatureStatesFromGraph skips a node the graph no longer has.
+    if (id == massPropertiesNode_.id()) massProperties_ = MassProperties{};
+
     if (std::holds_alternative<Parameter*>(handle)) {
         parameters_.remove(id);
     } else if (std::holds_alternative<Body*>(handle)) {
         for (auto it = bodies_.begin(); it != bodies_.end(); ++it) {
-            if ((*it)->id() == id) {
-                bodies_.erase(it);
-                break;
+            if ((*it)->id() != id) continue;
+
+            // Unhook every feature this Body OWNS before destroying it.
+            // Without this the features stayed registered and graph-scheduled
+            // while their memory was freed, and the next recompute() called
+            // recompute() on a destroyed PadFeature -- a use-after-free that
+            // savePartDocument happily preceded, so the crash landed later and
+            // somewhere else. ObjectRegistry's own header states the opposite
+            // invariant ("removeObject unhooks graph and registry BEFORE the
+            // owner erases"); this is the branch that did not honour it.
+            for (const std::unique_ptr<Feature>& feature : (*it)->features()) {
+                const ObjectId featureId = feature->id();
+                // The mass-properties node holds a feature id by value, so a
+                // destroyed source must be detached rather than left dangling.
+                if (massPropertiesNode_.boxFeatureId() == featureId) {
+                    massPropertiesNode_.setSource(kInvalidObjectId,
+                                                  massPropertiesNode_.materialId());
+                    graph_.removeNode(massPropertiesNode_.id());
+                    massProperties_ = MassProperties{}; // no source -> nothing current
+                }
+                graph_.removeNode(featureId);
+                registry_.unregisterObject(featureId);
             }
+
+            bodies_.erase(it);
+            break;
         }
+        syncFeatureStatesFromGraph();
     } else if (std::holds_alternative<Sketch*>(handle)) {
         // Without this the sketch survived removal: still in sketches(), still
         // resolvable, still serialized and fully resurrected on reload, while

@@ -138,7 +138,11 @@ TEST(SerializationV3Test, M3_SER_004_ByteIdenticalRoundTrip) {
     original.addBoxFeature(body, "Box001", width.id(), height.id(), depth.id());
 
     const std::string firstSave = saveToString(original);
-    EXPECT_NE(firstSave.find("\"schemaVersion\": 4"), std::string::npos);
+    // Save always writes the CURRENT schema version, which is 5 since M5
+    // added sketch constraints. This document exercises only v3-era
+    // features; the point of the assertion is byte-identical round-tripping
+    // at whatever version is current, not that it is any particular number.
+    EXPECT_NE(firstSave.find("\"schemaVersion\": 5"), std::string::npos);
     const LoadResult loaded = loadFromString(firstSave);
     ASSERT_TRUE(loaded) << loaded.message;
     EXPECT_EQ(saveToString(*loaded.document), firstSave);

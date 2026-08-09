@@ -10,6 +10,8 @@
 #include "Core/Sketch/Sketch.h"
 #include "Core/Feature/PadFeature.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
+#include "Solver/GaussNewtonSketchSolver.h"
+#include "Viewer/DocumentOutline.h"
 #include "Viewer/DocumentPresenter.h"
 #include "Viewer/MainWindow.h"
 #include "Viewer/OcctViewWidget.h"
@@ -18,6 +20,7 @@
 #include <QColor>
 #include <QPalette>
 #include <QTimer>
+#include <cstring>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -40,25 +43,50 @@ enum class Sample {
     Rectangle,      // A: 100 x 50 padded 20, aluminium
     FailedProfile,  // B: the same rectangle with one side missing
     CircleR10,      // D1: r = 10 padded 30
-    CircleR20       // D2: r = 20 padded 30 -- volume must be 4x D1
+    CircleR20,      // D2: r = 20 padded 30 -- volume must be 4x D1
+    // M5 samples. The M4 ones above stay exactly as they were: they are the
+    // evidence that a constraint-free document still behaves identically, and
+    // rewriting them to use constraints would destroy that evidence.
+    M5Rectangle,      // Gate A: fully constrained rectangle, DOF = 0
+    M5UnderConstrained, // Gate C: the same rectangle missing its dimensions
+    M5Conflict,       // Gate E: two disagreeing Lengths on one line
+    M5Circle          // Gate F: fixed-centre circle driven by a Radius Parameter
 };
+
+bool IsM5(Sample sample) noexcept {
+    return sample == Sample::M5Rectangle || sample == Sample::M5UnderConstrained ||
+           sample == Sample::M5Conflict || sample == Sample::M5Circle;
+}
 
 struct DemoModel {
     PartDocument document{"ViewerDemo"};
     OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver solver;
     Parameter* padLength = nullptr;
+    Parameter* width = nullptr;   // M5 samples only
+    Parameter* height = nullptr;  // M5 samples only
     PadFeature* pad = nullptr;
+    ObjectId sketchId = kInvalidObjectId;
 
     explicit DemoModel(Sample sample) {
         document.setGeometryKernel(&kernel);
+        // The solver is constructed HERE and injected, exactly like the kernel
+        // (ADR-M3-003 / ADR-M5-003): the viewer is an application, so it is
+        // allowed to name a concrete backend. Core never does.
+        document.setSketchSolver(&solver);
         document.addMaterial("Aluminium", 2700.0);
 
         const bool circle = sample == Sample::CircleR10 || sample == Sample::CircleR20;
         padLength = &document.addParameter("PadLength", circle ? 30.0 : 20.0,
                                            UnitType::Millimeter);
         Sketch& sketch = document.addSketch("Sketch001");
+        sketchId = sketch.id();
 
-        if (circle) {
+        if (sample == Sample::M5Circle) {
+            buildConstrainedCircle(sketch);
+        } else if (IsM5(sample)) {
+            buildConstrainedRectangle(sketch, sample);
+        } else if (circle) {
             sketch.addCircle(Vec2{0, 0}, sample == Sample::CircleR10 ? 10.0 : 20.0);
         } else {
             sketch.addLine(Vec2{0, 0}, Vec2{100, 0});
@@ -71,13 +99,81 @@ struct DemoModel {
         Body& body = document.addBody("Body001");
         pad = &document.addPadFeature(body, "Pad001", sketch.id(), padLength->id());
     }
+
+private:
+    // Spec 15's reference circle: fixed centre, radius driven by a Parameter.
+    // Drawn at 7 mm so that seeing 20 mm on screen is evidence the solver ran.
+    void buildConstrainedCircle(Sketch& sketch) {
+        width = &document.addParameter("Radius", 20.0, UnitType::Millimeter);
+        const SketchEntityId circle = sketch.addCircle(Vec2{0, 0}, 7.0);
+        document.addSketchConstraint(
+            sketch.id(),
+            FixConstraint{SketchElementRef{circle, SketchSubElement::CenterPoint}});
+        document.addSketchConstraint(sketch.id(), RadiusConstraint{circle, width->id()});
+    }
+
+    // Spec 14's reference rectangle. Drawn deliberately OFF-SIZE and skewed so
+    // that seeing 100 x 50 on screen is evidence the solver ran, not evidence
+    // that the geometry was typed in already correct.
+    void buildConstrainedRectangle(Sketch& sketch, Sample sample) {
+        width = &document.addParameter("Width", 100.0, UnitType::Millimeter);
+        height = &document.addParameter("Height", 50.0, UnitType::Millimeter);
+
+        const SketchEntityId bottom = sketch.addLine(Vec2{0, 0}, Vec2{112, 3});
+        const SketchEntityId right = sketch.addLine(Vec2{112, 3}, Vec2{115, 58});
+        const SketchEntityId top = sketch.addLine(Vec2{115, 58}, Vec2{2, 61});
+        const SketchEntityId left = sketch.addLine(Vec2{2, 61}, Vec2{0, 0});
+
+        const auto sp = [](SketchEntityId id) {
+            return SketchElementRef{id, SketchSubElement::StartPoint};
+        };
+        const auto ep = [](SketchEntityId id) {
+            return SketchElementRef{id, SketchSubElement::EndPoint};
+        };
+        const auto add = [&](SketchConstraintData data) {
+            document.addSketchConstraint(sketch.id(), std::move(data));
+        };
+
+        add(CoincidentConstraint{ep(bottom), sp(right)});
+        add(CoincidentConstraint{ep(right), sp(top)});
+        add(CoincidentConstraint{ep(top), sp(left)});
+        add(CoincidentConstraint{ep(left), sp(bottom)});
+        add(HorizontalConstraint{bottom});
+        add(HorizontalConstraint{top});
+        add(VerticalConstraint{right});
+        add(VerticalConstraint{left});
+        add(FixConstraint{sp(bottom)});
+
+        // Under-constrained stops here: the shape is a rectangle but no
+        // dimension pins its size, so DOF > 0 and the UI must SAY so rather
+        // than presenting it as finished work.
+        if (sample == Sample::M5UnderConstrained) return;
+
+        add(LengthConstraint{bottom, width->id()});
+        add(LengthConstraint{right, height->id()});
+
+        if (sample != Sample::M5Conflict) return;
+        // A second, disagreeing length on the same line: the textbook conflict.
+        Parameter& other = document.addParameter("WidthAlt", 70.0, UnitType::Millimeter);
+        add(LengthConstraint{bottom, other.id()});
+    }
 };
+
+bool gUnknownSample = false;
 
 Sample SampleFromName(const char* name) {
     if (name == nullptr) return Sample::Rectangle;
     if (std::strcmp(name, "m4-failed-profile") == 0) return Sample::FailedProfile;
     if (std::strcmp(name, "m4-circle-r10") == 0) return Sample::CircleR10;
     if (std::strcmp(name, "m4-circle-r20") == 0) return Sample::CircleR20;
+    if (std::strcmp(name, "m5-rectangle") == 0) return Sample::M5Rectangle;
+    if (std::strcmp(name, "m5-underconstrained") == 0) return Sample::M5UnderConstrained;
+    if (std::strcmp(name, "m5-conflict") == 0) return Sample::M5Conflict;
+    if (std::strcmp(name, "m5-circle") == 0) return Sample::M5Circle;
+    // An unknown name is an ERROR, not a fallback. Falling back to the M4
+    // rectangle and still printing SELFTEST OK meant a typo in CI silently
+    // downgraded an M5 gate to an M4 smoke test that passes.
+    gUnknownSample = true;
     return Sample::Rectangle;
 }
 
@@ -103,9 +199,32 @@ int main(int argc, char** argv) {
     // mock-ups. Each name matches a UI-0xx entry in the self-validation report.
     const char* scenario = nullptr;
     const char* sampleName = nullptr;
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (std::strcmp(argv[i], "--scenario") == 0) scenario = argv[i + 1];
-        if (std::strcmp(argv[i], "--sample") == 0) sampleName = argv[i + 1];
+    // Accepts BOTH `--flag value` and `--flag=value`.
+    //
+    // Matching only the separate-token form meant `--sample=m5-circle` failed
+    // strcmp, the flag was dropped entirely, and the M4 rectangle was built and
+    // passed with SELFTEST OK -- the third appearance of the same CI downgrade,
+    // after an unknown name and a missing value, and the most commonly typed of
+    // the three. A flag the program does not understand must never be silently
+    // discarded.
+    const auto valueFor = [&](int i, const char* flag, bool& present) -> const char* {
+        present = false;
+        const std::size_t length = std::strlen(flag);
+        if (std::strncmp(argv[i], flag, length) != 0) return nullptr;
+        present = true;
+        if (argv[i][length] == '=') return argv[i] + length + 1; // --flag=value
+        if (argv[i][length] != '\0') { present = false; return nullptr; } // --flagXYZ
+        return (i + 1 < argc) ? argv[i + 1] : nullptr;                     // --flag value
+    };
+    for (int i = 1; i < argc; ++i) {
+        bool present = false;
+        if (const char* value = valueFor(i, "--scenario", present); present && value != nullptr)
+            scenario = value;
+        if (const char* value = valueFor(i, "--sample", present); present) {
+            // An EMPTY or MISSING value is an error, not a silent default.
+            if (value == nullptr || value[0] == '\0') gUnknownSample = true;
+            else sampleName = value;
+        }
     }
 
     // --dark: apply a dark palette so the alternate-theme smoke test
@@ -178,36 +297,115 @@ int main(int argc, char** argv) {
         };
         // The window really came up (this alone catches the platform-plugin
         // defect, which aborted before any of the below could run).
+        if (gUnknownSample) fail("--sample named a sample that does not exist");
         if (!window.isVisible()) fail("main window is not visible");
         if (window.width() < 800 || window.height() < 500) fail("main window is undersized");
+
         // The document produced a solid and the viewer is willing to show it.
-        if (SampleFromName(sampleName) != Sample::FailedProfile &&
+        const Sample sampleBuilt = SampleFromName(sampleName);
+        if (sampleBuilt != Sample::FailedProfile && sampleBuilt != Sample::M5Conflict &&
             presenter.displayableSolids().size() != 1)
             fail("expected exactly one displayable solid");
+
         // Mass properties are current and match the analytical oracle, so the
-        // status bar cannot be showing stale or wrong numbers.
-        // The expected volume depends on which sample was built, so the check
-        // is a real oracle for each rather than one hardcoded number that only
-        // happens to hold for the default.
-        const Sample built = SampleFromName(sampleName);
+        // status bar cannot be showing stale or wrong numbers. The expected
+        // volume depends on which sample was built, so this is a real oracle
+        // for each rather than one number that only holds for the default.
+        const Sample built = sampleBuilt;
         const double kPi = 3.14159265358979323846;
         double expectedVolume = 100000.0;                 // 100 x 50 x 20
         if (built == Sample::CircleR10) expectedVolume = kPi * 100.0 * 30.0;
         if (built == Sample::CircleR20) expectedVolume = kPi * 400.0 * 30.0;
+        // pi * 20^2 * 20: the M5 circle's PadLength is the rectangle's 20 mm.
+        if (built == Sample::M5Circle) expectedVolume = kPi * 400.0 * 20.0;
+        // The M5 rectangle solves to the SAME 100 x 50 the M4 one is drawn at,
+        // padded 20 -- which is the point: the solved result must match the
+        // analytical oracle, not merely be self-consistent.
 
         const MassProperties& mp = model->document.massProperties();
-        if (built == Sample::FailedProfile) {
-            // This sample is SUPPOSED to fail: an open profile must leave the
-            // document reporting no current mass and nothing to draw.
-            if (mp.valid) fail("a broken profile still reports current mass properties");
+        const bool expectFailure =
+            built == Sample::FailedProfile || built == Sample::M5Conflict;
+        if (expectFailure) {
+            // These samples are SUPPOSED to fail: the document must report no
+            // current mass and offer nothing to draw.
+            if (mp.valid) fail("a failing sample still reports current mass properties");
             if (!presenter.displayableSolids().empty())
-                fail("a broken profile still offers a solid to draw");
+                fail("a failing sample still offers a solid to draw");
+        } else if (built == Sample::M5UnderConstrained) {
+            // Deliberately NO volume oracle. Nothing pins this sketch's size,
+            // so its solved dimensions are whatever least-change answer the
+            // solver lands on -- asserting a number would be asserting solver
+            // internals. What IS required is that an under-constrained sketch
+            // still produces a real solid and reports DOF > 0.
+            if (!mp.valid) fail("an under-constrained sketch produced no mass properties");
+            if (mp.volumeMm3 <= 0.0) fail("an under-constrained sketch produced no volume");
         } else {
             if (!mp.valid) fail("mass properties are not current");
             if (std::fabs(mp.volumeMm3 - expectedVolume) >
                 1e-6 * std::max(1.0, expectedVolume))
                 fail("volume does not match the sample's analytical value");
         }
+
+        // M5: the solver actually ran and the UI can say what happened.
+        // Checked HERE, in the running program, because everything below is
+        // invisible to a unit test -- and the M4 round taught that four
+        // user-facing defects survived two review rounds precisely because
+        // nothing ever started the executable (ADR-M4-012).
+        if (IsM5(built)) {
+            const Sketch* sketch = model->document.findSketch(model->sketchId);
+            if (sketch == nullptr) {
+                fail("the M5 sample has no sketch");
+            } else {
+                const DocumentOutline outline(model->document);
+                const std::vector<PropertyRow> rows = outline.propertiesOf(sketch->id());
+                const auto rowValue = [&rows](const char* label) -> std::string {
+                    for (const PropertyRow& row : rows)
+                        if (row.label == label) return row.value;
+                    return {};
+                };
+                // Status and DOF are readable as TEXT, not as a colour
+                // (spec 18): a status the user cannot read is not reported.
+                if (rowValue("Solve status").empty()) fail("the sketch shows no solve status");
+                if (rowValue("Degrees of freedom").empty())
+                    fail("the sketch shows no degrees of freedom");
+                // The constraint list is in the tree, under its sketch.
+                const OutlineNode root = outline.build();
+                std::size_t constraintRows = 0;
+                const std::function<void(const OutlineNode&)> count =
+                    [&](const OutlineNode& node) {
+                        if (node.kind == OutlineKind::Constraint) ++constraintRows;
+                        for (const OutlineNode& child : node.children) count(child);
+                    };
+                count(root);
+                if (constraintRows != sketch->constraints().size())
+                    fail("the constraint list does not show every constraint");
+
+                if (built == Sample::M5Circle) {
+                    if (sketch->solveStatus() != SketchSolveStatus::Solved)
+                        fail("the constrained circle did not solve");
+                    if (sketch->degreesOfFreedom() != 0)
+                        fail("the constrained circle does not report DOF 0");
+                } else if (built == Sample::M5Rectangle) {
+                    if (sketch->solveStatus() != SketchSolveStatus::Solved)
+                        fail("the fully constrained rectangle did not solve");
+                    if (sketch->degreesOfFreedom() != 0)
+                        fail("the fully constrained rectangle does not report DOF 0");
+                    if (rowValue("Degrees of freedom") != "0")
+                        fail("the panel does not show DOF 0 for a solved rectangle");
+                } else if (built == Sample::M5Conflict) {
+                    if (sketch->solveStatus() == SketchSolveStatus::Solved)
+                        fail("a conflicting sketch reported success");
+                    // Naming the offending constraint is the whole point: a
+                    // status with no id leaves the user nothing to act on.
+                    if (rowValue("Offending constraint IDs").empty())
+                        fail("a conflicting sketch names no offending constraint");
+                } else if (built == Sample::M5UnderConstrained) {
+                    if (sketch->degreesOfFreedom() <= 0)
+                        fail("an under-constrained sketch reports no free degrees");
+                }
+            }
+        }
+
         // Selection round-trips through the shell by ObjectId.
         window.selectObject(model->pad->id());
         if (window.selectedObjectId() != model->pad->id()) fail("selection did not round-trip");

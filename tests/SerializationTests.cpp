@@ -751,10 +751,10 @@ TEST(SerializationV2Test, M2_SER_001_StableIdsSurviveRoundTrip) {
     ASSERT_TRUE(original.addDependency(b.id(), a.id())); // A -> B
 
     const std::string saved = saveToString(original);
-    // Save always writes the CURRENT schema version (v3 as of M3), even
+    // Save always writes the CURRENT schema version (v5 as of M5), even
     // though this document only exercises v2-era features (parameters +
     // generic dependency edges, no Material/BoxFeature).
-    EXPECT_NE(saved.find("\"schemaVersion\": 4"), std::string::npos);
+    EXPECT_NE(saved.find("\"schemaVersion\": 5"), std::string::npos);
     const LoadResult loaded = loadFromString(saved);
     ASSERT_TRUE(loaded) << loaded.message;
     EXPECT_EQ(loaded.document->id(), original.id());
@@ -841,8 +841,13 @@ TEST(SerializationV2Test, M2_SER_005_StubEdgesNotPersisted) {
     ASSERT_TRUE(document.addDependency(stub.id(), width.id())); // Width -> stub
 
     const std::string saved = saveToString(document);
-    // The stub id appears nowhere in the file; the edge touching it is not saved.
-    EXPECT_EQ(saved.find(std::to_string(stub.id())), std::string::npos);
+    // The stub id appears nowhere in the file; the edge touching it is not
+    // saved. Searched in its PERSISTED form -- ids are written as quoted
+    // decimal strings -- because a bare numeric search matches any number
+    // with the same digits: it collided with "schemaVersion": 5 the moment
+    // M5 bumped the version, failing a test about stub edges for a reason
+    // that had nothing to do with stub edges.
+    EXPECT_EQ(saved.find("\"" + std::to_string(stub.id()) + "\""), std::string::npos);
 
     const LoadResult loaded = loadFromString(saved);
     ASSERT_TRUE(loaded) << loaded.message;

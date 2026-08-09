@@ -30,6 +30,9 @@ add_library(ParametricCADCore
     src/Core/Serialization/JsonValue.cpp
     src/Core/Serialization/PartDocumentSerializer.cpp
     src/Core/Sketch/Profile.cpp
+    src/Core/Sketch/SketchConstraint.cpp
+    src/Core/Sketch/ISketchSolver.cpp
+    src/Core/Sketch/SketchSolveSession.cpp
     src/Core/Sketch/Sketch.cpp
     src/Core/Sketch/SketchFrame.cpp
     src/Core/Sketch/SketchTypes.cpp
@@ -100,6 +103,37 @@ if(TARGET ParametricCADKernelOcct)
     target_compile_definitions(ParametricCADApp PRIVATE PARAMCAD_HAVE_OCCT_KERNEL)
 endif()
 
+# --- Sketch constraint solver (M5, ADR-M5-003) ------------------------------
+# Eigen is used for dense linear algebra and, critically, for the
+# rank-revealing decomposition that makes DOF a measured quantity rather than
+# "variables minus constraint count". It is header-only and MPL2 -- strictly
+# less encumbering than the OCCT and Qt dependencies already present -- and it
+# is PRIVATE to this target: ParametricCADCore gains no Eigen include path, and
+# ISketchSolver, SketchSolveProblem and SketchSolveResult carry no Eigen type,
+# so the replacement boundary stays exactly that interface.
+find_package(Eigen3 CONFIG QUIET
+    NO_CMAKE_PACKAGE_REGISTRY
+    NO_CMAKE_SYSTEM_PACKAGE_REGISTRY
+)
+
+if(Eigen3_FOUND)
+    add_library(ParametricCADSolver src/Solver/GaussNewtonSketchSolver.cpp)
+    target_include_directories(ParametricCADSolver PUBLIC src)
+    target_link_libraries(ParametricCADSolver
+        PUBLIC ParametricCADCore
+        PRIVATE Eigen3::Eigen
+    )
+    target_compile_features(ParametricCADSolver PUBLIC cxx_std_20)
+    if(MSVC)
+        target_compile_options(ParametricCADSolver PRIVATE /utf-8)
+    endif()
+    message(STATUS "ParametricCADSolver: Eigen ${Eigen3_VERSION} found -- "
+                    "sketch constraint solver will be built.")
+else()
+    message(WARNING "ParametricCADSolver: Eigen3 not found -- the sketch solver "
+                    "and its tests will be skipped. Core still builds.")
+endif()
+
 # --- Minimal Qt viewer (M4, ADR-M4-006) -------------------------------------
 # Qt is a hard dependency of the VIEWER TARGET ONLY. Without Qt this block is
 # skipped and Core, Kernel and every non-viewer test still configure and build
@@ -144,6 +178,12 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
                 Qt6::Core Qt6::Gui Qt6::Widgets
                 ${OpenCASCADE_LIBRARIES}
     )
+    # The viewer is an APPLICATION, so it is allowed to name a concrete solver
+    # backend and inject it -- the same licence main.cpp has for the OCCT
+    # kernel (ADR-M3-003 / ADR-M5-003). Core still links neither.
+    if(TARGET ParametricCADSolver)
+        target_link_libraries(ParametricCADViewer PRIVATE ParametricCADSolver)
+    endif()
     target_compile_features(ParametricCADViewer PRIVATE cxx_std_20)
     if(MSVC)
         target_compile_options(ParametricCADViewer PRIVATE /utf-8)
@@ -173,6 +213,42 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
     if(PARAMCAD_BUILD_TESTS)
         add_test(NAME ViewerSmokeTest COMMAND ParametricCADViewer --selftest)
         set_tests_properties(ViewerSmokeTest PROPERTIES TIMEOUT 60)
+        # One smoke test PER M5 sample. A single default run would leave the
+        # solved, under-constrained and conflicting paths unexercised in the
+        # running program -- and those are exactly the states spec 18's UI
+        # requirements are about.
+        foreach(sample m5-rectangle m5-underconstrained m5-conflict m5-circle)
+            add_test(NAME ViewerSmokeTest_${sample}
+                     COMMAND ParametricCADViewer --selftest --sample ${sample})
+            set_tests_properties(ViewerSmokeTest_${sample} PROPERTIES TIMEOUT 60)
+        endforeach()
+        # A bad --sample must FAIL. Both shapes of bad: an unknown name, and a
+        # MISSING value (`--sample` last, or a CI variable that expands to
+        # nothing). Each fell through to the M4 sample and still printed
+        # SELFTEST OK, silently downgrading an M5 gate -- and each was fixed one
+        # round apart, so both are pinned here.
+        add_test(NAME ViewerSmokeTest_RejectsUnknownSample
+                 COMMAND ParametricCADViewer --selftest --sample no-such-sample)
+        add_test(NAME ViewerSmokeTest_RejectsMissingSampleValue
+                 COMMAND ParametricCADViewer --selftest --sample)
+        # The --key=value form, which is the most commonly typed of the three
+        # and was silently dropped entirely (the flag failed strcmp, so the M4
+        # sample was built and passed). Both spellings are pinned because the
+        # separate-token cases above cannot see this one.
+        add_test(NAME ViewerSmokeTest_RejectsUnknownSampleEqualsForm
+                 COMMAND ParametricCADViewer --selftest --sample=no-such-sample)
+        add_test(NAME ViewerSmokeTest_RejectsEmptySampleEqualsForm
+                 COMMAND ParametricCADViewer --selftest --sample=)
+        set_tests_properties(ViewerSmokeTest_RejectsUnknownSample
+                             ViewerSmokeTest_RejectsMissingSampleValue
+                             ViewerSmokeTest_RejectsUnknownSampleEqualsForm
+                             ViewerSmokeTest_RejectsEmptySampleEqualsForm
+                             PROPERTIES WILL_FAIL TRUE TIMEOUT 60)
+        # And the =form with a VALID name must still WORK, so the parser is not
+        # simply rejecting everything with an '=' in it.
+        add_test(NAME ViewerSmokeTest_AcceptsEqualsForm
+                 COMMAND ParametricCADViewer --selftest --sample=m5-circle)
+        set_tests_properties(ViewerSmokeTest_AcceptsEqualsForm PROPERTIES TIMEOUT 60)
     endif()
 
     message(STATUS "ParametricCADViewer: Qt ${Qt6_VERSION} found -- viewer will be built.")
@@ -224,6 +300,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/ViewerPresenterTests.cpp
         tests/M4ReviewFindingTests.cpp
         tests/DocumentOutlineTests.cpp
+        tests/SerializationV5Tests.cpp
         tests/SerializationTests.cpp
     )
     target_link_libraries(ParametricCADCoreTests
@@ -233,7 +310,38 @@ if(PARAMCAD_BUILD_TESTS)
     endif()
 
     include(GoogleTest)
-    gtest_discover_tests(ParametricCADCoreTests)
+    # PRE_TEST for EVERY suite, not only the DLL-carrying ones.
+    #
+    # gtest_discover_tests' default POST_BUILD mode writes a single
+    # CONFIG-LESS <target>_tests.cmake whose add_test lines hard-code an
+    # absolute path to whichever configuration was linked last. Under a
+    # multi-config generator that means `ctest -C Release` silently runs the
+    # DEBUG binaries: independent review found 333 of 448 tests doing exactly
+    # that, so this project's "Release tests pass" claim was, for those suites,
+    # a second Debug run. A Release-only defect could not have been seen --
+    # and ADR-M5-005 puts DOF on a numerical rank threshold, which is precisely
+    # the kind of thing that differs between configurations.
+    #
+    # PRE_TEST defers enumeration to ctest time and emits per-config
+    # _include-<CONFIG>.cmake files, so -C selects the binary it names.
+    gtest_discover_tests(ParametricCADCoreTests DISCOVERY_MODE PRE_TEST)
+
+    # Solver test suite (M5). Built only when the solver target exists, and it
+    # links ParametricCADSolver rather than Eigen -- if a test needed Eigen
+    # directly, the solver boundary would not be where ADR-M5-003 says it is.
+    if(TARGET ParametricCADSolver)
+        add_executable(ParametricCADSolverTests
+            tests/Solver/SketchSolverTests.cpp
+            tests/Solver/SketchConstraintTests.cpp
+        )
+        target_link_libraries(ParametricCADSolverTests
+            PRIVATE ParametricCADCore ParametricCADSolver GTest::gtest_main
+        )
+        if(MSVC)
+            target_compile_options(ParametricCADSolverTests PRIVATE /utf-8)
+        endif()
+        gtest_discover_tests(ParametricCADSolverTests DISCOVERY_MODE PRE_TEST)
+    endif()
 
     # OCCT-linked test suite (M3-KERNEL-*, Mass, Inertia, real-geometry
     # recompute integration, and the mandatory release gate). Built and
@@ -262,8 +370,35 @@ if(PARAMCAD_BUILD_TESTS)
         # step -- on a clean build the enumeration runs before those DLLs are
         # in place and the whole build fails (MSB3073). PRE_TEST defers
         # enumeration to ctest time, when the DLLs are guaranteed present.
-        # ParametricCADCoreTests links no DLL-carrying dependency, so it keeps
-        # the default mode.
+        # Since the review, every suite uses PRE_TEST -- see the note at
+        # ParametricCADCoreTests. The DLL argument below is why this suite
+        # needed it FIRST, not why the others may go without it.
         gtest_discover_tests(ParametricCADKernelOcctTests DISCOVERY_MODE PRE_TEST)
+    endif()
+
+    # Full-stack integration (M5-J/K). The ONLY target linking Core + Solver +
+    # KernelOcct together, because spec 13's selective-recompute requirements
+    # are claims about a real solver and a real kernel in one recompute pass:
+    # "PadLength changed and the sketch did not re-solve" cannot be observed
+    # from either single-layer suite. Same PRE_TEST reasoning as above -- it
+    # carries the OCCT DLL dependency.
+    if(TARGET ParametricCADSolver AND TARGET ParametricCADKernelOcct)
+        add_executable(ParametricCADIntegrationTests
+            tests/Integration/M5RecomputeIntegrationTests.cpp
+            tests/Integration/M5UiTests.cpp
+            tests/Integration/M5ReleaseGateTests.cpp
+            tests/Integration/M5AdversarialTests.cpp
+        )
+        # ViewerCore joins so the UI's decisions can be checked against a REAL
+        # solve. Faking solver output would make those tests agree with a stub
+        # rather than with the solver the user runs.
+        target_link_libraries(ParametricCADIntegrationTests
+            PRIVATE ParametricCADCore ParametricCADSolver ParametricCADKernelOcct
+                    ParametricCADViewerCore GTest::gtest_main
+        )
+        if(MSVC)
+            target_compile_options(ParametricCADIntegrationTests PRIVATE /utf-8)
+        endif()
+        gtest_discover_tests(ParametricCADIntegrationTests DISCOVERY_MODE PRE_TEST)
     endif()
 endif()

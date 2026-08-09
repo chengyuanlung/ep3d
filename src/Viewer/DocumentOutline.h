@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Document/ObjectId.h"
+#include "Core/Sketch/ISketchSolver.h"
 #include <set>
 #include <string>
 #include <vector>
@@ -30,7 +31,9 @@ enum class OutlineState {
 // What kind of document object a row represents. The tree needs this for
 // icons and grouping; it is NOT a type discriminator for behaviour -- code that
 // needs behaviour asks for a capability (ADR-M3-007).
-enum class OutlineKind { Document, Parameter, Sketch, Solid, MassProperties, Material, Other };
+enum class OutlineKind {
+    Document, Parameter, Sketch, Constraint, Solid, MassProperties, Material, Other
+};
 
 struct OutlineNode {
     ObjectId id{kInvalidObjectId};
@@ -71,8 +74,17 @@ public:
     OutlineNode build(const std::set<ObjectId>& hiddenIds = {}) const;
 
     // Properties of one object, or an empty vector if the id is not something
-    // this panel can describe.
+    // this panel can describe. Accepts a SketchConstraintId's underlying
+    // ObjectId too: constraint ids come from the same generator, so they are
+    // document-unique and a selected constraint row can be described here
+    // exactly like any other object.
     std::vector<PropertyRow> propertiesOf(ObjectId id) const;
+
+    // Human-facing solve status, e.g. "Solved", "Over-constrained". Spec 18
+    // requires the status to be readable as TEXT: a status conveyed only by a
+    // row colour is unreadable in greyscale, to a colour-blind user, and in a
+    // screenshot attached to a bug report.
+    static const char* solveStatusLabel(SketchSolveStatus status) noexcept;
 
     // Marker text for a state, used alongside colour so state is never conveyed
     // by colour alone (UI spec 11/19).

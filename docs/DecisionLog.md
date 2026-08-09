@@ -795,3 +795,884 @@ both, in sequence.
 milestone's spec, the completion report states which document governed and why.
 Recording "PASS" without naming the basis is what makes a validation claim
 unfalsifiable.
+
+## ADR-M5-001 — Constraint identity and reference model (M5)
+Status: Accepted
+
+Constraints need identities as durable as the entities they reference, and
+references that survive insertion, deletion and reordering of anything else
+(spec 5).
+
+- **`SketchConstraintId` is a distinct type allocated from the existing
+  `ObjectIdGenerator`**, exactly as `SketchEntityId` is (ADR-M4-001). Distinct so
+  the compiler rejects passing an entity id where a constraint id belongs;
+  drawn from the shared generator so it inherits M1's restore-collision safety
+  (`AdvancePast` on restore, the `kMaxObjectId` cap, the no-wrap guarantee)
+  rather than a private counter that would reintroduce that bug class.
+- Full identity of a constraint is the pair (`Sketch::id()`,
+  `SketchConstraintId`). Constraints are sub-objects of a Sketch, like entities,
+  and are not registered in `ObjectRegistry`.
+- **Targets are `SketchElementRef`**, the type M4 reserved and left unused for
+  exactly this purpose: `{SketchEntityId, SketchSubElement}` with
+  `Whole/StartPoint/EndPoint/CenterPoint`. M5 is where those sub-elements
+  acquire meaning. Nothing else changes about the type, which is the point of
+  having reserved it.
+- **Storage is a vector, position is never identity.** Every lookup is by
+  `SketchConstraintId`; removal renumbers nothing. Constraint ORDER must not
+  affect the solved result either -- order independence is a tested property
+  (spec 19), not an assumption.
+- **Never persisted as identity**: solver variable indices, Jacobian row or
+  column numbers, backend handles, pointers, vector positions. A solver variable
+  index is the M5-shaped version of the topology-index mistake ADR-M4-004
+  forbids, and it is easy to make because the solver genuinely does number
+  things internally -- those numbers are rebuilt on every solve and are never
+  written down.
+
+## ADR-M5-002 — Dimensional constraint units and Parameter binding (M5)
+Status: Accepted
+
+- **Dimensional constraints bind to existing `Parameter` objects by `ObjectId`.**
+  No second scalar system (spec 7). A `Length` constraint stores the parameter's
+  id, reads its value at solve time through the registry, and participates in the
+  dependency graph as an ordinary prerequisite -- which is what makes
+  `Width 100 -> 120` propagate through the existing M2 machinery rather than
+  through anything new.
+- **Units**: lengths, distances, radii and diameters in **mm**, matching
+  `SketchTypes`' `(u,v)` convention and ADR-M3-002's project-wide length story.
+  **Angles in radians internally**; the UI may display degrees, and the
+  conversion lives at the display boundary only.
+- **A dimensional constraint whose bound Parameter carries an incompatible
+  `UnitType` is invalid input**, not a silent reinterpretation. A `Length`
+  constraint bound to a `Kilogram` parameter fails validation; spec 32 lists
+  "unit mismatch changes physical geometry" as a Critical example, and the way
+  to not have that defect is to refuse the binding.
+- **Value policy**: lengths, distances and radii must be finite and strictly
+  positive -- `kMinSketchDimensionMm = 1e-6`, the same floor ADR-M3-009 and
+  ADR-M4-005 use, so the project keeps one length-scale story. Zero is invalid
+  for these (a zero-length line has no direction; a zero-radius circle is a
+  point). Angles must be finite; any value is geometrically meaningful.
+- `Diameter` is **not separate state**: it drives the same underlying radius,
+  as `radius = diameter / 2`, so a Radius and a Diameter constraint on the same
+  circle are two views of one quantity and conflict if they disagree (spec 11).
+
+## ADR-M5-003 — Sketch solver selection and boundary (M5)
+Status: Accepted
+
+**Backend: a project-owned Gauss-Newton / Levenberg-Marquardt solver, with
+Eigen 5.0.1 (MPL2, header-only, via vcpkg) used only for dense linear algebra
+and rank determination.**
+
+Chosen over PlaneGCS (FreeCAD, LGPL) and SolveSpace (GPL). Rationale, recorded
+because the alternatives are reasonable:
+
+- M5's systems are small -- a constrained rectangle is 8 variables and ~10
+  residuals -- so a general-purpose geometric constraint library is not
+  load-bearing here. Its value would be the advanced constraints (tangent,
+  equal, symmetry) that spec 3 explicitly excludes from M5.
+- Vendoring a third-party solver's source is a substantial, permanent import
+  with a viral-or-weak-copyleft licence attached, made for capability M5 does
+  not use.
+- **Eigen earns its place on one specific requirement.** Spec 10 forbids faking
+  DOF as `variables - constraints` and demands rank. Computing the numerical
+  rank of a constraint Jacobian requires a rank-revealing decomposition;
+  `ColPivHouseholderQR` with an explicit threshold is exactly that, and it is
+  the part of this milestone where a hand-rolled implementation would produce
+  subtle wrong answers that survive review -- a failure mode this project has
+  already demonstrated twice.
+- Eigen is header-only and MPL2, strictly less encumbering than the OCCT (LGPL)
+  and Qt (LGPL) dependencies the project already carries, and it enters through
+  the same vcpkg toolchain path.
+
+**Numerical characteristics** (spec 12, all documented and none to be enlarged
+merely to make a test pass):
+
+```
+residual tolerance (length)     1e-9 mm
+residual tolerance (angle)      1e-9 rad
+convergence: max |residual|     < 1e-9
+step tolerance                  1e-12
+iteration limit                 100
+LM damping: initial 1e-6, x10 on rejection, /10 on acceptance
+rank threshold                  1e-9 relative to the largest pivot
+scale assumption                CAD-scale sketches, 1e-6 .. 1e6 mm
+```
+
+**Replacement boundary.** `ISketchSolver::solve(const SketchSolveProblem&) ->
+SketchSolveResult` is the only surface. Both types are Core-side, free of Eigen
+and of any backend type: the problem carries variables, residual definitions and
+parameter values; the result carries solved variable values, a status and a DOF.
+Eigen appears in exactly one translation unit. Swapping in PlaneGCS later means
+writing a second `ISketchSolver` and changing nothing else -- the same shape as
+`IGeometryKernel` and its OCCT implementation (ADR-M3-001).
+
+## ADR-M5-004 — Solver commit, failure and recovery policy (M5)
+Status: Accepted
+
+Solving is transactional in the same sense as M3's geometry build
+(ADR-M3-001/004), and for the same reason.
+
+- Order: validate semantic references and parameters -> build a temporary
+  `SketchSolveProblem` -> solve -> check every output is finite and the status
+  is acceptable -> compute DOF -> **only then** write solved coordinates back
+  into the sketch's entities.
+- **A failed solve writes nothing.** The sketch keeps its previous geometry
+  byte-for-byte; no partial, NaN or infinite coordinate is ever committed. Spec
+  32 lists "NaN/Inf committed" and "conflict silently produces wrong solid"
+  among its Critical examples, and not writing on failure is what makes both
+  unreachable rather than defended against.
+- **Retention and currency are separate** (ADR-M3-006, which this milestone
+  inherits rather than re-derives): the retained geometry stays, and the
+  sketch's solve status plus the graph's `ComputeState` carry the fact that it
+  is stale. Downstream `Profile`/`Pad`/`MassProperties` must not report a
+  current success after a failed solve.
+- **Recovery is deterministic**: correcting the input and recomputing follows
+  ADR-007's barrier-clear semantics unchanged. Re-solving the same problem twice
+  yields the same answer; solving from the retained geometry after a failure
+  yields the same answer as solving from scratch. Both are tested (spec 30's
+  "repeat solve 100x for drift").
+- **Under-constrained geometry is committed** when the solve otherwise
+  succeeded. Spec 16 recommends this: valid geometry with remaining DOF is a
+  normal editing state, not a failure, and blocking it would make a sketch
+  unusable until fully constrained. The status and DOF carry the caveat.
+
+## ADR-M5-005 — DOF and constraint status semantics (M5)
+Status: Accepted
+
+- **DOF is computed as `variables - rank(Jacobian)`**, with the rank taken
+  numerically at the solved configuration via `ColPivHouseholderQR` and an
+  explicit threshold. Not `variables - constraint_count`: that formula reports a
+  fully constrained rectangle with one redundant-but-consistent constraint as
+  having negative DOF, and reports a sketch constrained twice in the same
+  direction as fully constrained when it is not. Spec 10 names this specifically.
+- Statuses, with the mapping stated so it can be checked:
+
+| Status | Meaning |
+|---|---|
+| `Solved` | converged, all residuals within tolerance, DOF = 0 |
+| `UnderConstrained` | converged, residuals within tolerance, DOF > 0 |
+| `OverConstrained` | rank < number of constraint rows, and the redundant rows are CONSISTENT (residuals converge) |
+| `Conflicting` | residuals do not converge and the Jacobian is rank-deficient in the direction of the violation |
+| `InvalidInput` | a reference does not resolve, a parameter is missing, or a dimension is non-finite or non-positive -- detected before any solve |
+| `NumericalFailure` | iteration limit reached, or a non-finite value appeared during iteration |
+
+- **Conservative mapping where the distinction is not reliable.** Separating
+  `OverConstrained` from `Conflicting` depends on whether inconsistent redundant
+  rows can be told from merely redundant ones, which is a tolerance judgement.
+  The rule: if residuals converge, redundancy is reported as `OverConstrained`
+  (benign); if they do not, it is `Conflicting` (an error). Borderline cases
+  therefore resolve toward `Conflicting`, because reporting a real conflict as
+  benign is the more damaging error.
+- **Redundant-but-consistent constraints are accepted, not rejected**, and
+  reported as `OverConstrained` with the geometry committed. Rejecting them
+  would make ordinary modelling (e.g. Horizontal on both a line and its
+  already-horizontal neighbour) fail for no user-visible reason. Tests lock this
+  behaviour (spec 16).
+- Diagnostics name the offending `SketchConstraintId`s, not just a status --
+  spec 25's Gate E requires a "useful constraint diagnostic", and a status alone
+  does not tell a user which constraint to remove.
+
+## ADR-M5-006 — Angle constraint convention (M5)
+Status: Accepted
+
+- `Angle(lineA, lineB, parameter)` constrains the angle **from lineA to lineB**,
+  measured **counter-clockwise**, in **radians**, normalized to `[0, 2*pi)`.
+- Each line's direction is its stored `start -> end`, so reversing how a line
+  was drawn reverses its direction and changes the measured angle by `pi`. This
+  is deliberate: the alternative -- an undirected angle in `[0, pi)` -- cannot
+  express the difference between a 60-degree corner and a 120-degree corner,
+  which is a distinction a CAD user makes constantly.
+- **Degenerate cases are `InvalidInput`, not silently solved**: an angle
+  constraint on a zero-length line has no defined direction. Lines shorter than
+  `kMinSketchDimensionMm` are rejected at validation.
+- **Angles near 0 and near pi are the numerically delicate cases** and are
+  tested explicitly (spec 30).
+
+### SUPERSEDED clause, and why (M5 independent review)
+
+This ADR originally specified the residual as `sin(theta_actual -
+theta_target)`, "so that it is smooth across the wrap point". **That clause
+contradicted this same ADR.** `sin` has period `pi`, so it is satisfied by
+`theta` and by `theta + pi` alike -- it cannot distinguish a 60-degree corner
+from a 120-degree one, which is the exact distinction the paragraph above gives
+as the reason for a directed angle. The ADR asked for two incompatible things
+and the implementation followed the wrong one.
+
+**The residual is now the WRAPPED angular difference:**
+
+```
+d = atan2(dvB, duB) - atan2(dvA, duA) - target,  wrapped into (-pi, pi]
+```
+
+Smooth everywhere except exactly a half-turn from the target. In exchange it is
+zero exactly at the requested angle (mod `2*pi`) and has derivative 1 there,
+which is what makes the Jacobian rank, and therefore the DOF, come out right. A
+residual that is smooth but measures the wrong quantity is worse than one with a
+single removable discontinuity.
+
+**Correction (M5 re-review).** This paragraph first claimed the half-turn was
+"a measure-zero starting configuration the solve converges through from either
+side". Measured, it did not converge at all: the solver stalled at **iteration
+1**, reported "did not converge within the iteration limit" after refusing to
+take a single step, and in one variant falsely reported `Conflicting`. 13 of 576
+(target, start) grid configurations landed on it, and two lines drawn exactly
+parallel or antiparallel is an everyday result of axis snapping -- not measure
+zero in practice.
+
+An ADR that asserts a property the code does not have is the same failure as a
+comment that does, and this ADR had already produced one Critical that way.
+
+**Second correction (M5 round-3 review): the first correction was wrong too, and
+its fix was a regression.**
+
+The first correction said the half-turn was handled by rotating the starting
+guess off the antipode, and that "only the exact point was unreachable". Both
+halves were false when measured:
+
+- It was never a point. Before the nudge, offsets of 1e-15, 1e-12, 1e-9 and
+  1e-8 rad all failed -- a band.
+- The nudge used a fixed 1e-6 rad guard and a fixed 1e-4 rad rotation, while the
+  residual's usable angular resolution is `1e-7 * |coordinate| / length` --
+  **scale-dependent**. Over a 760-case grid the nudge improved 131
+  configurations and **broke 42**, turning correct `Solved` results into false
+  "did not converge" failures for short lines far from the sketch origin. It
+  produced, from its own fix, the exact symptom it was written to remove.
+
+**The nudge is deleted.** The real defect was never the starting point: wrapping
+makes the residual's VALUE jump by `2*pi` at the antipode, but its GRADIENT is
+continuous there. Central differences that wrap each evaluation independently
+straddle the jump and produce a Jacobian entry of about `2*pi/(2h)` -- enormous
+and wrong -- so Levenberg-Marquardt rejects every step and the solve stalls at
+iteration 1.
+
+`ComputeJacobian` now **wraps the DIFFERENCE** of the two evaluations for
+angular residuals, which removes the discontinuity from the derivative rather
+than steering around it.
+
+**Third correction (M5 round-4 review): "needs no tuning constant, is
+scale-free" was false, and this is the third clause in this ADR to be corrected
+for asserting a property the code does not have.**
+
+The tuning constant did not disappear; it moved from the deleted nudge into the
+finite-difference step. That step is `1e-7 * max(1, |x_j|)` -- relative to the
+COORDINATE -- while an angle residual's sensitivity is `1/L`, relative to the
+LINE LENGTH. Wrapping caps any angular Jacobian entry at `pi/(2h)`, so the
+recovered derivative is wrong once `|coordinate| / length` exceeds about
+`1.6e7`: measured, 132 of 336 swept Jacobians were wrong by more than 1e-4
+relative and 75 of 336 solves returned a **false** `NumericalFailure`.
+
+**Measured envelope, stated instead of a claim:** correct to ~1e-9 relative for
+lines down to `1e-3` mm at coordinates up to `1e5` mm, i.e. a coordinate-to-length
+ratio up to about `1e7`. Beyond that -- a 1 micrometre line 10 metres from the
+sketch origin -- the angular Jacobian degrades. That is outside spec 30's
+"reasonable geometry", which is why this is documented rather than engineered
+around, and spec 12 requires scale assumptions to be documented rather than
+assumed.
+
+`M5_REV3_001` sweeps to ratio `1e6`, one order inside the boundary. Locked by `M5_REV2_001` and by `M5_REV3_001`, which sweeps
+140 combinations of line length, distance from origin, and offset from the
+antipode -- the space that exposed the nudge.
+
+Wrapping is now `std::remainder`, not a `while` loop: `while (d > pi) d -= 2*pi`
+is unbounded, `DimensionValueValid` accepts any finite angle, and an `Angle`
+Parameter of `1e300` rad made `recompute()` **never return** (`2*pi` is below
+the ULP of `1e300`). `1e9` rad took 21.8 seconds. Locked by `M5_REV3_002`.
+- The UI may display degrees; conversion happens at the display boundary only,
+  and the persisted and solved values are always radians (ADR-M5-002).
+
+## ADR-M5-007 — Recomputability is read from the static type, not from the registered handle (M5)
+Status: Accepted
+
+`ObjectRegistry` stores a `std::variant` of concrete handle types plus an
+`IRecomputable*` alternative. Until M5, `findRecomputable` matched **only** the
+`IRecomputable*` alternative, so whether an object was recomputable depended on
+which alternative the registering call site happened to pick.
+
+Making `Sketch` recomputable exposed that as a trap with no correct answer:
+
+- Register the sketch via `addRecomputableNode` (as `IRecomputable*`), and
+  `PadFeature::resolveSketch`, which does `std::get_if<Sketch*>`, silently
+  returns `nullptr` -- every Pad loses its profile.
+- Register it as `Sketch*`, and `findRecomputable` reports "not recomputable"
+  -- the engine never invokes the solver and the sketch silently never solves.
+
+Both failures are silent, and both would have been introduced by an ordinary,
+locally reasonable one-line choice.
+
+**Decision**: `findRecomputable` visits the variant and upcasts from whichever
+concrete alternative is stored, using `if constexpr (std::is_base_of_v<...>)`.
+The registry now answers a question about the object's **type**, which is what
+the question actually is. Objects stay registered under their own concrete
+alternative, so one handle serves both the recompute engine and every
+type-specific lookup, and the choice that had no correct answer no longer exists.
+
+This generalizes ADR-M3-007 (capability over type enumeration) from feature
+iteration to registry lookup: ask what an object *can do*, and derive the answer
+from the type system rather than from a bookkeeping convention a call site must
+remember.
+
+## ADR-M5-008 — Constraint mutation goes through PartDocument (M5)
+Status: Accepted
+
+`Sketch::addConstraint` is not the path callers use. `PartDocument::
+addSketchConstraint` / `removeSketchConstraint` are, for the same reason
+`editSketch` exists (ADR-M4-008): a dimensional constraint binds a `Parameter`,
+and that binding is only real once the `Parameter -> Sketch` **graph edge**
+exists. A constraint added straight on the sketch compiles, persists, solves
+once, and then never re-solves when its parameter changes -- the sketch would
+silently freeze at whatever the parameter was when it was first solved.
+
+- `addSketchConstraint` adds the constraint **and** wires the edge, so
+  "edit Width, the sketch re-solves" falls out of M2's existing propagation
+  rather than needing a mechanism of its own (spec 13).
+- `removeSketchConstraint` drops the edge **only when no remaining constraint on
+  that sketch still binds the same Parameter**. Two dimensions legitimately
+  share one; removing the edge on the first removal would silently stop the
+  second from ever updating.
+- Both are verified by mutation: deleting the `addDependency` call fails
+  `M5_RECT_003` and `M5_CIRCLE_001`; deleting the `removeDependency` call fails
+  `M5_FACADE_001`. A selective-recompute test that only asserts "did not
+  re-solve" passes trivially when the edge was never wired, so each such test is
+  paired with a positive control that asserts the solve *did* happen.
+
+`SolveStatusName` also moved from the solver backend into Core
+(`src/Core/Sketch/ISketchSolver.cpp`): the names describe Core's status enum, so
+every Core caller can use them whether or not a backend is linked, and a second
+backend cannot rename `Conflicting` behind the first one's back.
+
+## ADR-M5-009 — Deletion policy: cascade for entities, refuse for Parameters (M5)
+Status: Accepted
+
+Spec 17 requires a deterministic policy and no dangling references. The two
+deletion cases get **different** answers, and the asymmetry is the decision:
+
+**Deleting a sketch entity CASCADES** to every constraint referencing it.
+A constraint whose geometry is gone has nothing left to constrain. Keeping it
+would produce a reference the solver reports as `InvalidInput` on every
+subsequent recompute, forever, with no way for a user to reach the offending
+constraint -- the geometry they would click to find it no longer exists.
+
+**Deleting a Parameter is REFUSED** while any sketch constraint binds it, and
+`PartDocument::constraintsBindingParameter` names the constraints so the refusal
+is actionable. A Parameter is a named, shared, document-level object the user
+can see and re-point; silently deleting their dimensional constraints as a side
+effect of deleting a parameter destroys more than was asked for. The refusal is
+checked BEFORE anything is unhooked, so it leaves the document unchanged rather
+than half-removed.
+
+Both branches are deterministic and both leave zero dangling references, which
+is what spec 17 actually demands -- it does not demand that both use the same
+mechanism.
+
+Consequences:
+- `Sketch::removeEntityCascading` returns the removed constraints and the
+  Parameters they released, so `PartDocument::removeSketchEntity` can drop the
+  graph edges the sketch no longer needs. It **re-checks** each released
+  Parameter against the surviving constraints rather than treating the released
+  list as a removal list: another constraint may still bind the same one.
+- `Sketch::removeEntity` cascades too. The lower-level path cannot touch the
+  graph, but it must not be able to create a dangling reference either --
+  otherwise the invariant would hold only for callers who remembered the facade.
+- The save-side validator rejects a constraint with an unresolvable reference
+  (ADR-M3-008: a file the loader would reject must never be writable over the
+  last good copy). With the policy in place this should never fire; if it does,
+  a mutation path bypassed both removal functions, and failing the save is how
+  that surfaces.
+
+## ADR-M5-010 — Schema v5: constraints are semantic, edges are re-derived (M5)
+Status: Accepted
+
+`kSchemaVersion` is 5. Per sketch, a `constraints` array persists constraint id,
+kind name, entity/sub-element references and the bound Parameter's `ObjectId`.
+
+- **Sub-elements are written as names** (`"StartPoint"`), never as the enum's
+  underlying integer. An integer changes meaning the day a sub-element is
+  inserted into the middle of the enum, and every file already on disk would
+  then load as the wrong sub-element with no error at all. This is ADR-M4-004's
+  "identity is semantic, never positional" applied to an enum.
+- **Nothing derived is persisted**: no solver variable index, residual index,
+  Jacobian layout, DOF or solve status. A reloaded sketch re-solves before
+  anything reads it. A test asserts each of those names is absent from the file.
+- **`Parameter -> Sketch` edges are Option B**: re-derived on load from the
+  constraints, never written. Deriving them means a hand-written file gets the
+  same graph as a saved one, and removes the possibility of a file whose edge
+  list disagrees with its own constraints. Without the re-derivation the
+  document loads, solves once, and then silently freezes -- editing the
+  Parameter would never dirty the sketch again (locked by `M5_SER_006`,
+  verified by mutation).
+- **v4 files load unchanged**: the `constraints` array is optional, and its
+  absence means a sketch of free geometry, which is exactly what a v4 sketch was.
+
+Three version-pinning tests were updated from 4 to 5, and
+`M4_SER_001_SchemaVersionIsFour` was renamed to
+`M4_SER_001_SaveWritesTheCurrentSchemaVersion` -- what it checks (that save
+writes the *current* version) is worth keeping; the number in its name was not.
+
+The bump also exposed a pre-existing fragile test:
+`M2_SER_005_StubEdgesNotPersisted` searched for the stub's id as a **bare
+numeric substring**, which matched `"schemaVersion": 5` the moment the version
+became 5. It now searches for the id in its persisted form -- a quoted decimal
+string -- so a test about stub edges can no longer fail for a reason that has
+nothing to do with stub edges.
+
+
+## ADR-M5-011 - A residual type must be able to express its constraint (M5)
+Status: Accepted. Supersedes the four-slot `SolveResidual` of ADR-M5-003.
+
+`SolveResidual` carried four variable slots. A line-to-line angle is a function
+of **eight** scalars. Unable to say what the constraint meant, the code said
+something else: it packed the two lines' `v` components and evaluated
+`sin(dvB - dvA - target)` -- subtracting a millimetre difference from a radian
+target. It converged, reported `Solved` with a residual of 4e-11, produced
+angles wrong by up to 260 degrees, was not rotation-invariant, and silently
+stretched already-correct geometry by about 1 mm.
+
+Three decisions follow:
+
+1. **Eight slots** (`std::array<int, 8> vars`), so the type can express every
+   constraint M5 has.
+2. **`SlotsRequired(kind)` is part of the interface**, declared next to the enum
+   rather than assumed privately by each backend.
+3. **The solver REJECTS an under-packed residual** as `InvalidInput`. This is
+   the part that matters: a future kind whose slots are not all filled fails
+   loudly instead of reading `vars[-1]` and computing plausible nonsense.
+
+**Two limits of that guard, stated rather than left to be discovered.**
+
+*It is arity-only.* A residual whose slots are all filled but MIS-ORDERED --
+a `Distance` packed `(a.u, b.u, a.v, b.v)` instead of `(a.u, a.v, b.u, b.v)` --
+passes, and then reports `Solved` with a residual of 2.7e-12 while the geometry
+is wrong. That is character-for-character the C1 failure mode. The problem
+already carries a `SolveVariable::Component` for every variable, so a
+cross-check is cheap and is recorded as follow-up. What stands in for it today
+is that the geometric tests DO catch it: an injected `Distance`/`Length` slot
+swap fails 49 tests, and an `Angle` slot swap fails `M5_ANGLE_E2E_001`.
+
+*It only protects the code that runs after it.* The ADR-M5-014 degeneracy nudge
+was first placed ABOVE the guard and indexed `x[]` raw -- so an under-packed
+`Distance`, the exact thing the guard refuses, was dereferenced first: an
+assertion abort in Debug and an out-of-bounds read AND WRITE in Release, through
+an interface whose header promises it never throws. A fix for one finding
+re-opened the hole this guard had just closed, and the guard's own test could
+not see it because that test uses `Angle`, which the nudge loop skips.
+**Everything that indexes `x[]` by slot now sits below the validation loop, and
+the code says so.** Locked by `M5_REV2_002`.
+
+**Why it survived review and 444 passing tests.** No test built an
+`AngleConstraint` and measured the resulting geometry. The two tests named for
+angles worked on bare scalars and finished by recomputing *the solver's own
+residual formula*, checking the solver had driven it to zero -- a tautology that
+asserts convergence, not an angle. Substituting `startU/endU` for
+`startV/endV`, which changes the constraint's meaning entirely, left the whole
+suite green.
+
+**The rule this establishes:** a constraint test measures the SOLVED GEOMETRY
+with an independent formula (`atan2` over the committed coordinates), never by
+re-evaluating the residual under test. The replacement tests fail 5-of-6 against
+the original defect; the ones they replaced failed 0-of-2.
+
+## ADR-M5-012 - DOF outranks redundancy, and an unmeasured DOF is not zero (M5)
+Status: Accepted. Refines ADR-M5-005.
+
+Two status defects, both found by independent review, both reachable in ordinary
+modelling:
+
+- **A redundant constraint masked free degrees.** The solver tested `redundant`
+  before it tested DOF, so a sketch still short of fully constrained that
+  happened to carry one duplicate reported `OverConstrained` -- telling the user
+  there are *too many* constraints on a sketch that needs *more*, and hiding the
+  free degrees behind a status implying none remain. **DOF > 0 now wins**:
+  redundancy becomes the headline only once there is no freedom left, and the
+  message says both when both are true.
+- **`degreesOfFreedom` defaulted to 0**, and 0 is this project's signal for
+  FULLY CONSTRAINED. A sketch whose *first* solve failed therefore read as
+  finished work, and every constraint-free sketch -- i.e. every M4 document --
+  read "Under-constrained, DOF 0", which is self-contradictory. There is now
+  `kUnknownDegreesOfFreedom = -1`, the UI renders it "not measured", and a
+  constraint-free sketch reports its actual free-variable count.
+
+## ADR-M5-013 - One reconciler owns the sketch's Parameter edges (M5)
+Status: Accepted. Refines ADR-M5-008.
+
+ADR-M5-008 said `Sketch::addConstraint` "is not the path callers use". Nothing
+enforced that: `editSketch` hands out a mutable `Sketch&`, and the shipped
+viewer uses exactly that path. Independent review found both holes:
+
+- a constraint added through `editSketch` wired **no** edge, so the document
+  behaved differently before and after a save/load -- the loader re-derives
+  edges from the constraints, so one appeared from nowhere;
+- a cascaded entity removal through the same path left a **phantom** edge, so a
+  Parameter kept re-solving a sketch that no longer read it, violating spec 13's
+  "unrelated Parameter: none of branch" through a public API.
+
+`PartDocument::reconcileSketchParameterEdges(sketchId)` now makes the graph
+match the constraint set exactly, and every facade path calls it:
+`addSketchConstraint`, `removeSketchConstraint`, `removeSketchEntity` and
+`editSketch`. Per-path edge bookkeeping produced two opposite bugs from one
+rule; one reconciler cannot disagree with itself.
+
+**Correction (M5 re-review): there was a FIFTH path, and this ADR said there
+were four.** `PartDocument::addSketch` returns a mutable `Sketch&`, so
+`Sketch::addConstraint` is reachable without any facade at all -- while
+`PartDocument.h` two screens above states the opposite invariant ("Const-only
+reads... Editing goes through `editSketch()`"). Through that reference a
+dimension edit silently did nothing, and the document behaved differently before
+and after a save/load, because the loader re-derives edges and the live document
+had none: verbatim the symptom this ADR claims to have fixed.
+
+`reconcileAllSketchParameterEdges()` now runs at the start of every recompute
+pass as a **net**, not as the primary mechanism, so the graph agrees with the
+constraint set whatever route a caller took. The cost is one walk over the
+sketches per pass. Locked by `M5_REV2_012`.
+
+The lesson is narrower than "add a net": an ADR that enumerates "every path"
+is a claim about a whole API surface, and it was written from the paths I had
+just edited rather than from the ones that exist.
+
+## ADR-M5-014 - A degenerate configuration is nudged, never called contradictory (M5)
+Status: Accepted
+
+`sqrt(du^2 + dv^2) - target` has an all-zero central-difference row at
+`du = dv = 0`, because the probe evaluates `|+h| - |-h| = 0`. Gauss-Newton then
+has no descent direction, the rank test sees deficiency, and a `Distance`
+between two coincident points -- a system with an **infinite** solution set --
+was reported `Conflicting` with the message "no configuration satisfies them".
+A false accusation of contradiction is the damaging kind of wrong answer: no
+constraint is in conflict, so the user has nothing to act on. Coincident points
+arrive by ordinary means (snapping, duplication, a collapsed edit, an import).
+
+The solver now perturbs its **starting guess** for such a residual. Initial
+values are the solver's input, not the model; any direction is as good as any
+other for a configuration that constrains none, and stored geometry is untouched.
+
+This also makes true a claim `SketchSolveSession` was already asserting as fact
+-- that a `Length` on a zero-length line is solvable because its direction is
+merely a free degree of freedom. It was not, until now.
+
+**Extension (M5 round-4 review): the same principle, violated by this ADR's own
+sibling fix.** `WrapToPi(atan2B - atan2A - target)` subtracted the RAW target
+before wrapping, so once the target was large its ULP exceeded the angular
+signal and the residual stopped depending on the geometry at all. At `1e9` rad
+the solver reported `Conflicting` -- "constraints are contradictory: no
+configuration satisfies them" -- for a system that solves perfectly with the
+mathematically identical pre-wrapped target. The round-3 fix for the unbounded
+`while` loop converted a hang into a wrong answer rather than a right one, and a
+false accusation of contradiction is exactly what this ADR calls the damaging
+kind. The target is now wrapped before it is subtracted. Locked by
+`M5_REV4_001`.
+
+## ADR-M5-015 - Every test suite uses PRE_TEST discovery (M5)
+Status: Accepted
+
+`gtest_discover_tests`' default POST_BUILD mode writes one **config-less**
+`<target>_tests.cmake` whose `add_test` lines hard-code an absolute path to
+whichever configuration was linked last. Under a multi-config generator,
+`ctest -C Release` then silently runs the **Debug** binaries. Independent review
+measured 333 of 448 tests doing exactly that, which made this project's "Release
+tests pass" claim a second Debug run for those suites -- and ADR-M5-005 puts DOF
+on a numerical rank threshold, precisely the kind of thing that can differ
+between configurations.
+
+Every suite now uses `DISCOVERY_MODE PRE_TEST`, which emits per-config include
+files so `-C` selects the binary it names. Verified from the ctest log: a
+Release run invokes `build/Release/...` for all 464 tests.
+
+The earlier note claiming only DLL-carrying targets needed PRE_TEST is corrected
+in place: the DLL argument is why the OCCT suite needed it *first*, not why the
+others could go without it.
+
+## ADR-M5-016 - Deleting a referenced Sketch keeps the M4 contract (M5)
+Status: Accepted, with an open question for the owner.
+
+Independent review recommended REFUSING to delete a Sketch that a `PadFeature`
+reads, by analogy with ADR-M5-009's rule for a bound Parameter. That change was
+made, broke three accepted M4 tests, and was **reverted**.
+
+M4's own independent review took this exact case (its MAJOR2 and MAJOR3
+findings) and settled it the other way: deletion is allowed, the Pad fails
+LOUDLY, and `savePartDocument` refuses to write a document with a dangling Pad
+reference -- so a broken document can never overwrite a good file, and the user
+recovers by deleting the Pad. Three tests encode that contract.
+
+The reviewer's underlying complaint is real: until the Pad is removed, every
+save fails, and `PadFeature` exposes no way to re-point its sketch. But that is
+the accepted design behaving as designed, not a defect M5 introduced, and
+reversing a reviewed milestone decision is the owner's call -- not a side effect
+of fixing something else. `M5_REV_008` now pins the M4 contract explicitly,
+including the recovery path, so a future change cannot drift away from it
+silently.
+
+**Open question for the owner:** should M6 add a way to re-point a Pad at
+another Sketch, which would remove the sharp edge without overturning anything?
+
+
+## ADR-M5-017 - A dimensional constraint must bind a Parameter, and both validators must agree (M5)
+Status: Accepted
+
+Rejecting a dimension bound to something that is not a Parameter left the other
+half of the same finding open -- a dimension bound to **nothing** -- and that
+half was worse:
+
+- `BuildSolveProblem` validated the Parameter only when the id was non-invalid,
+  so an unbound `Length` was translated with `target = 0.0` and no complaint.
+  The solver was asked to drive a line to zero length and a circle to zero
+  radius, values ADR-M5-002 declares invalid.
+- `validateSaveable` skipped its check for an invalid id, while the LOADER
+  **requires** `parameterId` for all five dimensional kinds. The document
+  therefore **saved cleanly and could never be loaded back** -- precisely what
+  ADR-M3-008 exists to prevent, reached through the facade that had just been
+  hardened for this very finding.
+
+Three changes, because one was not enough:
+
+1. `PartDocument::addSketchConstraint` rejects an unbound dimensional
+   constraint.
+2. `BuildSolveProblem` rejects it as `InvalidInput` and names it, instead of
+   defaulting the target to 0.
+3. `validateSaveable` mirrors the loader exactly.
+
+`IsDimensional(data)` answers "does this kind read a Parameter at all", which is
+the question all three sites need. `BoundParameterId(data) != kInvalidObjectId`
+cannot distinguish "needs none" from "needs one and has none" -- a distinction
+three separate call sites got wrong in the same way, which is what a capability
+question exists to prevent (ADR-M3-007).
+
+Locked by `M5_REV2_010` and `M5_REV2_011`.
+
+## ADR-M5-018 - Registration failures are checked for every restored type (M5)
+Status: Accepted. Completes ADR-M5-007 / the C2 fix.
+
+The C2 fix checked `registerObject`'s result in `restoreSketch` only. A reviewer
+removed *parameter* ids from `maxPersistedId` -- C2's exact shape, one type over
+-- and reproduced the identical silent symptom: **load reports success**, the id
+resolves to the MassPropertiesNode instead of the Parameter, and the feature
+downstream is blocked forever with no error anywhere.
+
+Fixing the instance is not fixing the class. `restoreParameter`, `restoreBody`
+and `restoreMaterial` now check too, and `loadPartDocument` already converts the
+throw into a clean load failure.
+
+**Correction (M5 round-3 review): "every restored type" meant four of six, and
+two of the four were checked in the wrong order.**
+
+- `restoreBoxFeature` and `restorePadFeature` discarded `addRecomputableNode`'s
+  result. A duplicate feature id threw nothing, left two features sharing one id
+  in the same Body, and the document then **saved cleanly and reloaded with
+  "duplicate ObjectId"** -- C2's symptom on precisely the types this ADR's title
+  claimed to have covered. Both now check.
+- `restoreMaterial` assigned `material_` **before** the check, so the throw
+  destroyed the previous `Material` (its `shared_ptr` use_count was 1) while the
+  registry still held its address -- and the next recompute read the density out
+  of freed memory. `restoreParameter` stored the duplicate before throwing, so
+  the document saved cleanly and could never be loaded back. **Both now validate
+  before mutating any owner state.** Adding a check without adding the rollback
+  replaced one silent failure with another.
+
+Locked by `M5_REV3_010`, `M5_REV3_011`, `M5_REV3_012`.
+
+Related, same class: `rewireMassPropertiesSource` re-added the
+MassPropertiesNode's **graph node** without re-registering it, producing a node
+the engine can schedule but not resolve -- "missing registry object" forever, in
+violation of the invariant `ObjectRegistry`'s own header states. It now restores
+both together.
+
+**Scope correction to the never-advance-on-failure guarantee.** It holds for
+every validation failure, all of which return before `AdvancePast`. It does NOT
+hold for the two failures that can occur after it -- a throwing restore, and the
+defensive edge re-apply. Both leave no document and ids only move forward, so
+nothing is corrupted, but the comment claimed the guarantee was unconditional
+and it is not. Stated in place rather than quietly relied upon.
+
+
+## ADR-M5-019 - A reconciler must add and remove over the same set (M5)
+Status: Accepted. Refines ADR-M5-013.
+
+`reconcileSketchParameterEdges` **added** an edge for any bound id but only
+**removed** prerequisites that resolve to a Parameter. A dimensional constraint
+bound to the Material id -- reachable through `editSketch` -- therefore wired a
+`Material -> Sketch` edge the function could never take away: after the
+offending constraint was deleted the edge survived two recompute passes, and a
+density edit kept re-solving a sketch that read nothing from it.
+
+That is verbatim the phantom-edge defect this reconciler was written to
+eliminate (ADR-M5-013's M7), re-created by the reconciler itself.
+
+**Add and remove now range over the same set**: only ids that resolve to a
+Parameter are wired at all. A reconciler whose two halves disagree is not a
+reconciler.
+
+It also **owns** every `Parameter -> Sketch` edge, which the header now states:
+one added by hand through `addDependency` is revoked by the next recompute pass.
+That is correct -- such an edge has no constraint behind it and the loader would
+not re-derive it, so keeping it would make the document behave differently
+before and after a save/load -- but the call succeeds and the edge later
+vanishes, which is surprising enough to write down.
+
+Locked by `M5_REV3_014`.
+
+## ADR-M5-020 - Removing a derived node clears the result it derived (M5)
+Status: Accepted
+
+`removeObject(massPropertiesNodeId)` unhooked the node but left
+`massProperties_.valid == true`, so the status bar went on reporting a stale
+volume as **current** through every later edit -- 100 000 mm3 after a change
+that made the true value 200 000. `syncFeatureStatesFromGraph` could not correct
+it, because it skips a node the graph no longer has.
+
+Removing the only thing that could keep a derived result current must clear that
+result. Retention and currency are separate properties (ADR-M3-006), and this
+was the case where retaining a value while claiming currency is exactly wrong.
+
+Locked by `M5_REV3_013` -- which, in its first draft, could not fail: it used a
+fixture with no solver whose mass had never been valid, so "expect invalid" held
+for the wrong reason. A mutation caught that, and the test now establishes a
+CURRENT mass before removing the node.
+
+## ADR-M5-021 — The deferred Minors, closed (M5)
+Status: Accepted
+
+Six findings had been recorded as "open, not fixed" rather than closed. They are
+now closed, each with a mutation-verified test. Recorded together because the
+common thread matters more than any one of them: **each was a guard that
+defended against a case rather than a class.**
+
+1. **The residual slot guard was arity-only.** A `Distance` packed
+   `(a.u, b.u, a.v, b.v)` filled all four slots in range, passed, and reported
+   `Solved` with a residual of 2.7e-12 while the geometry was wrong by
+   millimetres — character-for-character the C1 failure. Every `SolveVariable`
+   already carries its `Component`, so `SlotComponent(kind, slot)` now states
+   what each slot must be and the solver checks it. Arity said "enough
+   variables"; this says "the right ones". `M5_DEF_001`.
+
+2. **`CommitSolvedGeometry` did not re-validate.** `replaceGeometry` does not
+   check either, so a `Coincident` between a line's own endpoints solved to a
+   zero-length line and committed it with status `Solved` — geometry `addEntity`
+   has always refused. The sketch could hold state its own invariant forbids.
+   The commit is now two-phase: build every entity, validate all of them, write
+   only if all pass, so a rejection leaves the sketch exactly as it was.
+   `M5_DEF_010`.
+
+3. **`UnitType::Unitless` satisfied both the length and the angle check**, so
+   one unitless Parameter could drive a `Length` and an `Angle`
+   interchangeably — the door ADR-M5-002's unit rule exists to close, left ajar
+   by a convenience. A dimension states a physical quantity; "no unit" is not
+   one. `M5_DEF_011`.
+
+4. **`OutlineState::Blocked` was never assigned.** The graph stores `Failed`
+   for both "this failed" and "a prerequisite failed so it never ran"; the
+   engine distinguishes them and the display threw the distinction away. A Pad
+   blocked by a conflicting sketch read exactly like a Pad that broke on its
+   own, with no diagnostic — pointing the user at the wrong object. Blocked is
+   now derived in the outline using the engine's own rule, and names the
+   prerequisite that failed. `M5_DEF_012`.
+
+5. **`result.iterations` was not the iteration count.** `iteration =
+   kSolveMaxIterations` was used to break out of the loop, so a solve that
+   settled in three steps reported 100, and the failure message blamed an
+   iteration limit the solver had never reached. The exit reason is now tracked
+   separately and the message says which actually happened. `M5_DEF_002`.
+
+6. **`editSketch` bypasses the facade's Parameter-binding validation.** Left
+   open deliberately: the solver rejects the result as `InvalidInput` and names
+   the constraint, the panel shows it, and the save validator refuses the file.
+   Three independent catches downstream make this defence-in-depth rather than a
+   hole, and closing it at `Sketch::addConstraint` would require the sketch to
+   know about the document's Parameters — the coupling ADR-M5-001 avoided on
+   purpose.
+
+**DPI scaling remains NOT EXECUTED at the owner's direction.** A fix was
+prototyped — sizing the window from `availableGeometry()` and asserting in
+physical pixels — and it did make the selftest fail at 200% where the old
+logical-pixel assertion could not. It also revealed that the shell's 1000×640
+minimum cannot fit a 200%-scaled 1280×800 desktop at all, which is a layout
+change rather than an assertion change. It was reverted whole rather than left
+half-applied.
+
+
+## ADR-M5-022 - A commit answers for what it writes, not for what it found (M5)
+Status: Accepted. Corrects ADR-M5-021 item 2.
+
+Validating the solved geometry before committing was right. Validating **every
+entity in the sketch** was not.
+
+`Sketch::restoreEntity` deliberately does not validate -- a hand-edited file must
+round-trip, and the code says so -- and the loader calls it unguarded. So one
+degenerate entity anywhere in a loaded document made the entire sketch
+**permanently unsolvable**: every recompute returned `NumericalFailure`, the
+diagnostic named no constraint (there was none to name), and `degreesOfFreedom`
+kept its previous value of 0, which this project reads as FULLY CONSTRAINED.
+A bad entity that M4 tolerated -- the profile rejected it, the sketch still
+solved -- became fatal.
+
+`CommitSolvedGeometry` now validates only the entities this solve actually
+CHANGED. The rule generalises: a write is answerable for what it writes. Making
+it answerable for pre-existing state turns every legacy defect into a new one.
+
+Locked by `M5_REV4_010`, which uses no Pad on purpose -- a stray entity breaks
+the PROFILE as well, and asserting document-level success would fail for the
+profile's reason and prove nothing about the commit.
+
+## ADR-M5-023 - Two tolerances that meet must not meet on the same number (M5)
+Status: Accepted
+
+`kMinSketchDimensionMm` (the smallest ACCEPTED dimension, `value >= floor`) and
+`kSketchToleranceMm` (the largest separation still called COINCIDENT,
+`<= tolerance`) were both `1e-6`, with inclusive bounds from opposite sides. The
+smallest legal dimension was therefore, by definition, degenerate geometry: a
+`Length` of exactly `1e-6` was accepted as a dimension and its solved line
+rejected as a line. The solver's absolute residual tolerance (`1e-9`) widened the
+dead band further, and 41 of 144 swept configurations had a converged solve
+refused at commit.
+
+The floor is now `1e-5`, ten times the coincidence tolerance -- 10 nanometres,
+far below anything a CAD user models, so nothing real is excluded.
+
+**The relationship is enforced by `static_assert`, not by a test.** Reverting the
+constant now fails the BUILD. A behavioural test could not do this reliably: the
+first attempt passed under the reverted constant, because whether a solve at the
+floor lands above or below the tolerance depends on where it started, and that
+test's one configuration was among the 103 that pass. Where a constraint between
+two constants can be checked at compile time, checking it at run time on one
+sample is the weaker choice.
+
+## ADR-M5-024 - Replacing an owned object unhooks the one it replaces (M5)
+Status: Accepted. Completes ADR-M5-018.
+
+ADR-M5-018 made the duplicate-id THROW path safe in `restoreMaterial` by moving
+the check above the mutation. It left the line below untouched, and that line is
+the SUCCESS path: `material_ = std::move(item)` destroys the previous `Material`
+(its `shared_ptr` use_count is 1) while `registry_` still resolves its id to the
+freed address and `graph_` still holds its node.
+
+`MassPropertiesNode::resolveMaterial` then reads density through that pointer.
+In Debug the value was garbage; **in Release the freed memory still read the old
+density, so the document reported a plausible but WRONG mass as CURRENT, with
+`RecomputeStatus::Success` and no diagnostic anywhere** -- the worst available
+outcome, and the one hardest to notice.
+
+`detachCurrentMaterial()` unhooks the outgoing Material from the registry, the
+graph, and the mass-properties source before the assignment destroys it, on both
+`addMaterial` and `restoreMaterial`. It runs BEFORE the assignment on purpose:
+afterwards it would unregister the id the new object had just been given in the
+id-reuse case.
+
+The general rule, which is what ADR-M5-018 should have said: fixing the path a
+finding names is not fixing the class. Ask which OTHER path reaches the same
+line.
+
+## ADR-M5-025 - A flag the program does not understand is never silently discarded (M5)
+Status: Accepted
+
+`--sample` rejection was added twice and was wrong three times: an unknown NAME
+(closed in round 2), a MISSING value (closed in round 3), and `--sample=value`
+-- the most commonly typed form of the three -- which failed `strcmp` outright,
+so the flag was dropped, the M4 rectangle was built, and `SELFTEST OK` printed.
+A CI job with an M5 gate silently ran an M4 smoke test that passes.
+
+The parser now accepts both `--flag value` and `--flag=value`, and treats an
+unknown name, a missing value and an empty value alike as errors. Five ctest
+cases pin it -- four rejections and, deliberately, **one acceptance of the `=`
+form with a valid name**, so the parser cannot "pass" by rejecting everything
+containing an `=`.
+
+Twice was a coincidence. Three times is a category: an argument the program does
+not understand must fail, never default.
