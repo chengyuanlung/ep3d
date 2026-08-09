@@ -12,6 +12,8 @@ namespace paramcad {
 class OcctGeometryKernel final : public IGeometryKernel {
 public:
     ShapeResult createBox(const BoxDefinition& definition) override;
+    ShapeResult extrudeProfile(const PlanarProfileDefinition& profile,
+                               double distanceMm) override;
     KernelMassPropertiesResult calculateMassProperties(const KernelShape& shape) override;
 };
 

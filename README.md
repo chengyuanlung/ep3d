@@ -16,14 +16,24 @@ This starter repository is the architectural foundation for a Windows-first para
 - M1 — Parametric Part Core (data model, generic DependencyGraph, JSON schema v1, GoogleTest): COMPLETE.
 - M2 — Document Recompute Infrastructure (ObjectRegistry, PartDocument recompute façade, parameter dirty sources, schema v2 dependency persistence): COMPLETE.
 - M3 — Geometry Kernel Adapter & First Parametric Solid (kernel-neutral `IGeometryKernel` in Core, OCCT-backed `Kernel/Occt` adapter, `BoxFeature`/`MassPropertiesNode` real recompute, schema v3): COMPLETE.
-- M4 — Qt viewer: READY.
+- M4 — Sketch/Profile Foundation, Pad/Extrude & Basic 3D Viewer (stable
+  `SketchEntityId`, sketch frames, semantic Profile validation, `PadFeature`
+  through the M2 recompute graph, schema v4, Qt application shell): COMPLETE.
+  Functional independent review APPROVE 96/100; UI validated by owner manual
+  validation (ADR-M4-016), not by an independent UI review. See
+  `docs/reviews/M4_CompletionReport.md`.
+- M5 — Sketch Constraints & Dimensional Parameterization: NEXT.
 
 `MassProperties` now holds real computed Volume/Mass/COM/Inertia once a `BoxFeature` recomputes through an injected `IGeometryKernel` (see `docs/DecisionLog.md` ADR-M3-002).
 
-OCCT 8.0.1, discovered via a vcpkg toolchain file; build with
-`-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake`. Without OCCT the
-Core library and its 157 Core-only tests still configure and build normally --
-only `ParametricCADKernelOcct` and its test target are skipped.
+OCCT 8.0.1 and Qt 6.11.1, both discovered via a vcpkg toolchain file; build
+with `-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake`.
+Each dependency is optional at configure time: without OCCT the kernel target
+and its tests are skipped, and without Qt (or with
+`-DPARAMCAD_BUILD_VIEWER=OFF`) the viewer is skipped. Core and the Core-only
+test suite build normally in every case, and `ParametricCADCoreTests` links
+neither Qt nor OCCT -- a boundary check the build enforces rather than
+documents.
 
 See `docs/Architecture.md` and `docs/Roadmap.md`.
 

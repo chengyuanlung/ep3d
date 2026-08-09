@@ -12,6 +12,8 @@
 #include "Core/Recompute/DocumentRecomputeEngine.h"
 #include "Core/Recompute/RecomputeTypes.h"
 #include "Core/Reference/ReferenceFrame.h"
+#include "Core/Sketch/Sketch.h"
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -20,6 +22,7 @@ namespace paramcad {
 class IRecomputable;
 class IGeometryKernel;
 class BoxFeature;
+class PadFeature;
 
 // DEPENDENCY DIRECTION (single rule, ADR-007/ADR-012): an edge points
 // prerequisite -> dependent; "A -> B" means B depends on A and dirtiness
@@ -77,6 +80,14 @@ public:
 
     // --- Material (dirty source, ADR-M3-005; mirrors Parameter's pattern) --
     Material& addMaterial(std::string name, double densityKgPerM3);
+    // Assigns the document's current Material to every feature that can hold
+    // one, and rewires the mass-properties source. Without this, adding a
+    // Material after a feature already exists left the feature unassigned and
+    // the part weighing nothing -- self-consistent, round-trippable, and
+    // visibly wrong to a user (raised as a Minor by independent review).
+    // False if the document has no Material.
+    bool assignMaterialToFeatures();
+
     Material& restoreMaterial(ObjectId id, std::string name, double densityKgPerM3,
                               double elasticModulusPa, double poissonRatio,
                               double yieldStrengthPa, ContactProperties contact);
@@ -113,6 +124,56 @@ public:
     BoxFeature& restoreBoxFeature(Body& body, ObjectId id, std::string name, ComputeState state,
                                   ObjectId widthParameterId, ObjectId heightParameterId,
                                   ObjectId depthParameterId, ObjectId materialId);
+
+
+    // --- Sketch (M4, ADR-M4-001/002/005) -----------------------------------
+    // Creates a Sketch, registers it, and adds a graph node. A Sketch is a
+    // DIRTY SOURCE like Parameter and Material (ADR-011's pattern reused
+    // unchanged), not an IRecomputable: it has no derived state of its own.
+    // Editing its geometry and calling markDirty propagates to dependent Pads.
+    Sketch& addSketch(std::string name, SketchFrame frame = SketchFrame::WorldXY());
+    // Restore path (deserialization): keeps the persisted id and frame.
+    Sketch& restoreSketch(ObjectId id, std::string name, SketchFrame frame);
+    // Const-only reads. A non-const Sketch& would let any caller edit geometry
+    // without the graph learning the dependent Pads are stale -- exactly the
+    // hazard M2 removed for Parameters by making parameters() const-only
+    // (ADR-011). Editing goes through editSketch() below.
+    const Sketch* findSketch(ObjectId id) const noexcept;
+
+    // Returns const POINTERS, not the owning vector. `const vector<unique_ptr<
+    // Sketch>>&` looks read-only and is not: constness stops at the unique_ptr,
+    // so *doc.sketches().front() yields a mutable Sketch& from a const document
+    // and geometry can be edited with nothing dirtied. Independent review
+    // reproduced exactly that. The extra vector is a handful of pointers built
+    // at serialization and inspection time, which is the right price for an
+    // accessor that means what it says.
+    std::vector<const Sketch*> sketches() const;
+
+    // THE mutation path for sketch geometry. Applies `edit` to the sketch, then
+    // marks it dirty so dependent Pads recompute. False if the id is not a
+    // sketch in this document; in that case nothing is edited and nothing is
+    // dirtied.
+    //
+    // Taking a callback rather than handing out a mutable reference is what
+    // makes "edited" and "dirtied" inseparable: there is no way to do the first
+    // without the second, which is the property a bare accessor cannot offer.
+    bool editSketch(ObjectId sketchId, const std::function<void(Sketch&)>& edit);
+
+    // Marks a sketch dirty without editing it -- for callers that mutated
+    // through editSketch's reference and need to re-dirty, or that changed
+    // something the document cannot see. Prefer editSketch.
+    bool markSketchDirty(ObjectId sketchId);
+
+    // --- Pad feature (M4, spec 12) -----------------------------------------
+    // Creates a PadFeature in body, registers it as a graph node, wires the
+    // Sketch and Length prerequisite edges, and (re)wires the document's
+    // MassPropertiesNode to this pad -- giving exactly the graph spec 12
+    // requires: Sketch -> Pad -> Mass, Length -> Pad, Material -> Mass.
+    PadFeature& addPadFeature(Body& body, std::string name, ObjectId sketchId,
+                              ObjectId lengthParameterId);
+    PadFeature& restorePadFeature(Body& body, ObjectId id, std::string name, ComputeState state,
+                                  ObjectId sketchId, ObjectId lengthParameterId,
+                                  ObjectId materialId);
 
     // Non-owning; the caller keeps the concrete kernel alive for every
     // subsequent recompute()/recomputeFrom() call (ADR-M3-003, mirrors
@@ -155,6 +216,17 @@ private:
                        ObjectId heightParameterId, ObjectId depthParameterId,
                        ObjectId materialId);
 
+    // Shared Pad registration/wiring for addPadFeature and restorePadFeature
+    // (single registration path, spec 13).
+    void wirePadFeature(PadFeature& feature, ObjectId sketchId, ObjectId lengthParameterId,
+                       ObjectId materialId);
+
+    // Detaches the MassPropertiesNode from whatever solid feature and material
+    // it currently reads, then attaches it to this one. Shared by the Box and
+    // Pad wiring paths so the graph can never accumulate stale prerequisites
+    // from an earlier source.
+    void rewireMassPropertiesSource(ObjectId solidFeatureId, ObjectId materialId);
+
     // Clears massProperties_.valid when the mass-properties node did not
     // succeed in the pass that produced `report`, so retained numbers can
     // never read as current. See the definition for why this must live at
@@ -165,10 +237,14 @@ private:
     // (the source of truth) disagrees. See the definition.
     void syncFeatureStatesFromGraph() noexcept;
 
+    // Mutable lookup, private so every edit goes through editSketch().
+    Sketch* findSketchForEdit(ObjectId id) noexcept;
+
     ParameterManager parameters_;
     std::vector<std::unique_ptr<Body>> bodies_;
     std::vector<std::unique_ptr<ReferenceFrame>> frames_;
     std::vector<std::unique_ptr<Connector>> connectors_;
+    std::vector<std::unique_ptr<Sketch>> sketches_;
     std::shared_ptr<Material> material_;
     MassProperties massProperties_;
     ObjectRegistry registry_;

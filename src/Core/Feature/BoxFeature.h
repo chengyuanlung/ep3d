@@ -3,6 +3,8 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
+#include "Core/Feature/IMaterialReferencing.h"
+#include "Core/Feature/ISolidFeature.h"
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <string>
@@ -17,7 +19,10 @@ namespace paramcad {
 // creates are kept from becoming competing sources of truth (the graph's
 // ComputeState is authoritative; Feature::state() is a manually-synchronized
 // cache, updated only from inside recompute(context) below).
-class BoxFeature final : public Feature, public IRecomputable {
+class BoxFeature final : public Feature,
+                        public IRecomputable,
+                        public ISolidFeature,
+                        public IMaterialReferencing {
 public:
     BoxFeature(std::string name, ObjectId widthParameterId, ObjectId heightParameterId,
                ObjectId depthParameterId, ObjectId materialId);
@@ -35,13 +40,18 @@ public:
     ObjectId widthParameterId() const noexcept { return widthParameterId_; }
     ObjectId heightParameterId() const noexcept { return heightParameterId_; }
     ObjectId depthParameterId() const noexcept { return depthParameterId_; }
-    ObjectId materialId() const noexcept { return materialId_; }
+    ObjectId materialId() const noexcept override { return materialId_; }
+    void clearMaterialReference() noexcept override { materialId_ = kInvalidObjectId; }
+    void setMaterialReference(ObjectId materialId) noexcept override {
+        materialId_ = materialId;
+    }
 
     // Last successfully built shape. Untouched by a failed recompute --
     // transactional retention (ADR-M3-001/004): a failed build leaves this
     // byte-for-byte unchanged; staleness is communicated exclusively through
     // state()/ComputeState, never by mutating or clearing this.
-    const KernelShape& currentShape() const noexcept { return currentShape_; }
+    const KernelShape& currentShape() const noexcept override { return currentShape_; }
+    ComputeState currentState() const noexcept override { return Feature::state(); }
 
     // Vestigial M1 recompute contract (ADR-M3-004): NOT called by the
     // document recompute engine. Kept only so this type satisfies Feature's

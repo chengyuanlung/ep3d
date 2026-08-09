@@ -1,6 +1,9 @@
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Core/Dependency/DependencyGraph.h"
 #include "Core/Feature/BoxFeature.h"
+#include "Core/Feature/IMaterialReferencing.h"
+#include "Core/Feature/PadFeature.h"
+#include "Core/Sketch/Sketch.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Material/Material.h"
 #include "Core/Serialization/JsonValue.h"
@@ -18,7 +21,7 @@ namespace paramcad {
 
 namespace {
 
-constexpr int kSchemaVersion = 3;           // written on save
+constexpr int kSchemaVersion = 4;           // written on save (v4 adds Sketch/Pad)
 constexpr int kMinSupportedSchemaVersion = 1; // v1 (no edges) and v2 files still load
 constexpr std::string_view kFormatName = "ParametricCAD";
 
@@ -168,6 +171,14 @@ JsonValue toJson(const PartDocument& document) {
                 featureEntry.set("depthParameterId",
                                  JsonValue::makeString(idToString(box->depthParameterId())));
                 featureEntry.set("materialId", JsonValue::makeString(idToString(box->materialId())));
+            } else if (const auto* pad = dynamic_cast<const PadFeature*>(feature.get())) {
+                // Semantic references only (ADR-M4-004): the Sketch, the Length
+                // Parameter and the Material, each by ObjectId. No OCCT
+                // topology, no index, no address is ever written.
+                featureEntry.set("sketchId", JsonValue::makeString(idToString(pad->sketchId())));
+                featureEntry.set("lengthParameterId",
+                                 JsonValue::makeString(idToString(pad->lengthParameterId())));
+                featureEntry.set("materialId", JsonValue::makeString(idToString(pad->materialId())));
             }
             features.add(std::move(featureEntry));
         }
@@ -175,6 +186,73 @@ JsonValue toJson(const PartDocument& document) {
         bodies.add(std::move(bodyEntry));
     }
     root.set("bodies", std::move(bodies));
+
+    // Sketches (v4, ADR-M4-001/002). Entity ids are persisted as decimal
+    // strings exactly like ObjectIds -- they come from the same generator, so
+    // restore inherits the same collision safety. Storage POSITION is never
+    // written: the id is the identity (ADR-M4-004).
+    JsonValue sketches = JsonValue::makeArray();
+    for (const auto& sketch : document.sketches()) {
+        JsonValue sketchEntry = JsonValue::makeObject();
+        sketchEntry.set("id", JsonValue::makeString(idToString(sketch->id())));
+        sketchEntry.set("name", JsonValue::makeString(sketch->name()));
+
+        const Transform3D& transform = sketch->frame().transform();
+        JsonValue frame = JsonValue::makeObject();
+        JsonValue translation = JsonValue::makeObject();
+        translation.set("x", JsonValue::makeNumber(transform.translation.x));
+        translation.set("y", JsonValue::makeNumber(transform.translation.y));
+        translation.set("z", JsonValue::makeNumber(transform.translation.z));
+        frame.set("translation", std::move(translation));
+        JsonValue rotation = JsonValue::makeObject();
+        rotation.set("w", JsonValue::makeNumber(transform.rotation.w));
+        rotation.set("x", JsonValue::makeNumber(transform.rotation.x));
+        rotation.set("y", JsonValue::makeNumber(transform.rotation.y));
+        rotation.set("z", JsonValue::makeNumber(transform.rotation.z));
+        frame.set("rotation", std::move(rotation));
+        sketchEntry.set("frame", std::move(frame));
+
+        JsonValue entities = JsonValue::makeArray();
+        for (const SketchEntity& entity : sketch->entities()) {
+            JsonValue entry = JsonValue::makeObject();
+            entry.set("id", JsonValue::makeString(idToString(ToObjectId(entity.id))));
+            std::visit(
+                [&entry](const auto& geometry) {
+                    using T = std::decay_t<decltype(geometry)>;
+                    if constexpr (std::is_same_v<T, SketchPoint>) {
+                        entry.set("type", JsonValue::makeString("Point"));
+                        entry.set("u", JsonValue::makeNumber(geometry.position.x));
+                        entry.set("v", JsonValue::makeNumber(geometry.position.y));
+                    } else if constexpr (std::is_same_v<T, SketchLine>) {
+                        entry.set("type", JsonValue::makeString("Line"));
+                        entry.set("u1", JsonValue::makeNumber(geometry.start.x));
+                        entry.set("v1", JsonValue::makeNumber(geometry.start.y));
+                        entry.set("u2", JsonValue::makeNumber(geometry.end.x));
+                        entry.set("v2", JsonValue::makeNumber(geometry.end.y));
+                    } else if constexpr (std::is_same_v<T, SketchCircle>) {
+                        entry.set("type", JsonValue::makeString("Circle"));
+                        entry.set("u", JsonValue::makeNumber(geometry.center.x));
+                        entry.set("v", JsonValue::makeNumber(geometry.center.y));
+                        entry.set("radiusMm", JsonValue::makeNumber(geometry.radiusMm));
+                    } else {
+                        static_assert(std::is_same_v<T, SketchArc>);
+                        entry.set("type", JsonValue::makeString("Arc"));
+                        entry.set("u", JsonValue::makeNumber(geometry.center.x));
+                        entry.set("v", JsonValue::makeNumber(geometry.center.y));
+                        entry.set("radiusMm", JsonValue::makeNumber(geometry.radiusMm));
+                        entry.set("startAngleRad", JsonValue::makeNumber(geometry.startAngleRad));
+                        entry.set("endAngleRad", JsonValue::makeNumber(geometry.endAngleRad));
+                        entry.set("counterClockwise",
+                                  JsonValue::makeBool(geometry.counterClockwise));
+                    }
+                },
+                entity.geometry);
+            entities.add(std::move(entry));
+        }
+        sketchEntry.set("entities", std::move(entities));
+        sketches.add(std::move(sketchEntry));
+    }
+    root.set("sketches", std::move(sketches));
 
     // ADR-012/ADR-M3-005: persist explicit Option-A edges whose BOTH
     // endpoints are persisted document objects and whose dependent is NOT a
@@ -275,17 +353,80 @@ SaveResult validateSaveable(const PartDocument& document) {
     for (const auto& parameter : document.parameters().items())
         parameterIds.insert(parameter->id());
 
+    // A PlaceholderFeature preserves an unrecognized type string losslessly
+    // (ADR-009 D4). That becomes a save/load asymmetry the moment a later
+    // milestone introduces a concrete type with the SAME name: the record would
+    // be written with type "Pad" but none of a Pad's required fields, and the
+    // loader -- which now knows Pad -- would reject the file forever. Caught by
+    // the M3 regression suite when M4 added PadFeature.
+    //
+    // Rejecting here rather than degrading on load is deliberate: the opposite
+    // choice would let a real Pad whose fields were lost reload as an inert
+    // placeholder, silently dropping the solid.
     for (const auto& body : document.bodies()) {
         for (const auto& feature : body->features()) {
-            const auto* box = dynamic_cast<const BoxFeature*>(feature.get());
-            if (box == nullptr) continue;
-            for (ObjectId referenced :
-                 {box->widthParameterId(), box->heightParameterId(), box->depthParameterId()}) {
-                if (parameterIds.count(referenced) != 0) continue;
-                return SaveResult{SerializationError::UnknownDependencyId,
-                                  "feature " + idToString(box->id()) + " (" + box->name() +
-                                      "): box parameter id " + idToString(referenced) +
-                                      " is not a parameter in this document"};
+            if (dynamic_cast<const BoxFeature*>(feature.get()) != nullptr) continue;
+            if (dynamic_cast<const PadFeature*>(feature.get()) != nullptr) continue;
+            const std::string_view typeName = feature->typeName();
+            if (typeName != "Box" && typeName != "Pad") continue;
+            return SaveResult{SerializationError::InvalidFieldType,
+                              "feature " + idToString(feature->id()) + " (" + feature->name() +
+                                  ") is a placeholder carrying the reserved type name '" +
+                                  std::string(typeName) +
+                                  "'; the resulting file could never be loaded back"};
+        }
+    }
+
+    std::unordered_set<ObjectId> sketchIds;
+    for (const Sketch* sketch : document.sketches()) sketchIds.insert(sketch->id());
+
+    // Material references, checked for every referring feature type at once.
+    // Enumerating concrete types here is what let this rule lapse when Pad was
+    // added, so it asks the feature for its capability instead (ADR-M3-007).
+    const ObjectId documentMaterialId =
+        document.material() ? document.material()->id() : kInvalidObjectId;
+    for (const auto& body : document.bodies()) {
+        for (const auto& feature : body->features()) {
+            const auto* referencing = dynamic_cast<const IMaterialReferencing*>(feature.get());
+            if (referencing == nullptr) continue;
+            const ObjectId referenced = referencing->materialId();
+            if (referenced == kInvalidObjectId) continue; // no material assigned
+            if (referenced == documentMaterialId) continue;
+            return SaveResult{SerializationError::UnknownDependencyId,
+                              "feature " + idToString(feature->id()) + " (" + feature->name() +
+                                  "): materialId " + idToString(referenced) +
+                                  " does not match this document's material"};
+        }
+    }
+
+    for (const auto& body : document.bodies()) {
+        for (const auto& feature : body->features()) {
+            if (const auto* box = dynamic_cast<const BoxFeature*>(feature.get())) {
+                for (ObjectId referenced : {box->widthParameterId(), box->heightParameterId(),
+                                            box->depthParameterId()}) {
+                    if (parameterIds.count(referenced) != 0) continue;
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(box->id()) + " (" + box->name() +
+                                          "): box parameter id " + idToString(referenced) +
+                                          " is not a parameter in this document"};
+                }
+            } else if (const auto* pad = dynamic_cast<const PadFeature*>(feature.get())) {
+                // The same rule the loader enforces, applied here so a document
+                // whose Pad lost its Sketch or Length can never be written to
+                // disk over the last good copy (ADR-M3-008). Extending this
+                // check alongside every new referencing feature type is the
+                // point of the rule, and it was missed when Pad was added.
+                if (parameterIds.count(pad->lengthParameterId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(pad->id()) + " (" + pad->name() +
+                                          "): pad length parameter id " +
+                                          idToString(pad->lengthParameterId()) +
+                                          " is not a parameter in this document"};
+                if (sketchIds.count(pad->sketchId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(pad->id()) + " (" + pad->name() +
+                                          "): pad sketch id " + idToString(pad->sketchId()) +
+                                          " is not a sketch in this document"};
             }
         }
     }
@@ -400,6 +541,9 @@ LoadResult loadPartDocument(std::istream& in) {
         ObjectId heightParameterId = kInvalidObjectId;
         ObjectId depthParameterId = kInvalidObjectId;
         ObjectId materialId = kInvalidObjectId; // kInvalidObjectId == "no material"
+        // Pad-specific (v4, ADR-M4-004; only meaningful when type == "Pad").
+        ObjectId sketchId = kInvalidObjectId;
+        ObjectId lengthParameterId = kInvalidObjectId;
     };
     struct BodyData {
         ObjectId id;
@@ -596,11 +740,195 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.heightParameterId = *heightId;
                 featureData.depthParameterId = *depthId;
                 featureData.materialId = *boxMaterialId;
+            } else if (featureData.type == "Pad") {
+                const JsonValue* sketchField = requireField(featureEntry, "sketchId",
+                                                            JsonType::String, featureContext, err);
+                if (sketchField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* lengthField = requireField(
+                    featureEntry, "lengthParameterId", JsonType::String, featureContext, err);
+                if (lengthField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* padMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (padMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                const auto sketchRef = idFromString(sketchField->asString());
+                const auto lengthRef = idFromString(lengthField->asString());
+                const auto padMaterialId = idFromString(padMaterialField->asString());
+                if (!sketchRef || !lengthRef || !padMaterialId || *sketchRef > kMaxObjectId ||
+                    *lengthRef > kMaxObjectId || *padMaterialId > kMaxObjectId) {
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext +
+                                           ": pad sketch/parameter/material id is not a valid "
+                                           "decimal ObjectId string");
+                }
+                if (parameterIds.count(*lengthRef) == 0)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext + ": pad length parameter id " +
+                                           idToString(*lengthRef) +
+                                           " is not a parameter in this document");
+                if (*padMaterialId != kInvalidObjectId &&
+                    (!materialData.has_value() || materialData->id != *padMaterialId)) {
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext + ": pad materialId " +
+                                           idToString(*padMaterialId) +
+                                           " does not match this document's material");
+                }
+                featureData.sketchId = *sketchRef;
+                featureData.lengthParameterId = *lengthRef;
+                featureData.materialId = *padMaterialId;
             }
 
             body.features.push_back(std::move(featureData));
         }
         bodyData.push_back(std::move(body));
+    }
+
+    // Sketches (v4, ADR-M4-001/002). Parsed and fully validated BEFORE any
+    // document construction, like every other section, so a malformed file can
+    // never leave a partial document nor advance the id generator.
+    struct SketchEntityData {
+        SketchEntityId id{kInvalidSketchEntityId};
+        SketchGeometry geometry{};
+    };
+    struct SketchData {
+        ObjectId id;
+        std::string name;
+        Transform3D transform;
+        std::vector<SketchEntityData> entities;
+    };
+    std::vector<SketchData> sketchData;
+    std::unordered_set<ObjectId> sketchIds;
+
+    const JsonValue* sketchesField = root.find("sketches");
+    if (sketchesField != nullptr) {
+        if (sketchesField->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'sketches' has the wrong JSON type");
+        for (std::size_t i = 0; i < sketchesField->items().size(); ++i) {
+            const std::string context = "sketches[" + std::to_string(i) + "]";
+            const JsonValue& entry = sketchesField->items()[i];
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            const auto sketchId = requireIdField(entry, context, err);
+            if (!sketchId) return loadFailure(err.error, err.message);
+            if (!registerId(*sketchId, context, err)) return loadFailure(err.error, err.message);
+            sketchIds.insert(*sketchId);
+
+            const JsonValue* nameField =
+                requireField(entry, "name", JsonType::String, context, err);
+            if (nameField == nullptr) return loadFailure(err.error, err.message);
+
+            SketchData data{*sketchId, nameField->asString(), Transform3D{}, {}};
+
+            const JsonValue* frameField =
+                requireField(entry, "frame", JsonType::Object, context, err);
+            if (frameField == nullptr) return loadFailure(err.error, err.message);
+            const JsonValue* translationField =
+                requireField(*frameField, "translation", JsonType::Object, context, err);
+            if (translationField == nullptr) return loadFailure(err.error, err.message);
+            const JsonValue* rotationField =
+                requireField(*frameField, "rotation", JsonType::Object, context, err);
+            if (rotationField == nullptr) return loadFailure(err.error, err.message);
+            const auto number = [&](const JsonValue& object, const char* key,
+                                    double& out) -> bool {
+                const JsonValue* field = requireField(object, key, JsonType::Number, context, err);
+                if (field == nullptr) return false;
+                out = field->asNumber();
+                return true;
+            };
+            if (!number(*translationField, "x", data.transform.translation.x) ||
+                !number(*translationField, "y", data.transform.translation.y) ||
+                !number(*translationField, "z", data.transform.translation.z) ||
+                !number(*rotationField, "w", data.transform.rotation.w) ||
+                !number(*rotationField, "x", data.transform.rotation.x) ||
+                !number(*rotationField, "y", data.transform.rotation.y) ||
+                !number(*rotationField, "z", data.transform.rotation.z))
+                return loadFailure(err.error, err.message);
+
+            const JsonValue* entitiesField =
+                requireField(entry, "entities", JsonType::Array, context, err);
+            if (entitiesField == nullptr) return loadFailure(err.error, err.message);
+            std::unordered_set<ObjectId> entityIdsInSketch;
+            for (std::size_t j = 0; j < entitiesField->items().size(); ++j) {
+                const std::string entityContext = context + ".entities[" + std::to_string(j) + "]";
+                const JsonValue& entityEntry = entitiesField->items()[j];
+                if (entityEntry.type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       entityContext + ": entry is not an object");
+                const auto entityId = requireIdField(entityEntry, entityContext, err);
+                if (!entityId) return loadFailure(err.error, err.message);
+                if (*entityId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       entityContext + ": entity id exceeds the id cap");
+                // Entity ids share the ObjectId space but are scoped to their
+                // sketch, so uniqueness is enforced WITHIN the sketch rather
+                // than against the document-wide id set.
+                if (!entityIdsInSketch.insert(*entityId).second)
+                    return loadFailure(SerializationError::DuplicateId,
+                                       entityContext + ": duplicate sketch entity id " +
+                                           idToString(*entityId));
+
+                const JsonValue* typeField =
+                    requireField(entityEntry, "type", JsonType::String, entityContext, err);
+                if (typeField == nullptr) return loadFailure(err.error, err.message);
+                const std::string entityType = typeField->asString();
+
+                double u = 0.0, v = 0.0, u2 = 0.0, v2 = 0.0, radius = 0.0;
+                double startAngle = 0.0, endAngle = 0.0;
+                const auto num = [&](const char* key, double& out) -> bool {
+                    const JsonValue* field =
+                        requireField(entityEntry, key, JsonType::Number, entityContext, err);
+                    if (field == nullptr) return false;
+                    out = field->asNumber();
+                    return true;
+                };
+
+                SketchEntityData entity;
+                entity.id = static_cast<SketchEntityId>(*entityId);
+                if (entityType == "Point") {
+                    if (!num("u", u) || !num("v", v)) return loadFailure(err.error, err.message);
+                    entity.geometry = SketchPoint{Vec2{u, v}};
+                } else if (entityType == "Line") {
+                    if (!num("u1", u) || !num("v1", v) || !num("u2", u2) || !num("v2", v2))
+                        return loadFailure(err.error, err.message);
+                    entity.geometry = SketchLine{Vec2{u, v}, Vec2{u2, v2}};
+                } else if (entityType == "Circle") {
+                    if (!num("u", u) || !num("v", v) || !num("radiusMm", radius))
+                        return loadFailure(err.error, err.message);
+                    entity.geometry = SketchCircle{Vec2{u, v}, radius};
+                } else if (entityType == "Arc") {
+                    if (!num("u", u) || !num("v", v) || !num("radiusMm", radius) ||
+                        !num("startAngleRad", startAngle) || !num("endAngleRad", endAngle))
+                        return loadFailure(err.error, err.message);
+                    const JsonValue* ccwField = requireField(entityEntry, "counterClockwise",
+                                                             JsonType::Bool, entityContext, err);
+                    if (ccwField == nullptr) return loadFailure(err.error, err.message);
+                    entity.geometry =
+                        SketchArc{Vec2{u, v}, radius, startAngle, endAngle, ccwField->asBool()};
+                } else {
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       entityContext + ": unknown sketch entity type '" +
+                                           entityType + "'");
+                }
+                data.entities.push_back(std::move(entity));
+            }
+            sketchData.push_back(std::move(data));
+        }
+    }
+
+    // Every Pad must reference a Sketch present in this file. Same rule as the
+    // Box parameter check above: a reference the loader would reject must never
+    // have been savable either (ADR-M3-008).
+    for (const auto& body : bodyData) {
+        for (const auto& feature : body.features) {
+            if (feature.type != "Pad") continue;
+            if (sketchIds.count(feature.sketchId) == 0)
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   "feature " + idToString(feature.id) + ": pad sketch id " +
+                                       idToString(feature.sketchId) +
+                                       " is not a sketch in this document");
+        }
     }
 
     // Dependencies (Option A, ADR-012/ADR-M3-005; optional array). Validated
@@ -701,6 +1029,14 @@ LoadResult loadPartDocument(std::istream& in) {
                                   materialData->poissonRatio, materialData->yieldStrengthPa,
                                   materialData->contact);
     }
+    // Sketches first: restorePadFeature wires an edge to its Sketch node, so
+    // the sketch must already exist in the registry and graph.
+    for (auto& sketch : sketchData) {
+        Sketch& restoredSketch = document->restoreSketch(sketch.id, std::move(sketch.name),
+                                                         SketchFrame{sketch.transform});
+        for (auto& entity : sketch.entities)
+            restoredSketch.restoreEntity(entity.id, std::move(entity.geometry));
+    }
     for (auto& body : bodyData) {
         Body& restored = document->restoreBody(body.id, std::move(body.name));
         for (auto& feature : body.features) {
@@ -709,6 +1045,10 @@ LoadResult loadPartDocument(std::istream& in) {
                                             feature.state, feature.widthParameterId,
                                             feature.heightParameterId, feature.depthParameterId,
                                             feature.materialId);
+            } else if (feature.type == "Pad") {
+                document->restorePadFeature(restored, feature.id, std::move(feature.name),
+                                            feature.state, feature.sketchId,
+                                            feature.lengthParameterId, feature.materialId);
             } else {
                 restored.addFeature<PlaceholderFeature>(feature.id, std::move(feature.name),
                                                         feature.state, std::move(feature.type));

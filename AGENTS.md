@@ -17,7 +17,12 @@ Before changing code, read:
 
 Hard rules:
 1. Do not add Qt dependencies to `src/Core`.
-2. Do not add OpenCASCADE types to `src/Core` public APIs.
+2. Do not add OpenCASCADE types to `src/Core` public APIs. Since M4 this
+   extends to Qt: `src/Viewer` is the only place Qt appears, and
+   `src/Kernel/Occt` plus the viewer are the only places OCCT appears.
+   Features are heterogeneous -- code iterating `Body::features()` must state
+   which kinds it applies to (ADR-M3-007), and semantic identity is never an
+   OCCT handle, an explorer order, a vector index or an address (ADR-M4-004).
 3. Keep persistent identity separate from container position.
 4. Do not bypass document/parameter state rules with ad-hoc globals.
 5. Keep each task limited to the requested milestone.
@@ -25,9 +30,17 @@ Hard rules:
 7. Build and run tests before reporting completion.
 8. If an architectural conflict is discovered, document it instead of silently redesigning the project.
 
-M3 — Geometry Kernel Adapter & First Parametric Solid — is COMPLETE (independent review APPROVE 97/100; see `docs/reviews/M3_CompletionReport.md`).
+M3 — Geometry Kernel Adapter & First Parametric Solid — is COMPLETE
+(independent review APPROVE 97/100; see `docs/reviews/M3_CompletionReport.md`).
 
-Current target: M4 — Qt viewer (see `docs/Roadmap.md`).
+M4 — Sketch/Profile Foundation, Pad/Extrude & Basic 3D Viewer — is COMPLETE.
+Functional independent review APPROVE 96/100; the UI was validated by owner
+manual validation rather than an independent UI review, per ADR-M4-016. See
+`docs/reviews/M4_CompletionReport.md`.
+
+Current target: M5 — Sketch Constraints & Dimensional Parameterization (see
+`docs/Roadmap.md`). No M5 implementation specification exists yet; the UI
+validation workflow for it is `docs/M5_UI_User_Assisted_Validation_Guide.md`.
 
 ## Independent Review Role
 

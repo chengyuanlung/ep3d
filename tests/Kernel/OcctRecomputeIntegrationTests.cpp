@@ -22,12 +22,18 @@ public:
         ++createBoxCallCount;
         return inner_.createBox(definition);
     }
+    ShapeResult extrudeProfile(const PlanarProfileDefinition& profile,
+                               double distanceMm) override {
+        ++extrudeProfileCallCount;
+        return inner_.extrudeProfile(profile, distanceMm);
+    }
     KernelMassPropertiesResult calculateMassProperties(const KernelShape& shape) override {
         ++calculateMassPropertiesCallCount;
         return inner_.calculateMassProperties(shape);
     }
 
     int createBoxCallCount = 0;
+    int extrudeProfileCallCount = 0;
     int calculateMassPropertiesCallCount = 0;
 
 private:
