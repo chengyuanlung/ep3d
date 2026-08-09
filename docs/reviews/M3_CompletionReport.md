@@ -2,7 +2,7 @@
 
 **Milestone:** M3 — Geometry Kernel Adapter & First Parametric Solid
 **Baseline:** `8245c89` (M2, APPROVE 100/100)
-**Final commit:** _(filled in at commit time; see "Commit" below)_
+**Final commit:** `69c6ab1` on `m3-wip` (see "Commit" below)
 **Date:** 2026-08-09
 
 ---
@@ -244,12 +244,18 @@ uncomputed tensor read as `Ixx=1`) and carry no correctness impact.
 
 ## Commit
 
-The milestone was developed on branch `m3-wip` as an unreviewed checkpoint
-(`f4916af`) plus this session's work. Per the handoff plan it is to be squashed
-into a single reviewed milestone commit on `master`, in the style of M1/M2 —
-the "WIP" history is not to be carried into `master` verbatim.
+Committed on `m3-wip` as **`69c6ab1`** — "M3: complete OCCT geometry kernel
+adapter, reviewed and approved". 21 files, +1937 / -33. This is the commit the
+evidence in this report describes.
 
-_Final commit hash to be recorded here once that commit exists._
+Branch history: `c51a14f` (WIP checkpoint, phases 1–4) → `f4916af` (handoff
+notes) → `69c6ab1` (this milestone).
+
+**Still to do:** `master` remains at `8245c89` (M2). Per the handoff plan the
+three `m3-wip` commits are to be squashed into a single reviewed milestone
+commit on `master`, in the style of M1/M2 — the "WIP" checkpoint message and
+the machine-migration handoff note are not to be carried into `master` verbatim.
+Deferred deliberately so the reviewed work was secured on its own branch first.
 
 ---
 
