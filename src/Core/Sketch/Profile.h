@@ -1,0 +1,72 @@
+#pragma once
+
+#include "Core/Sketch/Sketch.h"
+#include "Core/Sketch/SketchTypes.h"
+#include <string>
+#include <vector>
+
+namespace paramcad {
+
+// A Profile is a SEMANTIC interpretation of Sketch entities (spec 8), never
+// OCCT topology (ADR-M4-003/004). Every reference below is a SketchEntityId --
+// no index, no pointer, no edge handle.
+
+// One entity as it appears in a traversal order. `reversed` says the loop walks
+// the entity from its end point to its start point, so a loop reads
+// start-to-end regardless of the direction each curve was drawn in.
+struct OrientedSketchEntityRef {
+    SketchEntityId entityId{kInvalidSketchEntityId};
+    bool reversed{false};
+};
+
+struct ProfileLoop {
+    std::vector<OrientedSketchEntityRef> entities;
+};
+
+// M4 validates one outer loop. Holes are deferred (spec 8), but nothing here
+// prevents adding an `inner` vector later.
+struct ValidatedProfile {
+    ProfileLoop outer;
+};
+
+enum class ProfileError {
+    None,
+    NoEntities,        // nothing that could form a loop
+    InvalidGeometry,   // an entity fails IsValidSketchGeometry
+    NotChainable,      // a Circle mixed with other curves, or a stray closed curve
+    OpenLoop,          // an endpoint has only one incident curve
+    Branch,            // an endpoint has three or more incident curves
+    DuplicateEntity,   // two entities span the same two endpoints
+    Disconnected,      // a loop closed but entities were left over
+    SelfIntersecting
+};
+
+struct ProfileResult {
+    ValidatedProfile profile;
+    ProfileError error = ProfileError::None;
+    std::string message;
+    explicit operator bool() const noexcept { return error == ProfileError::None; }
+};
+
+// Builds and validates the closed outer loop of `sketch` (ADR-M4-005).
+//
+// Deterministic and independent of storage order: traversal starts from the
+// lowest SketchEntityId, so the same sketch always yields the same loop no
+// matter what order entities were added, removed or restored in.
+//
+// Points are ignored rather than rejected -- they are legitimate reference
+// geometry and cannot contribute an edge. Every other entity must take part in
+// exactly one closed loop.
+//
+// Gaps are NEVER healed: two endpoints further apart than
+// kProfileConnectivityToleranceMm are different points, and the resulting
+// failure names both entities and the measured distance. Silently closing a
+// gap is how a real modelling error becomes a wrong solid.
+ProfileResult BuildProfile(const Sketch& sketch);
+
+// Tolerance used to decide whether two endpoints are the same point, in mm
+// (ADR-M4-005). Shares kSketchToleranceMm's value so the project keeps one
+// length-scale story across M3 and M4.
+inline constexpr double kProfileConnectivityToleranceMm = kSketchToleranceMm;
+
+} // namespace paramcad

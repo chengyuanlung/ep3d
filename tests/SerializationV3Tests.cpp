@@ -138,7 +138,7 @@ TEST(SerializationV3Test, M3_SER_004_ByteIdenticalRoundTrip) {
     original.addBoxFeature(body, "Box001", width.id(), height.id(), depth.id());
 
     const std::string firstSave = saveToString(original);
-    EXPECT_NE(firstSave.find("\"schemaVersion\": 3"), std::string::npos);
+    EXPECT_NE(firstSave.find("\"schemaVersion\": 4"), std::string::npos);
     const LoadResult loaded = loadFromString(firstSave);
     ASSERT_TRUE(loaded) << loaded.message;
     EXPECT_EQ(saveToString(*loaded.document), firstSave);

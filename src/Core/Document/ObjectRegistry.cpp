@@ -4,6 +4,7 @@
 #include "Core/Material/Material.h"
 #include "Core/Parameter/Parameter.h"
 #include "Core/Recompute/IRecomputable.h"
+#include "Core/Sketch/Sketch.h"
 
 namespace paramcad {
 

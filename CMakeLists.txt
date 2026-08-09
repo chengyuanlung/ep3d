@@ -22,12 +22,17 @@ add_library(ParametricCADCore
     src/Core/Dependency/DependencyGraph.cpp
     src/Core/Feature/BoxFeature.cpp
     src/Core/Feature/Feature.cpp
+    src/Core/Feature/PadFeature.cpp
     src/Core/Feature/PlaceholderFeature.cpp
     src/Core/Kernel/KernelShape.cpp
+    src/Core/Kernel/ProfileDefinition.cpp
     src/Core/Physics/MassPropertiesNode.cpp
     src/Core/Serialization/JsonValue.cpp
     src/Core/Serialization/PartDocumentSerializer.cpp
+    src/Core/Sketch/Profile.cpp
     src/Core/Sketch/Sketch.cpp
+    src/Core/Sketch/SketchFrame.cpp
+    src/Core/Sketch/SketchTypes.cpp
     src/Core/Connector/Connector.cpp
 )
 
@@ -95,6 +100,88 @@ if(TARGET ParametricCADKernelOcct)
     target_compile_definitions(ParametricCADApp PRIVATE PARAMCAD_HAVE_OCCT_KERNEL)
 endif()
 
+# --- Minimal Qt viewer (M4, ADR-M4-006) -------------------------------------
+# Qt is a hard dependency of the VIEWER TARGET ONLY. Without Qt this block is
+# skipped and Core, Kernel and every non-viewer test still configure and build
+# normally -- the same conditional pattern PARAMCAD_BUILD_KERNEL_OCCT uses for
+# OCCT. ParametricCADCore gains no Qt and no OCCT dependency here; the
+# binary-level check (dumpbin on ParametricCADCoreTests) still holds.
+option(PARAMCAD_BUILD_VIEWER "Build the Qt viewer" ON)
+
+# The document-facing half of the viewer. Free of Qt AND of OCCT, so it is unit
+# testable without a display -- but it belongs to the VIEWER layer, not to Core.
+# Compiling it into ParametricCADCore (as an earlier revision did) inverted the
+# layering and would have let a future Qt include reach Core without the
+# binary-level boundary check noticing.
+add_library(ParametricCADViewerCore
+    src/Viewer/DocumentPresenter.cpp
+    src/Viewer/DocumentOutline.cpp
+)
+target_include_directories(ParametricCADViewerCore PUBLIC src)
+target_link_libraries(ParametricCADViewerCore PUBLIC ParametricCADCore)
+target_compile_features(ParametricCADViewerCore PUBLIC cxx_std_20)
+if(MSVC)
+    target_compile_options(ParametricCADViewerCore PRIVATE /utf-8)
+endif()
+
+if(PARAMCAD_BUILD_VIEWER)
+    find_package(Qt6 CONFIG QUIET COMPONENTS Core Gui Widgets
+        NO_CMAKE_PACKAGE_REGISTRY
+        NO_CMAKE_SYSTEM_PACKAGE_REGISTRY
+    )
+endif()
+
+if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
+    set(CMAKE_AUTOMOC ON)
+    add_executable(ParametricCADViewer WIN32
+        src/Viewer/main.cpp
+        src/Viewer/MainWindow.cpp
+        src/Viewer/OcctViewWidget.cpp
+    )
+    target_include_directories(ParametricCADViewer PRIVATE src ${OpenCASCADE_INCLUDE_DIR})
+    target_link_libraries(ParametricCADViewer
+        PRIVATE ParametricCADCore ParametricCADViewerCore ParametricCADKernelOcct
+                Qt6::Core Qt6::Gui Qt6::Widgets
+                ${OpenCASCADE_LIBRARIES}
+    )
+    target_compile_features(ParametricCADViewer PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(ParametricCADViewer PRIVATE /utf-8)
+    endif()
+    # Qt platform plugin deployment. Without this the viewer BUILDS AND LINKS
+    # but aborts on launch with "no Qt platform plugin could be initialized" --
+    # vcpkg's applocal step copies the Qt DLLs next to the binary, but the
+    # platform plugin must additionally live in a platforms/ SUBDIRECTORY that
+    # nothing creates automatically. Found by actually running the executable;
+    # a build-and-link check cannot see it.
+    if(TARGET Qt6::QWindowsIntegrationPlugin)
+        add_custom_command(TARGET ParametricCADViewer POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:ParametricCADViewer>/platforms"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_FILE:Qt6::QWindowsIntegrationPlugin>"
+                    "$<TARGET_FILE_DIR:ParametricCADViewer>/platforms/"
+            COMMENT "Deploying the Qt platform plugin next to the viewer"
+        )
+    else()
+        message(WARNING "Qt6::QWindowsIntegrationPlugin target not found -- the viewer "
+                        "will build but may fail to start.")
+    endif()
+
+    # Launching the binary is its own check (see --selftest in main.cpp): the
+    # defects it catches are invisible to unit tests and to a successful build.
+    if(PARAMCAD_BUILD_TESTS)
+        add_test(NAME ViewerSmokeTest COMMAND ParametricCADViewer --selftest)
+        set_tests_properties(ViewerSmokeTest PROPERTIES TIMEOUT 60)
+    endif()
+
+    message(STATUS "ParametricCADViewer: Qt ${Qt6_VERSION} found -- viewer will be built.")
+else()
+    message(STATUS "ParametricCADViewer: Qt6 or the OCCT kernel is unavailable, or "
+                    "PARAMCAD_BUILD_VIEWER=OFF -- skipping the viewer. Core, Kernel and "
+                    "all non-viewer tests still build normally.")
+endif()
+
 if(PARAMCAD_BUILD_TESTS)
     include(CTest)
     enable_testing()
@@ -130,9 +217,17 @@ if(PARAMCAD_BUILD_TESTS)
         tests/MassPropertiesNodeTests.cpp
         tests/SerializationV3Tests.cpp
         tests/M3ReviewFindingTests.cpp
+        tests/SketchTests.cpp
+        tests/ProfileTests.cpp
+        tests/PadFeatureTests.cpp
+        tests/SerializationV4Tests.cpp
+        tests/ViewerPresenterTests.cpp
+        tests/M4ReviewFindingTests.cpp
+        tests/DocumentOutlineTests.cpp
         tests/SerializationTests.cpp
     )
-    target_link_libraries(ParametricCADCoreTests PRIVATE ParametricCADCore GTest::gtest_main)
+    target_link_libraries(ParametricCADCoreTests
+        PRIVATE ParametricCADCore ParametricCADViewerCore GTest::gtest_main)
     if(MSVC)
         target_compile_options(ParametricCADCoreTests PRIVATE /utf-8)
     endif()
@@ -149,6 +244,8 @@ if(PARAMCAD_BUILD_TESTS)
     if(TARGET ParametricCADKernelOcct)
         add_executable(ParametricCADKernelOcctTests
             tests/Kernel/OcctGeometryKernelTests.cpp
+            tests/Kernel/OcctExtrudeTests.cpp
+            tests/Kernel/M4ReleaseGateTests.cpp
             tests/Kernel/OcctRecomputeIntegrationTests.cpp
         )
         target_link_libraries(ParametricCADKernelOcctTests

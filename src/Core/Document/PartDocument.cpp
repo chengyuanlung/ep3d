@@ -1,5 +1,7 @@
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/BoxFeature.h"
+#include "Core/Feature/IMaterialReferencing.h"
+#include "Core/Feature/PadFeature.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <utility>
 #include <variant>
@@ -88,6 +90,9 @@ Material& PartDocument::addMaterial(std::string name, double densityKgPerM3) {
     material_ = std::move(item);
     registry_.registerObject(ref.id(), &ref);
     graph_.addNode(ref.id());
+    // Features created BEFORE this material exists would otherwise stay
+    // unassigned and the part would weigh nothing.
+    assignMaterialToFeatures();
     return ref;
 }
 
@@ -101,6 +106,29 @@ Material& PartDocument::restoreMaterial(ObjectId id, std::string name, double de
     registry_.registerObject(ref.id(), &ref);
     graph_.addNode(ref.id()); // starts Dirty; graph states are not persisted
     return ref;
+}
+
+bool PartDocument::assignMaterialToFeatures() {
+    if (!material_) return false;
+    const ObjectId materialId = material_->id();
+    bool assigned = false;
+    for (const std::unique_ptr<Body>& body : bodies_) {
+        for (const std::unique_ptr<Feature>& feature : body->features()) {
+            auto* referencing = dynamic_cast<IMaterialReferencing*>(feature.get());
+            if (referencing == nullptr) continue;
+            if (referencing->materialId() == materialId) continue;
+            referencing->setMaterialReference(materialId);
+            assigned = true;
+        }
+    }
+    // Rewire the mass-properties source too: the node reads density through
+    // its own material edge, so re-pointing features alone would leave mass
+    // computed from no material at all.
+    if (massPropertiesNode_.boxFeatureId() != kInvalidObjectId) {
+        rewireMassPropertiesSource(massPropertiesNode_.boxFeatureId(), materialId);
+        assigned = true;
+    }
+    return assigned;
 }
 
 bool PartDocument::setMaterialDensity(double densityKgPerM3) {
@@ -119,29 +147,122 @@ void PartDocument::wireBoxFeature(BoxFeature& feature, ObjectId widthParameterId
     addDependency(feature.id(), heightParameterId);
     addDependency(feature.id(), depthParameterId);
 
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+// Extracted from wireBoxFeature in M4 so the Box and Pad paths share one
+// implementation. Two copies of this wiring would be two places to get the
+// detach-before-attach order wrong.
+void PartDocument::rewireMassPropertiesSource(ObjectId solidFeatureId, ObjectId materialId) {
     // MassPropertiesNode joins the graph on first use (see the constructors'
-    // comment): a document that never adds a BoxFeature must not carry a
+    // comment): a document that never adds a solid feature must not carry a
     // permanently Dirty, permanently failing, edge-less recompute node.
     if (!graph_.hasNode(massPropertiesNode_.id())) graph_.addNode(massPropertiesNode_.id());
 
-    // Re-wiring the singleton MassPropertiesNode to a (possibly new) box
-    // source: detach any previous source's edges first so the graph never
-    // accumulates stale prerequisites from an earlier box (M3 scoping note,
+    // Detach any previous source's edges FIRST so the graph never accumulates
+    // stale prerequisites from an earlier feature or material (M3 scoping note,
     // ADR-M3-005).
     if (massPropertiesNode_.boxFeatureId() != kInvalidObjectId)
         removeDependency(massPropertiesNode_.id(), massPropertiesNode_.boxFeatureId());
     if (massPropertiesNode_.materialId() != kInvalidObjectId)
         removeDependency(massPropertiesNode_.id(), massPropertiesNode_.materialId());
 
-    massPropertiesNode_.setSource(feature.id(), materialId);
-    addDependency(massPropertiesNode_.id(), feature.id()); // BoxFeature -> MassPropertiesNode
+    massPropertiesNode_.setSource(solidFeatureId, materialId);
+    addDependency(massPropertiesNode_.id(), solidFeatureId); // solid -> MassProperties
     if (materialId != kInvalidObjectId)
-        addDependency(massPropertiesNode_.id(), materialId); // Material -> MassPropertiesNode
+        addDependency(massPropertiesNode_.id(), materialId); // Material -> MassProperties
 
     // The freshly added graph node starts Dirty, so this demotes a restored
     // feature that persisted a Valid ComputeState but, by design, restored no
     // runtime shape with it.
     syncFeatureStatesFromGraph();
+}
+
+// --- Sketch (M4) -----------------------------------------------------------
+
+Sketch& PartDocument::addSketch(std::string name, SketchFrame frame) {
+    auto item = std::make_unique<Sketch>(std::move(name));
+    item->setFrame(frame);
+    Sketch& ref = *item;
+    sketches_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    graph_.addNode(ref.id()); // dirty source, exactly like Parameter/Material
+    return ref;
+}
+
+Sketch& PartDocument::restoreSketch(ObjectId id, std::string name, SketchFrame frame) {
+    auto item = std::make_unique<Sketch>(id, std::move(name), frame);
+    Sketch& ref = *item;
+    sketches_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    graph_.addNode(ref.id()); // starts Dirty; graph states are not persisted
+    return ref;
+}
+
+std::vector<const Sketch*> PartDocument::sketches() const {
+    std::vector<const Sketch*> result;
+    result.reserve(sketches_.size());
+    for (const std::unique_ptr<Sketch>& sketch : sketches_) result.push_back(sketch.get());
+    return result;
+}
+
+const Sketch* PartDocument::findSketch(ObjectId id) const noexcept {
+    for (const std::unique_ptr<Sketch>& sketch : sketches_)
+        if (sketch->id() == id) return sketch.get();
+    return nullptr;
+}
+
+Sketch* PartDocument::findSketchForEdit(ObjectId id) noexcept {
+    for (const std::unique_ptr<Sketch>& sketch : sketches_)
+        if (sketch->id() == id) return sketch.get();
+    return nullptr;
+}
+
+bool PartDocument::editSketch(ObjectId sketchId, const std::function<void(Sketch&)>& edit) {
+    Sketch* sketch = findSketchForEdit(sketchId);
+    if (sketch == nullptr || !edit) return false;
+    edit(*sketch);
+    // Dirtying is not optional and not the caller's responsibility: an edited
+    // sketch whose dependents were never marked stale would keep reporting a
+    // solid built from geometry that no longer exists.
+    graph_.markDirty(sketchId);
+    syncFeatureStatesFromGraph();
+    return true;
+}
+
+bool PartDocument::markSketchDirty(ObjectId sketchId) {
+    if (findSketch(sketchId) == nullptr) return false;
+    if (!graph_.markDirty(sketchId)) return false;
+    syncFeatureStatesFromGraph();
+    return true;
+}
+
+// --- Pad feature (M4) ------------------------------------------------------
+
+void PartDocument::wirePadFeature(PadFeature& feature, ObjectId sketchId,
+                                  ObjectId lengthParameterId, ObjectId materialId) {
+    addRecomputableNode(feature); // registry + graph node (IRecomputable*)
+    addDependency(feature.id(), sketchId);          // Sketch -> Pad
+    addDependency(feature.id(), lengthParameterId); // Length -> Pad
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+PadFeature& PartDocument::addPadFeature(Body& body, std::string name, ObjectId sketchId,
+                                        ObjectId lengthParameterId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    PadFeature& feature =
+        body.addFeature<PadFeature>(std::move(name), sketchId, lengthParameterId, materialId);
+    wirePadFeature(feature, sketchId, lengthParameterId, materialId);
+    return feature;
+}
+
+PadFeature& PartDocument::restorePadFeature(Body& body, ObjectId id, std::string name,
+                                            ComputeState state, ObjectId sketchId,
+                                            ObjectId lengthParameterId, ObjectId materialId) {
+    PadFeature& feature = body.addFeature<PadFeature>(id, std::move(name), state, sketchId,
+                                                      lengthParameterId, materialId);
+    wirePadFeature(feature, sketchId, lengthParameterId, materialId);
+    return feature;
 }
 
 BoxFeature& PartDocument::addBoxFeature(Body& body, std::string name, ObjectId widthParameterId,
@@ -302,6 +423,49 @@ bool PartDocument::removeObject(ObjectId id) {
             if ((*it)->id() == id) {
                 bodies_.erase(it);
                 break;
+            }
+        }
+    } else if (std::holds_alternative<Sketch*>(handle)) {
+        // Without this the sketch survived removal: still in sketches(), still
+        // resolvable, still serialized and fully resurrected on reload, while
+        // its graph node was gone so markSketchDirty could never recover it.
+        // Same defect class as ADR-M3-008's Body-owned feature, one type later.
+        //
+        // Dependents are already dirtied by graph_.removeNode(id) above
+        // (ADR-007: removing a node dirties its former dependents), so a Pad
+        // reading this sketch fails loudly on its next recompute rather than
+        // continuing to report a solid built from geometry that no longer
+        // exists. An explicit markDirty here would be dead code -- the node is
+        // gone by this point and it would return false.
+        for (auto it = sketches_.begin(); it != sketches_.end(); ++it) {
+            if ((*it)->id() != id) continue;
+            sketches_.erase(it);
+            break;
+        }
+        syncFeatureStatesFromGraph();
+    } else if (std::holds_alternative<Material*>(handle)) {
+        if (material_ && material_->id() == id) {
+            if (massPropertiesNode_.materialId() == id)
+                massPropertiesNode_.setSource(massPropertiesNode_.boxFeatureId(),
+                                              kInvalidObjectId);
+            material_.reset();
+            massProperties_.valid = false; // mass can no longer be current
+
+            // Clearing the owner is not enough: every FEATURE still holding the
+            // removed id would keep writing it, so the file would save cleanly
+            // and its own loader would reject it forever. Removal has to reach
+            // referrers too (ADR-M4-009, extended after review).
+            //
+            // Found by independent review as a defect INTRODUCED by the fix that
+            // added this branch -- the second time in this project that repairing
+            // a Major created a new one.
+            for (const std::unique_ptr<Body>& body : bodies_) {
+                for (const std::unique_ptr<Feature>& feature : body->features()) {
+                    auto* referencing = dynamic_cast<IMaterialReferencing*>(feature.get());
+                    if (referencing == nullptr) continue;
+                    if (referencing->materialId() != id) continue;
+                    referencing->clearMaterialReference();
+                }
             }
         }
     } else if (std::holds_alternative<IRecomputable*>(handle)) {

@@ -1,12 +1,23 @@
 #include "Kernel/Occt/OcctGeometryKernel.h"
 #include "Kernel/Occt/OcctShape.h"
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Wire.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Mat.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
+#include <variant>
 #include <memory>
 #include <string>
 #include <typeinfo>
@@ -70,6 +81,112 @@ ShapeResult OcctGeometryKernel::createBox(const BoxDefinition& definition) {
     } catch (const Standard_Failure& failure) {
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            std::string("OCCT raised while constructing the box primitive: ") +
+                               describe(failure)};
+    }
+}
+
+ShapeResult OcctGeometryKernel::extrudeProfile(const PlanarProfileDefinition& profile,
+                                               double distanceMm) {
+    // Single validation site (ADR-M3-001 extended to profiles): every kernel,
+    // real or fake, calls these first, so degenerate input never reaches OCCT
+    // and always surfaces as a structured InvalidDimension.
+    if (!IsValidProfileDefinition(profile)) {
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "invalid profile definition: empty, non-finite, or degenerate "
+                           "plane/segment"};
+    }
+    if (!IsValidExtrusionDistance(distanceMm)) {
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "invalid extrusion distance: must be finite and at least " +
+                               std::to_string(kMinExtrusionDistanceMm) + " mm"};
+    }
+
+    try {
+        // The sketch plane, expressed to OCCT exactly as Core computed it --
+        // Kernel/Occt never re-derives the frame, so SketchFrame stays the
+        // single conversion site (ADR-M4-002).
+        const gp_Pnt origin(profile.plane.origin.x, profile.plane.origin.y,
+                            profile.plane.origin.z);
+        const gp_Dir normal(profile.plane.normal.x, profile.plane.normal.y,
+                            profile.plane.normal.z);
+        const gp_Dir uDir(profile.plane.uAxis.x, profile.plane.uAxis.y, profile.plane.uAxis.z);
+        const gp_Ax2 axes(origin, normal, uDir);
+        const gp_Pln plane(axes);
+
+        // (u,v) -> part-local XYZ, using the same basis Core handed over.
+        const auto toWorld = [&](Vec2 uv) {
+            return gp_Pnt(profile.plane.origin.x + uv.x * profile.plane.uAxis.x +
+                              uv.y * profile.plane.vAxis.x,
+                          profile.plane.origin.y + uv.x * profile.plane.uAxis.y +
+                              uv.y * profile.plane.vAxis.y,
+                          profile.plane.origin.z + uv.x * profile.plane.uAxis.z +
+                              uv.y * profile.plane.vAxis.z);
+        };
+
+        BRepBuilderAPI_MakeWire wireMaker;
+        for (const ProfileSegment& segment : profile.segments) {
+            if (const auto* line = std::get_if<ProfileLineSegment>(&segment)) {
+                BRepBuilderAPI_MakeEdge edge(toWorld(line->start), toWorld(line->end));
+                edge.Build();
+                if (!edge.IsDone())
+                    return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                                       "OCCT could not build a line edge for the profile"};
+                wireMaker.Add(edge.Edge());
+            } else if (const auto* arc = std::get_if<ProfileArcSegment>(&segment)) {
+                // Build the arc's supporting circle in the sketch plane, then
+                // trim it by parameter. Angles are measured from +u, which is
+                // exactly the gp_Ax2 reference direction set above, so no angle
+                // conversion is needed.
+                const gp_Circ circle(gp_Ax2(toWorld(arc->center), normal, uDir), arc->radiusMm);
+                const double first = arc->counterClockwise ? arc->startAngleRad : arc->endAngleRad;
+                const double last = arc->counterClockwise ? arc->endAngleRad : arc->startAngleRad;
+                BRepBuilderAPI_MakeEdge edge(circle, first, last);
+                edge.Build();
+                if (!edge.IsDone())
+                    return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                                       "OCCT could not build an arc edge for the profile"};
+                wireMaker.Add(edge.Edge());
+            } else {
+                const auto& full = std::get<ProfileCircleSegment>(segment);
+                const gp_Circ circle(gp_Ax2(toWorld(full.center), normal, uDir), full.radiusMm);
+                BRepBuilderAPI_MakeEdge edge(circle);
+                edge.Build();
+                if (!edge.IsDone())
+                    return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                                       "OCCT could not build a circular edge for the profile"};
+                wireMaker.Add(edge.Edge());
+            }
+        }
+
+        wireMaker.Build();
+        if (!wireMaker.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not assemble the profile edges into a wire"};
+        const TopoDS_Wire wire = wireMaker.Wire();
+        if (!wire.Closed())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "profile wire is not closed"};
+
+        BRepBuilderAPI_MakeFace faceMaker(plane, wire);
+        faceMaker.Build();
+        if (!faceMaker.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not build a planar face from the profile"};
+
+        // Extrude along the plane normal (spec 12: +sketch normal in M4).
+        const gp_Vec direction(normal.X() * distanceMm, normal.Y() * distanceMm,
+                               normal.Z() * distanceMm);
+        BRepPrimAPI_MakePrism prism(faceMaker.Face(), direction);
+        prism.Build();
+        if (!prism.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not extrude the profile face"};
+
+        auto handle = std::make_shared<OcctShape>(prism.Shape());
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT raised while extruding the profile: ") +
                                describe(failure)};
     }
 }

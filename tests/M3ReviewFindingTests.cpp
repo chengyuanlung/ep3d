@@ -224,7 +224,7 @@ TEST(M3ReviewFindingTest, MAJOR4_IntactDocumentStillSaves) {
 TEST(M3ReviewFindingTest, CRITICAL1_RecomputeWithValidPlaceholderFeatureDoesNotAbort) {
     PartDocument document{"MixedDoc"};
     Body& body = document.addBody("Body001");
-    PlaceholderFeature& pad = body.addFeature<PlaceholderFeature>("Pad001", "Pad");
+    PlaceholderFeature& pad = body.addFeature<PlaceholderFeature>("Pad001", "Revolve");
     ASSERT_TRUE(pad.recompute()); // -> Valid, but never joins the graph
     ASSERT_EQ(pad.state(), ComputeState::Valid);
 
@@ -237,7 +237,7 @@ TEST(M3ReviewFindingTest, CRITICAL1_RecomputeWithValidPlaceholderFeatureDoesNotA
 TEST(M3ReviewFindingTest, CRITICAL1_ParameterEditWithValidPlaceholderFeatureDoesNotAbort) {
     BoxDocFixture fx;
     Body& body = *fx.document.bodies().front();
-    PlaceholderFeature& pad = body.addFeature<PlaceholderFeature>("Pad001", "Pad");
+    PlaceholderFeature& pad = body.addFeature<PlaceholderFeature>("Pad001", "Revolve");
     ASSERT_TRUE(pad.recompute());
     ASSERT_EQ(pad.state(), ComputeState::Valid);
 
@@ -253,7 +253,7 @@ TEST(M3ReviewFindingTest, CRITICAL1_LoadingDocumentWithValidPlaceholderPreserves
     // BoxFeature, because restoreBoxFeature runs the sync over every feature.
     BoxDocFixture fx;
     Body& body = *fx.document.bodies().front();
-    PlaceholderFeature& pad = body.addFeature<PlaceholderFeature>("Pad001", "Pad");
+    PlaceholderFeature& pad = body.addFeature<PlaceholderFeature>("Pad001", "Revolve");
     ASSERT_TRUE(pad.recompute());
     ASSERT_TRUE(fx.document.recompute().success);
 
@@ -267,7 +267,7 @@ TEST(M3ReviewFindingTest, CRITICAL1_LoadingDocumentWithValidPlaceholderPreserves
     ASSERT_EQ(restoredBody.features().size(), 2u);
     const Feature* restoredPad = nullptr;
     for (const auto& feature : restoredBody.features())
-        if (feature->typeName() == "Pad") restoredPad = feature.get();
+        if (feature->typeName() == "Revolve") restoredPad = feature.get();
     ASSERT_NE(restoredPad, nullptr);
     EXPECT_EQ(restoredPad->state(), ComputeState::Valid)
         << "a persisted feature state was silently rewritten on load";

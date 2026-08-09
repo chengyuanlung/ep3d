@@ -2,6 +2,7 @@
 
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Kernel/KernelTypes.h"
+#include "Core/Kernel/ProfileDefinition.h"
 #include <string>
 
 namespace paramcad {
@@ -29,6 +30,24 @@ public:
     // returns a controlled ShapeResult with KernelError::InvalidDimension and
     // a diagnostic message -- never throws, never UB.
     virtual ShapeResult createBox(const BoxDefinition& definition) = 0;
+
+    // Builds a planar face from an already-validated, ordered, oriented profile
+    // and extrudes it distanceMm along the profile plane's normal (M4,
+    // ADR-M4-003).
+    //
+    // One call rather than createPlanarFace + extrude(face): a KernelFace would
+    // be a second runtime handle type with its own validity and staleness
+    // story, and M4 has no consumer for a bare face. M3's costliest defects
+    // were all a second copy of runtime state disagreeing with the first
+    // (ADR-M3-006/007). The face stays internal to the implementation; if a
+    // later milestone needs one (UpToFace, shells), the split can be added when
+    // there is a caller to define its semantics.
+    //
+    // Invalid input -- empty segment list, non-finite or non-positive distance,
+    // a degenerate plane -- returns a controlled ShapeResult with
+    // KernelError::InvalidDimension and a diagnostic. Never throws.
+    virtual ShapeResult extrudeProfile(const PlanarProfileDefinition& profile,
+                                       double distanceMm) = 0;
 
     // shape must be a valid KernelShape previously returned by this same
     // kernel; an invalid/foreign shape returns a controlled

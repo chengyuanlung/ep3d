@@ -307,3 +307,444 @@ string — a kernel-internal error where the spec promises a dimension error.
 - The diagnostic strings in both kernels were updated at the same time: they
   previously said "must be finite and positive", which became false the moment
   this threshold existed — 9.9e-7 is finite and positive and rejected.
+
+## ADR-M4-001 — Sketch entity identity and reference model (M4)
+Status: Accepted
+
+Sketch entities need identities that survive insertion, removal and reordering
+of *other* entities (spec 5), and that future constraints can point at
+(spec 5's `SketchElementRef`) without M4 solving constraints.
+
+- **`SketchEntityId` is a distinct type allocated from the existing
+  `ObjectIdGenerator`.** Distinct so the compiler rejects passing an `ObjectId`
+  where an entity id belongs — they are different id spaces semantically, and
+  M4 introduces the first place where confusing them is possible. Allocated
+  from the *existing* generator rather than a private counter so it inherits
+  the collision-safety machinery M1 built and M3 depended on: `RestoreObjectId`
+  advancing the generator past every restored id, the `kMaxObjectId` cap, and
+  the no-wrap guarantee. A second independent generator would reintroduce
+  exactly the restore-collision bug class that machinery exists to prevent.
+- Full identity of an entity is the pair (`Sketch::id()`, `SketchEntityId`).
+  Entities are NOT registered in `ObjectRegistry`: they are sub-objects of a
+  Sketch, not document objects, and in M4 nothing outside their Sketch
+  references an individual entity. `ObjectRegistry` keeps its M2 meaning.
+- Storage is `std::vector<SketchEntity>` but **position is never identity**
+  (ADR-010's rule, extended to sub-objects): every lookup is by
+  `SketchEntityId`, and removal does not renumber anything.
+- **Sub-element references are reserved, not implemented**:
+  `SketchElementRef{SketchEntityId, SketchSubElement}` with
+  `SketchSubElement{Whole, StartPoint, EndPoint, CenterPoint}`. M4 constructs
+  them for profile orientation but implements no constraint semantics.
+- **Line endpoints own their coordinates** rather than referencing shared Point
+  entities (the choice spec 7 assigns to the Architect). Referencing shared
+  points would make coincidence implicit in the storage model, and M4
+  explicitly defers the constraint solver — implicit coincidence with no solver
+  to maintain it is a half-built feature. Owning coordinates keeps M4 honest,
+  and the `SketchElementRef` indirection means M5 can add a real Coincident
+  constraint binding two endpoint refs without changing storage or the
+  persisted format.
+
+## ADR-M4-002 — Sketch coordinate frame (M4)
+Status: Accepted
+
+Entity geometry is stored in sketch-local `(u,v)` millimetres, never world XYZ
+(spec 6), so that moving a sketch's plane does not rewrite its geometry.
+
+- **A `SketchFrame` value embedded in the Sketch, not a reference to a
+  `ReferenceFrame` object.** `ReferenceFrame` exists (M0) but is not registered
+  in `ObjectRegistry`, not persisted, and the Origin frame is re-created fresh
+  on load (ADR-009 D6). Making frames registered, persisted, graph-participating
+  document objects is a real change to the M0-M2 contract, and M4 does not need
+  it: a sketch's support plane is intrinsic to that sketch. Deferring keeps the
+  milestone's blast radius honest rather than smuggling a frame-system redesign
+  into a sketch milestone.
+- `SketchFrame` carries a `Transform3D` — the same type `ReferenceFrame` uses —
+  precisely so that when frames do become first-class (M5+), a Sketch can gain
+  an optional `ObjectId supportFrameId` and the embedded transform becomes the
+  fallback, with no change to entity storage or to the `(u,v)` convention.
+- **Conversion lives in exactly one place**: `SketchFrame::toWorld(Vec2) ->
+  Vec3` and `SketchFrame::normal() -> Vec3`. No other code composes the
+  rotation. This is the same single-conversion-site discipline ADR-M3-002
+  applied to units, for the same reason — a second conversion path is how
+  frames silently disagree.
+- Default is the world XY plane (identity transform), so world-XY behaviour is
+  a *case* of the general path, never a shortcut around it. Translated and
+  rotated frames are tested explicitly (spec 6, Gate D) because a world-XY
+  hardcode is invisible until something is not at the origin.
+
+## ADR-M4-003 — Neutral profile to kernel boundary (M4)
+Status: Accepted
+
+The kernel interface gains profile extrusion without leaking OCCT (spec 11).
+
+- **One call: `extrudeProfile(const PlanarProfileDefinition&, double
+  distanceMm) -> ShapeResult`**, not the `createPlanarFace` + `extrude(face)`
+  split spec 11 offers as an alternative. A `KernelFace` would be a second
+  runtime handle type with its own validity, ownership and staleness story,
+  and M4 has no consumer for a bare face. M3's most expensive defects were all
+  about a second copy of runtime state disagreeing with the first
+  (ADR-M3-006/007); adding one speculatively, for a capability nothing uses
+  yet, repeats that on purpose. The face stays internal to `Kernel/Occt`. If
+  M5+ needs faces (UpToFace, shells), the interface can gain the split then,
+  when there is a caller to define its semantics.
+- `PlanarProfileDefinition` is pure data, zero OCCT: the sketch frame plus an
+  ordered, oriented list of neutral curve segments in `(u,v)` mm —
+  `ProfileSegment` covering line (start/end), arc (center, radius, start/end
+  angle, CCW flag) and full circle (center, radius). Angles in radians
+  (spec 7).
+- The kernel receives an already-validated profile. Validation is Core's job
+  (ADR-M4-005) and happens before any kernel call, so `Kernel/Occt` never
+  decides what a valid loop is — it only builds what it is given, and reports a
+  structured failure if OCCT still refuses.
+- Reuses M3's `ShapeResult`/`KernelShape` ownership unchanged, so `PadFeature`
+  gets the same transactional retention `BoxFeature` has for free.
+
+## ADR-M4-004 — Topological naming deferral and rules (M4)
+Status: Accepted
+
+Persistent subshape naming is out of scope (spec 14), and M4 must make it
+impossible to accidentally depend on it.
+
+- **Forbidden as persistent or semantic identity**, without exception:
+  `TopoDS_Shape`/`Edge`/`Face`/`Wire` and any OCCT handle, a `TopExp_Explorer`
+  visit order or index, a `std::vector` index, a pointer or address, and
+  string names of the form `"Face1"`/`"Edge7"`.
+- **The complete set of things M4 persists as identity**: `Sketch` `ObjectId`,
+  `SketchEntityId`, `PadFeature` `ObjectId`, and the `ObjectId`s of referenced
+  Parameters and Material. Nothing else. If a future feature needs to name a
+  face, that needs a real naming scheme, designed as its own decision.
+- The rule holds *semantically*, not only at the file boundary: a runtime
+  structure that maps a vector index to meaning is the same defect one step
+  earlier, so profile loops carry `SketchEntityId`, never positions.
+- Enforcement is a test, not a convention: the serialization suite asserts the
+  written document contains no OCCT type name and no index-shaped reference,
+  alongside the existing `src/Core` static scan.
+
+## ADR-M4-005 — Profile connectivity and tolerance policy (M4)
+Status: Accepted
+
+A Profile is a semantic interpretation of Sketch entities (spec 8) and must be
+deterministic and independent of storage order (spec 9).
+
+- **Connectivity tolerance `kProfileConnectivityToleranceMm = 1e-6` mm**
+  (1 nanometre), matching M3's `kLengthAbsTol` and `kMinBoxDimensionMm` so the
+  project has one length-scale story rather than three. Two endpoints closer
+  than this are the same point; further apart, they are not. **Gaps are never
+  healed** — a gap just outside tolerance is rejected with a diagnostic naming
+  the entities and the measured distance, not quietly closed. Silently healing
+  is how a user's real modelling error becomes a wrong solid.
+- **Deterministic traversal**: start from the entity with the lowest
+  `SketchEntityId` (a stable, storage-order-independent choice), then repeatedly
+  follow whichever entity has an unused endpoint within tolerance of the current
+  loop end. Each step orients the entity — `OrientedSketchEntityRef
+  {SketchEntityId, bool reversed}` — so the loop reads start-to-end regardless
+  of how entities were drawn.
+- **Ambiguity is rejected, never guessed**: if any point has more than two
+  incident endpoints the profile is a branch/T-junction and fails; if entities
+  remain unvisited after the loop closes, it is disconnected and fails. Both
+  produce a structured error identifying the offending entities.
+- A full Circle is a valid one-entity closed loop, handled as its own case
+  rather than forced through endpoint matching (it has no endpoints).
+- **Self-intersection is rejected** (spec 10's recommended policy) rather than
+  resolved into faces. Guessing which region a self-intersecting outline means
+  is a modelling decision the user has not made.
+- **Profile is a computed value, not a stored node.** Validation is a pure
+  function from Sketch entities to a `ValidatedProfile`, run inside
+  `PadFeature::recompute`, and nothing caches it between passes. A cached
+  Profile node would need its own currency flag kept coherent with the graph —
+  precisely the failure mode of ADR-M3-006/007. Recompute economy is preserved
+  where it is actually required (spec 12): a Pad-length-only edit does not
+  dirty the Sketch node, so no Sketch semantic geometry is rebuilt; re-running a
+  pure validation over a handful of entities is not the cost the requirement is
+  about.
+- Consequently the M4 graph is exactly:
+  `Sketch -> PadFeature -> MassPropertiesNode`, `PadLength -> PadFeature`,
+  `Material -> MassPropertiesNode`. `Sketch` is a dirty-source node like
+  `Parameter`/`Material` (ADR-011's pattern, reused unchanged), not an
+  `IRecomputable`.
+
+## ADR-M4-006 — Viewer/Core boundary (M4)
+Status: Accepted
+
+- **A new `ParametricCADViewer` target** links Qt 6 and `ParametricCADKernelOcct`
+  (for OCCT `AIS`/`V3d`, whose toolkits the existing vcpkg OCCT install already
+  provides). `ParametricCADCore` links neither Qt nor OCCT and gains no new
+  dependency — the M3 boundary is extended, not relaxed, and the same
+  binary-level check (`dumpbin` on the Core-only test executable) still applies.
+- **The viewer never owns semantic objects.** It holds a non-owning
+  `PartDocument*` and, per displayed solid, an `ObjectId`. Display objects
+  (`AIS_Shape`) are transient presentation state, rebuilt on refresh and owned
+  solely by the viewer.
+- **Selection maps presentation to identity, one way**: a viewer-local
+  `AIS_InteractiveObject* -> ObjectId` map, rebuilt whenever the display is
+  rebuilt, so a stale display object can never resolve to a document object.
+  Whole-object selection only; persistent face/edge selection is out of scope
+  (ADR-M4-004).
+- **Mutation flows one way**: the viewer calls `PartDocument`'s facade
+  (`setParameterValue`, `recompute`) and re-reads results. It never writes
+  document state directly, and it is never on the recompute path — refresh is a
+  consequence of recompute, never a participant in it.
+- Qt is a hard dependency of the viewer target only. The build stays usable
+  without Qt: absent Qt, the viewer target is skipped and Core, Kernel and all
+  non-viewer tests configure and build normally — the same conditional pattern
+  `PARAMCAD_BUILD_KERNEL_OCCT` already uses for OCCT.
+
+## ADR-M4-007 — Roadmap/spec conflict for M4 (M4)
+Status: Accepted
+
+Recorded rather than silently resolved, per AGENTS.md hard rule 8.
+
+`docs/Roadmap.md`'s M4 entry (written at M0) describes M4 as "Qt viewer" with a
+Qt Widgets shell, **feature tree**, **property panel**, an OCC-based 3D view and
+parameter-edit-triggers-recompute, with the exit criterion "edit Width 100 ->
+120 and see 3D update".
+
+`docs/M4_Implementation_SelfValidation_and_Evaluation.md` describes a
+substantially different milestone: a Sketch/Profile foundation and Pad/Extrude
+feature — a much deeper CAD modelling scope — with only a *basic* viewer
+(display, rotate, pan, zoom, fit, whole-object select, refresh) and no feature
+tree or property panel at all. Its exit criteria are release gates A-E.
+
+**The milestone spec governs**, consistent with how M1-M3 were run (the spec is
+the authoritative contract when present; the Roadmap is a planning sketch). The
+Roadmap M4 entry is rewritten to match the spec, and the deferred UI items
+(feature tree, property panel) move to M5+ rather than being dropped silently.
+
+Recorded because it matters for how this log is read: the first revision of this
+ADR stated the rewrite in the present tense while the Roadmap was still
+untouched, and the self-validation report repeated the claim. Independent review
+caught it. An ADR describes a decision; it is not evidence the decision was
+carried out, and anything asserting a file was changed has to be checked against
+the file.
+Noting the conflict matters because the Roadmap's exit criterion mentions
+`Width`, a BoxFeature parameter — a reader following the Roadmap alone would
+build the wrong milestone.
+
+## ADR-M4-008 — Sketch mutation goes through the document (M4, post-review)
+Status: Accepted
+
+Raised as Major finding 1. `addSketch`/`findSketch`/`sketches()` handed out a
+non-const `Sketch&` with a full mutating API and no dirty bridge, so editing a
+sketch's geometry and calling `recompute()` reported success while the Pad kept
+its old solid. M2 had already removed exactly this hazard for Parameters by
+making `parameters()` const-only (ADR-011); the rule was written in
+`PartDocument.h` but not enforced for sketches.
+
+- `findSketch` and `sketches()` are const-only. `PartDocument::editSketch(id,
+  callback)` is the mutation path: it applies the edit and then dirties the
+  sketch node, so "edited" and "dirtied" cannot be separated. A callback rather
+  than a mutable reference is the whole point -- a reference can outlive the
+  call and be used later without the graph ever hearing about it.
+- `addSketch`/`restoreSketch` still return `Sketch&` for construction-time
+  population, mirroring `addParameter`. The residual (a caller retaining that
+  reference and mutating later) is identical for Parameter and Sketch, is
+  pre-existing, and is deliberately not changed here: closing it means reworking
+  the M1 creation contract for every object type, which is a decision of its own
+  rather than a fix smuggled into a sketch milestone.
+
+## ADR-M4-009 — Removal completeness, second pass (M4, post-review)
+Status: Accepted
+
+Raised as Major finding 2 -- and the third instance of the same defect.
+ADR-M3-008 fixed `removeObject` for Body-owned Features; M4 added two more owned
+types and did not extend it. `removeObject(sketchId)` returned true, unregistered
+and removed the graph node, and left the Sketch in `sketches_`: still resolvable,
+still serialized, fully resurrected on reload, and now impossible to dirty
+because its node was gone.
+
+- `removeObject` now has an owner step for `Sketch*` and `Material*`. The sketch
+  is dirtied BEFORE removal so dependent Pads fail loudly on their next
+  recompute rather than continuing to report a solid built from geometry that no
+  longer exists; removing the material also detaches it from
+  `massPropertiesNode_` and drops the derived result's currency.
+- **The recurring rule, stated once so it stops recurring**: every alternative of
+  `ObjectRegistry::ObjectRef` needs a corresponding owner step in
+  `removeObject`, and adding an alternative without one is the defect. This has
+  now been the finding in two consecutive milestones; the next type added is
+  expected to arrive with its owner step and a removal test in the same change.
+
+**Amended after re-review — the rule above was not sufficient.** Stating it in
+terms of OWNERS missed the other half: removing an object must also reach
+everything that REFERS to it. The first version of this change cleared
+`material_` and left every `BoxFeature`/`PadFeature` holding the removed id, so
+the document saved cleanly and its own loader rejected it forever. That is the
+same data-loss shape ADR-M4-010 exists to prevent, introduced by the change that
+cited it.
+
+- **Removal has two halves: the owner step and the referrer step.** A type that
+  can be referenced needs a way to be found without naming its referrers'
+  concrete types -- `IMaterialReferencing` is that mechanism for Material
+  (`materialId()`, `clearMaterialReference()`, `setMaterialReference()`), and it
+  is what makes the check survive M5 adding another feature type.
+- **A removal test that never round-trips proves half the rule.** The test
+  written for the owner step asserted the owner was gone and stopped there,
+  which is precisely why 297 passing tests missed the referrer half. Removal
+  tests now save and load.
+
+## ADR-M4-010 — Save/load symmetry applies per feature type (M4, post-review)
+Status: Accepted
+
+Raised as Major finding 3, and the same rule failing the same way one type
+later. `validateSaveable` checked `BoxFeature`'s parameter references
+(ADR-M3-008) but not `PadFeature`'s, so removing a Pad's Length Parameter
+produced a file that saved cleanly and its own loader then rejected -- the exact
+data-loss scenario the rule exists to prevent, potentially over the last good
+copy.
+
+- `validateSaveable` now checks a Pad's Length Parameter and its Sketch, using
+  the same referential rules the loader enforces.
+- General rule: any validation the load path performs is an invariant of the
+  FORMAT, and every feature type that carries references owes the save path a
+  matching check. A per-type check list is the wrong shape long-term.
+
+**Amended after re-review.** The "M5+ should" above was already overdue: the very
+next finding was this same rule failing again, for Material rather than Sketch or
+Parameter. The capability approach is now built rather than planned --
+`validateSaveable` asks features for `IMaterialReferencing` instead of
+enumerating `BoxFeature` and `PadFeature`, so a new referencing feature type is
+checked without anyone remembering to extend a list. Parameter and Sketch
+references are still checked per type; converting them to the same shape is the
+remaining half, and belongs with M5's constraint references rather than as a
+late change here.
+
+## ADR-M4-011 — Geometric predicates must be orientation-independent (M4, post-review)
+Status: Accepted
+
+Raised as the Critical finding, and the most instructive defect of the
+milestone. The self-intersection check's collinear-overlap branch used a
+bounding box that shrank its x bounds by the tolerance while GROWING its y
+bounds. For any segment narrower than the tolerance in x -- every vertical
+segment -- the test could never fire. An outline whose vertical members
+overlapped was accepted as a valid profile, OCCT built a degenerate face from
+it, and the document reported `success`, `Valid`, and a volume of **0 mm³** for
+a region of real area 100 mm²: silent wrong geometry, spec §27's own Critical
+example.
+
+- Replaced with a parametric test: project the point onto the segment, compare
+  the normalized perpendicular distance against the tolerance, and require the
+  parameter to lie strictly inside (0, 1). This is axis-independent by
+  construction.
+- The normalization matters independently: the raw cross product scales with
+  segment length, so comparing it against a length tolerance made the effective
+  perpendicular tolerance depend on how long the segment happened to be.
+- **The rule this milestone earns**: a geometric predicate whose result depends
+  on the orientation of its input is wrong even where it happens to give the
+  right answer. The same figure rotated 90 degrees WAS correctly rejected, which
+  is why 284 passing tests missed it -- the suite tested the predicate, not its
+  invariance. Predicates now get an explicit invariance test
+  (`CRITICAL1_DetectionIsOrientationIndependent`), and axis-aligned geometry is
+  the first case to try, not the last.
+
+## ADR-M4-012 — Running the program is its own check (M4, post-review)
+Status: Accepted
+
+Four user-facing defects survived two complete review rounds while 302 tests
+passed, for one reason: nothing ever started the executable.
+
+- the Qt platform plugin was never deployed, so the viewer **could not launch at
+  all** -- it built, linked, and aborted on startup;
+- `WA_NativeWindow` was missing, so OCCT received the top-level window handle and
+  painted over the toolbar, property panel and status bar;
+- `AIS_Shape` displayed in its default wireframe, so a solid appeared as edges;
+- `resizeEvent` updated the view's size without redrawing, leaving stale pixels
+  and undrawn regions after any resize.
+
+None of these is reachable from a unit test, and a successful build says nothing
+about any of them. The milestone's own self-validation report had honestly
+recorded the viewer as "builds and links" with interactive behaviour UNVERIFIED
+-- which was true, and which is exactly the point: **an item marked unverified is
+not evidence of anything, and treating it as probably-fine is how four defects
+reached two reviewers.**
+
+- `ParametricCADViewer --selftest` builds the real window, lets it lay out and
+  paint, then asserts the things a user notices first: the window is visible and
+  properly sized, exactly one solid is displayable, mass properties are current
+  and match the analytical oracle, and selection round-trips by `ObjectId`. It
+  exits non-zero on any failure.
+- Registered as the CTest case `ViewerSmokeTest`, so it runs with everything
+  else. Verified to actually catch the original defect: with `platforms/`
+  removed the run exits 139 (crash); restored, it exits 0.
+- **General rule**: any executable a user launches gets a smoke check that
+  launches it. The check does not need to be thorough -- three of these four
+  defects would have been caught by "does the window appear", which is the
+  cheapest assertion in the suite.
+
+## ADR-M4-013 — Visibility is view state (M4 UI)
+Status: Accepted
+
+Show/Hide was missing entirely and was the automatic REQUEST CHANGES trigger in
+the first UI review ("required viewer/property workflow cannot be completed").
+
+- **Hidden lives in `DocumentPresenter`, never in `PartDocument`.** UI spec 11
+  separates Hidden from Suppressed for exactly this reason: hiding changes what
+  is DRAWN, while suppression changes what is COMPUTED. A hidden solid is still
+  recomputed, still contributes its mass, and still serializes; nothing about
+  the document differs. Putting visibility in the document would have made a
+  presentation preference part of the saved model.
+- `DocumentOutline::build()` takes the hidden id set as a parameter rather than
+  reaching for a presenter, so the outline stays free of any notion of a viewer
+  and remains unit-testable.
+- **Hidden never masks Failed.** The tree reports Hidden only when the object is
+  otherwise Valid; a hidden object that fails still reports Failed. Hiding
+  something must not conceal that it is broken (`M4_VIEW_012`).
+
+## ADR-M4-014 — Shortcuts are application-scoped because the 3D view is native (M4 UI)
+Status: Accepted
+
+Every shortcut the menus advertised silently did nothing whenever the 3D view
+held focus -- which, in a CAD application, is most of the time.
+
+The cause is structural rather than incidental: OCCT needs to own its drawing
+surface, so `OcctViewWidget` sets `WA_NativeWindow` (itself a fix from earlier in
+this milestone -- without it OCCT painted over every Qt control). A native child
+window changes how key events reach Qt, and Qt's default `WindowShortcut`
+context did not deliver them.
+
+- All menu/toolbar actions use `Qt::ApplicationShortcut`.
+- Verified by driving the application with the viewport deliberately focused:
+  Ctrl+H toggled the solid (viewport coverage 69.4% -> 0% -> 69.4%),
+  Ctrl+Shift+F refitted a wrecked camera, Ctrl+R recomputed without disturbing
+  the selection. All three had done nothing before the change.
+- **How it was found, and the rule it earns**: the Show/Hide command was tested
+  first with Ctrl+H, which appeared to prove the command broken. Clicking the
+  toolbar button worked, which separated "the command is broken" from "the key
+  never arrived". A UI check that exercises only one input path cannot tell
+  those apart -- so a command reachable by both a button and a shortcut is
+  verified through both, or it is verified through neither.
+
+## ADR-M4-015 — Mouse input crosses a logical/device pixel boundary (M4 UI)
+Status: Accepted
+
+Reported by the user from ordinary use: clicking beside the solid selected it
+anyway.
+
+Qt reports mouse positions in LOGICAL pixels; OCCT's view is sized in DEVICE
+pixels. `OcctViewWidget` passed Qt's coordinates straight to
+`AIS_InteractiveContext::MoveTo`, `V3d_View::StartRotation`, `Rotation` and
+`Pan`. On a display scaled at 200% the two differ by a factor of two, so every
+hit test, rotation pivot and pan delta was applied at half the true distance
+from the top-left corner -- the pick happened up and to the left of the cursor,
+and picked whatever was there.
+
+- `OcctViewWidget::toDevicePixels()` is the single conversion site; every mouse
+  handler goes through it, so no call site can forget the multiplication. Same
+  discipline as ADR-M3-002 for units and ADR-M4-002 for sketch frames: a second
+  conversion path is how two coordinate systems silently disagree.
+- Verified on the 200%-scaled display after the fix: a click in empty space
+  above the solid gives `No selection` with an empty property panel; a click on
+  the solid gives `Selected: Pad001 (Pad)`.
+
+**Why it survived every check.** The defect is invisible at 100% scaling, where
+logical and device pixels are equal. Every screenshot I captured, and every
+interaction the independent UI reviewer drove, ran on the 1920x1080 secondary
+display at 100%. The primary display -- 2560x1600 at 200% -- is where the user
+actually works, and one click there was enough.
+
+- **The rule this earns**: a UI verified on one display configuration has been
+  verified on one display configuration. Scaling, not resolution, is the axis
+  that changes behaviour, and it must be varied deliberately rather than
+  inherited from whichever monitor the automation happened to target.
+- Corollary already visible: `setMinimumSize(1000, 640)` is 2000x1280 DEVICE
+  pixels at 200%. It fits 2560x1600, but the margin is small, and a minimum
+  expressed in logical pixels has a physical consequence that has to be checked
+  on the scaled display rather than reasoned about.
