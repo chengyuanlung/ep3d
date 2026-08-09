@@ -2,7 +2,7 @@
 
 **Milestone:** M3 — Geometry Kernel Adapter & First Parametric Solid
 **Baseline:** `8245c89` (M2, APPROVE 100/100)
-**Final commit:** `69c6ab1` on `m3-wip` (see "Commit" below)
+**Final commit:** `f583f29` on `master` (see "Commit" below)
 **Date:** 2026-08-09
 
 ---
@@ -244,18 +244,32 @@ uncomputed tensor read as `Ixx=1`) and carry no correctness impact.
 
 ## Commit
 
-Committed on `m3-wip` as **`69c6ab1`** — "M3: complete OCCT geometry kernel
-adapter, reviewed and approved". 21 files, +1937 / -33. This is the commit the
-evidence in this report describes.
+**`master` = `f583f29`** — "M3: geometry kernel adapter and first parametric
+solid". 45 files, +5162 / −65. Squashed from `m3-wip` per the handoff plan, so
+`master` keeps one clean commit per milestone in the style of M1/M2:
 
-Branch history: `c51a14f` (WIP checkpoint, phases 1–4) → `f4916af` (handoff
-notes) → `69c6ab1` (this milestone).
+```
+f583f29  M3: geometry kernel adapter and first parametric solid
+8245c89  M2: document recompute infrastructure
+34f67cf  M1: native JSON serialization (schema v1) + GoogleTest adoption
+2f9768a  Initial commit: ParametricCAD starter + DependencyGraph milestone
+```
 
-**Still to do:** `master` remains at `8245c89` (M2). Per the handoff plan the
-three `m3-wip` commits are to be squashed into a single reviewed milestone
-commit on `master`, in the style of M1/M2 — the "WIP" checkpoint message and
-the machine-migration handoff note are not to be carried into `master` verbatim.
-Deferred deliberately so the reviewed work was secured on its own branch first.
+The squashed result was re-verified rather than assumed equivalent: clean
+configure and build from an empty tree, **180/180 in Debug and Release**, Core
+boundary scan 0 matches.
+
+`m3-wip` (`4a4f3ad`, pushed) retains the development history —
+`c51a14f` (WIP, phases 1–4) → `f4916af` (handoff notes) → `69c6ab1` (M3
+complete) → `4a4f3ad` (hash backfill).
+
+One file was deliberately **not** carried into `master`:
+`docs/reviews/SESSION_HANDOFF_M3.md`. It was written mid-migration and every
+substantive claim in it is now false — it calls the old 15.7 GB machine "this
+machine", describes the OCCT build as an unresolved blocker, and calls the
+Phase 5 adapter an uncompiled draft. Accurate when written, misleading in a
+clean milestone history. It remains on `m3-wip` as the historical record.
+That is the only difference between the two trees.
 
 ---
 
