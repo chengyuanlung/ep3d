@@ -15,7 +15,8 @@
 
 **Baseline:** `3734740` — the project-owner-accepted M4 state on `master`.
 
-**Final commit:** not yet made. To be recorded here when the commit is made.
+**Final commit:** `1967238` on branch `m5-wip` — "M5: parameter-driven
+constrained Sketch". Not yet squashed into `master`.
 
 ---
 
