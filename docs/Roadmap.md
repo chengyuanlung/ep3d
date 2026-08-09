@@ -61,7 +61,10 @@ Deferred from the original M4 sketch, now M5+: feature tree and property panel.
 
 Exit criterion: mandatory release gates A-E (rectangle, circle,
 failure/recovery, transformed frames, save/load) pass against real OCCT
-geometry. **MET** — OCCT 8.0.1 + Qt 6.11.1, 297/297 tests in Debug and Release.
+geometry, AND both the functional and UI reviews pass (UI spec 26).
+**Gates MET** — OCCT 8.0.1 + Qt 6.11.1, 322/322 tests in Debug and Release,
+functional review APPROVE 96/100. **UI review outstanding** — last verdict
+REQUEST CHANGES 79/100, findings fixed but not re-reviewed.
 
 ## M5 — Sketch v1
 - Points, lines, circles, arcs.

@@ -33,11 +33,10 @@ Hard rules:
 M3 — Geometry Kernel Adapter & First Parametric Solid — is COMPLETE
 (independent review APPROVE 97/100; see `docs/reviews/M3_CompletionReport.md`).
 
-M4 — Sketch/Profile Foundation, Pad/Extrude & Basic 3D Viewer — is COMPLETE
-(see `docs/reviews/M4_CompletionReport.md`).
-
-Current target: M5 — Sketch Constraints & Dimensional Parameterization (see
-`docs/Roadmap.md`).
+Current target: M4 — Sketch/Profile Foundation, Pad/Extrude & Basic 3D Viewer.
+Implemented and functionally approved (96/100), but NOT complete: the UI review
+last returned REQUEST CHANGES 79/100 and has not been re-run against the fixes.
+See `docs/reviews/M4_CompletionReport.md` for exactly what remains.
 
 ## Independent Review Role
 

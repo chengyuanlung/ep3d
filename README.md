@@ -18,8 +18,11 @@ This starter repository is the architectural foundation for a Windows-first para
 - M3 — Geometry Kernel Adapter & First Parametric Solid (kernel-neutral `IGeometryKernel` in Core, OCCT-backed `Kernel/Occt` adapter, `BoxFeature`/`MassPropertiesNode` real recompute, schema v3): COMPLETE.
 - M4 — Sketch/Profile Foundation, Pad/Extrude & Basic 3D Viewer (stable
   `SketchEntityId`, sketch frames, semantic Profile validation, `PadFeature`
-  through the M2 recompute graph, schema v4, minimal Qt viewer): COMPLETE.
-- M5 — Sketch Constraints & Dimensional Parameterization: NEXT.
+  through the M2 recompute graph, schema v4, Qt application shell):
+  **IN PROGRESS.** Functional review APPROVE 96/100; the UI review's last
+  recorded verdict is REQUEST CHANGES 79/100 and its findings, though fixed,
+  have not been independently re-reviewed. See
+  `docs/reviews/M4_CompletionReport.md`.
 
 `MassProperties` now holds real computed Volume/Mass/COM/Inertia once a `BoxFeature` recomputes through an injected `IGeometryKernel` (see `docs/DecisionLog.md` ADR-M3-002).
 
