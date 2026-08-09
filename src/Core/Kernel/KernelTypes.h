@@ -21,15 +21,25 @@ enum class KernelError {
     MassPropertiesFailed
 };
 
+// Smallest box dimension this kernel boundary accepts, in mm. Strictly
+// positive is not a sufficient test in practice: OCCT rejects degenerate
+// primitives below its own confusion tolerance and signals that by throwing,
+// which would reach callers as a bare "OCCT raised ..." string instead of the
+// structured InvalidDimension the spec-13 contract promises for a bad
+// dimension. 1e-6 mm (one nanometre) sits well above OCCT's threshold and far
+// below any real CAD feature, so it rejects only inputs that were already
+// unusable.
+inline constexpr double kMinBoxDimensionMm = 1e-6;
+
 // The ONE place numeric dimension validation lives (ADR-M3-001): every
 // IGeometryKernel implementation, real or fake, calls this first, so the
 // check exists exactly once. A valid box requires every dimension to be
-// finite and strictly positive (zero, negative, NaN, and infinity are all
-// invalid -- spec 13).
+// finite and at least kMinBoxDimensionMm (zero, negative, NaN, infinity, and
+// degenerate-but-positive values are all invalid -- spec 13).
 inline bool IsValidBoxDefinition(const BoxDefinition& definition) noexcept {
     for (double dimension : {definition.widthMm, definition.heightMm, definition.depthMm}) {
         if (!std::isfinite(dimension)) return false;
-        if (dimension <= 0.0) return false;
+        if (dimension < kMinBoxDimensionMm) return false;
     }
     return true;
 }

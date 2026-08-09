@@ -75,6 +75,37 @@ TEST(OcctGeometryKernelTest, M3_KERNEL_005_ZeroDimensionFails) {
     EXPECT_FALSE(result.shape.isValid());
 }
 
+// kMinBoxDimensionMm exists because OCCT rejects degenerate primitives by
+// throwing, which would escape the structured InvalidDimension contract of
+// spec 13 (ADR-M3-009). The Core-side tests for it use the fake kernel, so
+// this is the only place the threshold is checked against REAL OCCT -- the
+// one that decides whether the chosen value is actually high enough.
+TEST(OcctGeometryKernelTest, M3_KERNEL_010_DegenerateDimensionRejectedBeforeReachingOcct) {
+    OcctGeometryKernel kernel;
+    const ShapeResult justBelow =
+        kernel.createBox(BoxDefinition{kMinBoxDimensionMm * 0.99, 50.0, 20.0});
+    EXPECT_FALSE(justBelow);
+    EXPECT_EQ(justBelow.error, KernelError::InvalidDimension)
+        << "degenerate dimension surfaced as a kernel-internal error: " << justBelow.message;
+    EXPECT_FALSE(justBelow.message.empty());
+
+    // At the threshold OCCT must genuinely succeed, or the constant is too low.
+    const ShapeResult atThreshold =
+        kernel.createBox(BoxDefinition{kMinBoxDimensionMm, 100.0, 50.0});
+    EXPECT_TRUE(atThreshold) << atThreshold.message;
+    EXPECT_TRUE(atThreshold.shape.isValid());
+}
+
+TEST(OcctGeometryKernelTest, M3_KERNEL_011_LargeDimensionSucceeds) {
+    // Spec 23 adversarial check: a large but reasonable dimension (1 km).
+    OcctGeometryKernel kernel;
+    const ShapeResult result = kernel.createBox(BoxDefinition{1.0e6, 1.0e6, 1.0e6});
+    ASSERT_TRUE(result) << result.message;
+    const KernelMassPropertiesResult props = kernel.calculateMassProperties(result.shape);
+    ASSERT_TRUE(props) << props.message;
+    ExpectRel(props.properties.volumeMm3, 1.0e18, kVolumeMassRelTol);
+}
+
 TEST(OcctGeometryKernelTest, M3_KERNEL_006_NegativeDimensionFails) {
     OcctGeometryKernel kernel;
     const ShapeResult result = kernel.createBox(BoxDefinition{-5.0, 50.0, 20.0});
@@ -156,7 +187,11 @@ TEST(OcctGeometryKernelTest, M3_INERTIA_001_DiagonalMatchesAnalyticalFormula) {
     const KernelMassPropertiesResult props = kernel.calculateMassProperties(shape.shape);
     ASSERT_TRUE(props) << props.message;
 
-    const double volumeM3 = props.properties.volumeMm3 * 1e-9;
+    // Expected mass is derived from the DIMENSIONS, not from the kernel's own
+    // reported volume (spec 10: the oracle must be independent). Reusing the
+    // measured volume here would let a wrong volume cancel itself out of the
+    // inertia comparison.
+    const double volumeM3 = (w * h * d) * 1e-9;
     const double massKg = density * volumeM3;
     const double wM = w * 1e-3, hM = h * 1e-3, dM = d * 1e-3;
     const double expectedIxx = massKg / 12.0 * (hM * hM + dM * dM);

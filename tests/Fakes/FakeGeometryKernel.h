@@ -13,6 +13,7 @@
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Kernel/KernelTypes.h"
 #include <memory>
+#include <string>
 #include <utility>
 
 namespace paramcad {
@@ -34,7 +35,8 @@ public:
     ShapeResult createBox(const BoxDefinition& definition) override {
         if (!IsValidBoxDefinition(definition))
             return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
-                               "invalid box definition: dimensions must be finite and positive"};
+                               "invalid box definition: every dimension must be finite and at least " +
+                                   std::to_string(kMinBoxDimensionMm) + " mm"};
         ++createBoxCallCount;
         auto handle = std::make_shared<FakeShapeHandle>(definition);
         return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};

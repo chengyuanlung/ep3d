@@ -34,11 +34,17 @@ public:
     // the density policy (ADR-M3-005: finite and non-negative; zero is
     // valid), and performs the single traceable mm->m unit conversion
     // (ADR-M3-002) before committing into context.document.massProperties().
-    // Commits ONLY on full success (transactional, spec 12): every failure
-    // path returns before touching the document's last valid result.
+    // Commits ONLY on full success (transactional, spec 12): no failure path
+    // overwrites the document's last valid numbers; they only strip the
+    // `valid` flag marking those numbers current (ADR-M3-004).
     RecomputeResult recompute(const RecomputeContext& context) override;
 
 private:
+    // A member rather than a file-local helper so it reads as part of this
+    // node's failure protocol (see the definition for what it does and why the
+    // document-level clear in PartDocument is the primary guarantee).
+    static RecomputeResult failAndMarkStale(const RecomputeContext& context, std::string message);
+
     ObjectId id_;
     ObjectId boxFeatureId_ = kInvalidObjectId;
     ObjectId materialId_ = kInvalidObjectId;

@@ -8,6 +8,8 @@
 #include "Core/Recompute/RecomputeContext.h"
 #include <cmath>
 #include <cstddef>
+#include <string>
+#include <utility>
 #include <variant>
 
 namespace paramcad {
@@ -43,9 +45,24 @@ void MassPropertiesNode::setSource(ObjectId boxFeatureId, ObjectId materialId) n
     materialId_ = materialId;
 }
 
+// Retain the last valid numbers (ADR-M3-004) but strip their currency, so a
+// direct reader of PartDocument::massProperties() can never mistake stale
+// values for a current successful result (spec 2 DoD, spec 13).
+//
+// PartDocument::refreshMassPropertiesCurrency() is the primary guarantee, since
+// it also covers the case where the graph blocks this node and never calls the
+// code below. This is the defense-in-depth half, covering a direct/out-of-band
+// recompute(context) call outside a graph pass -- the same reasoning as the
+// upstream-state check in recompute().
+RecomputeResult MassPropertiesNode::failAndMarkStale(const RecomputeContext& context,
+                                                     std::string message) {
+    context.document.massProperties().valid = false;
+    return {RecomputeStatus::Failed, std::move(message)};
+}
+
 RecomputeResult MassPropertiesNode::recompute(const RecomputeContext& context) {
     BoxFeature* box = resolveBoxFeature(context.registry, boxFeatureId_);
-    if (box == nullptr) return {RecomputeStatus::Failed, "no box feature configured"};
+    if (box == nullptr) return failAndMarkStale(context, "no box feature configured");
 
     // Defense in depth (ADR-M3-004): the graph normally blocks this node with
     // BlockedByDependency before it is even invoked whenever the box failed
@@ -54,7 +71,7 @@ RecomputeResult MassPropertiesNode::recompute(const RecomputeContext& context) {
     // outside a graph pass), satisfying "failed build cannot expose
     // dangling/partial shape" beyond what the graph alone guarantees.
     if (box->state() != ComputeState::Valid)
-        return {RecomputeStatus::Failed, "upstream BoxFeature is not valid"};
+        return failAndMarkStale(context, "upstream BoxFeature is not valid");
 
     // Density policy (ADR-M3-005, spec 13): zero density is valid (a
     // real, useful "no mass assigned" CAD state); negative/non-finite must
@@ -62,17 +79,17 @@ RecomputeResult MassPropertiesNode::recompute(const RecomputeContext& context) {
     double densityKgPerM3 = 0.0;
     if (materialId_ != kInvalidObjectId) {
         Material* material = resolveMaterial(context.registry, materialId_);
-        if (material == nullptr) return {RecomputeStatus::Failed, "material not found"};
+        if (material == nullptr) return failAndMarkStale(context, "material not found");
         densityKgPerM3 = material->density();
     }
     if (!std::isfinite(densityKgPerM3) || densityKgPerM3 < 0.0)
-        return {RecomputeStatus::Failed, "invalid density: must be finite and non-negative"};
+        return failAndMarkStale(context, "invalid density: must be finite and non-negative");
 
     if (context.kernel == nullptr)
-        return {RecomputeStatus::Failed, "no geometry kernel configured"};
+        return failAndMarkStale(context, "no geometry kernel configured");
     const KernelMassPropertiesResult kmpResult =
         context.kernel->calculateMassProperties(box->currentShape());
-    if (!kmpResult) return {RecomputeStatus::Failed, kmpResult.message};
+    if (!kmpResult) return failAndMarkStale(context, kmpResult.message);
 
     // Single traceable unit-conversion site (ADR-M3-002): production code
     // must never multiply densityKgPerM3 by a raw mm^3/mm^5 value without
@@ -90,9 +107,10 @@ RecomputeResult MassPropertiesNode::recompute(const RecomputeContext& context) {
         result.inertiaTensorKgM2.m[i] = densityKgPerM3 * kmp.secondMomentMm5.m[i] * kMm5ToM5;
     result.valid = true;
 
-    // Commit only on full success (transactional, spec 12): every failure
-    // path above returns before touching the document's last valid result,
-    // exactly mirroring BoxFeature::currentShape_'s retention policy.
+    // Commit only on full success (transactional, spec 12): no failure path
+    // above overwrites the document's last valid NUMBERS, exactly mirroring
+    // BoxFeature::currentShape_'s retention policy -- they only strip the
+    // `valid` flag that marks those numbers as current (ADR-M3-004).
     context.document.massProperties() = result;
     return {RecomputeStatus::Success, {}};
 }

@@ -129,6 +129,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/BoxFeatureTests.cpp
         tests/MassPropertiesNodeTests.cpp
         tests/SerializationV3Tests.cpp
+        tests/M3ReviewFindingTests.cpp
         tests/SerializationTests.cpp
     )
     target_link_libraries(ParametricCADCoreTests PRIVATE ParametricCADCore GTest::gtest_main)
@@ -156,6 +157,16 @@ if(PARAMCAD_BUILD_TESTS)
         if(MSVC)
             target_compile_options(ParametricCADKernelOcctTests PRIVATE /utf-8)
         endif()
-        gtest_discover_tests(ParametricCADKernelOcctTests)
+        # DISCOVERY_MODE PRE_TEST is required here, unlike for
+        # ParametricCADCoreTests above. gtest_discover_tests' default
+        # POST_BUILD mode RUNS the freshly linked executable to enumerate its
+        # tests, but this target needs the OCCT DLLs that vcpkg's
+        # VCPKG_APPLOCAL_DEPS copies next to the binary in its own POST_BUILD
+        # step -- on a clean build the enumeration runs before those DLLs are
+        # in place and the whole build fails (MSB3073). PRE_TEST defers
+        # enumeration to ctest time, when the DLLs are guaranteed present.
+        # ParametricCADCoreTests links no DLL-carrying dependency, so it keeps
+        # the default mode.
+        gtest_discover_tests(ParametricCADKernelOcctTests DISCOVERY_MODE PRE_TEST)
     endif()
 endif()

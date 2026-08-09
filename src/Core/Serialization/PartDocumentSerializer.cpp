@@ -259,11 +259,45 @@ LoadResult loadFailure(SerializationError error, std::string message) {
     return LoadResult{nullptr, error, std::move(message)};
 }
 
+// Save/load symmetry guard: anything savePartDocument accepts must be
+// loadable. The load path rejects a BoxFeature whose widthParameterId /
+// heightParameterId / depthParameterId is not a parameter in the file, but the
+// save path used to write those ids unchecked -- so removing a Parameter that a
+// BoxFeature still references (reachable through the public
+// PartDocument::removeObject) produced a file that saved cleanly and then
+// failed to load forever, with the only copy of the data already overwritten.
+//
+// Failing the save instead surfaces the dangling reference while the in-memory
+// document is still intact and repairable. The message deliberately mirrors the
+// load-side wording so the two report the same defect recognisably.
+SaveResult validateSaveable(const PartDocument& document) {
+    std::unordered_set<ObjectId> parameterIds;
+    for (const auto& parameter : document.parameters().items())
+        parameterIds.insert(parameter->id());
+
+    for (const auto& body : document.bodies()) {
+        for (const auto& feature : body->features()) {
+            const auto* box = dynamic_cast<const BoxFeature*>(feature.get());
+            if (box == nullptr) continue;
+            for (ObjectId referenced :
+                 {box->widthParameterId(), box->heightParameterId(), box->depthParameterId()}) {
+                if (parameterIds.count(referenced) != 0) continue;
+                return SaveResult{SerializationError::UnknownDependencyId,
+                                  "feature " + idToString(box->id()) + " (" + box->name() +
+                                      "): box parameter id " + idToString(referenced) +
+                                      " is not a parameter in this document"};
+            }
+        }
+    }
+    return SaveResult{};
+}
+
 } // namespace
 
 // --- public API -------------------------------------------------------------
 
 SaveResult savePartDocument(const PartDocument& document, std::ostream& out) {
+    if (const SaveResult invalid = validateSaveable(document); !invalid) return invalid;
     const std::string text = writeJson(toJson(document));
     out << text << '\n';
     if (!out.good())

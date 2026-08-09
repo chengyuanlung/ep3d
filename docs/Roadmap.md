@@ -35,7 +35,7 @@ Exit criterion: change a Parameter and only its dependent nodes recompute, in or
 - Exact Volume, Mass, COM, and inertia tensor (kg·m²) with a single traceable mm→m conversion site; invalid dimensions/density fail transactionally (last valid shape retained, marked stale) and recover deterministically.
 - Schema v3 persists BoxFeature/Material semantic records; Feature-owned and MassPropertiesNode edges are always re-derived from semantic id fields on load (never replayed from the generic edge list).
 
-Exit criterion: change Width and receive rebuilt mass properties through real OCCT geometry — proven by the release-gate scenario test (spec §19).
+Exit criterion: change Width and receive rebuilt mass properties through real OCCT geometry — proven by the release-gate scenario test (spec §19). **MET** — OCCT 8.0.1, 180/180 tests in Debug and Release, independent review APPROVE 97/100.
 
 ## M4 — Qt viewer
 - Qt Widgets shell.

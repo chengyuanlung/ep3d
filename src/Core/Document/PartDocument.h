@@ -87,6 +87,13 @@ public:
     bool setMaterialDensity(double densityKgPerM3);
     const std::shared_ptr<Material>& material() const noexcept { return material_; }
 
+    // NOTE: the non-const overload lets any caller overwrite derived state,
+    // which sits awkwardly with "mutation goes through the facade" below.
+    // MassPropertiesNode is its only legitimate writer. Left public
+    // deliberately: every read through a non-const PartDocument selects this
+    // overload too, so restricting it churns ~20 unrelated call sites for no
+    // behavioural gain. Candidate M4 cleanup alongside the ADR-M3-004
+    // Feature/IRecomputable collapse.
     MassProperties& massProperties() noexcept { return massProperties_; }
     const MassProperties& massProperties() const noexcept { return massProperties_; }
 
@@ -147,6 +154,16 @@ private:
     void wireBoxFeature(BoxFeature& feature, ObjectId widthParameterId,
                        ObjectId heightParameterId, ObjectId depthParameterId,
                        ObjectId materialId);
+
+    // Clears massProperties_.valid when the mass-properties node did not
+    // succeed in the pass that produced `report`, so retained numbers can
+    // never read as current. See the definition for why this must live at
+    // document level rather than inside the node.
+    void refreshMassPropertiesCurrency(const DocumentRecomputeReport& report) noexcept;
+
+    // Demotes any Feature whose cached state() claims Valid while the graph
+    // (the source of truth) disagrees. See the definition.
+    void syncFeatureStatesFromGraph() noexcept;
 
     ParameterManager parameters_;
     std::vector<std::unique_ptr<Body>> bodies_;

@@ -218,6 +218,10 @@ TEST(IntegrationTest, M3_GATE_ReleaseScenario) {
     for (const auto& item : failedReport.items)
         if (!item.message.empty()) sawDiagnostic = true;
     EXPECT_TRUE(sawDiagnostic);
+    // "Downstream blocked / not current" at the DATA level, not just in the
+    // report (spec 2 DoD, ADR-M3-006): the retained numbers must stop claiming
+    // to be current, or a reader of massProperties() cannot tell they are stale.
+    EXPECT_FALSE(fx.document.massProperties().valid);
 
     // D -- Width -> 80. Expect recovery: Volume=80000mm^3,
     // Mass=0.628kg at density 7850.

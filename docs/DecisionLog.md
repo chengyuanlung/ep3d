@@ -170,3 +170,140 @@ Schema v3. Persists semantics only (spec 15); extends ADR-012's hybrid policy wi
 - Do not persist: `TopoDS_Shape`, `KernelShape`, `IShapeHandle`, any `Kernel/Occt` runtime state, `MassProperties` computed values (still purely derived, ADR-009 D6, now finally populated by real computation instead of a stub).
 - After load: `restoreBoxFeature`'s wiring means the graph is fully reconstructed and every node starts Dirty — the very next `recompute()` call rebuilds equivalent geometry from the restored Parameters/Material, satisfying spec 15's "recompute geometry after load" without any special-cased load-time geometry rebuild.
 - Schema version bumped to 3 (written on save); the loader still accepts v1 and v2 files.
+
+## ADR-M3-006 — Currency vs retention for derived results (M3, post-review)
+Status: Accepted
+
+Raised as Major finding 1 by the M3 independent review: `MassProperties::valid`
+was set `true` on first success and never cleared, so after a geometry failure
+the document still exposed `valid=1` with the previous numbers — failing spec 2's
+"downstream current results do not falsely succeed" at the data level even though
+the recompute *report* correctly said failure.
+
+ADR-M3-001/004 established **retention**: a failed rebuild keeps the last valid
+result rather than destroying it. That policy is unchanged and still right. What
+was missing is its other half: retained data must not claim to be current.
+
+- **Retention and currency are separate properties.** For `BoxFeature` the two are
+  already separated: `currentShape_` is retained, and currency is carried by
+  `ComputeState`, which every consumer reaches through the graph.
+  `MassProperties` has no such wrapper — `PartDocument::massProperties()` hands
+  out a plain struct, so its own `valid` flag is the only currency signal a
+  reader ever sees, and it must be maintained with the same discipline.
+- **The clear must happen at document level.** `PartDocument::refreshMassPropertiesCurrency()` inspects the engine report after every `recompute()`/
+  `recomputeFrom()` and clears `valid` if the mass node did not succeed. Doing
+  this only inside `MassPropertiesNode::recompute()` cannot work: when the
+  upstream box fails, the graph blocks the node with `BlockedByDependency` and
+  never invokes it, so no code inside the node runs at all. The node's own
+  failure paths (via `failAndMarkStale`) clear the flag as defense in depth for
+  direct out-of-band calls, mirroring the existing upstream-state check.
+- **A node absent from the report was not touched**, so its previous currency
+  stands. Only nodes that actually ran, or were actually blocked, are affected.
+- General rule for future derived results: whenever a value is retained past a
+  failure, the same commit must define how a reader learns it is stale. If the
+  value is not reached through something carrying `ComputeState`, it needs its
+  own currency flag, and that flag needs a clearing path on every failure route
+  including the ones where the producing code never executes.
+
+## ADR-M3-007 — Cached Feature state is derived, never authoritative (M3, post-review)
+Status: Accepted
+
+Raised as Major finding 2. ADR-M3-004 declared the graph's `ComputeState` the
+sole scheduling source of truth and `Feature::state_` a manually-synchronized
+cache, but nothing kept the cache honest: `Feature::markDirty()` had **zero
+callers** anywhere in `src/`. Two observable falsehoods followed — a restored
+feature read `Valid` while holding no runtime shape (ComputeState is persisted,
+`KernelShape` deliberately is not, ADR-M3-005), and a feature kept reading
+`Valid` after a parameter edit had superseded its geometry.
+
+- `PartDocument::syncFeatureStatesFromGraph()` demotes any feature whose cached
+  `state()` claims `Valid` while the graph disagrees. Called from every path that
+  can invalidate: `setParameterValue`, `setMaterialDensity`, `markDirty`,
+  `wireBoxFeature` (covering restore), `recompute`, `recomputeFrom`.
+- **Only false `Valid` is corrected, and only ever downward to `Dirty`.** `Failed`
+  is never manufactured by the sync: a feature is `Failed` solely because its own
+  `recompute()` ran and reported failure. This keeps ADR-M3-004's rule that a
+  feature's own recompute is the only writer of `Failed` intact.
+- The asymmetry is deliberate and worth stating: a cache that wrongly says
+  "needs recompute" costs one redundant recompute, while a cache that wrongly
+  says "valid" hands out superseded geometry. Only the second is a correctness
+  bug, so the sync is one-directional.
+- Persisting `ComputeState` while deliberately not persisting the runtime shape
+  means a restored `Valid` is **always** unearned. Rather than special-case the
+  loader, `wireBoxFeature` runs the same sync every other path uses: the fresh
+  graph node starts `Dirty`, so the demotion falls out of the general rule.
+- **SCOPE — the sync applies only to features that are graph nodes.** As of M3
+  features are heterogeneous: `BoxFeature` is the first and so far only type that
+  joins the dependency graph (via `wireBoxFeature`), while `PlaceholderFeature`
+  is Body-owned and never registered. A feature outside the graph has no graph
+  state that could be authoritative over it — its `ComputeState` is owned by
+  whoever drives it and is persisted verbatim, so rewriting it would corrupt a
+  lossless round-trip. `syncFeatureStatesFromGraph()` therefore skips any feature
+  with no graph node, and that is a semantic rule, not a defensive check.
+- **How this was learned (recorded because the pattern will recur).** The first
+  version of the sync called `graph_.state()` for every cached-`Valid` feature.
+  `DependencyGraph::state()` asserts on an unknown id, so a document holding a
+  `Valid` `PlaceholderFeature` **aborted the process in Debug** — including
+  inside `loadPartDocument` itself — and in Release silently demoted the
+  placeholder, making Debug and Release disagree about document semantics. It
+  was caught by independent re-review, not by the 174-test suite, because every
+  existing test either used a Box-only document or never recomputed after
+  creating a placeholder.
+- This was the **second** defect from the same assumption that every `Feature`
+  behaves like a `BoxFeature`; the first was the stale "Feature*: not registered"
+  comment in `removeObject` (ADR-M3-008). M4 will add more feature types, so any
+  code iterating `Body::features()` must state which kinds of feature it applies
+  to before it touches one.
+
+## ADR-M3-008 — Removal completeness and save/load symmetry (M3, post-review)
+Status: Accepted
+
+Raised as Major findings 3 and 4. Both are the same class of defect — an
+operation that reported success while leaving the document in a state its own
+invariants reject.
+
+- **Removal must reach every owner.** `PartDocument::removeObject` cleaned up the
+  graph and registry but had no case for a Body-owned `Feature`, because in M2
+  features were not registered at all. Since M3 a `BoxFeature` registers under
+  the `IRecomputable*` variant while still being owned by its `Body`, so the
+  pre-existing "Feature*: not registered" comment had quietly become false.
+  The feature survived removal: still serialized, still restored on load, and
+  still the mass node's source, which then failed every subsequent recompute
+  forever with "no box feature configured". Fixed with `Body::removeFeature` plus
+  an `IRecomputable*` case that detaches `massPropertiesNode_` FIRST (it holds
+  the id by value, so leaving it set would point it at a destroyed object).
+- **Save must accept exactly what load accepts.** The loader rejects a BoxFeature
+  whose W/H/D parameter ids are not parameters in the file; the save path wrote
+  those ids unchecked. Removing a referenced Parameter therefore produced a file
+  that saved cleanly and could never be loaded again — potentially over the only
+  copy of the data. `validateSaveable()` applies the symmetric check before
+  writing, so the dangling reference surfaces while the in-memory document is
+  still intact and repairable.
+- General rule: any validation the load path enforces is an invariant of the
+  format, and the save path must enforce it too. A one-sided check does not
+  prevent a bad document — it only defers the failure to the point where the
+  data is already lost.
+
+## ADR-M3-009 — Minimum accepted box dimension (M3, post-review)
+Status: Accepted
+
+`IsValidBoxDefinition` originally accepted any finite, strictly positive
+dimension. That is not sufficient in practice: OCCT rejects degenerate
+primitives below its own confusion tolerance by throwing, so a positive-but-
+degenerate input (say 1e-12 mm) escaped the structured `InvalidDimension`
+contract of spec 13 and surfaced instead as an unstructured "OCCT raised ..."
+string — a kernel-internal error where the spec promises a dimension error.
+
+- `kMinBoxDimensionMm = 1e-6` (one nanometre), checked in `IsValidBoxDefinition`
+  so it applies to every kernel implementation, real or fake, exactly like the
+  finiteness and sign checks (ADR-M3-001's single-validation-site rule).
+- The value sits far above OCCT's rejection threshold and far below any real CAD
+  feature, so it rejects only inputs that were already unusable. Verified against
+  real OCCT during review: 1e-6 mm is accepted, 9.9e-7 mm is rejected, and a
+  mixed 1e-6 x 100 x 50 box builds correctly.
+- Upper end: no maximum is imposed. 1e6 mm (1 km) and beyond build without
+  incident, and no CAD-meaningful upper bound presented itself that would not be
+  arbitrary.
+- The diagnostic strings in both kernels were updated at the same time: they
+  previously said "must be finite and positive", which became false the moment
+  this threshold existed — 9.9e-7 is finite and positive and rejected.
