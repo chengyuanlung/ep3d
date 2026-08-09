@@ -165,30 +165,34 @@ first UI self-validation report marked it NOT EXECUTED.
 
 ## Failure / recovery through the UI
 
-**NOT EXECUTED.** The owner chose not to run this group. No PASS is inferred for
-it, and nothing elsewhere in this report substitutes for it.
+`--sample m4-rectangle`, Pad001 selected, three values typed into the
+`Geometry / Length` field.
 
-What it would have covered (guide §11): typing `-5` into the Pad Length field
-(expect Failed, solid gone, `not current`), typing `abc` (expect rejection with
-a message and the committed value restored), then typing `20` (expect full
-recovery to 100000 mm³).
+| Input | Expected | Result |
+|---|---|---|
+| `-5` | Pad turns Failed, solid disappears, status shows `not current` | **PASS** |
+| `abc` | Rejected, status says it is not a number, field restored | **PASS** |
+| `20` | Full recovery — solid returns, Volume back to 100000 mm³ | **PASS** |
 
-What *is* covered by other evidence, and what is not:
+| Check | Result |
+|---|---|
+| Negative value rejected and marked failed | **PASS** |
+| Non-numeric rejected with a message | **PASS** |
+| Editing back to a valid value recovers completely | **PASS** |
+| No crash | **PASS** |
 
-- The underlying failure and recovery **semantics** are verified automatically
-  and by Sample B: `M4_PAD_022` drives four invalid Pad lengths
-  (0 / negative / NaN / infinity) and asserts the feature fails and the mass
-  result stops being current; `M4_PAD_021` and Gate C verify deterministic
-  recovery; Sample B confirmed by observation that a failed state cannot be made
-  to look current through four different viewer actions.
-- What remains unobserved is specifically the **UI input path**: whether typing
-  an invalid value into the Property Panel is rejected sensibly, whether the
-  message is understandable, and whether a recovering edit restores the display.
-  The commit path is asserted by `UI_PROP_001` and the non-numeric branch exists
-  in `MainWindow::onPropertyCommitted`, but no one has typed into that field and
-  looked at the result.
+**Failure / recovery: PASS.** Reported by the project owner.
 
-This is a gap in observation, not a known defect.
+Notes: this closes the one group the owner had initially set aside. It is the
+UI-input counterpart to what the automated tests already cover — `M4_PAD_022`
+drives four invalid Pad lengths (0 / negative / NaN / infinity) and asserts the
+feature fails and the mass result stops being current, and `M4_PAD_021` and
+Gate C verify deterministic recovery. What the automated tests could not show is
+whether the *input path* behaves sensibly: whether a bad value is refused
+legibly and whether a good one restores the display. Both are now observed.
+
+Guide §11's prohibitions all hold: no crash, no NaN rendered as ordinary
+geometry, no wrong solid marked as current success, and no silent failure.
 
 ---
 
@@ -249,23 +253,26 @@ to OCCT unconverted (ADR-M4-015). It is fixed, and its confirmation is the
 | Selection synchronization | **PASS** |
 | Viewer — Show/Hide, rotate, pan, zoom, fit | **PASS** |
 | DPI / layout — 100% and 200% | **PASS** |
+| Failure / recovery through the UI | **PASS** |
 | DPI — 150% | **NOT EXECUTED** |
-| Failure / recovery through the UI | **NOT EXECUTED** |
 
-Six groups passed by direct observation. Two were not executed and are recorded
+Seven groups passed by direct observation. One was not executed and is recorded
 as such rather than inferred.
 
 ---
 
 ## User Validation Result
 
-**ACCEPTED WITH ONE UNOBSERVED GROUP.**
+**ACCEPTED.**
 
-Everything the owner exercised passed, including all four Critical conditions
-and the 200%-scaling picking behaviour that no amount of agent-driven testing on
-the 100% display could have reached. The failure/recovery input path was not
-exercised; its underlying semantics are covered by automated tests, but the UI
-path itself is unobserved and is not claimed as passing.
+Every group the guide defines for M4 was exercised and passed, including all
+four of UI spec §24's Critical conditions, the failure/recovery input path, and
+the 200%-scaling picking behaviour that no amount of agent-driven testing on the
+100% display could have reached.
+
+The single item not executed is display scaling at 150%. 100% and 200% both
+passed, and they bracket it — but that is an argument, not a measurement, and it
+is recorded as NOT EXECUTED rather than inferred.
 
 Validated by: **project owner, manual validation.**
 

@@ -12,7 +12,7 @@
 **M4 NOT COMPLETE.**
 
 Every functional gate passes, the functional review approved the work, and
-owner manual validation of the UI passed six of eight groups with no Critical
+owner manual validation of the UI passed seven of eight groups with no Critical
 and no Major findings. The UI gate still does not pass on the terms the spec
 sets: the last recorded *independent* UI verdict is **REQUEST CHANGES,
 79/100**. Its four Major findings have been fixed and each is covered by
@@ -167,7 +167,7 @@ The reviewer also executed four of six items the self-validation report had
 marked NOT EXECUTED, and measured two of its claims as false. Both corrections
 are recorded in revision 2 of that report.
 
-### UI — user-assisted validation: performed, six of eight groups
+### UI — user-assisted validation: performed, seven of eight groups
 
 `docs/reviews/M4_UI_UserValidation.md`, following the workflow in
 `docs/M5_UI_User_Assisted_Validation_Guide.md`. The project owner operated the
@@ -181,13 +181,14 @@ instructions and expected values, and recorded the observations.
 | Sample D — circle dimensional ratio | PASS |
 | Selection synchronization | PASS |
 | Viewer — Show/Hide, rotate, pan, zoom, fit | PASS |
+| Failure / recovery through the UI | PASS |
 | DPI 100% and 200% | PASS |
 | DPI 150% | NOT EXECUTED |
-| Failure / recovery through the UI | NOT EXECUTED |
 
-Result: **ACCEPTED WITH ONE UNOBSERVED GROUP.** No Critical and no Major user
-findings. All four of UI spec §24's Critical conditions were tested and none
-reproduced.
+Result: **ACCEPTED.** No Critical and no Major user findings. All four of UI
+spec §24's Critical conditions were tested and none reproduced. The only item
+not executed is 150% display scaling; 100% and 200% both passed and bracket it,
+but that is an argument rather than a measurement.
 
 This confirms by observation the behaviours the four independent-review Majors
 concerned, and — uniquely — picking accuracy at **200% display scaling**, which
@@ -261,8 +262,8 @@ suggested the command was broken; the toolbar button worked, which separated
    behaviours by observation, which is strong evidence but is explicitly not the
    review UI spec §28 requires.
 2. Update this report with that verdict.
-3. Optionally close the two NOT EXECUTED user-validation groups (150% scaling;
-   the failure/recovery input path).
+3. Optionally close the one NOT EXECUTED user-validation group (150% display
+   scaling).
 4. Set README / AGENTS / Roadmap to COMPLETE. They were prematurely set to
    COMPLETE earlier and have been corrected back to IN PROGRESS.
 5. Squash `m4-wip` into a milestone commit on `master`, in the style of M1–M3.
