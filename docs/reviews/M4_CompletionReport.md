@@ -11,9 +11,11 @@
 
 **M4 NOT COMPLETE.**
 
-Every functional gate passes and the functional review approved the work. The UI
-gate does not pass: the last recorded independent UI verdict is **REQUEST
-CHANGES, 79/100**. Its four Major findings have been fixed and each is covered by
+Every functional gate passes, the functional review approved the work, and
+owner manual validation of the UI passed six of eight groups with no Critical
+and no Major findings. The UI gate still does not pass on the terms the spec
+sets: the last recorded *independent* UI verdict is **REQUEST CHANGES,
+79/100**. Its four Major findings have been fixed and each is covered by
 a regression test, but **no independent reviewer has verified those fixes** — the
 re-review was stopped by decision before it ran.
 
@@ -149,7 +151,7 @@ beyond what actually happened.
 
 Final: **APPROVE, 96/100.** §34 functional gate: every line passes.
 
-### UI — one round, not re-reviewed
+### UI — independent review: one round, not re-reviewed
 
 | Round | Decision | Score | Findings |
 |---|---|---|---|
@@ -159,11 +161,40 @@ Final: **APPROVE, 96/100.** §34 functional gate: every line passes.
 The four Majors — no viewer highlight on tree selection; a deselection dead end;
 no Show/Hide command (the automatic REQUEST CHANGES trigger); the root row
 permanently reading "Not computed" — are fixed, each with a regression test.
-**That is the developer's account and has not been independently verified.**
+**No independent reviewer has verified those fixes.**
 
 The reviewer also executed four of six items the self-validation report had
 marked NOT EXECUTED, and measured two of its claims as false. Both corrections
 are recorded in revision 2 of that report.
+
+### UI — user-assisted validation: performed, six of eight groups
+
+`docs/reviews/M4_UI_UserValidation.md`, following the workflow in
+`docs/M5_UI_User_Assisted_Validation_Guide.md`. The project owner operated the
+application; the agent supplied deterministic samples, step-by-step
+instructions and expected values, and recorded the observations.
+
+| Group | Result |
+|---|---|
+| Sample A — rectangle Pad, numeric edit | PASS |
+| Sample B — failed profile visibility | PASS |
+| Sample D — circle dimensional ratio | PASS |
+| Selection synchronization | PASS |
+| Viewer — Show/Hide, rotate, pan, zoom, fit | PASS |
+| DPI 100% and 200% | PASS |
+| DPI 150% | NOT EXECUTED |
+| Failure / recovery through the UI | NOT EXECUTED |
+
+Result: **ACCEPTED WITH ONE UNOBSERVED GROUP.** No Critical and no Major user
+findings. All four of UI spec §24's Critical conditions were tested and none
+reproduced.
+
+This confirms by observation the behaviours the four independent-review Majors
+concerned, and — uniquely — picking accuracy at **200% display scaling**, which
+no agent-driven test on the 100% secondary display could have reached.
+
+**This is owner manual validation and is NOT an independent agent review**
+(guide §4, §18). It does not substitute for the UI re-review.
 
 ---
 
@@ -225,12 +256,16 @@ suggested the command was broken; the toolbar button worked, which separated
 
 ## What remains before M4 can be declared complete
 
-1. Independent UI re-review of the four fixed Majors, reaching ≥ 80 with no
-   unresolved Major.
+1. **Independent UI re-review** of the four fixed Majors, reaching ≥ 80 with no
+   unresolved Major. User-assisted validation has since confirmed the same
+   behaviours by observation, which is strong evidence but is explicitly not the
+   review UI spec §28 requires.
 2. Update this report with that verdict.
-3. Set README / AGENTS / Roadmap to COMPLETE — **they are currently premature
-   and say M4 is complete; that is wrong and should be corrected either way.**
-4. Squash `m4-wip` into a milestone commit on `master`, in the style of M1–M3.
+3. Optionally close the two NOT EXECUTED user-validation groups (150% scaling;
+   the failure/recovery input path).
+4. Set README / AGENTS / Roadmap to COMPLETE. They were prematurely set to
+   COMPLETE earlier and have been corrected back to IN PROGRESS.
+5. Squash `m4-wip` into a milestone commit on `master`, in the style of M1–M3.
 
 ---
 

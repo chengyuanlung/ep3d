@@ -27,27 +27,59 @@ using namespace paramcad;
 
 namespace {
 
-// The mandatory release-gate A model: a 100 x 50 rectangle padded 20 mm in
-// aluminium, so the viewer opens on something whose correct values are known.
+// Deterministic validation samples (M5 UI guide 2: a generator is acceptable in
+// place of committed sample files, provided anyone can reproduce them without
+// relying on the developer modelling by hand).
+//
+// These are M4-shaped. The guide's samples B and C assume under-constrained and
+// conflicting states, which are M5 concepts and do not exist yet; its Test A
+// edits sketch Width, which M4's UI does not expose (only the Pad Length
+// Parameter is editable). Each substitute below exercises the same property the
+// original was checking, using something M4 can actually do.
+enum class Sample {
+    Rectangle,      // A: 100 x 50 padded 20, aluminium
+    FailedProfile,  // B: the same rectangle with one side missing
+    CircleR10,      // D1: r = 10 padded 30
+    CircleR20       // D2: r = 20 padded 30 -- volume must be 4x D1
+};
+
 struct DemoModel {
     PartDocument document{"ViewerDemo"};
     OcctGeometryKernel kernel;
     Parameter* padLength = nullptr;
     PadFeature* pad = nullptr;
 
-    DemoModel() {
+    explicit DemoModel(Sample sample) {
         document.setGeometryKernel(&kernel);
         document.addMaterial("Aluminium", 2700.0);
-        padLength = &document.addParameter("PadLength", 20.0, UnitType::Millimeter);
+
+        const bool circle = sample == Sample::CircleR10 || sample == Sample::CircleR20;
+        padLength = &document.addParameter("PadLength", circle ? 30.0 : 20.0,
+                                           UnitType::Millimeter);
         Sketch& sketch = document.addSketch("Sketch001");
-        sketch.addLine(Vec2{0, 0}, Vec2{100, 0});
-        sketch.addLine(Vec2{100, 0}, Vec2{100, 50});
-        sketch.addLine(Vec2{100, 50}, Vec2{0, 50});
-        sketch.addLine(Vec2{0, 50}, Vec2{0, 0});
+
+        if (circle) {
+            sketch.addCircle(Vec2{0, 0}, sample == Sample::CircleR10 ? 10.0 : 20.0);
+        } else {
+            sketch.addLine(Vec2{0, 0}, Vec2{100, 0});
+            sketch.addLine(Vec2{100, 0}, Vec2{100, 50});
+            if (sample != Sample::FailedProfile)
+                sketch.addLine(Vec2{100, 50}, Vec2{0, 50});
+            sketch.addLine(Vec2{0, 50}, Vec2{0, 0});
+        }
+
         Body& body = document.addBody("Body001");
         pad = &document.addPadFeature(body, "Pad001", sketch.id(), padLength->id());
     }
 };
+
+Sample SampleFromName(const char* name) {
+    if (name == nullptr) return Sample::Rectangle;
+    if (std::strcmp(name, "m4-failed-profile") == 0) return Sample::FailedProfile;
+    if (std::strcmp(name, "m4-circle-r10") == 0) return Sample::CircleR10;
+    if (std::strcmp(name, "m4-circle-r20") == 0) return Sample::CircleR20;
+    return Sample::Rectangle;
+}
 
 } // namespace
 
@@ -70,8 +102,11 @@ int main(int argc, char** argv) {
     // screenshot set (UI spec 16) captures real application states rather than
     // mock-ups. Each name matches a UI-0xx entry in the self-validation report.
     const char* scenario = nullptr;
-    for (int i = 1; i + 1 < argc; ++i)
+    const char* sampleName = nullptr;
+    for (int i = 1; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--scenario") == 0) scenario = argv[i + 1];
+        if (std::strcmp(argv[i], "--sample") == 0) sampleName = argv[i + 1];
+    }
 
     // --dark: apply a dark palette so the alternate-theme smoke test
     // (UI spec 14/21) exercises the real widgets rather than asserting that
@@ -99,7 +134,7 @@ int main(int argc, char** argv) {
     // The document and kernel are owned HERE, not by any Qt object
     // (ADR-M4-006, UI spec 20): Qt presentation objects never own the semantic
     // CAD model, and both outlive the window they are displayed in.
-    auto model = std::make_unique<DemoModel>();
+    auto model = std::make_unique<DemoModel>(SampleFromName(sampleName));
     DocumentPresenter presenter(model->document);
     presenter.recomputeForDisplay();
 
@@ -107,7 +142,7 @@ int main(int argc, char** argv) {
     // is genuinely the state the name claims -- not a screenshot taken during a
     // transition.
     if (scenario != nullptr) {
-        if (std::strcmp(scenario, "failed-profile") == 0) {
+        if (std::strcmp(scenario, "failed-profile") == 0 && sampleName == nullptr) {
             // Break the rectangle: remove one side. Pad fails, and the tree and
             // status bar must say so.
             const ObjectId sketchId = model->document.sketches().front()->id();
@@ -146,13 +181,33 @@ int main(int argc, char** argv) {
         if (!window.isVisible()) fail("main window is not visible");
         if (window.width() < 800 || window.height() < 500) fail("main window is undersized");
         // The document produced a solid and the viewer is willing to show it.
-        if (presenter.displayableSolids().size() != 1)
+        if (SampleFromName(sampleName) != Sample::FailedProfile &&
+            presenter.displayableSolids().size() != 1)
             fail("expected exactly one displayable solid");
         // Mass properties are current and match the analytical oracle, so the
         // status bar cannot be showing stale or wrong numbers.
+        // The expected volume depends on which sample was built, so the check
+        // is a real oracle for each rather than one hardcoded number that only
+        // happens to hold for the default.
+        const Sample built = SampleFromName(sampleName);
+        const double kPi = 3.14159265358979323846;
+        double expectedVolume = 100000.0;                 // 100 x 50 x 20
+        if (built == Sample::CircleR10) expectedVolume = kPi * 100.0 * 30.0;
+        if (built == Sample::CircleR20) expectedVolume = kPi * 400.0 * 30.0;
+
         const MassProperties& mp = model->document.massProperties();
-        if (!mp.valid) fail("mass properties are not current");
-        if (std::fabs(mp.volumeMm3 - 100000.0) > 1e-6) fail("volume is not 100000 mm^3");
+        if (built == Sample::FailedProfile) {
+            // This sample is SUPPOSED to fail: an open profile must leave the
+            // document reporting no current mass and nothing to draw.
+            if (mp.valid) fail("a broken profile still reports current mass properties");
+            if (!presenter.displayableSolids().empty())
+                fail("a broken profile still offers a solid to draw");
+        } else {
+            if (!mp.valid) fail("mass properties are not current");
+            if (std::fabs(mp.volumeMm3 - expectedVolume) >
+                1e-6 * std::max(1.0, expectedVolume))
+                fail("volume does not match the sample's analytical value");
+        }
         // Selection round-trips through the shell by ObjectId.
         window.selectObject(model->pad->id());
         if (window.selectedObjectId() != model->pad->id()) fail("selection did not round-trip");
