@@ -25,8 +25,10 @@ class IRecomputable;
 class ObjectRegistry {
 public:
     // Sketch* joins in M4: a Sketch is a document object that participates in
-    // the dependency graph as a dirty source, exactly like Parameter and
-    // Material (ADR-M4-005).
+    // the dependency graph (ADR-M4-005) -- as a dirty source in M4, and as a
+    // recomputable node since M5. It stays registered under its own concrete
+    // alternative in both cases; findRecomputable below derives the capability
+    // from the type rather than from the alternative.
     using ObjectRef =
         std::variant<Parameter*, Body*, Feature*, Material*, Sketch*, IRecomputable*>;
 

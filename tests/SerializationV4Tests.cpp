@@ -59,9 +59,13 @@ struct PadDoc {
     }
 };
 
-TEST(SerializationV4Test, M4_SER_001_SchemaVersionIsFour) {
+// Renamed from M4_SER_001_SchemaVersionIsFour when M5 bumped the version to
+// 5. What it checks is unchanged and still worth checking: save writes the
+// CURRENT version, so a forgotten bump alongside a format change fails here
+// rather than producing files an older loader silently mis-reads.
+TEST(SerializationV4Test, M4_SER_001_SaveWritesTheCurrentSchemaVersion) {
     PadDoc doc;
-    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 4"), std::string::npos);
+    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 5"), std::string::npos);
 }
 
 TEST(SerializationV4Test, M4_SER_002_SketchAndEntityIdsSurvive) {

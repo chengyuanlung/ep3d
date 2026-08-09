@@ -13,6 +13,7 @@
 #include <optional>
 #include <ostream>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <unordered_set>
 #include <vector>
@@ -21,9 +22,32 @@ namespace paramcad {
 
 namespace {
 
-constexpr int kSchemaVersion = 4;           // written on save (v4 adds Sketch/Pad)
+constexpr int kSchemaVersion = 5;           // v5 adds sketch constraints
 constexpr int kMinSupportedSchemaVersion = 1; // v1 (no edges) and v2 files still load
 constexpr std::string_view kFormatName = "ParametricCAD";
+
+// Sub-element names, used in both directions. Written as strings, never as the
+// enum's underlying integer: an integer would silently change meaning the day a
+// sub-element is inserted into the middle of the enum, and every file already
+// on disk would then load as the wrong sub-element without any error
+// (ADR-M4-004's "identity is semantic, never positional", applied to enums).
+const char* subElementName(SketchSubElement subElement) noexcept {
+    switch (subElement) {
+        case SketchSubElement::Whole: return "Whole";
+        case SketchSubElement::StartPoint: return "StartPoint";
+        case SketchSubElement::EndPoint: return "EndPoint";
+        case SketchSubElement::CenterPoint: return "CenterPoint";
+    }
+    return "Whole";
+}
+
+std::optional<SketchSubElement> subElementFromString(const std::string& name) {
+    if (name == "Whole") return SketchSubElement::Whole;
+    if (name == "StartPoint") return SketchSubElement::StartPoint;
+    if (name == "EndPoint") return SketchSubElement::EndPoint;
+    if (name == "CenterPoint") return SketchSubElement::CenterPoint;
+    return std::nullopt;
+}
 
 // --- enum <-> string (serializer-owned; enum headers stay minimal) ---------
 
@@ -250,6 +274,63 @@ JsonValue toJson(const PartDocument& document) {
             entities.add(std::move(entry));
         }
         sketchEntry.set("entities", std::move(entities));
+
+        // Constraints (v5, ADR-M5-001; spec 17). Persisted: constraint id,
+        // kind, entity/sub-element targets and the bound Parameter's ObjectId.
+        // NOT persisted, deliberately: solver variable indexes, residual
+        // indexes, Jacobian layout, DOF, solve status or any backend state --
+        // all of it is derived, and writing a variable index as if it were
+        // identity is exactly the failure spec 17 forbids. A reloaded sketch
+        // re-solves before anything reads it.
+        JsonValue constraints = JsonValue::makeArray();
+        for (const SketchConstraint& constraint : sketch->constraints()) {
+            JsonValue entry = JsonValue::makeObject();
+            entry.set("id", JsonValue::makeString(idToString(ToObjectId(constraint.id))));
+            entry.set("type", JsonValue::makeString(ConstraintKindName(constraint.data)));
+
+            const auto writeRef = [&entry](const char* key, const SketchElementRef& ref) {
+                JsonValue target = JsonValue::makeObject();
+                target.set("entityId", JsonValue::makeString(idToString(ToObjectId(ref.entityId))));
+                target.set("subElement", JsonValue::makeString(subElementName(ref.subElement)));
+                entry.set(key, std::move(target));
+            };
+            const auto writeEntity = [&entry](const char* key, SketchEntityId id) {
+                entry.set(key, JsonValue::makeString(idToString(ToObjectId(id))));
+            };
+
+            std::visit(
+                [&](const auto& c) {
+                    using T = std::decay_t<decltype(c)>;
+                    if constexpr (std::is_same_v<T, CoincidentConstraint>) {
+                        writeRef("a", c.a);
+                        writeRef("b", c.b);
+                    } else if constexpr (std::is_same_v<T, HorizontalConstraint> ||
+                                         std::is_same_v<T, VerticalConstraint>) {
+                        writeEntity("line", c.line);
+                    } else if constexpr (std::is_same_v<T, FixConstraint>) {
+                        writeRef("target", c.target);
+                    } else if constexpr (std::is_same_v<T, DistanceConstraint>) {
+                        writeRef("a", c.a);
+                        writeRef("b", c.b);
+                    } else if constexpr (std::is_same_v<T, LengthConstraint>) {
+                        writeEntity("line", c.line);
+                    } else if constexpr (std::is_same_v<T, RadiusConstraint> ||
+                                         std::is_same_v<T, DiameterConstraint>) {
+                        writeEntity("curve", c.curve);
+                    } else {
+                        static_assert(std::is_same_v<T, AngleConstraint>);
+                        writeEntity("lineA", c.lineA);
+                        writeEntity("lineB", c.lineB);
+                    }
+                },
+                constraint.data);
+
+            const ObjectId parameterId = BoundParameterId(constraint.data);
+            if (parameterId != kInvalidObjectId)
+                entry.set("parameterId", JsonValue::makeString(idToString(parameterId)));
+            constraints.add(std::move(entry));
+        }
+        sketchEntry.set("constraints", std::move(constraints));
         sketches.add(std::move(sketchEntry));
     }
     root.set("sketches", std::move(sketches));
@@ -428,6 +509,47 @@ SaveResult validateSaveable(const PartDocument& document) {
                                           "): pad sketch id " + idToString(pad->sketchId()) +
                                           " is not a sketch in this document"};
             }
+        }
+    }
+
+    // Constraint references (v5). Same rule as every reference check above: a
+    // reference the loader would reject must never be writable to disk over the
+    // last good copy (ADR-M3-008). The deletion policy (ADR-M5-009) is what
+    // keeps this from ever firing in practice -- so if it DOES fire, a mutation
+    // path bypassed the facade, and failing the save is how that surfaces
+    // instead of producing a file that can never be loaded back.
+    for (const Sketch* sketch : document.sketches()) {
+        for (const SketchConstraint& constraint : sketch->constraints()) {
+            for (SketchEntityId referenced : ReferencedEntities(constraint.data)) {
+                if (sketch->findEntity(referenced) != nullptr) continue;
+                return SaveResult{SerializationError::UnknownDependencyId,
+                                  "sketch " + idToString(sketch->id()) + " constraint " +
+                                      idToString(ToObjectId(constraint.id)) + " (" +
+                                      ConstraintKindName(constraint.data) +
+                                      "): references entity " +
+                                      idToString(ToObjectId(referenced)) +
+                                      " which is not in this sketch"};
+            }
+            const ObjectId boundParameter = BoundParameterId(constraint.data);
+            // Mirror the LOADER, which requires 'parameterId' for all five
+            // dimensional kinds. Skipping the check for an invalid id let a
+            // document save successfully and then fail to load forever.
+            if (boundParameter == kInvalidObjectId) {
+                if (!IsDimensional(constraint.data)) continue;
+                return SaveResult{SerializationError::UnknownDependencyId,
+                                  "sketch " + idToString(sketch->id()) + " constraint " +
+                                      idToString(ToObjectId(constraint.id)) + " (" +
+                                      ConstraintKindName(constraint.data) +
+                                      "): a dimensional constraint is bound to no Parameter, "
+                                      "so the resulting file could never be loaded back"};
+            }
+            if (parameterIds.count(boundParameter) != 0) continue;
+            return SaveResult{SerializationError::UnknownDependencyId,
+                              "sketch " + idToString(sketch->id()) + " constraint " +
+                                  idToString(ToObjectId(constraint.id)) + " (" +
+                                  ConstraintKindName(constraint.data) + "): parameter id " +
+                                  idToString(boundParameter) +
+                                  " is not a parameter in this document"};
         }
     }
     return SaveResult{};
@@ -790,11 +912,16 @@ LoadResult loadPartDocument(std::istream& in) {
         SketchEntityId id{kInvalidSketchEntityId};
         SketchGeometry geometry{};
     };
+    struct SketchConstraintData_ {
+        SketchConstraintId id{kInvalidSketchConstraintId};
+        SketchConstraintData data{};
+    };
     struct SketchData {
         ObjectId id;
         std::string name;
         Transform3D transform;
         std::vector<SketchEntityData> entities;
+        std::vector<SketchConstraintData_> constraints;
     };
     std::vector<SketchData> sketchData;
     std::unordered_set<ObjectId> sketchIds;
@@ -913,6 +1040,189 @@ LoadResult loadPartDocument(std::istream& in) {
                 }
                 data.entities.push_back(std::move(entity));
             }
+
+            // Constraints (v5). OPTIONAL: a v4 file has no such array and must
+            // still load, as a sketch with free geometry and no constraints --
+            // which is exactly what it was.
+            const JsonValue* constraintsField = entry.find("constraints");
+            if (constraintsField != nullptr) {
+                if (constraintsField->type() != JsonType::Array)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'constraints' has the wrong JSON type");
+                std::unordered_set<ObjectId> constraintIdsInSketch;
+                for (std::size_t j = 0; j < constraintsField->items().size(); ++j) {
+                    const std::string cc = context + ".constraints[" + std::to_string(j) + "]";
+                    const JsonValue& ce = constraintsField->items()[j];
+                    if (ce.type() != JsonType::Object)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           cc + ": entry is not an object");
+
+                    const auto constraintId = requireIdField(ce, cc, err);
+                    if (!constraintId) return loadFailure(err.error, err.message);
+                    if (*constraintId > kMaxObjectId)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           cc + ": constraint id exceeds the id cap");
+                    // Scoped to the sketch, exactly like entity ids.
+                    if (!constraintIdsInSketch.insert(*constraintId).second)
+                        return loadFailure(SerializationError::DuplicateId,
+                                           cc + ": duplicate sketch constraint id " +
+                                               idToString(*constraintId));
+
+                    const JsonValue* kindField =
+                        requireField(ce, "type", JsonType::String, cc, err);
+                    if (kindField == nullptr) return loadFailure(err.error, err.message);
+                    const std::string kind = kindField->asString();
+
+                    // Every reference is resolved against THIS sketch's entity
+                    // set as parsed above -- a constraint naming an entity that
+                    // is not in the file is rejected at load, never restored as
+                    // a dangling reference (spec 17).
+                    bool refError = false;
+                    std::string refMessage;
+                    SerializationError refCode = SerializationError::None;
+                    const auto entityRef = [&](const char* key) -> SketchEntityId {
+                        if (refError) return kInvalidSketchEntityId;
+                        const JsonValue* field =
+                            requireField(ce, key, JsonType::String, cc, err);
+                        if (field == nullptr) {
+                            refError = true;
+                            refCode = err.error;
+                            refMessage = err.message;
+                            return kInvalidSketchEntityId;
+                        }
+                        const auto id = idFromString(field->asString());
+                        if (!id || *id == kInvalidObjectId || *id > kMaxObjectId) {
+                            refError = true;
+                            refCode = SerializationError::InvalidFieldType;
+                            refMessage = cc + ": field '" + key + "' is not a valid id";
+                            return kInvalidSketchEntityId;
+                        }
+                        if (entityIdsInSketch.count(*id) == 0) {
+                            refError = true;
+                            refCode = SerializationError::UnknownDependencyId;
+                            refMessage = cc + ": references entity " + idToString(*id) +
+                                         " which is not in this sketch";
+                            return kInvalidSketchEntityId;
+                        }
+                        return static_cast<SketchEntityId>(*id);
+                    };
+                    const auto elementRef = [&](const char* key) -> SketchElementRef {
+                        if (refError) return SketchElementRef{};
+                        const JsonValue* field =
+                            requireField(ce, key, JsonType::Object, cc, err);
+                        if (field == nullptr) {
+                            refError = true;
+                            refCode = err.error;
+                            refMessage = err.message;
+                            return SketchElementRef{};
+                        }
+                        const JsonValue* entityField = requireField(*field, "entityId",
+                                                                    JsonType::String, cc, err);
+                        const JsonValue* subField = requireField(*field, "subElement",
+                                                                 JsonType::String, cc, err);
+                        if (entityField == nullptr || subField == nullptr) {
+                            refError = true;
+                            refCode = err.error;
+                            refMessage = err.message;
+                            return SketchElementRef{};
+                        }
+                        const auto id = idFromString(entityField->asString());
+                        if (!id || *id == kInvalidObjectId || *id > kMaxObjectId ||
+                            entityIdsInSketch.count(*id) == 0) {
+                            refError = true;
+                            refCode = SerializationError::UnknownDependencyId;
+                            refMessage = cc + ": field '" + key +
+                                         "' references an entity that is not in this sketch";
+                            return SketchElementRef{};
+                        }
+                        const auto sub = subElementFromString(subField->asString());
+                        if (!sub) {
+                            refError = true;
+                            refCode = SerializationError::InvalidEnumValue;
+                            refMessage = cc + ": unknown sub-element '" + subField->asString() +
+                                         "'";
+                            return SketchElementRef{};
+                        }
+                        return SketchElementRef{static_cast<SketchEntityId>(*id), *sub};
+                    };
+                    // The bound Parameter must exist in this file. parameterIds
+                    // was built before any sketch was parsed.
+                    const auto parameterRef = [&]() -> ObjectId {
+                        if (refError) return kInvalidObjectId;
+                        const JsonValue* field =
+                            requireField(ce, "parameterId", JsonType::String, cc, err);
+                        if (field == nullptr) {
+                            refError = true;
+                            refCode = err.error;
+                            refMessage = err.message;
+                            return kInvalidObjectId;
+                        }
+                        const auto id = idFromString(field->asString());
+                        if (!id || *id == kInvalidObjectId || *id > kMaxObjectId) {
+                            refError = true;
+                            refCode = SerializationError::InvalidFieldType;
+                            refMessage = cc + ": field 'parameterId' is not a valid id";
+                            return kInvalidObjectId;
+                        }
+                        if (parameterIds.count(*id) == 0) {
+                            refError = true;
+                            refCode = SerializationError::UnknownDependencyId;
+                            refMessage = cc + ": parameter id " + idToString(*id) +
+                                         " is not a parameter in this document";
+                            return kInvalidObjectId;
+                        }
+                        return *id;
+                    };
+
+                    SketchConstraintData_ parsed;
+                    parsed.id = static_cast<SketchConstraintId>(*constraintId);
+                    if (kind == "Coincident") {
+                        CoincidentConstraint c;
+                        c.a = elementRef("a");
+                        c.b = elementRef("b");
+                        parsed.data = c;
+                    } else if (kind == "Horizontal") {
+                        parsed.data = HorizontalConstraint{entityRef("line")};
+                    } else if (kind == "Vertical") {
+                        parsed.data = VerticalConstraint{entityRef("line")};
+                    } else if (kind == "Fix") {
+                        parsed.data = FixConstraint{elementRef("target")};
+                    } else if (kind == "Distance") {
+                        DistanceConstraint c;
+                        c.a = elementRef("a");
+                        c.b = elementRef("b");
+                        c.parameterId = parameterRef();
+                        parsed.data = c;
+                    } else if (kind == "Length") {
+                        LengthConstraint c;
+                        c.line = entityRef("line");
+                        c.parameterId = parameterRef();
+                        parsed.data = c;
+                    } else if (kind == "Radius") {
+                        RadiusConstraint c;
+                        c.curve = entityRef("curve");
+                        c.parameterId = parameterRef();
+                        parsed.data = c;
+                    } else if (kind == "Diameter") {
+                        DiameterConstraint c;
+                        c.curve = entityRef("curve");
+                        c.parameterId = parameterRef();
+                        parsed.data = c;
+                    } else if (kind == "Angle") {
+                        AngleConstraint c;
+                        c.lineA = entityRef("lineA");
+                        c.lineB = entityRef("lineB");
+                        c.parameterId = parameterRef();
+                        parsed.data = c;
+                    } else {
+                        return loadFailure(SerializationError::InvalidEnumValue,
+                                           cc + ": unknown sketch constraint type '" + kind + "'");
+                    }
+                    if (refError) return loadFailure(refCode, refMessage);
+                    data.constraints.push_back(std::move(parsed));
+                }
+            }
+
             sketchData.push_back(std::move(data));
         }
     }
@@ -996,11 +1306,18 @@ LoadResult loadPartDocument(std::istream& in) {
     }
 
     // Construction. Advance the generator past the file's MAXIMUM persisted id
-    // first: restore allocates fresh ids along the way (the Origin frame in
-    // the PartDocument restore ctor), and those must not collide with
-    // persisted ids restored later. Done only after all validation succeeded,
-    // preserving the never-advance-on-failure guarantee. The per-restore
-    // RestoreObjectId calls remain as defense in depth.
+    // first: restore allocates fresh ids along the way (massPropertiesNode_ and
+    // the Origin frame, both built by the PartDocument constructor BEFORE any
+    // restore runs), and those must not collide with persisted ids restored
+    // later. The per-restore RestoreObjectId calls remain as defense in depth.
+    //
+    // Scope of the never-advance-on-failure guarantee: it holds for every
+    // VALIDATION failure, all of which return before this line. It does NOT
+    // hold for the two failures that can still occur after it -- a restore that
+    // throws, and the defensive edge re-apply -- where the generator has
+    // already moved. Both leave no document, and ids only ever move forward, so
+    // nothing is corrupted; but the guarantee is not unconditional and saying
+    // so here is cheaper than a reader assuming it is.
     ObjectId maxPersistedId = *documentId;
     for (const auto& parameter : parameterData)
         maxPersistedId = std::max(maxPersistedId, parameter.id);
@@ -1010,6 +1327,29 @@ LoadResult loadPartDocument(std::istream& in) {
         for (const auto& feature : body.features)
             maxPersistedId = std::max(maxPersistedId, feature.id);
     }
+    // Sketch, ENTITY and CONSTRAINT ids too. All three are written to the file
+    // and all three come from the same ObjectIdGenerator, so omitting them
+    // leaves the counter below the file's real maximum -- and in a v5 file the
+    // entity and constraint ids are typically the LARGEST ids present.
+    //
+    // The consequence was silent and severe: PartDocument's constructor
+    // allocates massPropertiesNode_ and the Origin frame from the
+    // under-advanced counter, so one of them takes an id a sketch in this very
+    // file already owns. restoreSketch's registerObject then fails (duplicate
+    // id) while graph_.addNode succeeds, and the two objects share a node: the
+    // Pad loses its profile AND the sketch is never invoked, with no error
+    // anywhere and a re-save that still loads.
+    //
+    // Every serialization test saves and loads in ONE process, where the
+    // generator is already past every id -- which is why the whole suite was
+    // structurally blind to this. M5_SER_015 loads from a cold generator.
+    for (const auto& sketch : sketchData) {
+        maxPersistedId = std::max(maxPersistedId, sketch.id);
+        for (const auto& entity : sketch.entities)
+            maxPersistedId = std::max(maxPersistedId, ToObjectId(entity.id));
+        for (const auto& constraint : sketch.constraints)
+            maxPersistedId = std::max(maxPersistedId, ToObjectId(constraint.id));
+    }
     ObjectIdGenerator::AdvancePast(maxPersistedId);
 
     // All restore goes through the document facade so ObjectRegistry and
@@ -1018,6 +1358,12 @@ LoadResult loadPartDocument(std::istream& in) {
     // before bodies/features, since a BoxFeature's Material->MassPropertiesNode
     // edge (Option B, ADR-M3-005) requires the Material to already be a graph
     // node when restoreBoxFeature wires it.
+    // Restore runs inside a try: PartDocument's restore paths throw on an
+    // invariant violation (an id that collides with an object the constructor
+    // already allocated). That must surface as a load failure, not as an
+    // exception escaping the serializer -- and it must never be swallowed into
+    // a half-built document, which is what returning a partial result would do.
+    try {
     auto document = std::make_unique<PartDocument>(*documentId, name->asString());
     for (auto& parameter : parameterData)
         document->restoreParameter(parameter.id, std::move(parameter.name), parameter.value,
@@ -1036,6 +1382,19 @@ LoadResult loadPartDocument(std::istream& in) {
                                                          SketchFrame{sketch.transform});
         for (auto& entity : sketch.entities)
             restoredSketch.restoreEntity(entity.id, std::move(entity.geometry));
+        for (auto& constraint : sketch.constraints)
+            restoredSketch.restoreConstraint(constraint.id, std::move(constraint.data));
+
+        // Parameter -> Sketch edges are OPTION B: re-derived from the
+        // constraints, never written to the file (ADR-012's split, ADR-M5-008's
+        // edge). Deriving them is what makes a hand-written or older file get
+        // the same graph as a saved one, and it removes the possibility of a
+        // file whose edge list disagrees with its own constraints.
+        for (const SketchConstraint& constraint : restoredSketch.constraints()) {
+            const ObjectId parameterId = BoundParameterId(constraint.data);
+            if (parameterId == kInvalidObjectId) continue;
+            document->addDependency(restoredSketch.id(), parameterId);
+        }
     }
     for (auto& body : bodyData) {
         Body& restored = document->restoreBody(body.id, std::move(body.name));
@@ -1063,6 +1422,10 @@ LoadResult loadPartDocument(std::istream& in) {
                                    " -> " + idToString(edge.dependent));
     }
     return LoadResult{std::move(document), SerializationError::None, {}};
+    } catch (const std::exception& error) {
+        return loadFailure(SerializationError::DuplicateId,
+                           std::string("document could not be restored: ") + error.what());
+    }
 }
 
 SaveResult savePartDocumentToFile(const PartDocument& document, const std::string& path) {
