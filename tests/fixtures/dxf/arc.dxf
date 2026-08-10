@@ -1,0 +1,62 @@
+999
+Fixture C (M6 spec 15): one ARC with deliberately NONTRIVIAL angles.
+999
+Centre (10,-5), radius 12, start 30 deg, end 200 deg, millimetres.
+999
+
+999
+Every value is chosen so a mistake shows up:
+999
+ - 30 and 200 are not 0/90/180, so cos and sin are distinct irrational values
+999
+   and swapping start with end moves the endpoints somewhere obviously wrong;
+999
+ - the sweep 30->200 is 170 deg, so it is neither a half turn nor a quarter;
+999
+ - the centre is off the origin and has a NEGATIVE y, so dropping the centre or
+999
+   flipping the y axis is visible;
+999
+ - DXF stores these as DEGREES. If they reached the model unconverted, the
+999
+   start direction would be 30 RADIANS, which is 30 - 4*2pi = 1.867 rad = 107
+999
+   deg -- a different point entirely, which the geometric test measures.
+0
+SECTION
+2
+HEADER
+9
+$ACADVER
+1
+AC1015
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+ARC
+8
+0
+10
+10.0
+20
+-5.0
+30
+0.0
+40
+12.0
+50
+30.0
+51
+200.0
+0
+ENDSEC
+0
+EOF

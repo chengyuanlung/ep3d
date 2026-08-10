@@ -216,6 +216,168 @@ TEST(M6DxfImport, M6_CIRCLE_003_AnImportedCircleDrivesDownstreamGeometry) {
     EXPECT_NEAR(document.massProperties().volumeMm3, expected, 1e-4 * expected);
 }
 
+// --- Gate C: ARC import (M6.3) ------------------------------------------------
+//
+// Arcs are measured GEOMETRICALLY, never by comparing the stored angle to the
+// number in the file. Spec 16 says so, and the reason is concrete: reproducing
+// the importer's own conversion is what let a broken Angle constraint ship in
+// M5 with a green test beside it. Here the arc's start and end POINTS are
+// computed from the fixture by hand and compared with the points the model
+// actually holds.
+
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kArcTol = 1e-9; // mm; the conversion is exact bar rounding
+
+const SketchArc& ArcOf(const Sketch& sketch, SketchEntityId id) {
+    const SketchEntity* entity = sketch.findEntity(id);
+    EXPECT_NE(entity, nullptr);
+    return std::get<SketchArc>(entity->geometry);
+}
+
+// Where an arc actually starts and ends, derived from what the model stores.
+Vec2 PointAt(const ImportedArc2D& arc, double angleRad) {
+    return Vec2{arc.center.x + arc.radiusMm * std::cos(angleRad),
+                arc.center.y + arc.radiusMm * std::sin(angleRad)};
+}
+
+TEST(M6DxfImport, M6_GATE_C_ArcImportsWithGeometricallyMeasuredEndpoints) {
+    const DxfReadResult read = ReadDxfFile(Fixture("arc.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    ASSERT_EQ(read.geometry.arcs.size(), 1u);
+    EXPECT_TRUE(read.geometry.lines.empty());
+    EXPECT_TRUE(read.geometry.circles.empty()) << "an ARC was imported as a CIRCLE";
+
+    const ImportedArc2D& arc = read.geometry.arcs.front();
+    EXPECT_DOUBLE_EQ(arc.center.x, 10.0);
+    EXPECT_DOUBLE_EQ(arc.center.y, -5.0);
+    EXPECT_DOUBLE_EQ(arc.radiusMm, 12.0);
+
+    // Hand-computed from the fixture: centre (10,-5), r 12, 30 deg and 200 deg.
+    //   start = (10 + 12*cos30, -5 + 12*sin30) = (20.392304845, 1.0)
+    //   end   = (10 + 12*cos200, -5 + 12*sin200) = (-1.276311, -9.104242)
+    // These are the numbers a reader can check against a calculator, which is
+    // the point of measuring points rather than re-deriving the angles.
+    const Vec2 start = PointAt(arc, arc.startAngleRad);
+    const Vec2 end = PointAt(arc, arc.endAngleRad);
+    EXPECT_NEAR(start.x, 10.0 + 12.0 * std::cos(30.0 * kPi / 180.0), kArcTol);
+    EXPECT_NEAR(start.y, -5.0 + 12.0 * std::sin(30.0 * kPi / 180.0), kArcTol);
+    EXPECT_NEAR(end.x, 10.0 + 12.0 * std::cos(200.0 * kPi / 180.0), kArcTol);
+    EXPECT_NEAR(end.y, -5.0 + 12.0 * std::sin(200.0 * kPi / 180.0), kArcTol);
+
+    // Spelled out as literal coordinates as well, so the test does not lean
+    // entirely on the same trig call the expectation above uses. On the first
+    // run these literals were wrong and the trig-based expectations were right,
+    // so the second check caught MY arithmetic rather than the importer's --
+    // which is still the reason to have it.
+    EXPECT_NEAR(start.x, 20.392304845413264, 1e-9);
+    EXPECT_NEAR(start.y, 1.0, 1e-9);
+    EXPECT_NEAR(end.x, -1.2763114494309011, 1e-9);
+    EXPECT_NEAR(end.y, -9.104241719908025, 1e-9);
+}
+
+TEST(M6DxfImport, M6_ARC_001_DegreesAreConvertedNotPassedThrough) {
+    // DXF stores codes 50/51 in DEGREES. libdxfrw's header says it hands them
+    // over in radians; that claim is not taken on trust. If 30 arrived
+    // unconverted it would mean 30 RADIANS = 1.867 rad = 107 deg, a completely
+    // different direction -- which this asserts is NOT what happened.
+    const DxfReadResult read = ReadDxfFile(Fixture("arc.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    const ImportedArc2D& arc = read.geometry.arcs.front();
+
+    EXPECT_NEAR(arc.startAngleRad, 30.0 * kPi / 180.0, 1e-12);
+    EXPECT_NEAR(arc.endAngleRad, 200.0 * kPi / 180.0, 1e-12);
+    EXPECT_LT(std::fabs(arc.startAngleRad), 2.0 * kPi)
+        << "the start angle looks like raw degrees, not radians";
+}
+
+TEST(M6DxfImport, M6_ARC_002_StartAndEndAreDistinguishable) {
+    // The mutation spec 18 names explicitly: swapping start and end must break
+    // Gate C. That is only true if the two angles produce DIFFERENT points, so
+    // this asserts the fixture is actually capable of detecting the swap --
+    // a fixture with a symmetric sweep would silently disarm that mutation.
+    const DxfReadResult read = ReadDxfFile(Fixture("arc.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    const ImportedArc2D& arc = read.geometry.arcs.front();
+
+    const Vec2 start = PointAt(arc, arc.startAngleRad);
+    const Vec2 end = PointAt(arc, arc.endAngleRad);
+    EXPECT_GT(std::hypot(end.x - start.x, end.y - start.y), 1.0)
+        << "start and end coincide, so a swap could not be detected";
+    EXPECT_NE(arc.startAngleRad, arc.endAngleRad);
+}
+
+TEST(M6DxfImport, M6_ARC_003_AnArcCrossingZeroKeepsItsShortSweep) {
+    // start 350, end 40. DXF arcs always sweep counter-clockwise from start to
+    // end, so this is a 50 degree sweep THROUGH zero -- not 310 degrees the
+    // other way. An importer that assumed end > start gets it backwards, and
+    // an arc that does not cross zero cannot reveal that.
+    const DxfReadResult read = ReadDxfFile(Fixture("arc_crossing_zero.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    ASSERT_EQ(read.geometry.arcs.size(), 1u);
+    const ImportedArc2D& arc = read.geometry.arcs.front();
+
+    EXPECT_NEAR(arc.startAngleRad, 350.0 * kPi / 180.0, 1e-12);
+    EXPECT_NEAR(arc.endAngleRad, 40.0 * kPi / 180.0, 1e-12);
+
+    // The counter-clockwise sweep from start to end, measured rather than read.
+    double sweep = arc.endAngleRad - arc.startAngleRad;
+    while (sweep <= 0.0) sweep += 2.0 * kPi;
+    EXPECT_NEAR(sweep, 50.0 * kPi / 180.0, 1e-12)
+        << "the sweep is " << sweep * 180.0 / kPi << " deg, not 50";
+}
+
+TEST(M6DxfImport, M6_ARC_004_ImportedArcIsAnOrdinarySketchArcAndSurvivesReload) {
+    PartDocument document{"ImportedArc"};
+    const DxfReadResult read = ReadDxfFile(Fixture("arc.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message;
+    ASSERT_EQ(result.entityIds.size(), 1u);
+    const SketchEntityId id = result.entityIds.front();
+
+    const Sketch* sketch = document.findSketch(result.sketchId);
+    ASSERT_NE(sketch, nullptr);
+    const SketchArc& arc = ArcOf(*sketch, id);
+    EXPECT_DOUBLE_EQ(arc.center.x, 10.0);
+    EXPECT_DOUBLE_EQ(arc.center.y, -5.0);
+    EXPECT_DOUBLE_EQ(arc.radiusMm, 12.0);
+    EXPECT_TRUE(arc.counterClockwise) << "DXF arcs sweep counter-clockwise";
+
+    std::ostringstream out;
+    ASSERT_TRUE(savePartDocument(document, out));
+    std::istringstream in(out.str());
+    const LoadResult loaded = loadPartDocument(in);
+    ASSERT_TRUE(loaded) << loaded.message;
+    const Sketch* reloaded = loaded.document->findSketch(result.sketchId);
+    ASSERT_NE(reloaded, nullptr);
+    ASSERT_NE(reloaded->findEntity(id), nullptr) << "the arc's id did not survive";
+
+    // Measured again after the round trip, from the reloaded model.
+    const SketchArc& after = ArcOf(*reloaded, id);
+    EXPECT_NEAR(after.center.x + after.radiusMm * std::cos(after.startAngleRad),
+                20.392304845413264, 1e-9);
+    EXPECT_NEAR(after.center.y + after.radiusMm * std::sin(after.startAngleRad), 1.0, 1e-9);
+}
+
+TEST(M6DxfImport, M6_ARC_005_ADegenerateArcIsSkippedAndTheRestSurvive) {
+    const DxfReadResult read = ReadDxfFile(Fixture("arc_degenerate.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    ASSERT_EQ(read.geometry.arcs.size(), 2u) << "the valid arcs did not both survive";
+    EXPECT_DOUBLE_EQ(read.geometry.arcs[0].radiusMm, 4.0);
+    EXPECT_DOUBLE_EQ(read.geometry.arcs[1].radiusMm, 6.0);
+
+    const auto invalid = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& skip) {
+            return skip.entityKind == "ARC" &&
+                   skip.reason == ImportSkipReason::InvalidGeometry;
+        });
+    EXPECT_EQ(invalid, 1);
+}
+
 // --- Unit policy (ADR-M6-002) -------------------------------------------------
 
 TEST(M6DxfImport, M6_UNITS_001_InchesAreConvertedExactly) {
