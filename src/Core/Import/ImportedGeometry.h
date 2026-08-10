@@ -26,12 +26,21 @@ namespace paramcad {
 // How the file said, or failed to say, what its numbers mean.
 enum class ImportedLengthUnit {
     Unitless,     // no $INSUNITS, or $INSUNITS = 0
+    Micrometre,
     Millimeter,
     Centimeter,
+    Decimetre,
     Meter,
+    Decametre,
+    Hectometre,
+    Kilometre,
+    Microinch,
+    Mil,
     Inch,
     Foot,
-    Unrecognized  // present but not a value we map
+    Yard,
+    Mile,
+    Unrecognized  // a value the DXF format does not define, or we cannot map
 };
 
 const char* ImportedLengthUnitName(ImportedLengthUnit unit) noexcept;

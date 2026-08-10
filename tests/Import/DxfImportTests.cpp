@@ -33,6 +33,30 @@ std::string Fixture(const char* name) {
     return std::string(PARAMCAD_DXF_FIXTURE_DIR) + "/" + name;
 }
 
+// One entity's geometry as a comparable string, so "same geometry" has a single
+// definition shared by the order-independence test and Gate E.
+std::string EntityFingerprint(const SketchEntity& entity) {
+    std::ostringstream out;
+    out.precision(15);
+    out << std::fixed;
+    std::visit(
+        [&out](const auto& g) {
+            using T = std::decay_t<decltype(g)>;
+            if constexpr (std::is_same_v<T, SketchPoint>) {
+                out << "P " << g.position.x << ' ' << g.position.y;
+            } else if constexpr (std::is_same_v<T, SketchLine>) {
+                out << "L " << g.start.x << ' ' << g.start.y << ' ' << g.end.x << ' ' << g.end.y;
+            } else if constexpr (std::is_same_v<T, SketchCircle>) {
+                out << "C " << g.center.x << ' ' << g.center.y << ' ' << g.radiusMm;
+            } else {
+                out << "A " << g.center.x << ' ' << g.center.y << ' ' << g.radiusMm << ' '
+                    << g.startAngleRad << ' ' << g.endAngleRad << ' ' << g.counterClockwise;
+            }
+        },
+        entity.geometry);
+    return out.str();
+}
+
 const SketchLine& LineOf(const Sketch& sketch, SketchEntityId id) {
     const SketchEntity* entity = sketch.findEntity(id);
     EXPECT_NE(entity, nullptr);
@@ -552,6 +576,13 @@ TEST(M6DxfImport, M6_GATE_E_MixedImportSurvivesSaveLoadWithEveryId) {
         ASSERT_NE(originalEntity, nullptr);
         EXPECT_EQ(restored->geometry.index(), originalEntity->geometry.index())
             << "entity " << ToObjectId(id) << " changed kind across save/load";
+        // The GEOMETRY, not just the kind. Spec 16 Gate E says "same
+        // geometry"; comparing only the variant index would pass for an entity
+        // whose coordinates had been mangled, which is most of what the gate is
+        // for. Compared through the same fingerprint the order-independence
+        // test uses, so one definition of "same geometry" serves both.
+        EXPECT_EQ(EntityFingerprint(*restored), EntityFingerprint(*originalEntity))
+            << "entity " << ToObjectId(id) << " changed geometry across save/load";
     }
 }
 
@@ -845,6 +876,167 @@ TEST(M6DxfImport, M6_ADV_007_ADirectoryPathIsNotReadAsAFile) {
     EXPECT_FALSE(read);
     EXPECT_EQ(read.error, DxfReadError::NotReadable);
     EXPECT_FALSE(read.message.empty());
+}
+
+// --- Regressions for the M6 independent review --------------------------------
+
+TEST(M6DxfImport, M6_REV_001_BlockContentsAreNotModelGeometry) {
+    // CRITICAL. libdxfrw dispatches a block's contents through the same
+    // addLine/addCircle/addArc as model space, so the collector imported them
+    // at DEFINITION coordinates while reporting the INSERT that places them as
+    // "skipped" -- losing placement, scale, rotation and multiplicity.
+    //
+    // The realistic case is worse: every DXF with a DIMENSION carries an
+    // anonymous block holding its annotation lines, and those were becoming
+    // model geometry. Spec 4 says that must not silently happen.
+    const DxfReadResult read = ReadDxfFile(Fixture("block_insert.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.importedCount(), 0u)
+        << "block-definition geometry was imported as model geometry";
+    EXPECT_TRUE(read.geometry.lines.empty());
+    EXPECT_TRUE(read.geometry.circles.empty());
+
+    // And it SAYS so: silence would leave the user wondering why their block
+    // did not arrive.
+    const bool reported = std::any_of(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.entityKind == "BLOCK"; });
+    EXPECT_TRUE(reported) << "block contents were dropped without a diagnostic";
+
+    // A file of nothing but a block is a failed import, not an empty sketch.
+    PartDocument document{"Blocks"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    EXPECT_FALSE(result);
+    EXPECT_TRUE(document.sketches().empty());
+}
+
+TEST(M6DxfImport, M6_REV_002_EntitiesBeforeHeaderStillConvertUnits) {
+    // libdxfrw dispatches sections in FILE ORDER. Scaling each entity as it
+    // arrived meant a file with ENTITIES first was scaled by the 1.0 default
+    // and only then learned the unit -- 25.4x wrong -- while the result
+    // reported unit = inches, unitWasDefaulted = false. The one signal
+    // ADR-M6-002 relies on to make that visible was asserting the opposite.
+    const DxfReadResult read = ReadDxfFile(Fixture("entities_before_header.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    ASSERT_EQ(read.geometry.lines.size(), 1u);
+
+    EXPECT_EQ(read.geometry.unit, ImportedLengthUnit::Inch);
+    EXPECT_FALSE(read.geometry.unitWasDefaulted);
+    // 100 in = 2540 mm, 50 in = 1270 mm -- the same expectation as
+    // line_inches.dxf, because the section order must not matter.
+    EXPECT_DOUBLE_EQ(read.geometry.lines.front().end.x, 2540.0);
+    EXPECT_DOUBLE_EQ(read.geometry.lines.front().end.y, 1270.0);
+}
+
+TEST(M6DxfImport, M6_REV_003_ArcRadiusAndCentreAreUnitConverted) {
+    // No fixture had an arc in a non-millimetre file, so removing the arc unit
+    // conversion left the entire suite green -- "a green test whose production
+    // defect can be restored without causing failure" (spec 18).
+    const DxfReadResult read = ReadDxfFile(Fixture("arc_inches.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    ASSERT_EQ(read.geometry.arcs.size(), 1u);
+    const ImportedArc2D& arc = read.geometry.arcs.front();
+
+    EXPECT_EQ(read.geometry.unit, ImportedLengthUnit::Inch);
+    EXPECT_DOUBLE_EQ(arc.center.x, 254.0);  // 10 in
+    EXPECT_DOUBLE_EQ(arc.center.y, 508.0);  // 20 in
+    EXPECT_DOUBLE_EQ(arc.radiusMm, 101.6);  // 4 in
+    // Angles are NOT lengths and must not be scaled.
+    EXPECT_NEAR(arc.startAngleRad, 30.0 * kPi / 180.0, 1e-12);
+    EXPECT_NEAR(arc.endAngleRad, 200.0 * kPi / 180.0, 1e-12);
+}
+
+TEST(M6DxfImport, M6_REV_004_AnImportedArcSweepIsMeasuredThroughTheProfile) {
+    // The sweep direction rested on ONE boolean assertion. Flipping
+    // counterClockwise turns a 170-degree arc into 190 and a 350->40 arc into
+    // 310 -- wrong by up to 260 degrees -- and only that one assertion failed.
+    // That is the shape of the M5 failure this milestone claims to have
+    // eliminated, so the sweep is now measured through real geometry: the AREA
+    // of a solid built from an imported arc depends on which way it goes.
+    PartDocument document{"ArcArea"};
+    OcctGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+
+    const DxfReadResult read = ReadDxfFile(Fixture("arc_sector.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    const SketchImportResult imported =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(imported) << imported.message;
+
+    Parameter& length = document.addParameter("PadLength", 10.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body001");
+    document.addPadFeature(body, "Pad001", imported.sketchId, length.id());
+    ASSERT_TRUE(document.recompute().success);
+
+    // A 90-degree sector of radius 20, padded 10: (90/360) * pi * 20^2 * 10
+    // = 100*pi*10 = 3141.592653... If the sweep went the other way it would be
+    // the 270-degree sector, 9424.777, which this tolerance cannot absorb.
+    const double expected = 0.25 * kPi * 400.0 * 10.0;
+    EXPECT_NEAR(document.massProperties().volumeMm3, expected, 1e-3);
+}
+
+TEST(M6DxfImport, M6_REV_005_AFullTurnArcIsSkippedNotFatal) {
+    // A 0 -> 360 arc is legal DXF and several exporters emit one instead of a
+    // CIRCLE. The model refuses a zero normalised sweep, so such an arc reached
+    // the importer, failed validation and rolled back the WHOLE file -- two
+    // perfectly good lines discarded with it. Every other degenerate entity is
+    // skipped and reported; the sweep was the one hole in that rule.
+    const DxfReadResult read = ReadDxfFile(Fixture("arc_full_turn.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 2u) << "the valid lines were discarded";
+    EXPECT_TRUE(read.geometry.arcs.empty());
+    const bool reported = std::any_of(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) {
+            return s.entityKind == "ARC" && s.reason == ImportSkipReason::InvalidGeometry;
+        });
+    EXPECT_TRUE(reported);
+
+    PartDocument document{"FullTurn"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message;
+    EXPECT_EQ(result.importedCount, 2u);
+}
+
+TEST(M6DxfImport, M6_REV_006_NonDefaultExtrusionIsRefusedNotMirrored) {
+    // DXF stores LINE in world coordinates and CIRCLE/ARC in the entity's own
+    // system. Ignoring code 210 mixes two frames in one file: with the common
+    // (0,0,-1) the correct result is a MIRROR, so a hole at (25,30) imported at
+    // (-25,30) -- and a mirrored part has identical area, volume and mass, so
+    // no analytical oracle could ever catch it. Refusing is recoverable;
+    // importing something mirrored and reporting success is not.
+    const DxfReadResult read = ReadDxfFile(Fixture("ocs_extrusion.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 1u) << "the WCS line should still import";
+    EXPECT_TRUE(read.geometry.circles.empty())
+        << "an entity in a mirrored coordinate system was imported anyway";
+
+    const auto skip = std::find_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.entityKind == "CIRCLE"; });
+    ASSERT_NE(skip, read.geometry.skipped.end())
+        << "the mirrored circle was dropped with no diagnostic";
+    EXPECT_NE(skip->detail.find("extrusion"), std::string::npos) << skip->detail;
+}
+
+TEST(M6DxfImport, M6_REV_007_MilsAndOtherRealUnitsAreMapped) {
+    // $INSUNITS 3 and 7-20 were all unmapped and took the millimetre default
+    // with a message saying the file had not stated a usable unit -- which it
+    // had. Mils matter: a PCB drawing imported 39.4x too large.
+    const DxfReadResult read = ReadDxfFile(Fixture("line_mils.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    ASSERT_EQ(read.geometry.lines.size(), 1u);
+
+    EXPECT_EQ(read.geometry.unit, ImportedLengthUnit::Mil);
+    EXPECT_FALSE(read.geometry.unitWasDefaulted)
+        << "a stated unit was reported as absent";
+    // 1 mil = 0.0254 mm exactly, so 1000 mil = 25.4 mm.
+    EXPECT_DOUBLE_EQ(read.geometry.lines.front().end.x, 25.4);
 }
 
 // --- Unit policy (ADR-M6-002) -------------------------------------------------

@@ -1880,3 +1880,99 @@ extended.
 
 Recorded as a known limitation in `M6_SelfValidationReport.md` rather than left
 in the code, because a limitation only in the code is one nobody reads.
+
+## ADR-M6-009 — Block definitions are not model geometry (M6)
+Status: Accepted. Corrects a Critical found by independent review.
+
+libdxfrw dispatches a BLOCK's contents through the same `addLine`/`addCircle`/
+`addArc` callbacks it uses for model space. Without tracking the block state the
+collector could not tell them apart, and it did not: a file whose ENTITIES
+section held only an `INSERT` imported the block's geometry at **definition**
+coordinates — losing placement, scale, rotation and multiplicity — while
+reporting the `INSERT` that places it as "skipped".
+
+The realistic case is worse. **Every DXF carrying a DIMENSION also carries an
+anonymous block holding its dimension and extension lines.** A drawing with one
+real line and one dimension imported **four** lines. Spec 4 states that
+dimensions and annotations must not silently become model content; they were.
+
+`addBlock` / `endBlock` now bracket block definitions and everything inside is
+skipped, reported once per block rather than once per entity.
+
+`INSERT` is still not expanded, so a drawing built from blocks imports as
+nothing plus a diagnostic. That is now true — it was claimed in the M6.1
+self-validation report while being false in both halves.
+
+## ADR-M6-010 — Units are applied once, after the whole file is read (M6)
+Status: Accepted. Supersedes the parse-time scaling of ADR-M6-002.
+
+ADR-M6-002 got the policy right and the timing wrong. Scaling each entity as it
+arrived assumed the HEADER reached the reader before the ENTITIES section.
+libdxfrw dispatches sections in **file order**, so a file with entities first
+was scaled by the 1.0 default and only then learned the unit — 25.4x wrong,
+while the result reported `unit = inches, unitWasDefaulted = false`. The one
+signal ADR-M6-002 relies on to make that error visible was asserting the
+opposite. A file with two HEADER sections split one sketch across two scales.
+
+The reader now collects **raw** values and applies the factor once, after the
+read completes. That removes the ordering assumption rather than checking it,
+which is the only version a file we have not seen cannot defeat. The
+degenerate-geometry checks moved with it, because "shorter than
+`kMinSketchDimensionMm`" is a statement about millimetres.
+
+The comment that used to assert the ordering is gone. An assumption stated in a
+comment and nowhere else is the failure mode this project hit twice in M5 and
+once here.
+
+## ADR-M6-011 — Every $INSUNITS value the format defines (M6)
+Status: Accepted. Corrects ADR-M6-002.
+
+ADR-M6-002 claimed the mapping covered "the remaining ISO units libdxfrw
+exposes". It covered 0, 1, 2, 4, 5, 6. Values 3 and 7–20 fell through to
+`Unrecognized` and took the millimetre default **with a message saying the file
+had not stated a usable unit** — which it had. Mils (9) made PCB geometry 39.4x
+too large; microns (13), 1000x; kilometres (7), 1e6x too small.
+
+Now mapped: micrometre, millimetre, centimetre, decimetre, metre, decametre,
+hectometre, kilometre, microinch, mil, inch, foot, yard, mile. Imperial values
+are multiples of the exact 1959 definition, so nothing drifts.
+
+Angstrom, nanometre, gigametre, astronomical unit, light year and parsec are
+deliberately left unmapped: the format defines them, but they are not units a
+CAD part is modelled in, and mapping them would let a typo produce a 1e16 scale
+factor. They report as unrecognised.
+
+## ADR-M6-012 — A degenerate sweep is skipped, not fatal (M6)
+Status: Accepted. Closes a hole in ADR-M6-005.
+
+The reader validated an arc's radius and finiteness but never its **sweep**. A
+0 to 360 degree arc — legal DXF, and what several exporters emit instead of a
+CIRCLE — reached the importer, failed the model's validation, and rolled back
+the **whole file**. A drawing with 500 good lines and one such arc imported as
+nothing.
+
+ADR-M6-005 says a degenerate entity is skipped and reported; the sweep was the
+one hole in that rule, and it turned a skippable entity into a fatal one. The
+reader now applies the same sweep test the model uses.
+
+## ADR-M6-013 — A non-default extrusion is refused, not guessed (M6)
+Status: Accepted. Replaces ADR-M6-008's assessment, which understated the risk.
+
+ADR-M6-008 described ignoring group code 210 as producing "the wrong
+orientation". Independent review measured it and found two things worse:
+
+1. For the common `210 = (0,0,-1)` the correct result is a **mirror**, not a
+   rotation. A mirrored part has identical area, volume, mass and centre of
+   mass, so **no analytical oracle of the kind every gate in this project uses
+   can detect it.**
+2. DXF stores **LINE in world coordinates and CIRCLE/ARC in the entity's own
+   system**, so ignoring 210 mixes two frames inside one file. A plate with a
+   hole imported the hole at (-25, 30) instead of (25, 30), reported success,
+   and produced a part wrong in a way nothing downstream can see.
+
+Applying an arbitrary OCS plane means deciding how it maps onto a sketch frame,
+which is a modelling decision beyond M6's scope. Entities carrying a non-default
+extrusion are therefore **skipped and reported**.
+
+The rule this turns on: when the choice is between refusing and guessing, and a
+wrong guess is undetectable, refuse.
