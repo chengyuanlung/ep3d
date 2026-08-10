@@ -7,7 +7,11 @@
 #include <drw_interface.h>
 #include <libdxfrw.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <utility>
+#include <vector>
 #include <initializer_list>
 #include <filesystem>
 #include <fstream>
@@ -58,7 +62,15 @@ ImportedLengthUnit UnitFromInsUnits(int insUnits) noexcept {
     }
 }
 
-// Whether the BLOCKS section closes every BLOCK it opens.
+// Two facts about the file that the callback interface cannot report, read in
+// one pass over the group codes.
+//
+// This is not a second DXF parser. It reads code/value pairs, tracks which
+// section it is in, and answers exactly two questions -- both of them questions
+// libdxfrw structurally cannot be asked. It returns `Unknown` for binary DXF
+// rather than guessing.
+//
+// FACT 1: does the BLOCKS section close every BLOCK it opens?
 //
 // This exists because the callback interface CANNOT answer the question. A
 // BLOCK with no ENDBLK makes libdxfrw read the whole rest of the file as block
@@ -69,22 +81,52 @@ ImportedLengthUnit UnitFromInsUnits(int insUnits) noexcept {
 // not imported" note, which aims the user at their geometry when the fault is
 // one missing group code in a section they never open.
 //
-// Counting `0 / BLOCK` against `0 / ENDBLK` is not a second DXF parser: it is a
-// structural check on group code 0 values, bounded to the BLOCKS section, and
-// it answers exactly one question. `BLOCK_RECORD` in TABLES does not collide --
-// the comparison is for equality, not prefix.
+// `BLOCK_RECORD` in TABLES does not collide -- the comparison is for equality,
+// not prefix.
+//
+// FACT 2: does any model-space LINE carry a start point but no end point?
+//
+// libdxfrw default-initialises a missing second point to (0,0,0) and exposes no
+// group-code-presence flag, so a LINE with codes 10/20 and no 11/21 arrives
+// indistinguishable from a real line drawn to the origin. It imported silently:
+// a phantom entity, a success message, and a profile that opens or branches.
+// spec 4 says nothing may be silently misinterpreted, and this was the one place
+// left where something was.
+//
+// This was accepted as a limitation for two rounds on the stated grounds that
+// "detecting it needs a group-code-presence hook the library does not offer".
+// That reason stopped being true the moment FACT 1 forced a group-code scan to
+// exist: the hook is not needed, because the file says so directly.
 enum class BlocksSectionState { Unknown, Terminated, Unterminated };
 
-BlocksSectionState ScanBlocksSection(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return BlocksSectionState::Unknown;
+struct DxfStructureScan {
+    BlocksSectionState blocks{BlocksSectionState::Unknown};
+    // ENTITIES-section LINEs whose second point is incomplete, recorded as the
+    // whole phantom the library will synthesise: {start, end}, where each
+    // missing component of the end is the 0.0 libdxfrw default-initialises it
+    // to. Storing the START alone was not enough -- a LINE with code 11 and no
+    // 21 becomes (x11, 0), not the origin -- and matching on the start alone
+    // erases whichever line comes first, which can be a real one that happens
+    // to share the start point.
+    //
+    // Matched by value rather than by index because addLine can decline an
+    // entity (a non-finite coordinate), which would slide every later index by
+    // one and delete the wrong line.
+    struct Phantom { double sx, sy, ex, ey; };
+    std::vector<Phantom> truncatedLines;
+};
 
-    // Binary DXF has no group-code lines to count. Untested and documented as
+DxfStructureScan ScanDxfStructure(const std::string& path) {
+    DxfStructureScan scan;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return scan;
+
+    // Binary DXF has no group-code lines to read. Untested and documented as
     // such; reporting Unknown is honest, guessing would not be.
     char magic[22] = {};
     in.read(magic, 21);
     if (std::string(magic, static_cast<size_t>(in.gcount())).rfind("AutoCAD Binary DXF", 0) == 0)
-        return BlocksSectionState::Unknown;
+        return scan;
     in.clear();
     in.seekg(0);
 
@@ -96,36 +138,91 @@ BlocksSectionState ScanBlocksSection(const std::string& path) {
         return s.substr(i);
     };
 
-    std::string code;
-    std::string value;
-    bool inBlocksSection = false;
+    enum class Section { Other, Blocks, Entities };
+    Section section = Section::Other;
     bool sectionNameExpected = false;
     int depth = 0;
+    bool blocksSeen = false;
+
+    // State for the LINE record currently being read, if any.
+    bool inLine = false;
+    bool has10 = false, has20 = false, has11 = false, has21 = false;
+    double x10 = 0.0, y10 = 0.0, x11 = 0.0, y11 = 0.0;
+
+    const auto closeLineRecord = [&] {
+        if (inLine && has10 && has20 && !(has11 && has21)) {
+            // Whatever half of the second point is present is kept: the phantom
+            // to look for is exactly what the library will have built.
+            scan.truncatedLines.push_back(
+                DxfStructureScan::Phantom{x10, y10, has11 ? x11 : 0.0,
+                                          has21 ? y11 : 0.0});
+        }
+        inLine = false;
+        has10 = has20 = has11 = has21 = false;
+        x10 = y10 = x11 = y11 = 0.0;
+    };
+
+    std::string code;
+    std::string value;
     while (std::getline(in, code) && std::getline(in, value)) {
         const std::string c = trim(std::move(code));
         const std::string v = trim(std::move(value));
+
         if (sectionNameExpected && c == "2") {
-            inBlocksSection = (v == "BLOCKS");
             sectionNameExpected = false;
+            if (v == "BLOCKS") {
+                section = Section::Blocks;
+                blocksSeen = true;
+                depth = 0;
+            } else if (v == "ENTITIES") {
+                section = Section::Entities;
+            } else {
+                section = Section::Other;
+            }
             continue;
         }
-        if (c != "0") continue;
+
+        if (c != "0") {
+            if (inLine) {
+                if (c == "10") { has10 = true; x10 = std::strtod(v.c_str(), nullptr); }
+                else if (c == "20") { has20 = true; y10 = std::strtod(v.c_str(), nullptr); }
+                else if (c == "11") { has11 = true; x11 = std::strtod(v.c_str(), nullptr); }
+                else if (c == "21") { has21 = true; y11 = std::strtod(v.c_str(), nullptr); }
+            }
+            continue;
+        }
+
+        // A code 0 ends whatever entity record was open.
+        closeLineRecord();
+
         if (v == "SECTION") {
             sectionNameExpected = true;
         } else if (v == "ENDSEC") {
-            if (inBlocksSection)
-                return depth == 0 ? BlocksSectionState::Terminated
-                                  : BlocksSectionState::Unterminated;
-            inBlocksSection = false;
-        } else if (inBlocksSection) {
+            if (section == Section::Blocks && scan.blocks == BlocksSectionState::Unknown)
+                scan.blocks = depth == 0 ? BlocksSectionState::Terminated
+                                         : BlocksSectionState::Unterminated;
+            section = Section::Other;
+        } else if (section == Section::Blocks) {
             if (v == "BLOCK") ++depth;
             else if (v == "ENDBLK") --depth;
+        } else if (section == Section::Entities && v == "LINE") {
+            inLine = true;
         }
     }
-    // EOF inside BLOCKS: unterminated in every case, whether or not a BLOCK is
-    // still open, but only the open one loses geometry.
-    return (inBlocksSection && depth != 0) ? BlocksSectionState::Unterminated
-                                           : BlocksSectionState::Terminated;
+    // No closeLineRecord() here. A file that ends with an entity record still
+    // open is refused by libdxfrw outright -- measured: it returns false, the
+    // reader reports MalformedFile, and this scan's result is never consulted.
+    // So a trailing close could not change any outcome, and a line that cannot
+    // change an outcome cannot be tested. It is left out rather than left in
+    // and excused, on the same grounds as the `inBlock_ at end of read` check
+    // that ADR-M6-015 records me writing and measuring doing nothing.
+
+    // EOF inside BLOCKS with a block still open: unterminated.
+    if (scan.blocks == BlocksSectionState::Unknown)
+        scan.blocks = (blocksSeen && section == Section::Blocks && depth != 0)
+                          ? BlocksSectionState::Unterminated
+                          : BlocksSectionState::Terminated;
+    return scan;
 }
 
 constexpr double kPi = 3.14159265358979323846;
@@ -248,6 +345,34 @@ public:
         // addArc is their only guard -- which is exactly why it needs a test of
         // its own, and now has one.
 
+    }
+
+    // Removes the LINEs the file never gave an end point. Runs BEFORE finalise
+    // so the comparison is against the raw coordinates the scanner read from
+    // the same text -- after scaling, both sides would have been multiplied and
+    // the equality would depend on the order of two floating-point products.
+    //
+    // Both endpoints are compared, not just the start. A real line that happens
+    // to share a start point with a phantom must survive -- deleting genuine
+    // geometry to remove an invented entity would be worse than the bug.
+    //
+    // Failing to match removes nothing and reports nothing, which is exactly
+    // the behaviour this replaces. It cannot make the result worse.
+    void dropTruncatedLines(const std::vector<DxfStructureScan::Phantom>& phantoms) {
+        for (const auto& phantom : phantoms) {
+            const auto it = std::find_if(
+                geometry.lines.begin(), geometry.lines.end(),
+                [&phantom](const ImportedLine2D& line) {
+                    return line.start.x == phantom.sx && line.start.y == phantom.sy &&
+                           line.end.x == phantom.ex && line.end.y == phantom.ey;
+                });
+            if (it == geometry.lines.end()) continue;
+            geometry.lines.erase(it);
+            note(ImportSkipReason::InvalidGeometry, "LINE",
+                 "the entity has a start point (codes 10/20) but no end point "
+                 "(codes 11/21); it would have imported as a line to the sketch "
+                 "origin, which is not what the file says");
+        }
     }
 
     // Reports a fault the callbacks cannot see. See BlocksSectionState below.
@@ -515,14 +640,19 @@ DxfReadResult ReadDxfFile(const std::string& path) {
     Collector collector;
     dxfRW reader(path.c_str());
     const bool ok = reader.read(&collector, /*ext=*/false);
+
+    // Two questions the callbacks are structurally blind to, asked after the
+    // read so they cost nothing on the failure path. Neither can refuse a file
+    // the parser accepted: one removes an entity the file never defined, the
+    // other only adds a diagnostic.
+    const DxfStructureScan scan = ScanDxfStructure(path);
+    collector.dropTruncatedLines(scan.truncatedLines);
+
     // Units applied ONCE, here, after the whole file has been seen -- so the
     // result cannot depend on whether HEADER preceded ENTITIES.
     collector.finalise();
 
-    // Asked AFTER the read so it costs nothing on the failure path, and only
-    // ever ADDS a diagnostic -- an unterminated BLOCKS section is a fault the
-    // callbacks are structurally blind to, not a reason to refuse the file.
-    if (ScanBlocksSection(path) == BlocksSectionState::Unterminated)
+    if (scan.blocks == BlocksSectionState::Unterminated)
         collector.noteUnterminatedBlocks();
 
     if (!ok) {

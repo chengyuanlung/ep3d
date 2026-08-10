@@ -1,0 +1,78 @@
+999
+Round 3 follow-up, second half. Two cases the first fixture could not reach,
+999
+both found by mutating my own new code:
+999
+ (a) codes 11 present but 21 ABSENT -- half a second point is still no second
+999
+     point, and `!(has11 && has21)` says so while `!has11 && !has21` does not;
+999
+ (b) a truncated LINE and a REAL line sharing the same start point. The phantom
+999
+     is identified by start AND by end == (0,0); dropping the end test lets the
+999
+     search erase whichever line comes first, which here is the real one.
+0
+SECTION
+2
+HEADER
+9
+$ACADVER
+1
+AC1015
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+0
+10
+200
+20
+0
+11
+200
+21
+50
+0
+LINE
+8
+0
+10
+100
+20
+0
+11
+110
+0
+LINE
+8
+0
+10
+200
+20
+0
+0
+LINE
+8
+0
+10
+0
+20
+0
+11
+10
+21
+0
+0
+ENDSEC
+0
+EOF

@@ -76,17 +76,17 @@ or an own reader means rewriting `src/Import/Dxf/DxfReader.cpp` and nothing else
 
 | | M5 baseline | M6 |
 |---|---|---|
-| Total | 498 | **558** |
+| Total | 498 | **560** |
 | `ParametricCADCoreTests` | 301 | 301 |
 | `ParametricCADSolverTests` | 53 | 53 |
 | `ParametricCADKernelOcctTests` | 47 | 47 |
 | `ParametricCADIntegrationTests` | 87 | 87 |
-| **`ParametricCADImportTests`** | — | **57** |
+| **`ParametricCADImportTests`** | — | **59** |
 | Viewer smoke tests (ctest) | 10 | 13 |
 
-**558 / 558 in Debug and Release**, with the Release run verified to invoke
+**560 / 560 in Debug and Release**, with the Release run verified to invoke
 Release binaries — independently reproduced by a reviewer. `M6_RR_001..005` are
-one per second-round finding; `M6_R3_001..007` one per third-round finding.
+one per second-round finding; `M6_R3_001..009` one per third-round finding.
 
 ---
 
@@ -132,7 +132,7 @@ that had shipped two rounds earlier with a test and no record of why.
 | M6-012 | A degenerate sweep is skipped, not fatal |
 | M6-013 | A non-default extrusion is refused, not guessed |
 | M6-014 | Finiteness is checked on both sides of the unit multiply — *written three rounds late; the fix it describes shipped with a test and no ADR* |
-| M6-015 | An unterminated BLOCKS section is detected outside the parser |
+| M6-015 | Two structural facts are read outside the parser: an unterminated BLOCKS section, and a LINE with no end point |
 
 ---
 
@@ -202,11 +202,6 @@ be worth nothing.
   Refusing is recoverable; importing something mirrored and reporting success
   is not.
 - **Z is ignored** — entities are read as their X and Y.
-- **A truncated LINE is silently misinterpreted** as a line to the origin.
-  libdxfrw exposes no group-code-presence flag, so detecting it needs a
-  lower-level parse. It opens or branches the loop and the Pad then fails
-  loudly, so the effect is a phantom entity plus a misleading success message
-  rather than a wrong solid.
 - **Binary DXF is untested.** libdxfrw reads it; no fixture exercises it.
 - **`$INSUNITS` 11, 12, 17–20** are deliberately unmapped (ADR-M6-011).
 - **Fresh-process load is proven but not in CI.** A reviewer's three-process

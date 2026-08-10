@@ -1,0 +1,86 @@
+999
+Round 3 follow-up: a LINE with codes 10/20 and NO 11/21. libdxfrw
+999
+default-initialises the missing second point to (0,0,0) and exposes no
+999
+group-code-presence flag, so this arrived indistinguishable from a real line
+999
+drawn to the origin: a phantom entity, IMPORT OK, and a profile that opens.
+999
+Accepted as a limitation for two rounds because "detecting it needs a hook the
+999
+library does not offer" -- which stopped being true once ADR-M6-015 made the
+999
+reader read group codes for itself.
+999
+The three good lines plus the phantom would have formed a closed quadrilateral;
+999
+without the phantom the remaining three are an open chain, which is what the
+999
+file actually describes.
+0
+SECTION
+2
+HEADER
+9
+$ACADVER
+1
+AC1015
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+0
+10
+0
+20
+0
+11
+40
+21
+0
+0
+LINE
+8
+0
+10
+40
+20
+0
+11
+40
+21
+30
+0
+LINE
+8
+0
+10
+40
+20
+30
+11
+0
+21
+30
+0
+LINE
+8
+0
+10
+0
+20
+30
+0
+ENDSEC
+0
+EOF

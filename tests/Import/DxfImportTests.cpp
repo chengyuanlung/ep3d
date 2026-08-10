@@ -1338,6 +1338,86 @@ TEST(M6DxfImport, M6_R3_007_AnAlreadyInfiniteCoordinateIsReportedAsSuchNotAsOver
     EXPECT_EQ(reported, 2) << "one line and one circle should each be reported";
 }
 
+TEST(M6DxfImport, M6_R3_008_ALineWithNoEndPointIsSkippedNotInventedAsALineToTheOrigin) {
+    // This was a KNOWN LIMITATION for two rounds, on the recorded grounds that
+    // "detecting it needs a group-code-presence hook the library does not
+    // offer". That reason expired when ADR-M6-015 made the reader read the
+    // file's group codes for itself to find unterminated blocks -- the hook is
+    // not needed, because the file states the absence directly.
+    //
+    // The fixture's fourth LINE has 10/20 and no 11/21. Before this it imported
+    // as (0,30) -> (0,0), which closes the quadrilateral: the file describes an
+    // OPEN chain of three lines and the importer reported a closed one, with
+    // IMPORT OK. That is the last place in M6 where something was silently
+    // misinterpreted, which spec 4 forbids outright.
+    const DxfReadResult read = ReadDxfFile(Fixture("line_missing_endpoint.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 3u) << "the phantom line survived";
+    for (const ImportedLine2D& line : read.geometry.lines) {
+        const bool phantom = line.start.x == 0.0 && line.start.y == 30.0 &&
+                             line.end.x == 0.0 && line.end.y == 0.0;
+        EXPECT_FALSE(phantom) << "the invented line to the origin is still here";
+    }
+
+    const bool reported = std::any_of(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) {
+            return s.entityKind == "LINE" &&
+                   s.detail.find("no end point") != std::string::npos;
+        });
+    EXPECT_TRUE(reported) << "dropped silently, which is the other half of the bug";
+
+    // The remaining three still import: this removes an entity the file never
+    // defined, it does not refuse the file.
+    PartDocument document{"MissingEndpoint"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message;
+    EXPECT_EQ(result.importedCount, 3u);
+}
+
+TEST(M6DxfImport, M6_R3_009_HalfAnEndPointIsStillNoEndPointAndTheRealLineSurvives) {
+    // Both cases here came from mutating my OWN new detection code, which is
+    // the first time on this project that step found anything before a reviewer
+    // did. Neither was reachable from the fixture I wrote alongside the fix.
+    //
+    // (a) A LINE with code 11 and no 21. libdxfrw fills the missing y with 0, so
+    //     it arrives as a real line to (110, 0). Requiring BOTH codes to be
+    //     absent misses it.
+    // (b) A truncated LINE sharing a start point with a REAL line. The phantom
+    //     is identified by its start AND by end == (0,0); matching on the start
+    //     alone erases whichever comes first in the container, which here is the
+    //     genuine (200,0) -> (200,50) line -- deleting real geometry to remove
+    //     a phantom is strictly worse than the bug being fixed.
+    const DxfReadResult read = ReadDxfFile(Fixture("line_missing_endpoint_variants.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    ASSERT_EQ(read.geometry.lines.size(), 2u);
+
+    const bool realVerticalSurvived = std::any_of(
+        read.geometry.lines.begin(), read.geometry.lines.end(),
+        [](const ImportedLine2D& l) {
+            return l.start.x == 200.0 && l.start.y == 0.0 && l.end.x == 200.0 &&
+                   l.end.y == 50.0;
+        });
+    EXPECT_TRUE(realVerticalSurvived)
+        << "the real line was erased instead of the phantom that shares its start";
+
+    const bool halfSurvived = std::any_of(
+        read.geometry.lines.begin(), read.geometry.lines.end(),
+        [](const ImportedLine2D& l) { return l.start.x == 100.0 && l.start.y == 0.0; });
+    EXPECT_FALSE(halfSurvived) << "a LINE with 11 and no 21 imported as a real line";
+
+    const auto reported = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) {
+            return s.entityKind == "LINE" &&
+                   s.detail.find("no end point") != std::string::npos;
+        });
+    EXPECT_EQ(reported, 2) << "both incomplete lines should be reported";
+}
+
 // --- Unit policy (ADR-M6-002) -------------------------------------------------
 
 TEST(M6DxfImport, M6_UNITS_001_InchesAreConvertedExactly) {
@@ -1503,4 +1583,5 @@ TEST(M6DxfImport, M6_DIAG_001_AMissingFileIsDistinguishableFromABadOne) {
 }
 
 } // namespace
+
 

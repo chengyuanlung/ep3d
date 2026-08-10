@@ -65,13 +65,17 @@ imports as nothing plus a diagnostic." Neither clause was true.
 
 ## Accepted, not fixed
 
-- **A truncated LINE is silently misinterpreted.** libdxfrw default-initialises
-  a missing second point to (0,0,0) and exposes no presence flag, so a LINE with
-  codes 10/20 and no 11/21 imports as a line to the sketch origin with no skip
-  record. Detecting it needs a group-code-presence hook the library does not
-  offer. In practice it opens or branches the loop and the Pad fails loudly, so
-  it produces a phantom entity and a misleading success message rather than a
-  wrong solid. Recorded as a limitation rather than papered over.
+- **[NO LONGER ACCEPTED — FIXED after round 3.]** *A truncated LINE is silently
+  misinterpreted.* The original text read: "Detecting it needs a
+  group-code-presence hook the library does not offer." That was true when
+  written and stopped being true when ADR-M6-015 made the reader read the file's
+  group codes for itself to find unterminated blocks. **Nothing re-examined the
+  limitation when the tools changed** — it was still listed as permanent two
+  rounds later. Fixed by `M6_R3_008` and `M6_R3_009`.
+
+  The lesson is not about DXF: **"cannot be fixed" is a claim with a date on
+  it.** This list is the place where such claims go to be forgotten, so every
+  entry on it needs re-reading whenever the surrounding capability changes.
 - **The profile-connectivity tolerance band** (gaps in [1e-7, 1e-6] mm are
   accepted by `BuildProfile` and rejected by OCCT) is pre-existing M4 behaviour
   that M6 newly exposes to externally authored coordinates. It fails loudly and
@@ -259,7 +263,13 @@ verdict on the four guards they both tested. `AGENTS.md` now carries the rule.
 
 - 1 Major live defect fixed (ADR-M6-015); 8 unguarded guards now covered by
   `M6_R3_001..007`; 4 documentation claims corrected.
-- **558 / 558 in Debug and Release.**
+- **One accepted limitation retired.** The scan built for the unterminated-block
+  defect made the truncated-LINE defect detectable, which two rounds of notes
+  had recorded as impossible with the library's interface. `M6_R3_008/009`.
+  Mutating that new code myself found two defects in it before a reviewer did —
+  the first time on this project that step caught anything first, and both were
+  the same shape as everything else here: a case my own fixture could not reach.
+- **560 / 560 in Debug and Release.**
 - Twelve mutations re-run under a protocol that fails loudly: **11 CAUGHT, 0
   INCONCLUSIVE, 1 UNGUARDED** — the NaN-safe rewrite of the sweep guard, which
   no single-mutation test can reach because `AllFinite` rejects the only input

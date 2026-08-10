@@ -2066,8 +2066,9 @@ undo.
 held only LINEs, so deleting either the CIRCLE or the ARC re-check left all fifty
 tests green. `M6_R3_002` covers all three, centre and radius separately.
 
-## ADR-M6-015 — An unterminated BLOCKS section is detected outside the parser (M6)
-Status: Accepted.
+## ADR-M6-015 — Two structural facts are read outside the parser (M6)
+Status: Accepted. Extended after the scan it introduced made a second, older
+finding fixable.
 
 A `BLOCK` with no `ENDBLK` makes libdxfrw read **the entire rest of the file** as
 block content. The whole ENTITIES section disappears, `read()` returns true, and
@@ -2092,3 +2093,34 @@ The geometry is not recoverable — once the callbacks have been dispatched ther
 is nothing left to re-attribute. **The diagnostic is.** The rule this turns on is
 the same one as ADR-M6-013: when a fault cannot be repaired, it must at least be
 named, and it must be named after the thing that is actually broken.
+
+
+**Extension — a LINE with no end point is no longer invented.**
+
+libdxfrw default-initialises a missing second point to (0,0,0) and exposes no
+group-code-presence flag, so a LINE with codes 10/20 and no 11/21 arrived
+indistinguishable from a real line drawn to the origin. It imported silently: a
+phantom entity, `IMPORT OK`, and a profile that opens or branches. Spec 4 says
+nothing may be silently misinterpreted; this was the last place in M6 where
+something was.
+
+It was accepted as a limitation for two review rounds, on the recorded grounds
+that "detecting it needs a group-code-presence hook the library does not offer".
+**That reason expired the moment this ADR forced a group-code scan to exist.**
+The hook is not needed — the file states the absence directly. Two rounds of
+"cannot be fixed" turned out to mean "cannot be fixed with the tools we had
+then", and nothing re-examined it when the tools changed.
+
+Two things about the identification, both found by mutating this code rather
+than by reading it:
+
+- The phantom is matched by **both** endpoints. A real line may share a start
+  point with a phantom, and erasing genuine geometry to remove an invented
+  entity would be worse than the bug.
+- A LINE with code 11 and **no 21** becomes `(x11, 0)`, not the origin. Half a
+  second point is still no second point, and the phantom to look for is exactly
+  what the library will have built — so the scan records the synthesised end,
+  it does not assume it.
+
+Failing to match removes nothing and reports nothing, which is precisely the
+behaviour this replaces: the change cannot make any file worse.
