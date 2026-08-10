@@ -19,6 +19,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QPalette>
+#include <QString>
 #include <QTimer>
 #include <cstring>
 #include <cstdio>
@@ -199,6 +200,7 @@ int main(int argc, char** argv) {
     // mock-ups. Each name matches a UI-0xx entry in the self-validation report.
     const char* scenario = nullptr;
     const char* sampleName = nullptr;
+    const char* importPath = nullptr;
     // Accepts BOTH `--flag value` and `--flag=value`.
     //
     // Matching only the separate-token form meant `--sample=m5-circle` failed
@@ -220,6 +222,13 @@ int main(int argc, char** argv) {
         bool present = false;
         if (const char* value = valueFor(i, "--scenario", present); present && value != nullptr)
             scenario = value;
+        if (const char* value = valueFor(i, "--import", present); present) {
+            // An --import with no path is an error, not a silent no-op: the
+            // same rule --sample learned three times over (ADR-M6-025's
+            // sibling, ADR-M5-025).
+            if (value == nullptr || value[0] == '\0') gUnknownSample = true;
+            else importPath = value;
+        }
         if (const char* value = valueFor(i, "--sample", present); present) {
             // An EMPTY or MISSING value is an error, not a silent default.
             if (value == nullptr || value[0] == '\0') gUnknownSample = true;
@@ -280,6 +289,12 @@ int main(int argc, char** argv) {
     MainWindow window(model->document, presenter);
     window.resize(1440, 900);
     window.show();
+
+    // DXF import, driven through MainWindow exactly as the menu action does.
+    // This is the half of the workflow no unit test reaches: the panel commit,
+    // the recompute, the redisplay and the status message.
+    QString importReport;
+    if (importPath != nullptr) importReport = window.importDxfFile(QString::fromUtf8(importPath));
 
     // Selection scenarios need the window to exist first.
     if (scenario != nullptr && std::strcmp(scenario, "pad-selected") == 0)
@@ -404,6 +419,32 @@ int main(int argc, char** argv) {
                         fail("an under-constrained sketch reports no free degrees");
                 }
             }
+        }
+
+        // The DXF import workflow really ran, in the running application.
+        if (importPath != nullptr) {
+            if (importReport.isEmpty()) fail("the import produced no status message");
+            if (importReport.contains(QStringLiteral("failed")))
+                fail("the DXF import failed");
+            if (model->document.sketches().empty())
+                fail("the import produced no sketch");
+            else {
+                const Sketch* imported = model->document.sketches().back();
+                if (imported->entities().empty())
+                    fail("the imported sketch has no entities");
+            }
+            // The tree must SHOW it -- an import the model tree does not list
+            // is an import the user cannot select or delete.
+            const DocumentOutline outline(model->document);
+            const OutlineNode root = outline.build();
+            std::size_t sketchRows = 0;
+            const std::function<void(const OutlineNode&)> count =
+                [&](const OutlineNode& node) {
+                    if (node.kind == OutlineKind::Sketch) ++sketchRows;
+                    for (const OutlineNode& child : node.children) count(child);
+                };
+            count(root);
+            if (sketchRows < 2) fail("the imported sketch is not in the model tree");
         }
 
         // Selection round-trips through the shell by ObjectId.

@@ -5,10 +5,14 @@
 #include "Viewer/DesignTokens.h"
 #include "Viewer/DocumentOutline.h"
 #include "Viewer/DocumentPresenter.h"
+#include "Core/Import/SketchImporter.h"
+#include "Import/Dxf/DxfReader.h"
 #include "Viewer/OcctViewWidget.h"
 
 #include <QAction>
 #include <QDockWidget>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QHeaderView>
 #include <QLabel>
 #include <QMenuBar>
@@ -62,6 +66,10 @@ MainWindow::MainWindow(PartDocument& document, DocumentPresenter& presenter, QWi
 
 void MainWindow::buildMenus() {
     QMenu* file = menuBar()->addMenu(QStringLiteral("&File"));
+    QAction* importDxf = file->addAction(QStringLiteral("&Import DXF..."));
+    importDxf->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
+    connect(importDxf, &QAction::triggered, this, &MainWindow::onImportDxfRequested);
+    file->addSeparator();
     QAction* quit = file->addAction(QStringLiteral("E&xit"));
     connect(quit, &QAction::triggered, this, &QWidget::close);
 
@@ -409,6 +417,62 @@ void MainWindow::onRecomputeRequested() {
     // (reportHealth), so success only needs to say so without overwriting a
     // failure message that is still true.
     if (ok) statusLeft_->setText(selectionSummary());
+}
+
+void MainWindow::onImportDxfRequested() {
+    // The dialog is the ONLY part of this workflow a test cannot drive, so it
+    // is the only part that lives in the slot. Everything after it is in
+    // importDxfFile, which the import UI test calls directly.
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Import DXF"), QString(),
+        QStringLiteral("DXF files (*.dxf);;All files (*)"));
+    if (path.isEmpty()) return; // cancelled; nothing said, nothing changed
+    importDxfFile(path);
+}
+
+QString MainWindow::importDxfFile(const QString& path) {
+    const DxfReadResult read = ReadDxfFile(path.toStdString());
+    if (!read) {
+        // The CAUSE, not "import failed" (spec 11). The reader already
+        // distinguishes missing from unreadable from malformed; throwing that
+        // away at the display boundary is what M5's Blocked state did.
+        const QString message = QStringLiteral("DXF import failed (%1): %2")
+                                    .arg(QString::fromUtf8(DxfReadErrorName(read.error)),
+                                         QString::fromStdString(read.message));
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    }
+
+    const QString name = QFileInfo(path).completeBaseName();
+    const SketchImportResult imported = ImportGeometryIntoNewSketch(
+        *document_, name.isEmpty() ? std::string("Imported") : name.toStdString(),
+        read.geometry);
+    if (!imported) {
+        const QString message =
+            QStringLiteral("DXF import failed: %1").arg(QString::fromStdString(imported.message));
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    }
+
+    // The imported sketch is an ordinary document object, so the ordinary
+    // refresh path shows it: recompute, then rebuild tree, panel and view.
+    onRecomputeRequested();
+    selectObject(imported.sketchId);
+
+    QString message = QStringLiteral("Imported %1: %2")
+                          .arg(QFileInfo(path).fileName(),
+                               QString::fromStdString(imported.message));
+    if (imported.skippedCount > 0) {
+        // Skipped entities are reported in the status bar rather than only in a
+        // log: a user who cannot see that something was dropped will assume
+        // nothing was.
+        message += QStringLiteral(" [%1 skipped]").arg(imported.skippedCount);
+    }
+    statusLeft_->setText(message);
+    statusLeft_->setToolTip(message);
+    return message;
 }
 
 void MainWindow::onFitAllRequested() { viewer_->fitAll(); }

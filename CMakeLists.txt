@@ -221,6 +221,13 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
     if(TARGET ParametricCADSolver)
         target_link_libraries(ParametricCADViewer PRIVATE ParametricCADSolver)
     endif()
+    # DXF import in the shell (M6.7). The viewer is an application, so it may
+    # name a concrete backend -- and it inherits libdxfrw's GPL-2.0 copyleft by
+    # doing so (ADR-M6-001). Core still links neither.
+    if(TARGET ParametricCADImportDxf)
+        target_link_libraries(ParametricCADViewer PRIVATE ParametricCADImportDxf)
+        target_compile_definitions(ParametricCADViewer PRIVATE PARAMCAD_HAVE_DXF_IMPORT)
+    endif()
     target_compile_features(ParametricCADViewer PRIVATE cxx_std_20)
     if(MSVC)
         target_compile_options(ParametricCADViewer PRIVATE /utf-8)
@@ -286,6 +293,27 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
         add_test(NAME ViewerSmokeTest_AcceptsEqualsForm
                  COMMAND ParametricCADViewer --selftest --sample=m5-circle)
         set_tests_properties(ViewerSmokeTest_AcceptsEqualsForm PROPERTIES TIMEOUT 60)
+
+        # M6.7: the DXF import workflow driven through MainWindow in the running
+        # application -- the half of it no unit test reaches (the panel commit,
+        # the recompute, the redisplay, the model-tree row and the status
+        # message). Only registered when the import target exists.
+        if(TARGET ParametricCADImportDxf)
+            add_test(NAME ViewerSmokeTest_ImportsDxf
+                     COMMAND ParametricCADViewer --selftest
+                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/mixed.dxf")
+            set_tests_properties(ViewerSmokeTest_ImportsDxf PROPERTIES TIMEOUT 60)
+            # A failed import must FAIL the selftest, so a broken import cannot
+            # pass CI by producing an empty document quietly.
+            add_test(NAME ViewerSmokeTest_ReportsFailedImport
+                     COMMAND ParametricCADViewer --selftest
+                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/nope.dxf")
+            add_test(NAME ViewerSmokeTest_RejectsMissingImportPath
+                     COMMAND ParametricCADViewer --selftest --import)
+            set_tests_properties(ViewerSmokeTest_ReportsFailedImport
+                                 ViewerSmokeTest_RejectsMissingImportPath
+                                 PROPERTIES WILL_FAIL TRUE TIMEOUT 60)
+        endif()
     endif()
 
     message(STATUS "ParametricCADViewer: Qt ${Qt6_VERSION} found -- viewer will be built.")

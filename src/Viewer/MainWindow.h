@@ -36,6 +36,12 @@ public:
     // Rebuilds tree, properties and viewer from current document state.
     void refreshAll();
 
+    // Imports `path` and refreshes the shell. Separated from the menu slot so
+    // the whole workflow -- read, import, recompute, redisplay, report -- is
+    // reachable without a file dialog, which is the only part of it a test
+    // cannot drive. Returns the message shown in the status bar.
+    QString importDxfFile(const QString& path);
+
     // Selects an object as if the user had clicked it in the tree.
     void selectObject(ObjectId id);
 
@@ -46,6 +52,7 @@ private slots:
     void onRecomputeRequested();
     void onFitAllRequested();
     void onToggleHiddenRequested();
+    void onImportDxfRequested();
 
 private:
     void buildMenus();
