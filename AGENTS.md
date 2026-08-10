@@ -45,17 +45,36 @@ owner UI validation passed; DPI scaling remains unverified at the owner's
 direction. See `docs/reviews/M5_CompletionReport.md`.
 
 Current target: **M6 — DXF Import to Stable Sketch Entities**
-(`docs/M6_SPEC.md`), on branch `m6-wip`. Two review rounds so far, with the same
-pattern: the second found a Critical the first round's fixes had created. See
+(`docs/M6_SPEC.md`), on branch `m6-wip`. Three review rounds so far, each
+finding defects the previous round's fixes had created. See
 `docs/reviews/M6_CompletionReport.md`.
 
 **The pattern is now the most reliable prediction this project makes.** Every
 review round since M5 has found defects introduced by the previous round's
-fixes, and in three of them the implementer's own claim that "every fix is
+fixes, and in four of them the implementer's own claim that "every fix is
 mutation-verified" was false. A mutation suite written by the author of a fix
 measures the author's imagination; only a reviewer removing a line the author
 did not think to remove has ever found an unguarded fix here. Plan for a review
 round after every round of fixes, not after the implementation.
+
+**Two rules earned by that pattern, both mechanical enough to apply without
+judgement:**
+
+1. **Parallel kinds get parallel fixtures.** Every unguarded line M6 round 3
+   found was the third leg of a LINE / CIRCLE / ARC triple where only one or two
+   legs got a fixture — including in the test written for that very finding. A
+   guard added to `addLine` needs a sibling fixture exercising `addCircle` and
+   `addArc`, and the reverse. This one rule would have caught five of six
+   mechanically. It generalises past DXF: wherever the code enumerates kinds,
+   the fixtures must too.
+2. **A mutation run that cannot fail loudly proves nothing.** A killed process
+   keeps holding the test binary on Windows, the next build then fails
+   *silently*, and the stale binary is re-run — which once produced five
+   identical results and a confident "no unguarded fix". Delete the executable
+   before each rebuild, assert it exists afterward, require a completion summary
+   in the output, and keep **INCONCLUSIVE** separate from **guarded**. Never run
+   two mutating agents in one working tree; give each its own `git archive`
+   export and build directory.
 
 ## Independent Review Role
 

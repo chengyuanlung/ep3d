@@ -1,22 +1,34 @@
 # M6 Completion Report — DXF Import to Stable Sketch Entities
 
-> **STATUS: FUNCTIONALLY COMPLETE — one verification item open.**
+> **STATUS: FUNCTIONALLY COMPLETE — two verification items open.**
 >
-> All required DXF entities import and Gates A–I pass. **Two** independent
-> review rounds have run. The first found 1 Critical and 6 Major; the second
-> verified those fixes and found the round had introduced **1 more Critical and
-> 4 more findings** — including an unbounded loop that froze the application on
-> a legal DXF file, the identical bug this project had already fixed and
-> documented in M5. All are fixed and mutation-verified.
+> All required DXF entities import and Gates A–I pass. **Three** independent
+> review rounds have run, and every one found defects created by the previous
+> round's fixes:
 >
-> **The second round's fixes have not themselves been reviewed**, and **owner
-> manual UI validation of the import workflow has not been performed.** M6 is
-> not declared complete here.
+> | Round | Found |
+> |---|---|
+> | 1 | 1 Critical, 6 Major |
+> | 2 | 1 Critical, 4 more — including an unbounded loop that froze the application on a legal DXF file, the identical bug this project had already fixed and documented in M5 |
+> | 3 | 1 Major live defect, **six unguarded guards**, and three still-false documentation claims |
+>
+> Round 3's finding is the one worth carrying forward, because it is mechanical:
+> **every unguarded line was the third leg of a LINE / CIRCLE / ARC triple where
+> only one or two legs got a fixture.** Two reviewers found it independently by
+> deleting lines the author had not thought to delete.
+>
+> All findings are fixed. Every fix is mutation-verified **except one**, named
+> below, which no single-mutation test can reach.
+>
+> **Round 3's fixes have not themselves been reviewed**, and **owner manual UI
+> validation of the import workflow has not been performed.** M6 is not declared
+> complete here.
 
 **Baseline:** `a6e7078` — the accepted M5 master state.
 
-**Branch:** `m6-wip`. Head at the time of writing: `881f0bc` (M6.9 review
-fixes), plus the documentation commit that records this file.
+**Branch:** `m6-wip`. This file is rewritten by each round, so naming a head
+commit here has been wrong more often than right; `git log m6-wip` is the
+authority.
 
 ---
 
@@ -64,17 +76,17 @@ or an own reader means rewriting `src/Import/Dxf/DxfReader.cpp` and nothing else
 
 | | M5 baseline | M6 |
 |---|---|---|
-| Total | 498 | **551** |
+| Total | 498 | **558** |
 | `ParametricCADCoreTests` | 301 | 301 |
 | `ParametricCADSolverTests` | 53 | 53 |
 | `ParametricCADKernelOcctTests` | 47 | 47 |
 | `ParametricCADIntegrationTests` | 87 | 87 |
-| **`ParametricCADImportTests`** | — | **50** |
+| **`ParametricCADImportTests`** | — | **57** |
 | Viewer smoke tests (ctest) | 10 | 13 |
 
-**551 / 551 in Debug and Release**, with the Release run verified to invoke
-Release binaries — independently reproduced by a reviewer. The five added tests
-are `M6_RR_001..005`, one per second-round finding.
+**558 / 558 in Debug and Release**, with the Release run verified to invoke
+Release binaries — independently reproduced by a reviewer. `M6_RR_001..005` are
+one per second-round finding; `M6_R3_001..007` one per third-round finding.
 
 ---
 
@@ -99,8 +111,10 @@ No expectation was produced by running the importer.
 
 ## ADRs
 
-Seven were required by spec 21; **thirteen** exist. Six more had to be written
-once review found what the first seven had got wrong.
+Seven were required by spec 21; **fifteen** exist. Eight more had to be written
+once review found what the first seven had got wrong — and ADR-M6-014 exists
+because a reviewer grepped the log for "overflow", got nothing, and found a fix
+that had shipped two rounds earlier with a test and no record of why.
 
 | ADR | Subject |
 |---|---|
@@ -117,12 +131,14 @@ once review found what the first seven had got wrong.
 | M6-011 | Every `$INSUNITS` value the format defines |
 | M6-012 | A degenerate sweep is skipped, not fatal |
 | M6-013 | A non-default extrusion is refused, not guessed |
+| M6-014 | Finiteness is checked on both sides of the unit multiply — *written three rounds late; the fix it describes shipped with a test and no ADR* |
+| M6-015 | An unterminated BLOCKS section is detected outside the parser |
 
 ---
 
 ## Independent review
 
-One round, two reviewers, recorded in full in `M6_IndependentReview.md`.
+Three rounds, two reviewers each, recorded in full in `M6_IndependentReview.md`.
 
 **1 Critical, 6 Major, 2 Minor/Info** — all fixed with regression tests, except
 two accepted and recorded as limitations. (An earlier draft of this line, and
@@ -137,9 +153,37 @@ Three claims in my own self-validation report were **falsified by execution**,
 including the one it leaned on hardest ("unguarded mutations: none"). All are
 corrected in place and marked, nothing deleted.
 
+A **third** round then reviewed the second round's fixes. The Critical fix was
+found genuinely correct across its whole domain — measured, not read — but the
+round's other fixes had landed on one or two of the three entity kinds each, and
+**six lines could be deleted with all fifty tests still passing.** Both
+reviewers converged on the same mechanical rule, which is worth more than any
+individual finding:
+
+> **Every unguarded line was the third leg of a LINE / CIRCLE / ARC triple where
+> only one or two legs got a fixture.**
+
+Round 3 also found one live defect: a `BLOCK` with no `ENDBLK` made libdxfrw
+read the entire rest of the file as block content, so the whole drawing vanished
+while the reader reported success and the message blamed the user's geometry
+(ADR-M6-015).
+
 The durable finding: **a mutation suite written against my own code measures my
-imagination, not my coverage.** Both genuinely unguarded fixes were found by
-someone removing a line I had not thought to remove.
+imagination, not my coverage.** Every genuinely unguarded fix across three
+rounds was found by someone removing a line I had not thought to remove. Round
+2's mutation run mutated the LINE leg and the shared code and concluded "no
+unguarded fix"; round 3 deleted the ARC legs and found six.
+
+### The one fix that is not mutation-verified
+
+The sweep guard was rewritten from `sweep < lo || sweep > hi` into positive
+form, because both clauses of the negative form are **false for NaN** and
+`fmod(inf, 2*pi)` is NaN. Restoring the negative form breaks no test, and
+**no single-mutation test can break it**: the only route to a NaN sweep is a
+non-finite angle, which `AllFinite` rejects first (a reviewer traced libdxfrw's
+degree-to-radian conversion and confirmed `|end - start|` cannot overflow). It
+is defence in depth behind a guard that is itself tested, and it is listed here
+rather than counted as covered.
 
 **No score is claimed.** Spec 23 defines no scorecard for M6, and a number I
 awarded myself after my own report was shown to contain three false claims would

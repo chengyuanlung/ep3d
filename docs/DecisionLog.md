@@ -2036,3 +2036,59 @@ extrusion are therefore **skipped and reported**.
 
 The rule this turns on: when the choice is between refusing and guessing, and a
 wrong guess is undetectable, refuse.
+
+## ADR-M6-014 — Finiteness is checked on both sides of the unit multiply (M6)
+Status: Accepted. Records a fix that had no ADR at all.
+
+ADR-M6-010 moved unit scaling to the end of the read. It recorded that "the
+degenerate-geometry checks moved with it" and stopped there. What it did not
+record is that the move put every `AllFinite` check **before** the multiply, so
+a coordinate that was finite in the file and infinite after conversion — 1e305
+in a drawing measured in miles — passed the reader untouched and was refused by
+the model, aborting the whole file. That is exactly the failure ADR-M6-012
+exists to eliminate, reintroduced through the door ADR-M6-010 opened.
+
+The rule: **a value is checked for finiteness both as it arrives and after it is
+scaled.** `tooSmall` cannot stand in for the second check — `inf < 1e-5` is
+false, and `hypot` of two infinities is NaN.
+
+Angles are the deliberate exception. They are never scaled, so conversion cannot
+make a finite angle infinite; the raw check in `addArc` is their only guard. That
+is a reason to test that one line harder, not to add a second check that can
+never fire — `M6_R3_003` is that test.
+
+**This ADR is written three rounds late.** The fix shipped in M6.10 with a test
+(`M6_RR_004`) and no entry here, and a reviewer found it by grepping the log for
+"overflow" and getting nothing. A fix with no ADR is a fix the next person will
+undo.
+
+**And the fix itself covered one third of its own case.** `overflow_on_scale.dxf`
+held only LINEs, so deleting either the CIRCLE or the ARC re-check left all fifty
+tests green. `M6_R3_002` covers all three, centre and radius separately.
+
+## ADR-M6-015 — An unterminated BLOCKS section is detected outside the parser (M6)
+Status: Accepted.
+
+A `BLOCK` with no `ENDBLK` makes libdxfrw read **the entire rest of the file** as
+block content. The whole ENTITIES section disappears, `read()` returns true, and
+the user is told "every entity in the file was skipped; nothing to import" —
+which aims them at their geometry when the fault is one missing group code in a
+section they never open. Unbounded silent data loss with a misleading diagnostic.
+
+The callback interface cannot see this. `DRW_Interface` has no
+section-transition hook (`setBlock` is never called), and libdxfrw calls
+`endBlock()` at EOF, so the obvious check — "are we still inside a block when the
+read finishes?" — is **always false**. I wrote that check first and measured it
+doing nothing before replacing it; it is recorded here because it is the check
+anyone would reach for.
+
+So the file is scanned separately for one structural fact: does the BLOCKS
+section close every BLOCK it opens? This is not a second DXF parser. It reads
+group code 0 values, is bounded to the BLOCKS section, answers one question, and
+returns `Unknown` for binary DXF rather than guessing. `BLOCK_RECORD` in TABLES
+does not collide because the comparison is for equality.
+
+The geometry is not recoverable — once the callbacks have been dispatched there
+is nothing left to re-attribute. **The diagnostic is.** The rule this turns on is
+the same one as ADR-M6-013: when a fault cannot be repaired, it must at least be
+named, and it must be named after the thing that is actually broken.

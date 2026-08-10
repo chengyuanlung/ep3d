@@ -10,6 +10,9 @@
 #include <cmath>
 #include <initializer_list>
 #include <filesystem>
+#include <fstream>
+#include <ios>
+#include <string>
 
 // The ONLY translation unit that names libdxfrw (ADR-M6-001/003).
 //
@@ -53,6 +56,76 @@ ImportedLengthUnit UnitFromInsUnits(int insUnits) noexcept {
         // a 1e16x scale factor from a typo. Reported as unrecognised.
         default: return ImportedLengthUnit::Unrecognized;
     }
+}
+
+// Whether the BLOCKS section closes every BLOCK it opens.
+//
+// This exists because the callback interface CANNOT answer the question. A
+// BLOCK with no ENDBLK makes libdxfrw read the whole rest of the file as block
+// content -- the entire ENTITIES section disappears -- and then call endBlock()
+// at EOF, so an `inBlock_ still true` check at the end never fires. I wrote
+// that check first and measured it doing nothing; the observable symptom is a
+// SUCCESSFUL read with zero geometry and one ordinary "block definitions are
+// not imported" note, which aims the user at their geometry when the fault is
+// one missing group code in a section they never open.
+//
+// Counting `0 / BLOCK` against `0 / ENDBLK` is not a second DXF parser: it is a
+// structural check on group code 0 values, bounded to the BLOCKS section, and
+// it answers exactly one question. `BLOCK_RECORD` in TABLES does not collide --
+// the comparison is for equality, not prefix.
+enum class BlocksSectionState { Unknown, Terminated, Unterminated };
+
+BlocksSectionState ScanBlocksSection(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return BlocksSectionState::Unknown;
+
+    // Binary DXF has no group-code lines to count. Untested and documented as
+    // such; reporting Unknown is honest, guessing would not be.
+    char magic[22] = {};
+    in.read(magic, 21);
+    if (std::string(magic, static_cast<size_t>(in.gcount())).rfind("AutoCAD Binary DXF", 0) == 0)
+        return BlocksSectionState::Unknown;
+    in.clear();
+    in.seekg(0);
+
+    const auto trim = [](std::string s) {
+        while (!s.empty() && (s.back() == '\r' || s.back() == ' ' || s.back() == '\t'))
+            s.pop_back();
+        size_t i = 0;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+        return s.substr(i);
+    };
+
+    std::string code;
+    std::string value;
+    bool inBlocksSection = false;
+    bool sectionNameExpected = false;
+    int depth = 0;
+    while (std::getline(in, code) && std::getline(in, value)) {
+        const std::string c = trim(std::move(code));
+        const std::string v = trim(std::move(value));
+        if (sectionNameExpected && c == "2") {
+            inBlocksSection = (v == "BLOCKS");
+            sectionNameExpected = false;
+            continue;
+        }
+        if (c != "0") continue;
+        if (v == "SECTION") {
+            sectionNameExpected = true;
+        } else if (v == "ENDSEC") {
+            if (inBlocksSection)
+                return depth == 0 ? BlocksSectionState::Terminated
+                                  : BlocksSectionState::Unterminated;
+            inBlocksSection = false;
+        } else if (inBlocksSection) {
+            if (v == "BLOCK") ++depth;
+            else if (v == "ENDBLK") --depth;
+        }
+    }
+    // EOF inside BLOCKS: unterminated in every case, whether or not a BLOCK is
+    // still open, but only the open one loses geometry.
+    return (inBlocksSection && depth != 0) ? BlocksSectionState::Unterminated
+                                           : BlocksSectionState::Terminated;
 }
 
 constexpr double kPi = 3.14159265358979323846;
@@ -169,6 +242,20 @@ public:
                 ++it;
             }
         }
+
+        // Angles are deliberately NOT re-checked here: they are not scaled, so
+        // unit conversion cannot make a finite angle infinite. The raw check in
+        // addArc is their only guard -- which is exactly why it needs a test of
+        // its own, and now has one.
+
+    }
+
+    // Reports a fault the callbacks cannot see. See BlocksSectionState below.
+    void noteUnterminatedBlocks() {
+        note(ImportSkipReason::UnsupportedEntity, "BLOCK",
+             "the BLOCKS section is not terminated by ENDBLK, so every entity "
+             "after it was read as block content and skipped; the drawing "
+             "cannot be recovered without repairing that section");
     }
 
     // BLOCK DEFINITIONS ARE NOT MODEL GEOMETRY.
@@ -273,7 +360,15 @@ public:
         // (IsValidSketchGeometry) uses fmod. Now so does this.
         double sweep = std::fmod(end - start, 2.0 * kPi);
         if (sweep < 0.0) sweep += 2.0 * kPi;
-        if (sweep < kMinSweepRad || sweep > 2.0 * kPi - kMinSweepRad) {
+        // Written in POSITIVE form so it is NaN-safe by construction. The
+        // negative form `sweep < lo || sweep > hi` is FALSE on both clauses for
+        // a NaN, so a NaN sweep sailed straight through and the guard supplied
+        // no defence in depth at all -- AllFinite above was a single point of
+        // failure, and it is one line. fmod(inf - 0, 2*pi) is NaN, so that is
+        // not hypothetical: it is what this path produces the moment the
+        // finiteness check is weakened. For every finite input the two forms
+        // are identical; both bounds match the model's inclusive comparisons.
+        if (!(sweep >= kMinSweepRad && sweep <= 2.0 * kPi - kMinSweepRad)) {
             note(ImportSkipReason::InvalidGeometry, "ARC",
                  "the arc has no sweep (start and end angles coincide)");
             return;
@@ -423,6 +518,12 @@ DxfReadResult ReadDxfFile(const std::string& path) {
     // Units applied ONCE, here, after the whole file has been seen -- so the
     // result cannot depend on whether HEADER preceded ENTITIES.
     collector.finalise();
+
+    // Asked AFTER the read so it costs nothing on the failure path, and only
+    // ever ADDS a diagnostic -- an unterminated BLOCKS section is a fault the
+    // callbacks are structurally blind to, not a reason to refuse the file.
+    if (ScanBlocksSection(path) == BlocksSectionState::Unterminated)
+        collector.noteUnterminatedBlocks();
 
     if (!ok) {
         result.error = DxfReadError::MalformedFile;

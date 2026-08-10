@@ -1,5 +1,8 @@
 # M6 Independent Review — findings and responses
 
+Three rounds. Round 3 is recorded at the end of this file; rounds 1 and 2
+follow immediately below, in the order they happened.
+
 Two independent reviewer agents reviewed M6 in parallel, partitioned by the
 spec 23 areas. Neither wrote the code. Both were told that M5 needed **four**
 review rounds, that each round found defects created by the previous round's
@@ -150,3 +153,117 @@ remove.
   project's record that is a real gap, not a formality.
 - **Owner manual UI validation of the import workflow: NOT EXECUTED**, and the
   owner's to perform (ADR-M4-016).
+
+---
+
+# Round 3 — reviewing the second round's fixes
+
+Two reviewers again, partitioned. Both were told the project's record and asked
+to assume `029c2f4` held a defect until they had evidence otherwise. Both found
+one, and they converged.
+
+## The finding that matters most
+
+> **Every unguarded line was the third leg of a LINE / CIRCLE / ARC triple where
+> only one or two legs got a fixture.**
+
+Six guards could be deleted with all fifty import tests still passing. The
+author's round-2 mutation run had mutated the LINE leg and the shared code and
+concluded "no unguarded fix" — for the fourth time on this project, falsely.
+
+| Deleted line | Tests still green? | Now caught by |
+|---|---|---|
+| ARC non-default-extrusion guard | yes, 50/50 | `M6_R3_001` |
+| CIRCLE post-scale finiteness re-check | yes, 50/50 | `M6_R3_002` |
+| ARC post-scale finiteness re-check | yes, 50/50 | `M6_R3_002` |
+| ARC angle terms in `AllFinite` | yes, 50/50 | `M6_R3_003` |
+| ARC block guard | yes, 50/50 | `M6_R3_004` |
+| block attribution in `noteUnsupported` | yes, 50/50 | `M6_R3_005` |
+| LINE raw finiteness | yes, 56/56 | `M6_R3_007` |
+| CIRCLE raw finiteness | yes, 56/56 | `M6_R3_007` |
+
+Two of these are worth naming individually because the ADRs say no oracle can
+catch what they prevent:
+
+- **ARC extrusion.** ADR-M6-013 states that for `210 = (0,0,-1)` the correct
+  result is a mirror, and a mirrored part has identical area, volume, mass and
+  centre of mass — so the guard is the entire defence. `ocs_extrusion.dxf`
+  carried a LINE and a CIRCLE and no ARC. A reviewer measured the mutant
+  importing a fillet arc at (25,30) whose true position is (−25,30), with
+  `IMPORT OK`.
+- **ARC inside a block.** ADR-M6-009 was written because every DIMENSION carries
+  an anonymous `*D1` block. An **angular** dimension's annotation geometry is an
+  arc — the entity kind most likely to appear in the block that motivated the
+  ADR was the one kind whose guard nothing tested.
+
+## Live defect — an unterminated BLOCKS section discards the drawing
+
+A `BLOCK` with no `ENDBLK` makes libdxfrw read the entire rest of the file as
+block content. Two real model lines vanished, `read()` returned **true** with no
+parse error, and the user was told *"every entity in the file was skipped;
+nothing to import"* — aiming them at their geometry when the fault is one
+missing group code in a section they never open.
+
+The obvious fix does not work, and that is worth recording: `endBlock()` is
+called at EOF, so "are we still inside a block when the read finishes?" is
+**always false**. I wrote that check first and measured it doing nothing.
+Detecting it requires reading the file's section structure outside the parser —
+ADR-M6-015, `M6_R3_006`.
+
+## What the reviewers verified as genuinely correct
+
+- **The round-2 Critical fix is sound across its whole domain.** Negative
+  angles, angles beyond 2π, ±1e308°, denormals, exactly-2π, and the
+  `fmod`-returns-tiny-negative-then-rounds-to-2π case were each constructed and
+  measured. The reader's rejection band matches the model's **bit for bit**:
+  `2.0 * kPi` in the reader and `kTwoPi` in `SketchTypes` are the same double,
+  `0x401921fb54442d18`. ADR-M6-012's claim that "the reader applies the same
+  sweep test the model uses" is, this time, true.
+- **ARC semantics measured through solid volume** against four hand oracles,
+  including a 240° sector declared in inches — which confirms centre and radius
+  are scaled and angles are not, without asserting on a struct field.
+- **Units:** all of `$INSUNITS` 0–25, −1, 999, `INT_MAX`, no HEADER, HEADER
+  without `$INSUNITS`, `$INSUNITS` as a real, ENTITIES before HEADER, and three
+  two-HEADER variants. `unitWasDefaulted` truthful in all 36 cases.
+- **Rollback:** nine failure positions against a populated document, compared
+  down to the serialized bytes. Every case byte-identical.
+- **Architecture boundary at binary level:** Core and ViewerCore carry
+  `dxfrw=0 occt=0 qt=0 eigen=0`; `DxfReader.cpp` is the only translation unit
+  including any libdxfrw header.
+- **Licence:** the installed vcpkg port is `2025-09-25`, `GPL-2.0-only` — as
+  ADR-M6-001 and `CMakeLists.txt` state.
+
+## Documentation still false after a commit that claimed to audit it
+
+- **`$INSUNITS`.** "Values other than 0/1/2/4/5/6 map to `Unrecognized`" —
+  falsified by running every value, and contradicted eleven lines below in the
+  same list. Found by both reviewers.
+- **"All are fixed and mutation-verified."** False; see the table above.
+- **"1 Critical and 7 Major"** had a **fourth** site, in the self-validation
+  report, after the M6.10 commit said the over-count "appeared in three places".
+- **`M6_RR_004` had no ADR and no DecisionLog entry at all.** A reviewer found
+  it by grepping the log for "overflow" and getting nothing. Now ADR-M6-014.
+
+## Process failure — mine, not the reviewers'
+
+I launched both reviewers into the **same working tree and build directory**.
+Reviewer 2 saw Reviewer 1's mutation of `DxfReader.cpp` appear mid-run and hit
+PDB lock failures (`error C1041`) that silently broke two rebuilds — precisely
+the stale-binary hazard I had warned them about, created by me. Reviewer 2
+recovered by exporting an isolated tree with `git archive` and re-running
+everything there. Reviewer 1's results came from the shared tree, so they are
+corroborated rather than assumed: both reviewers independently reached the same
+verdict on the four guards they both tested. `AGENTS.md` now carries the rule.
+
+## Status after round 3
+
+- 1 Major live defect fixed (ADR-M6-015); 8 unguarded guards now covered by
+  `M6_R3_001..007`; 4 documentation claims corrected.
+- **558 / 558 in Debug and Release.**
+- Twelve mutations re-run under a protocol that fails loudly: **11 CAUGHT, 0
+  INCONCLUSIVE, 1 UNGUARDED** — the NaN-safe rewrite of the sweep guard, which
+  no single-mutation test can reach because `AllFinite` rejects the only input
+  that produces a NaN sweep. It is listed as uncovered rather than counted.
+- **Round 3's fixes have not themselves been reviewed.**
+- **Owner manual UI validation of the import workflow: still NOT EXECUTED**, and
+  the owner's to perform (ADR-M4-016).

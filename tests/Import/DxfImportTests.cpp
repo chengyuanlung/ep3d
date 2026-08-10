@@ -1137,6 +1137,207 @@ TEST(M6DxfImport, M6_RR_005_EachBlockIsReportedOnce) {
     EXPECT_EQ(blocks, 2) << "two block definitions produced " << blocks << " reports";
 }
 
+// --- Third review round -------------------------------------------------------
+//
+// Two independent reviewers converged on one finding about the SECOND round's
+// fixes, and it is more useful than any individual defect below:
+//
+//     every unguarded line was the third leg of a LINE / CIRCLE / ARC triple
+//     where only one or two legs got a fixture.
+//
+// The author's own mutation suite mutated the LINE leg and the shared code, and
+// concluded "all fixed and mutation-verified" -- for the fourth time on this
+// project, falsely. A reviewer deleting the ARC leg found all fifty tests still
+// green. The tests below are one per missing leg, plus the malformed-input case
+// nobody had constructed.
+
+TEST(M6DxfImport, M6_R3_001_AnArcWithNonDefaultExtrusionIsRefusedNotMirrored) {
+    // The ARC half of ADR-M6-013. ocs_extrusion.dxf carries a LINE and a
+    // CIRCLE, so M6_REV_006 guarded the circle leg alone and deleting
+    // skipNonDefaultExtrusion from addArc broke nothing.
+    //
+    // This is the case the ADR itself says no oracle can catch: for
+    // 210 = (0,0,-1) the correct result is a MIRROR, and a mirrored part has
+    // identical area, volume, mass and centre of mass. The guard is the entire
+    // defence, so a guard nothing tests is no defence at all.
+    const DxfReadResult read = ReadDxfFile(Fixture("ocs_extrusion_arc.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_TRUE(read.geometry.arcs.empty())
+        << "the arc was imported at (25,30); its true position is (-25,30)";
+    EXPECT_EQ(read.geometry.lines.size(), 1u)
+        << "LINE is stored in world coordinates and must be unaffected";
+    const bool reported = std::any_of(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.entityKind == "ARC"; });
+    EXPECT_TRUE(reported) << "the arc vanished with no diagnostic";
+}
+
+TEST(M6DxfImport, M6_R3_002_OverflowDuringScalingIsSkippedForCirclesAndArcsToo) {
+    // M6_RR_004 -- the test added for the round-2 overflow finding -- used a
+    // fixture containing only LINEs, so it covered one third of its own fix.
+    // Deleting either the CIRCLE or the ARC re-check left all fifty tests
+    // green while restoring the whole-file abort of ADR-M6-012.
+    //
+    // Centre and radius are exercised separately: an infinite radius and an
+    // infinite centre are different doors to the same failure.
+    const DxfReadResult read = ReadDxfFile(Fixture("overflow_on_scale_curves.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_TRUE(read.geometry.circles.empty()) << "an infinite circle survived";
+    EXPECT_TRUE(read.geometry.arcs.empty()) << "an infinite arc survived";
+    EXPECT_EQ(read.geometry.lines.size(), 2u) << "the two good lines were lost";
+
+    const auto nonFinite = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.reason == ImportSkipReason::NonFiniteValue; });
+    EXPECT_EQ(nonFinite, 4) << "two circles and two arcs should each be reported";
+
+    // The point of the whole finding: the file still imports.
+    PartDocument document{"OverflowCurves"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message;
+    EXPECT_EQ(result.importedCount, 2u);
+}
+
+TEST(M6DxfImport, M6_R3_003_AnArcWithANonFiniteAngleIsSkippedNotFatal) {
+    // Angles are never scaled, so finalise() cannot re-check them: the raw
+    // AllFinite in addArc is their ONLY guard, and it had no test.
+    //
+    // The second guard people would assume covers this does not. fmod(inf, 2pi)
+    // is NaN, and the sweep test was written as `sweep < lo || sweep > hi`,
+    // which is FALSE on both clauses for NaN. It is now written in positive
+    // form, so it rejects NaN by construction -- but the finiteness check is
+    // what must hold, and this test is what holds it.
+    const DxfReadResult read = ReadDxfFile(Fixture("arc_nonfinite_angle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_TRUE(read.geometry.arcs.empty()) << "an arc with an infinite angle survived";
+    EXPECT_EQ(read.geometry.lines.size(), 1u) << "the good line was lost with it";
+    const bool reported = std::any_of(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) {
+            return s.entityKind == "ARC" && s.reason == ImportSkipReason::NonFiniteValue;
+        });
+    EXPECT_TRUE(reported) << "skipped with no diagnostic, or with the wrong reason";
+
+    PartDocument document{"NonFiniteAngle"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message;
+    EXPECT_EQ(result.importedCount, 1u);
+}
+
+TEST(M6DxfImport, M6_R3_004_AnArcInsideABlockIsNotModelGeometry) {
+    // The ARC leg of the ADR-M6-009 block guard. LINE and CIRCLE were covered;
+    // ARC was not -- and an ANGULAR dimension's annotation geometry is an arc,
+    // so the entity kind most likely to appear in the anonymous *D1 block that
+    // motivated the ADR is the kind whose guard nothing tested.
+    const DxfReadResult read = ReadDxfFile(Fixture("arc_in_block.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_TRUE(read.geometry.arcs.empty())
+        << "a dimension's annotation arc was imported as model geometry";
+    EXPECT_EQ(read.geometry.lines.size(), 1u) << "the real model line was lost";
+    const auto blocks = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.entityKind == "BLOCK"; });
+    EXPECT_EQ(blocks, 1) << "the block should be reported exactly once";
+}
+
+TEST(M6DxfImport, M6_R3_005_UnsupportedEntitiesInsideABlockAreNotReportedAsModelLevel) {
+    // No fixture put an unsupported entity inside a block, so deleting the
+    // block-attribution line from noteUnsupported left all fifty tests green
+    // while restoring exactly the defect M6.10 claims to have fixed: telling
+    // the user their drawing contains an INSERT and a TEXT it does not contain.
+    //
+    // The fixture holds a block with a LINE, a TEXT and a POINT, plus ONE real
+    // model-space TEXT -- so the test can tell "reported nothing" from
+    // "reported the right thing".
+    const DxfReadResult read = ReadDxfFile(Fixture("block_unsupported_content.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 1u) << "the block's line leaked into the model";
+
+    const auto blocks = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.entityKind == "BLOCK"; });
+    EXPECT_EQ(blocks, 1) << "one block definition, one report";
+
+    const auto texts = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.entityKind == "TEXT"; });
+    EXPECT_EQ(texts, 1) << "only the model-space TEXT exists; the block's is not the "
+                           "user's drawing content";
+
+    const bool point = std::any_of(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.entityKind == "POINT"; });
+    EXPECT_FALSE(point) << "a POINT inside a block was reported as model-level";
+
+    EXPECT_EQ(read.geometry.skipped.size(), 2u)
+        << "skippedCount inflated by block contents";
+}
+
+TEST(M6DxfImport, M6_R3_006_AnUnterminatedBlockNamesItsOwnCause) {
+    // inBlock_ is a latch only endBlock() clears, and libdxfrw exposes no
+    // section-transition hook, so a BLOCK with no ENDBLK stayed latched past
+    // ENDSEC and through the entire ENTITIES section. Both real lines were
+    // attributed to the block and dropped.
+    //
+    // The geometry is genuinely unrecoverable -- once the callbacks have been
+    // dispatched there is nothing left to re-attribute. What is recoverable is
+    // the DIAGNOSTIC. Before this, the reader reported success with no parse
+    // error and the importer said "every entity in the file was skipped",
+    // aiming the user at their geometry when the fault is one missing group
+    // code in a section they never open.
+    const DxfReadResult read = ReadDxfFile(Fixture("block_unterminated.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    const bool named = std::any_of(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) {
+            return s.entityKind == "BLOCK" &&
+                   s.detail.find("ENDBLK") != std::string::npos;
+        });
+    EXPECT_TRUE(named)
+        << "the whole drawing vanished and nothing in the report says why";
+}
+
+TEST(M6DxfImport, M6_R3_007_AnAlreadyInfiniteCoordinateIsReportedAsSuchNotAsOverflow) {
+    // Deleting the raw AllFinite from addLine or addCircle left all fifty-six
+    // tests green, because finalise()'s post-scale re-check drops the entity
+    // anyway. It would be easy to call the raw checks redundant and delete
+    // them. They are not.
+    //
+    // The re-check's message is "a coordinate overflowed to infinity during
+    // unit conversion". For a file that shipped the infinity itself, in
+    // millimetres, with a scale factor of exactly 1.0, that sentence is FALSE:
+    // it sends the user to look at their units when the fault is in their
+    // coordinates. The duplication is in the dropping; the diagnostic is not
+    // duplicated, and the diagnostic is the whole product here.
+    const DxfReadResult read = ReadDxfFile(Fixture("nonfinite_coordinates.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 1u) << "the good line was lost";
+    EXPECT_TRUE(read.geometry.circles.empty()) << "an infinite radius survived";
+
+    const auto blamesUnits = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) {
+            return s.detail.find("unit conversion") != std::string::npos;
+        });
+    EXPECT_EQ(blamesUnits, 0)
+        << "the file is in millimetres and nothing was converted; blaming unit "
+           "conversion points the user at the wrong part of their file";
+
+    const auto reported = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.reason == ImportSkipReason::NonFiniteValue; });
+    EXPECT_EQ(reported, 2) << "one line and one circle should each be reported";
+}
+
 // --- Unit policy (ADR-M6-002) -------------------------------------------------
 
 TEST(M6DxfImport, M6_UNITS_001_InchesAreConvertedExactly) {
@@ -1302,3 +1503,4 @@ TEST(M6DxfImport, M6_DIAG_001_AMissingFileIsDistinguishableFromABadOne) {
 }
 
 } // namespace
+

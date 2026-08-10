@@ -251,8 +251,13 @@ unguarded fix on this project is one written by someone else.**
   CIRCLE/ARC are stored in the entity's own, ignoring 210 mixed two frames in
   one file — a hole imported at (−25, 30) instead of (25, 30) with `IMPORT OK`.
   See ADR-M6-013.
-- **DXF `$INSUNITS` values other than 0/1/2/4/5/6** map to `Unrecognized` and
-  take the millimetre default with a diagnostic.
+- **[CORRECTED] DXF `$INSUNITS` values other than 11, 12 and 17–20** are all
+  mapped. The original sentence here said "values other than 0/1/2/4/5/6 map to
+  `Unrecognized`", which described pre-M6.9 behaviour and was contradicted
+  eleven lines below in this same list, by ADR-M6-011, and by `M6_REV_007`.
+  Two reviewers found it independently; it survived the M6.10 pass that claims
+  to have audited twelve such claims, which is why the correction is left
+  visible rather than silently overwritten.
 - **A truncated LINE is silently misinterpreted.** libdxfrw default-initialises
   a missing second point to (0,0,0) and exposes no presence flag, so a LINE with
   codes 10/20 and no 11/21 imports as a line to the sketch origin, with no skip
@@ -278,8 +283,13 @@ independent review is worth nothing.
 ## Ready for review
 
 **[CORRECTED] Originally "YES", with "mutation verification shows no unguarded
-fix" as part of the reason. That reason was false.** Two independent reviews
-then found 1 Critical and 7 Major, all now fixed with mutation-verified tests.
+fix" as part of the reason. That reason was false** — and the replacement text
+was false too. It read "1 Critical and 7 Major, all now fixed with
+mutation-verified tests": the review enumerates **six** Major (the fourth site
+of one miscount), and a third round then deleted six guards with all fifty
+tests still green, so "mutation-verified" was false for the fourth time on this
+project. What is true is stated once, in the completion report, and not
+restated here.
 
 **Ready for RE-review: YES.** Not ready to be called complete: the round of
 fixes above has not itself been reviewed, and on this project's record — M5
