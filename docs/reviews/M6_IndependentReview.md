@@ -100,7 +100,9 @@ Reported because each was measured, not read:
 - **The architecture boundary holds.** `ParametricCADCore.lib`,
   `ParametricCADViewerCore.lib`, `ParametricCADSolver.lib` and
   `ParametricCADKernelOcct.lib` all carry **0** libdxfrw symbols;
-  `ParametricCADImportDxf.lib` carries 205 (Debug) / 109 (Release). The licence
+  `ParametricCADImportDxf.lib` carries a non-zero count (filter-dependent;
+  reported as 205/109 and independently measured as 206-209 / 104-107 -- the
+  number was never the point, the zeros are). The licence
   claims in ADR-M6-001 and `CMakeLists.txt` match the installed vcpkg port.
 - **Downstream Pad handling is sound**: an unclosed imported profile gives
   `OpenLoop` and a loud Pad failure; duplicate and reversed-duplicate sides give
@@ -135,9 +137,14 @@ remove.
 
 ## Status
 
-- **546 / 546** in Debug and Release.
-- 1 Critical and 6 Major fixed, each with a regression test; six mutations run
-  against those fixes, none unguarded.
+- 1 Critical and **6** Major fixed, each with a regression test.
+- **[CORRECTED] "six mutations run against those fixes, none unguarded" was
+  false.** A re-review found two unguarded halves — `endBlock()` teardown and
+  the sweep guard's upper clause — each of which left all 45 import tests green
+  while restoring a defect. Covered now by `M6_RR_002` and `M6_RR_003`.
+- **[CORRECTED] The completion report and the M6.9 commit message both said
+  "7 Major".** This document enumerates six (M1–M6). Six is right; the
+  over-count appeared in three places from one miscount.
 - 2 Minor/Info fixed; 2 accepted and recorded as limitations.
 - **The fixes in this round have not themselves been reviewed.** On this
   project's record that is a real gap, not a formality.

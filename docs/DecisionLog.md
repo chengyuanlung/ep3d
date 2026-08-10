@@ -1723,7 +1723,22 @@ A binary-level check asserts Core carries no libdxfrw symbol, so the boundary is
 measured rather than asserted.
 
 ## ADR-M6-002 — DXF unit policy (M6)
-Status: Accepted
+Status: **PARTLY SUPERSEDED.** The policy stands; two of its statements do not.
+
+> **Superseded by ADR-M6-010** (timing): this ADR says conversion happens "as
+> DXF units enter the format-neutral representation". It now happens ONCE after
+> the whole file is read, because libdxfrw dispatches sections in file order and
+> the old timing produced 25.4x-wrong geometry while reporting success.
+>
+> **Corrected by ADR-M6-011** (coverage): this ADR's claim that the mapping
+> covers "the remaining ISO units libdxfrw exposes" was false. It covered six
+> values; fifteen are now mapped.
+>
+> These markers were added after a reviewer pointed out that the cross-
+> references existed only in the superseding ADRs, so anyone reading this one
+> would take its false statements at face value. **That is the third time on
+> this project an ADR has been left asserting behaviour the code does not have**
+> -- ADR-M5-006 needed three corrections for the same reason.
 
 DXF stores lengths as unitless numbers plus a header variable, `$INSUNITS`,
 which says what those numbers mean. It is frequently absent or `0`
@@ -1858,7 +1873,16 @@ Status: Accepted
   green test beside it (spec 16 says the same thing).
 
 ## ADR-M6-008 — What M6 does NOT read, and the one that can be silently wrong (M6)
-Status: Accepted
+Status: **SUPERSEDED by ADR-M6-013.**
+
+> The assessment below is wrong in both directions and is kept only as a record
+> of what was believed. It says the reader "ignores... the extrusion direction
+> (group code 210)" and therefore "imports at the wrong orientation --
+> silently". Measured: for the common `(0,0,-1)` the correct result is a
+> **mirror**, which no analytical oracle in this project could detect; and
+> CIRCLE/ARC entities carrying a non-default extrusion are now **refused and
+> reported**, not imported. LINE is unaffected because DXF stores it in world
+> coordinates. See ADR-M6-013.
 
 M6 imports LINE, CIRCLE and ARC. Everything else is reported and skipped
 (ADR-M6-005). Most of those omissions are loud: a drawing made of SPLINEs
@@ -1898,6 +1922,22 @@ dimensions and annotations must not silently become model content; they were.
 
 `addBlock` / `endBlock` now bracket block definitions and everything inside is
 skipped, reported once per block rather than once per entity.
+
+**Correction (M6.9 re-review): "once per block" was false when written** -- the
+flag was set once and never reset, so a drawing with forty dimension blocks
+reported "skipped 1". It is reset in `addBlock` now, and `M6_RR_005` checks that
+a two-block file produces two reports.
+
+**And the EXIT half of this fix was entirely unguarded.** Making `endBlock()` a
+no-op left all 45 tests green, while a file with a BLOCKS section followed by
+real model geometry imported **nothing** -- a worse defect than the one this ADR
+fixed. The only block fixture had an ENTITIES section containing a single
+INSERT, so no test could observe whether the block state was ever cleared.
+`M6_RR_002` covers it.
+
+Unsupported entities *inside* a block are also no longer reported as model-level
+entities: doing so told the user their drawing contained an INSERT and a TEXT it
+does not contain, and inflated the skip count by the contents of every block.
 
 `INSERT` is still not expanded, so a drawing built from blocks imports as
 nothing plus a diagnostic. That is now true — it was claimed in the M6.1
@@ -1954,6 +1994,26 @@ nothing.
 ADR-M6-005 says a degenerate entity is skipped and reported; the sweep was the
 one hole in that rule, and it turned a skippable entity into a fatal one. The
 reader now applies the same sweep test the model uses.
+
+**Correction (M6.9 re-review): it did not, and the difference froze the
+application.** The reader normalised with `while (sweep >= 2*pi) sweep -= 2*pi`
+while the model uses `std::fmod`. Subtracting in a loop never terminates once
+the value exceeds about `2^53 * 2*pi`, and libdxfrw applies no range check to
+codes 50/51 -- so an ARC with end angle `1e20` made `ReadDxfFile` never return,
+synchronously on the Qt GUI thread, with no cancel.
+
+**This project had already fixed that exact bug in M5** and recorded the reason
+in ADR-M5-006. Writing it again, on the one code path that reads untrusted
+external files, is the plainest evidence yet that a lesson written into an ADR
+is not a lesson applied. The reader uses `fmod` now, and `M6_RR_001` fails -- by
+hanging -- if the loop returns.
+
+**Second correction: the guard has two clauses and only one was tested.** A
+sweep of `2*pi - 1.7e-7` (an arc of 359.99999 degrees) is inside the model's
+rejection band but is not caught by the lower bound, so removing the upper
+clause left all 45 import tests green while restoring the whole-file abort this
+ADR exists to prevent. `arc_full_turn.dxf` is exactly 0->360, which normalises
+to 0, so it could never exercise the other clause. `M6_RR_003` does.
 
 ## ADR-M6-013 — A non-default extrusion is refused, not guessed (M6)
 Status: Accepted. Replaces ADR-M6-008's assessment, which understated the risk.

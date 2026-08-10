@@ -1,12 +1,17 @@
 # M6 Completion Report — DXF Import to Stable Sketch Entities
 
-> **STATUS: FUNCTIONALLY COMPLETE — two verification items open.**
+> **STATUS: FUNCTIONALLY COMPLETE — one verification item open.**
 >
-> All required DXF entities import, Gates A–I pass, and one independent review
-> round found 1 Critical and 7 Major which are fixed and mutation-verified.
-> **Those fixes have not themselves been reviewed**, and **owner manual UI
-> validation of the import workflow has not been performed.** M6 is not
-> declared complete here.
+> All required DXF entities import and Gates A–I pass. **Two** independent
+> review rounds have run. The first found 1 Critical and 6 Major; the second
+> verified those fixes and found the round had introduced **1 more Critical and
+> 4 more findings** — including an unbounded loop that froze the application on
+> a legal DXF file, the identical bug this project had already fixed and
+> documented in M5. All are fixed and mutation-verified.
+>
+> **The second round's fixes have not themselves been reviewed**, and **owner
+> manual UI validation of the import workflow has not been performed.** M6 is
+> not declared complete here.
 
 **Baseline:** `a6e7078` — the accepted M5 master state.
 
@@ -59,16 +64,17 @@ or an own reader means rewriting `src/Import/Dxf/DxfReader.cpp` and nothing else
 
 | | M5 baseline | M6 |
 |---|---|---|
-| Total | 498 | **546** |
+| Total | 498 | **551** |
 | `ParametricCADCoreTests` | 301 | 301 |
 | `ParametricCADSolverTests` | 53 | 53 |
 | `ParametricCADKernelOcctTests` | 47 | 47 |
 | `ParametricCADIntegrationTests` | 87 | 87 |
-| **`ParametricCADImportTests`** | — | **45** |
+| **`ParametricCADImportTests`** | — | **50** |
 | Viewer smoke tests (ctest) | 10 | 13 |
 
-**546 / 546 in Debug and Release**, with the Release run verified to invoke
-Release binaries — independently reproduced by a reviewer.
+**551 / 551 in Debug and Release**, with the Release run verified to invoke
+Release binaries — independently reproduced by a reviewer. The five added tests
+are `M6_RR_001..005`, one per second-round finding.
 
 ---
 
@@ -80,7 +86,7 @@ Release binaries — independently reproduced by a reviewer.
 | **B** CIRCLE centre and radius | **PASS** |
 | **C** ARC measured geometrically — centre, radius, start/end direction, orientation | **PASS** |
 | **D** Mixed file: count, kinds, unique ids, no dependence on array position | **PASS** |
-| **E** Save/load identity — ids, references, geometry, kinds | **PASS** |
+| **E** Save/load identity — ids, geometry, kinds | **PASS** — *"references" removed: no M6 test round-trips a constraint reference on an imported sketch. `M6_ADV_006` constrains an imported line but never saves it. Native-sketch constraint round-trip is covered by M5's v5 tests, so this is an evidence gap, not a functional one.* |
 | **F** Source independence — the saved document names no `.dxf` at all | **PASS** |
 | **G** Imported closed profile drives a real solid: 48000 mm³, 0.1296 kg, hand-computed | **PASS** |
 | **H** Invalid/unsupported input: documented result, useful diagnostics, no corrupt partial document | **PASS** |
@@ -118,8 +124,14 @@ once review found what the first seven had got wrong.
 
 One round, two reviewers, recorded in full in `M6_IndependentReview.md`.
 
-**1 Critical, 7 Major, 2 Minor/Info** — all fixed with mutation-verified
-regression tests, except two accepted and recorded as limitations.
+**1 Critical, 6 Major, 2 Minor/Info** — all fixed with regression tests, except
+two accepted and recorded as limitations. (An earlier draft of this line, and
+the M6.9 commit message, said "7 Major"; the review enumerates six.)
+
+A **second** review round then verified those fixes and found the round had
+recreated the pattern: **1 more Critical and 4 more findings, all introduced by
+the fixes**, including an unbounded loop that froze the application on a legal
+DXF file — the identical bug this project fixed and documented in M5.
 
 Three claims in my own self-validation report were **falsified by execution**,
 including the one it leaned on hardest ("unguarded mutations: none"). All are
@@ -141,8 +153,10 @@ be worth nothing.
   and never reinterpreted.
 - **`INSERT` is not expanded**, so a block-based drawing imports as nothing plus
   a diagnostic.
-- **A non-default extrusion (code 210) is refused**, not applied. Refusing is
-  recoverable; importing something mirrored and reporting success is not.
+- **A non-default extrusion (code 210) is refused for CIRCLE and ARC**, not
+  applied. LINE is unaffected because DXF stores it in world coordinates.
+  Refusing is recoverable; importing something mirrored and reporting success
+  is not.
 - **Z is ignored** — entities are read as their X and Y.
 - **A truncated LINE is silently misinterpreted** as a line to the origin.
   libdxfrw exposes no group-code-presence flag, so detecting it needs a
@@ -162,7 +176,9 @@ be worth nothing.
 **M6 is functionally complete and not yet certifiable.** Two items stand between
 that and complete, and neither is closed by more of my own testing:
 
-1. **The M6.9 review fixes are unreviewed.** M5 needed four rounds, each finding
+1. **The second round's fixes are unreviewed.** M5 needed four rounds and M6 has
+   now needed two, every one of them finding defects the previous round's fixes
+   introduced. M5 needed four rounds, each finding
    defects the previous round's fixes had introduced. Assuming this round broke
    that pattern is the assumption that failed four times.
 2. **Owner manual UI validation of the import workflow** has not been performed.

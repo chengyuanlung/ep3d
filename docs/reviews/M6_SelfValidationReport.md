@@ -73,7 +73,7 @@ ADR, `CMakeLists.txt` beside the `find_package`, and here.
 | Core free of Qt / OCCT / Eigen | same scan | **PASS** — zero |
 | libdxfrw symbols in `ParametricCADCore.lib` | `dumpbin /symbols` | **PASS** — **0** |
 | libdxfrw symbols in `ParametricCADViewerCore.lib` | `dumpbin /symbols` | **PASS** — **0** |
-| libdxfrw symbols in `ParametricCADImportDxf.lib` | `dumpbin /symbols` | 205 — the boundary is where it should be |
+| libdxfrw symbols in `ParametricCADImportDxf.lib` | `dumpbin /symbols` | **[CORRECTED] a non-zero count, filter-dependent.** I wrote "205"; a reviewer measured 206–209 (Debug) and 104–107 (Release) depending on the grep pattern. The number was never the point and should not have been stated as if it were exact — **the load-bearing half is the zeros above**, which reproduce exactly. |
 | Core test binary dependents | `dumpbin /dependents` on the Release exe | **PASS** — KERNEL32, MSVCP140, VCRUNTIME140(_1), UCRT only |
 | Import representation is neutral | read `ImportedGeometry.h` | **PASS** — coordinates, radii, angles, unit metadata and skip records; no parser pointer, no handle, no file offset |
 
@@ -87,14 +87,15 @@ Core compiles, links and tests with libdxfrw absent: the import target is behind
 | | Result |
 |---|---|
 | Debug build | **PASS** — 0 errors |
-| Debug tests | **546 / 546** |
+| Debug tests | **551 / 551** |
 | Release build | **PASS** — 0 errors |
-| Release tests | **546 / 546** |
+| Release tests | **551 / 551** |
 | Release actually ran Release binaries | **PASS** — every ctest command line names `build/Release/...`, none names `build/Debug/`. Independently reproduced by a reviewer with `ctest -C Release -N -V`. |
 | M0–M5 regression | **PASS** — every pre-M6 test still passes |
 
-Baseline was 498 at the end of M5; **48 tests added**, seven of them regressions
-for review findings.
+Baseline was 498 at the end of M5; **53 tests added**, twelve of them
+regressions for review findings — seven from the first round (`M6_REV_*`) and
+five from the second (`M6_RR_*`).
 
 ---
 
@@ -104,9 +105,9 @@ for review findings.
 |---|---|---|
 | **A** — LINE import against a hand-computed oracle | **PASS** | `M6_GATE_A` — (0,0)→(100,50) read from a fixture small enough to check by eye |
 | **B** — CIRCLE centre and radius | **PASS** | `M6_GATE_B` — centre (25,30), radius 10; centre deliberately off the origin so dropping it would show |
-| **C** — ARC centre, radius, start/end direction, orientation, measured geometrically | **PASS** | `M6_GATE_C` computes the arc's start and end POINTS from the model and compares them with hand-computed coordinates; `M6_ARC_001/003` measure the degree→radian conversion and the sweep through 0° |
+| **C** — ARC centre, radius, start/end direction, orientation, measured geometrically | **PASS** | `M6_GATE_C` computes the arc's start and end POINTS **from the reader's output** and compares them with hand-computed coordinates — **[CORRECTED]**, this row previously said "from the model"; `M6_ARC_004` is the document-level check and `M6_REV_004` measures the sweep through a real Pad volume |
 | **D** — mixed file: count, kinds, unique ids, no dependence on array position | **PASS** | `M6_GATE_D_MixedFileImportsEveryKind`, `..._FileOrderIsNotIdentity` (same entities, shuffled file, geometry compared as sets), `..._RepeatedImportsOfOneFileAgree` |
-| **E** — save/load identity | **PASS** | `M6_GATE_E_MixedImportSurvivesSaveLoadWithEveryId` — every id resolves after reload and keeps its kind |
+| **E** — save/load identity | **PASS** | `M6_GATE_E_MixedImportSurvivesSaveLoadWithEveryId` — every id resolves after reload and keeps its kind **and its full geometry** (**[CORRECTED]**: the row was written before the geometry comparison was added and never updated, so it understated its own test) |
 | **F** — source independence | **PASS** | `M6_GATE_EF` asserts the saved document contains no `.dxf` reference at all, then reloads and checks the geometry |
 | **G** — imported closed profile drives 3D | **PASS** | `M6_GATE_G` — 60×40×20 = 48000 mm³ and 0.1296 kg at 2700 kg/m³, both hand-computed; still parametric afterwards; survives save/load onto a **fresh** kernel |
 | **H** — invalid/unsupported input | **PASS** | `M6_GATE_H` ×3 — malformed file diagnostics, a failed import leaving sketch count, registry size and graph node count unchanged, and NaN/∞ rejected at the importer |
@@ -166,8 +167,21 @@ were entirely unguarded and a reviewer proved it by execution:
 
 Six further mutations were run against the review fixes — block guard, scale
 timing, arc scaling, sweep guard, extrusion guard, mil mapping — and each killed
-its own test. **Unguarded among those: none**, a claim that now rests on
-mutations chosen against findings rather than against my own code.
+its own test.
+
+**[CORRECTED AGAIN] "Unguarded among those: none" was false, for the second
+time in this document.** A re-review ran mutations I had not thought of and
+found two unguarded halves:
+
+| Unguarded half | Consequence when removed | Now covered by |
+|---|---|---|
+| `endBlock()` teardown | a file with a BLOCKS section followed by real geometry imported **nothing**; 45/45 still green | `M6_RR_002` |
+| the sweep guard's **upper** clause | an arc of 359.99999° restored the whole-file abort; 45/45 still green | `M6_RR_003` |
+
+The first paragraph of this section already said that a mutation suite I write
+measures my imagination rather than my coverage. I then wrote a second one and
+drew the same conclusion from it. **The only mutation set that has ever found an
+unguarded fix on this project is one written by someone else.**
 
 ---
 
@@ -223,8 +237,13 @@ mutations chosen against findings rather than against my own code.
   annotation lines as real entities. Fixed in ADR-M6-009; the sentence is true
   now.
 - **3D DXF is flattened by ignoring Z.** Entities are read as their X and Y.
-- **A non-default extrusion (code 210) is now REFUSED and reported**, not
-  imported. **[CORRECTED]** — this bullet used to say the entity imported "at
+- **A non-default extrusion (code 210) is refused and reported for CIRCLE and
+  ARC.** **[CORRECTED]** this bullet used to say so without qualification, and
+  a reviewer pointed out it is false for LINE: a LINE carrying `210 = (0,0,-1)`
+  imports with no skip record. That is *correct* behaviour — DXF stores LINE in
+  world coordinates, so 210 does not affect its geometry, and `M6_REV_006`
+  asserts the line still imports — but the sentence claimed more than the code
+  does. **[CORRECTED]** — this bullet used to say the entity imported "at
   the wrong orientation, not detected, not reported". A reviewer measured it and
   found worse: for the common `(0,0,-1)` the correct result is a **mirror**, and
   a mirrored part has identical area, volume and mass, so no oracle this project

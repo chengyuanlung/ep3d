@@ -116,9 +116,26 @@ public:
 
         // The degenerate checks have to run on the SCALED values, because
         // "shorter than kMinSketchDimensionMm" is a statement about millimetres.
+        //
+        // Finiteness is re-checked here too. Collecting raw and scaling later
+        // moved the AllFinite checks to BEFORE the multiply, so a coordinate
+        // that overflowed to infinity during scaling (1e305 in a file measured
+        // in miles) passed the reader untouched and was then refused by the
+        // model -- aborting the WHOLE file. That is precisely the class
+        // ADR-M6-012 was written to eliminate, reintroduced through the
+        // refactor that fixed the unit ordering. `tooSmall` cannot catch it
+        // either: `inf < 1e-5` is false, and hypot of two infinities is NaN.
         auto tooSmall = [](double v) { return v < kMinSketchDimensionMm; };
+        auto overflowed = [](std::initializer_list<double> values) {
+            return !AllFinite(values);
+        };
         for (auto it = geometry.lines.begin(); it != geometry.lines.end();) {
-            if (tooSmall(std::hypot(it->end.x - it->start.x, it->end.y - it->start.y))) {
+            if (overflowed({it->start.x, it->start.y, it->end.x, it->end.y})) {
+                note(ImportSkipReason::NonFiniteValue, "LINE",
+                     "a coordinate overflowed to infinity during unit conversion");
+                it = geometry.lines.erase(it);
+            } else if (tooSmall(
+                           std::hypot(it->end.x - it->start.x, it->end.y - it->start.y))) {
                 note(ImportSkipReason::InvalidGeometry, "LINE",
                      "the line has zero length after unit conversion");
                 it = geometry.lines.erase(it);
@@ -127,7 +144,11 @@ public:
             }
         }
         for (auto it = geometry.circles.begin(); it != geometry.circles.end();) {
-            if (tooSmall(it->radiusMm)) {
+            if (overflowed({it->center.x, it->center.y, it->radiusMm})) {
+                note(ImportSkipReason::NonFiniteValue, "CIRCLE",
+                     "a value overflowed to infinity during unit conversion");
+                it = geometry.circles.erase(it);
+            } else if (tooSmall(it->radiusMm)) {
                 note(ImportSkipReason::InvalidGeometry, "CIRCLE",
                      "the radius is zero or negative after unit conversion");
                 it = geometry.circles.erase(it);
@@ -136,7 +157,11 @@ public:
             }
         }
         for (auto it = geometry.arcs.begin(); it != geometry.arcs.end();) {
-            if (tooSmall(it->radiusMm)) {
+            if (overflowed({it->center.x, it->center.y, it->radiusMm})) {
+                note(ImportSkipReason::NonFiniteValue, "ARC",
+                     "a value overflowed to infinity during unit conversion");
+                it = geometry.arcs.erase(it);
+            } else if (tooSmall(it->radiusMm)) {
                 note(ImportSkipReason::InvalidGeometry, "ARC",
                      "the radius is zero or negative after unit conversion");
                 it = geometry.arcs.erase(it);
@@ -159,7 +184,13 @@ public:
     // an anonymous *D1... block holding its dimension and extension lines. Those
     // annotation lines were being imported as model geometry -- exactly what
     // spec 4 says must not silently happen.
-    void addBlock(const DRW_Block&) override { inBlock_ = true; }
+    void addBlock(const DRW_Block&) override {
+        inBlock_ = true;
+        // Reset per BLOCK. Setting blockReported_ once and never clearing it
+        // made a drawing with forty dimension blocks report "skipped 1", while
+        // ADR-M6-009 and the comment below both said "once per block".
+        blockReported_ = false;
+    }
     void setBlock(const int) override {}
     void endBlock() override { inBlock_ = false; }
 
@@ -226,9 +257,22 @@ public:
         // its validation, and rolled back the WHOLE file -- 500 good lines
         // discarded with it. Every other degenerate entity is skipped and
         // reported (ADR-M6-005); the sweep was the one hole in that rule.
-        double sweep = end - start;
-        while (sweep < 0.0) sweep += 2.0 * kPi;
-        while (sweep >= 2.0 * kPi) sweep -= 2.0 * kPi;
+        // std::fmod, NOT a while-loop.
+        //
+        // I wrote the while-loop version here after fixing exactly this bug in
+        // M5 and recording the reason in ADR-M5-006: subtracting 2*pi in a loop
+        // never terminates once |value| exceeds about 2^53 * 2*pi, because the
+        // subtraction stops changing the double. libdxfrw applies no range check
+        // to codes 50/51 and AllFinite accepts any finite value, so an ARC with
+        // end angle 1e20 made ReadDxfFile never return -- on the Qt GUI thread,
+        // synchronously, with no cancel. A hostile or merely corrupt file froze
+        // the application permanently.
+        //
+        // This is also what ADR-M6-012 claimed was already true: "the reader
+        // applies the same sweep test the model uses". The model
+        // (IsValidSketchGeometry) uses fmod. Now so does this.
+        double sweep = std::fmod(end - start, 2.0 * kPi);
+        if (sweep < 0.0) sweep += 2.0 * kPi;
         if (sweep < kMinSweepRad || sweep > 2.0 * kPi - kMinSweepRad) {
             note(ImportSkipReason::InvalidGeometry, "ARC",
                  "the arc has no sweep (start and end angles coincide)");
@@ -332,6 +376,11 @@ private:
     // An entity kind M6 does not import. Reported, never reinterpreted as
     // another kind (spec 4).
     void noteUnsupported(const char* kind) {
+        // An unsupported entity INSIDE a block definition is not a model-level
+        // entity. Reporting it as one told the user their drawing contained an
+        // INSERT and a TEXT it does not contain, and inflated skippedCount by
+        // the contents of every block.
+        if (skipBlockContent(kind)) return;
         geometry.skipped.push_back(
             ImportedSkip{ImportSkipReason::UnsupportedEntity, kind,
                          "M6 imports LINE, CIRCLE and ARC; this entity was skipped"});

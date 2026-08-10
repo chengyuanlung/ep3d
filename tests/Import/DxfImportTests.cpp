@@ -1039,6 +1039,104 @@ TEST(M6DxfImport, M6_REV_007_MilsAndOtherRealUnitsAreMapped) {
     EXPECT_DOUBLE_EQ(read.geometry.lines.front().end.x, 25.4);
 }
 
+// --- Regressions for the M6.9 re-review ---------------------------------------
+
+TEST(M6DxfImport, M6_RR_001_AnAbsurdArcAngleTerminates) {
+    // The sweep normaliser I wrote as `while (sweep >= 2*pi) sweep -= 2*pi`
+    // never terminates once the value exceeds about 2^53 * 2*pi, because the
+    // subtraction stops changing the double. libdxfrw applies no range check to
+    // codes 50/51, so an ARC with end angle 1e20 froze ReadDxfFile -- called
+    // synchronously on the Qt GUI thread with no cancel.
+    //
+    // I had fixed this exact bug in M5 and written the reason down in
+    // ADR-M5-006. If this test hangs rather than fails, the loop is back.
+    const DxfReadResult read = ReadDxfFile(Fixture("arc_absurd_angle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    EXPECT_EQ(read.geometry.lines.size(), 1u) << "the valid line was lost";
+    // Whether such an arc is kept or skipped is secondary; what matters is that
+    // the reader RETURNS and the rest of the file survives.
+    EXPECT_LE(read.geometry.arcs.size(), 1u);
+}
+
+TEST(M6DxfImport, M6_RR_002_ModelGeometryAfterABlockSectionStillImports) {
+    // The EXIT half of the block fix was unguarded: making endBlock() a no-op
+    // left the whole suite green, while a file with a BLOCKS section followed by
+    // real geometry imported NOTHING. block_insert.dxf cannot notice, because
+    // its ENTITIES section holds only an INSERT -- so the only fixture covering
+    // the Critical could not tell whether the state was ever cleared.
+    const DxfReadResult read = ReadDxfFile(Fixture("block_then_entities.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 2u)
+        << "model geometry after a BLOCKS section was discarded";
+    EXPECT_EQ(read.geometry.circles.size(), 1u);
+
+    PartDocument document{"AfterBlocks"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message;
+    EXPECT_EQ(result.importedCount, 3u);
+}
+
+TEST(M6DxfImport, M6_RR_003_AnArcJustUnderAFullTurnIsSkippedNotFatal) {
+    // 0 -> 359.99999 degrees normalises to 2*pi - 1.7e-7, inside the model's
+    // rejection band but NOT caught by the guard's LOWER bound. Removing the
+    // upper clause left 45 tests green while restoring the whole-file abort,
+    // because arc_full_turn.dxf is exactly 0->360, which normalises to 0.
+    const DxfReadResult read = ReadDxfFile(Fixture("arc_near_full_turn.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 2u) << "the valid lines were discarded";
+    EXPECT_TRUE(read.geometry.arcs.empty()) << "a near-full-turn arc was admitted";
+
+    PartDocument document{"NearFullTurn"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message
+                        << " -- one degenerate arc must not abort the file";
+    EXPECT_EQ(result.importedCount, 2u);
+}
+
+TEST(M6DxfImport, M6_RR_004_OverflowDuringScalingIsSkippedNotFatal) {
+    // Collecting raw and scaling later moved the finiteness check BEFORE the
+    // multiply, so a coordinate that overflowed to infinity during scaling
+    // passed the reader and was refused by the model -- aborting the whole file.
+    // The same class ADR-M6-012 exists to prevent, through a different door,
+    // opened by the refactor that fixed the unit ordering.
+    const DxfReadResult read = ReadDxfFile(Fixture("overflow_on_scale.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 2u) << "the two good lines were lost";
+    for (const ImportedLine2D& line : read.geometry.lines) {
+        EXPECT_TRUE(std::isfinite(line.end.x));
+        EXPECT_TRUE(std::isfinite(line.end.y));
+    }
+    const bool reported = std::any_of(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.reason == ImportSkipReason::NonFiniteValue; });
+    EXPECT_TRUE(reported) << "the overflowed line was dropped with no diagnostic";
+
+    PartDocument document{"Overflow"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message;
+    EXPECT_EQ(result.importedCount, 2u);
+}
+
+TEST(M6DxfImport, M6_RR_005_EachBlockIsReportedOnce) {
+    // blockReported_ was set once and never reset, so a drawing with forty
+    // dimension blocks reported "skipped 1" -- while ADR-M6-009 and the code
+    // comment both said "once per block".
+    const DxfReadResult read = ReadDxfFile(Fixture("two_blocks.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 1u) << "model geometry was lost";
+    const auto blocks = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) { return s.entityKind == "BLOCK"; });
+    EXPECT_EQ(blocks, 2) << "two block definitions produced " << blocks << " reports";
+}
+
 // --- Unit policy (ADR-M6-002) -------------------------------------------------
 
 TEST(M6DxfImport, M6_UNITS_001_InchesAreConvertedExactly) {

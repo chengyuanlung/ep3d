@@ -38,9 +38,24 @@ Functional independent review APPROVE 96/100; the UI was validated by owner
 manual validation rather than an independent UI review, per ADR-M4-016. See
 `docs/reviews/M4_CompletionReport.md`.
 
-Current target: M5 — Sketch Constraints & Dimensional Parameterization (see
-`docs/Roadmap.md`). No M5 implementation specification exists yet; the UI
-validation workflow for it is `docs/M5_UI_User_Assisted_Validation_Guide.md`.
+M5 — Sketch Constraints & Dimensional Parameterization — is complete on
+`master` (`7238548`). It needed **four** independent review rounds, and every
+one of them found defects that the previous round's fixes had introduced. Its
+owner UI validation passed; DPI scaling remains unverified at the owner's
+direction. See `docs/reviews/M5_CompletionReport.md`.
+
+Current target: **M6 — DXF Import to Stable Sketch Entities**
+(`docs/M6_SPEC.md`), on branch `m6-wip`. Two review rounds so far, with the same
+pattern: the second found a Critical the first round's fixes had created. See
+`docs/reviews/M6_CompletionReport.md`.
+
+**The pattern is now the most reliable prediction this project makes.** Every
+review round since M5 has found defects introduced by the previous round's
+fixes, and in three of them the implementer's own claim that "every fix is
+mutation-verified" was false. A mutation suite written by the author of a fix
+measures the author's imagination; only a reviewer removing a line the author
+did not think to remove has ever found an unguarded fix here. Plan for a review
+round after every round of fixes, not after the implementation.
 
 ## Independent Review Role
 
