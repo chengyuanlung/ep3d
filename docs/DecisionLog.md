@@ -1791,3 +1791,92 @@ identity, persistence and solving contracts apply unchanged (spec 7).
 Two separate imports of the same file are not required to produce equal ids
 (spec 13); identity stability is required across save/load of **one** imported
 document.
+
+## ADR-M6-005 — Unsupported entity policy (M6)
+Status: Accepted
+
+An entity kind M6 does not import is **reported and skipped**, never
+reinterpreted as another kind (spec 4), and never fatal.
+
+- The reader records `ImportSkipReason::UnsupportedEntity` with the kind as the
+  file named it, so the diagnostic can say `SPLINE` rather than "something".
+- Skipping is **not** silent: the count reaches the import result and the status
+  bar. A user who cannot see that something was dropped will assume nothing was.
+- **Unsupported** is distinct from **invalid**: `CIRCLE` is supported, and a
+  circle with a zero radius is a supported kind carrying values the model
+  refuses. Spec 11 wants those told apart because they call for different user
+  actions — one means "M6 does not do this yet", the other means "your drawing
+  has a degenerate entity".
+- A file consisting **only** of skipped entities is a FAILED import with a
+  message saying so, distinct from an empty file. Returning an empty sketch
+  would make the user discover the emptiness themselves.
+
+The fixtures place unsupported and degenerate entities **between** valid ones,
+because a trailing one cannot distinguish "skipped it and carried on" from
+"stopped there".
+
+## ADR-M6-006 — Transactional import (M6)
+Status: Accepted
+
+Import is transactional at the **sketch** level (spec 10). Any failure removes
+the sketch again, leaving no half-built sketch, no orphan registry entry, no
+stray graph node and no dangling id.
+
+Returning a partially-populated sketch would be worse than failing: the user
+would have to work out which half arrived, and a drawing that is half-imported
+looks like a drawing that was half-drawn.
+
+Entities the READER rejected (unsupported kinds, degenerate geometry) arrive as
+skip records and do **not** fail the import — the file is legitimate, it simply
+contains more than M6 handles. Entities the reader passed but the model refuses
+DO fail it: the two layers disagreeing is a fault worth surfacing, not an entity
+to drop quietly.
+
+`M6_GATE_H_AFailedImportLeavesNoTraceInTheDocument` checks sketch count,
+registry size and graph node count, because "the sketch is gone" is a weaker
+claim than "nothing of the attempt remains".
+
+## ADR-M6-007 — ARC orientation and angle convention (M6)
+Status: Accepted
+
+- DXF stores arc angles as **degrees**, counter-clockwise from +X, in group
+  codes 50 (start) and 51 (end). libdxfrw converts them to radians before the
+  reader sees them.
+- **That conversion is verified, not trusted.** `M6_ARC_001` measures it and
+  fails in either direction. libdxfrw's header comment asserts it; this project
+  has already shipped one Critical because two comments described an algorithm
+  the code did not implement.
+- A DXF arc always sweeps **counter-clockwise from start to end**, so
+  350° → 40° is a 50° sweep through zero, not 310° the other way. An importer
+  assuming `end > start` gets it backwards, which is why a fixture that crosses
+  zero exists — an arc that does not cross it cannot reveal the mistake.
+- `SketchArc::counterClockwise` is therefore always `true` for an imported arc.
+- **Arcs are tested by measuring their endpoints**, computed from the model's
+  stored centre, radius and angles and compared with hand-computed coordinates.
+  Re-deriving the importer's own conversion would prove only that it agrees with
+  itself — the failure mode that let a broken Angle constraint ship in M5 with a
+  green test beside it (spec 16 says the same thing).
+
+## ADR-M6-008 — What M6 does NOT read, and the one that can be silently wrong (M6)
+Status: Accepted
+
+M6 imports LINE, CIRCLE and ARC. Everything else is reported and skipped
+(ADR-M6-005). Most of those omissions are loud: a drawing made of SPLINEs
+imports as nothing plus a diagnostic naming SPLINE.
+
+**One omission is not loud, and it is recorded here so it is not discovered as a
+surprise:** the reader takes DXF X and Y and **ignores Z and the extrusion
+direction (group code 210)**. A drawing whose entities sit on a non-XY plane, or
+that carries a non-default extrusion vector, therefore imports at the wrong
+orientation — silently, because nothing in the file marks it as unusual and the
+resulting geometry is perfectly valid.
+
+It is left this way for M6 deliberately: applying the extrusion direction
+correctly means deciding how an arbitrary OCS plane maps onto a sketch's frame,
+which is a modelling decision rather than a parsing one and is out of scope for
+"import LINE, CIRCLE and ARC". Detecting and REPORTING a non-default extrusion
+would be the cheap half of the fix and is the first thing to add if M6 is
+extended.
+
+Recorded as a known limitation in `M6_SelfValidationReport.md` rather than left
+in the code, because a limitation only in the code is one nobody reads.

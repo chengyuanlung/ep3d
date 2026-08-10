@@ -12,6 +12,7 @@
 #include "Core/Sketch/Sketch.h"
 #include "Import/Dxf/DxfReader.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
+#include "Solver/GaussNewtonSketchSolver.h"
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
@@ -693,6 +694,157 @@ TEST(M6DxfImport, M6_GATE_H_NonFiniteValuesNeverReachTheDocument) {
     EXPECT_FALSE(inf);
 
     EXPECT_EQ(document.sketches().size(), before);
+}
+
+// --- Adversarial (M6.8, spec 17) ----------------------------------------------
+
+TEST(M6DxfImport, M6_ADV_001_ZeroLengthLineIsSkippedNotImported) {
+    // A zero-length line is degenerate geometry the Sketch refuses. Reported by
+    // the reader rather than left to fail the whole import later.
+    ImportedSketchGeometry geometry;
+    const DxfReadResult read = ReadDxfFile(Fixture("degenerate_line.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.lines.size(), 2u) << "the valid lines did not both survive";
+    const auto invalid = std::count_if(
+        read.geometry.skipped.begin(), read.geometry.skipped.end(),
+        [](const ImportedSkip& s) {
+            return s.entityKind == "LINE" && s.reason == ImportSkipReason::InvalidGeometry;
+        });
+    EXPECT_EQ(invalid, 1);
+}
+
+TEST(M6DxfImport, M6_ADV_002_VerySmallAndVeryLargeCoordinatesSurvive) {
+    // spec 17 names both. The importer must not clamp, round or reject
+    // geometry that is merely far from 1.
+    const DxfReadResult read = ReadDxfFile(Fixture("extreme_scale.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    ASSERT_EQ(read.geometry.lines.size(), 2u);
+
+    // Hand-computed from the fixture, in millimetres.
+    EXPECT_NEAR(read.geometry.lines[0].end.x, 0.001, 1e-12);
+    EXPECT_NEAR(read.geometry.lines[1].end.x, 1.0e7, 1e-3);
+
+    PartDocument document{"Extreme"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message;
+    EXPECT_EQ(result.importedCount, 2u);
+}
+
+TEST(M6DxfImport, M6_ADV_003_AnEmptyEntitiesSectionIsAFailureNotAnEmptySketch) {
+    const DxfReadResult read = ReadDxfFile(Fixture("empty.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    EXPECT_EQ(read.geometry.importedCount(), 0u);
+
+    PartDocument document{"EmptyFile"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    EXPECT_FALSE(result) << "an empty file produced a sketch the user would have to discover";
+    EXPECT_NE(result.message.find("no importable geometry"), std::string::npos)
+        << result.message;
+    EXPECT_TRUE(document.sketches().empty());
+}
+
+TEST(M6DxfImport, M6_ADV_004_AFileOfOnlyUnsupportedEntitiesFailsAndSaysWhy) {
+    // Distinguished from an empty file: "everything was skipped" and "there was
+    // nothing there" call for different user actions (spec 11).
+    ImportedSketchGeometry geometry;
+    geometry.skipped.push_back(
+        ImportedSkip{ImportSkipReason::UnsupportedEntity, "SPLINE", "not imported by M6"});
+    geometry.skipped.push_back(
+        ImportedSkip{ImportSkipReason::UnsupportedEntity, "HATCH", "not imported by M6"});
+
+    PartDocument document{"AllSkipped"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", geometry);
+    EXPECT_FALSE(result);
+    EXPECT_NE(result.message.find("skipped"), std::string::npos) << result.message;
+    EXPECT_EQ(result.skippedCount, 2u);
+}
+
+TEST(M6DxfImport, M6_ADV_005_ImportThenRecomputeThenDeleteThenRecompute) {
+    // spec 17's sequence, run end to end: the document must stay usable at
+    // every step, and savable at the end.
+    PartDocument document{"Lifecycle"};
+    OcctGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+    document.addMaterial("Aluminium", 2700.0);
+
+    const DxfReadResult read = ReadDxfFile(Fixture("closed_rectangle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    const SketchImportResult imported =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(imported) << imported.message;
+
+    Parameter& length = document.addParameter("PadLength", 20.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body001");
+    PadFeature& pad = document.addPadFeature(body, "Pad001", imported.sketchId, length.id());
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_NEAR(document.massProperties().volumeMm3, 48000.0, 1e-6);
+
+    // Deleting the imported sketch fails the Pad LOUDLY -- the accepted M4
+    // contract (ADR-M5-016), which import must not quietly change.
+    ASSERT_TRUE(document.removeObject(imported.sketchId));
+    EXPECT_FALSE(document.recompute().success);
+    EXPECT_NE(pad.state(), ComputeState::Valid);
+
+    // Removing the Pad restores a savable document, as it does for a native
+    // sketch. Import introduces no new recovery rule.
+    ASSERT_TRUE(document.removeObject(pad.id()));
+    std::ostringstream out;
+    EXPECT_TRUE(savePartDocument(document, out));
+}
+
+TEST(M6DxfImport, M6_ADV_006_ImportedEntitiesCanBeConstrainedAndSolved) {
+    // The strongest form of "imported entities are ordinary": constrain one
+    // with a Parameter and solve it. If import produced anything special, the
+    // M5 solver would be the first thing to notice.
+    PartDocument document{"ConstrainImported"};
+    OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver solver;
+    document.setGeometryKernel(&kernel);
+    document.setSketchSolver(&solver);
+
+    const DxfReadResult read = ReadDxfFile(Fixture("line.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    const SketchImportResult imported =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(imported) << imported.message;
+    const SketchEntityId line = imported.entityIds.front();
+
+    // The fixture's line is 100 x 50, so its length is hypot(100,50) =
+    // 111.803398... Constrain it to exactly 200 and let the solver move it.
+    Parameter& target = document.addParameter("Length", 200.0, UnitType::Millimeter);
+    ASSERT_NE(document.addSketchConstraint(
+                  imported.sketchId,
+                  FixConstraint{SketchElementRef{line, SketchSubElement::StartPoint}}),
+              kInvalidSketchConstraintId);
+    ASSERT_NE(document.addSketchConstraint(imported.sketchId,
+                                           LengthConstraint{line, target.id()}),
+              kInvalidSketchConstraintId);
+
+    ASSERT_TRUE(document.recompute().success);
+    const Sketch* sketch = document.findSketch(imported.sketchId);
+    ASSERT_NE(sketch, nullptr);
+    const SketchLine& solved = std::get<SketchLine>(sketch->findEntity(line)->geometry);
+    EXPECT_NEAR(std::hypot(solved.end.x - solved.start.x, solved.end.y - solved.start.y),
+                200.0, 1e-6)
+        << "an imported entity did not respond to a constraint";
+
+    // And the Parameter keeps driving it.
+    ASSERT_TRUE(document.setParameterValue(target.id(), 150.0));
+    ASSERT_TRUE(document.recompute().success);
+    const SketchLine& again = std::get<SketchLine>(sketch->findEntity(line)->geometry);
+    EXPECT_NEAR(std::hypot(again.end.x - again.start.x, again.end.y - again.start.y),
+                150.0, 1e-6);
+}
+
+TEST(M6DxfImport, M6_ADV_007_ADirectoryPathIsNotReadAsAFile) {
+    const DxfReadResult read = ReadDxfFile(std::string(PARAMCAD_DXF_FIXTURE_DIR));
+    EXPECT_FALSE(read);
+    EXPECT_EQ(read.error, DxfReadError::NotReadable);
+    EXPECT_FALSE(read.message.empty());
 }
 
 // --- Unit policy (ADR-M6-002) -------------------------------------------------

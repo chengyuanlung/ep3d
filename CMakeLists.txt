@@ -456,6 +456,11 @@ if(PARAMCAD_BUILD_TESTS)
         if(TARGET ParametricCADKernelOcct)
             target_link_libraries(ParametricCADImportTests PRIVATE ParametricCADKernelOcct)
         endif()
+        # The solver too: the strongest test of "imported entities are ordinary"
+        # is constraining one and letting M5's solver move it.
+        if(TARGET ParametricCADSolver)
+            target_link_libraries(ParametricCADImportTests PRIVATE ParametricCADSolver)
+        endif()
         if(MSVC)
             target_compile_options(ParametricCADImportTests PRIVATE /utf-8)
         endif()
