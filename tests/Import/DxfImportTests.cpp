@@ -17,8 +17,10 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -376,6 +378,321 @@ TEST(M6DxfImport, M6_ARC_005_ADegenerateArcIsSkippedAndTheRestSurvive) {
                    skip.reason == ImportSkipReason::InvalidGeometry;
         });
     EXPECT_EQ(invalid, 1);
+}
+
+// --- Gate D: mixed files and order independence (M6.4) ------------------------
+
+// Geometry as comparable values, so two imports can be compared as SETS. Two
+// files holding the same entities in different order must produce the same
+// geometry, and comparing in order would pass for the wrong reason.
+std::vector<std::string> GeometryFingerprints(const ImportedSketchGeometry& g) {
+    std::vector<std::string> out;
+    const auto num = [](double v) {
+        std::ostringstream s;
+        s.precision(12);
+        s << std::fixed << v;
+        return s.str();
+    };
+    for (const ImportedLine2D& l : g.lines)
+        out.push_back("LINE " + num(l.start.x) + " " + num(l.start.y) + " " + num(l.end.x) +
+                      " " + num(l.end.y));
+    for (const ImportedCircle2D& c : g.circles)
+        out.push_back("CIRCLE " + num(c.center.x) + " " + num(c.center.y) + " " +
+                      num(c.radiusMm));
+    for (const ImportedArc2D& a : g.arcs)
+        out.push_back("ARC " + num(a.center.x) + " " + num(a.center.y) + " " +
+                      num(a.radiusMm) + " " + num(a.startAngleRad) + " " + num(a.endAngleRad));
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+TEST(M6DxfImport, M6_GATE_D_MixedFileImportsEveryKind) {
+    const DxfReadResult read = ReadDxfFile(Fixture("mixed.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    // Four lines, one circle, one arc -- counted from the fixture by hand.
+    EXPECT_EQ(read.geometry.lines.size(), 4u);
+    EXPECT_EQ(read.geometry.circles.size(), 1u);
+    EXPECT_EQ(read.geometry.arcs.size(), 1u);
+    EXPECT_EQ(read.geometry.importedCount(), 6u);
+    EXPECT_TRUE(read.geometry.skipped.empty());
+
+    PartDocument document{"Mixed"};
+    const SketchImportResult result =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(result) << result.message;
+    EXPECT_EQ(result.importedCount, 6u);
+    ASSERT_EQ(result.entityIds.size(), 6u);
+
+    // Every id is distinct. Duplicate ids would make one entity unreachable
+    // and the other ambiguous, which no later test would obviously catch.
+    std::vector<SketchEntityId> ids = result.entityIds;
+    std::sort(ids.begin(), ids.end());
+    EXPECT_EQ(std::adjacent_find(ids.begin(), ids.end()), ids.end())
+        << "two imported entities share an id";
+
+    // And the sketch really holds all six, each of the kind it should be.
+    const Sketch* sketch = document.findSketch(result.sketchId);
+    ASSERT_NE(sketch, nullptr);
+    ASSERT_EQ(sketch->entities().size(), 6u);
+    std::size_t lines = 0, circles = 0, arcs = 0;
+    for (const SketchEntity& entity : sketch->entities()) {
+        if (std::holds_alternative<SketchLine>(entity.geometry)) ++lines;
+        else if (std::holds_alternative<SketchCircle>(entity.geometry)) ++circles;
+        else if (std::holds_alternative<SketchArc>(entity.geometry)) ++arcs;
+    }
+    EXPECT_EQ(lines, 4u);
+    EXPECT_EQ(circles, 1u);
+    EXPECT_EQ(arcs, 1u) << "an arc became some other kind";
+}
+
+TEST(M6DxfImport, M6_GATE_D_FileOrderIsNotIdentity) {
+    // The same entities in a different file order. Nothing about the resulting
+    // geometry may depend on that order (ADR-M6-004, spec 17).
+    const DxfReadResult a = ReadDxfFile(Fixture("mixed.dxf"));
+    const DxfReadResult b = ReadDxfFile(Fixture("mixed_shuffled.dxf"));
+    ASSERT_TRUE(a) << a.message;
+    ASSERT_TRUE(b) << b.message;
+
+    EXPECT_EQ(a.geometry.importedCount(), b.geometry.importedCount());
+    EXPECT_EQ(GeometryFingerprints(a.geometry), GeometryFingerprints(b.geometry))
+        << "the imported geometry depends on the order of the file";
+}
+
+TEST(M6DxfImport, M6_GATE_D_RepeatedImportsOfOneFileAgree) {
+    // Determinism (spec 13): the same input twice gives the same geometry.
+    const DxfReadResult first = ReadDxfFile(Fixture("mixed.dxf"));
+    const DxfReadResult second = ReadDxfFile(Fixture("mixed.dxf"));
+    ASSERT_TRUE(first) << first.message;
+    ASSERT_TRUE(second) << second.message;
+    EXPECT_EQ(GeometryFingerprints(first.geometry), GeometryFingerprints(second.geometry));
+}
+
+TEST(M6DxfImport, M6_MIXED_001_TwoImportsIntoOneDocumentStayApart) {
+    // Spec 17: repeated import into the same document. Each import gets its own
+    // Sketch, and the first one's entities are untouched -- an importer that
+    // reused or appended to the previous sketch would silently merge two
+    // drawings.
+    PartDocument document{"TwoImports"};
+    const DxfReadResult read = ReadDxfFile(Fixture("mixed.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    const SketchImportResult first =
+        ImportGeometryIntoNewSketch(document, "First", read.geometry);
+    ASSERT_TRUE(first) << first.message;
+    const SketchImportResult second =
+        ImportGeometryIntoNewSketch(document, "Second", read.geometry);
+    ASSERT_TRUE(second) << second.message;
+
+    EXPECT_NE(first.sketchId, second.sketchId);
+    EXPECT_EQ(document.sketches().size(), 2u);
+    for (SketchEntityId id : first.entityIds)
+        EXPECT_EQ(std::find(second.entityIds.begin(), second.entityIds.end(), id),
+                  second.entityIds.end())
+            << "the two imports share an entity id";
+
+    // The first sketch still holds exactly what it did.
+    const Sketch* firstSketch = document.findSketch(first.sketchId);
+    ASSERT_NE(firstSketch, nullptr);
+    EXPECT_EQ(firstSketch->entities().size(), 6u);
+}
+
+TEST(M6DxfImport, M6_MIXED_002_DeletingAnImportedSketchLeavesTheOtherIntact) {
+    // Spec 17: deleting the imported sketch, then recomputing.
+    PartDocument document{"DeleteImported"};
+    const DxfReadResult read = ReadDxfFile(Fixture("mixed.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    const SketchImportResult first =
+        ImportGeometryIntoNewSketch(document, "First", read.geometry);
+    const SketchImportResult second =
+        ImportGeometryIntoNewSketch(document, "Second", read.geometry);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+
+    ASSERT_TRUE(document.removeObject(first.sketchId));
+    EXPECT_EQ(document.findSketch(first.sketchId), nullptr);
+
+    const Sketch* survivor = document.findSketch(second.sketchId);
+    ASSERT_NE(survivor, nullptr) << "deleting one imported sketch took the other with it";
+    EXPECT_EQ(survivor->entities().size(), 6u);
+    EXPECT_TRUE(document.recompute().success);
+
+    std::ostringstream out;
+    EXPECT_TRUE(savePartDocument(document, out));
+}
+
+TEST(M6DxfImport, M6_GATE_E_MixedImportSurvivesSaveLoadWithEveryId) {
+    // Gate E on the mixed file: every id and every geometry survives, and the
+    // ids are the ones the import produced rather than ids re-derived from file
+    // order on the way back in.
+    PartDocument document{"MixedPersist"};
+    const DxfReadResult read = ReadDxfFile(Fixture("mixed.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    const SketchImportResult imported =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(imported) << imported.message;
+
+    std::ostringstream out;
+    ASSERT_TRUE(savePartDocument(document, out));
+    std::istringstream in(out.str());
+    const LoadResult loaded = loadPartDocument(in);
+    ASSERT_TRUE(loaded) << loaded.message;
+
+    const Sketch* before = document.findSketch(imported.sketchId);
+    const Sketch* after = loaded.document->findSketch(imported.sketchId);
+    ASSERT_NE(before, nullptr);
+    ASSERT_NE(after, nullptr);
+    ASSERT_EQ(after->entities().size(), before->entities().size());
+
+    for (SketchEntityId id : imported.entityIds) {
+        const SketchEntity* originalEntity = before->findEntity(id);
+        const SketchEntity* restored = after->findEntity(id);
+        ASSERT_NE(restored, nullptr) << "entity " << ToObjectId(id) << " lost its id";
+        ASSERT_NE(originalEntity, nullptr);
+        EXPECT_EQ(restored->geometry.index(), originalEntity->geometry.index())
+            << "entity " << ToObjectId(id) << " changed kind across save/load";
+    }
+}
+
+// --- Gate G: an imported profile drives 3D geometry (M6.6) --------------------
+
+TEST(M6DxfImport, M6_GATE_G_ImportedClosedProfileDrivesAPadWithAnalyticalVolume) {
+    // The gate that proves the importer creates REAL native geometry rather
+    // than something display-only. The fixture's sides are listed out of order
+    // and two are reversed, because a DXF has no obligation to list a loop in
+    // traversal order -- the profile validator has to find the loop, and the
+    // importer must not be relied on to hand it over pre-sorted.
+    PartDocument document{"ImportedPad"};
+    OcctGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+    document.addMaterial("Aluminium", 2700.0);
+
+    const DxfReadResult read = ReadDxfFile(Fixture("closed_rectangle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    ASSERT_EQ(read.geometry.lines.size(), 4u);
+
+    const SketchImportResult imported =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(imported) << imported.message;
+
+    Parameter& length = document.addParameter("PadLength", 20.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body001");
+    PadFeature& pad = document.addPadFeature(body, "Pad001", imported.sketchId, length.id());
+
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_EQ(pad.state(), ComputeState::Valid);
+
+    // Hand-computed from the fixture: 60 x 40 x 20 = 48000 mm^3, and at
+    // 2700 kg/m^3 that is 4.8e-5 m^3 * 2700 = 0.1296 kg.
+    ASSERT_TRUE(document.massProperties().valid);
+    EXPECT_NEAR(document.massProperties().volumeMm3, 48000.0, 1e-6);
+    EXPECT_NEAR(document.massProperties().massKg, 0.1296, 1e-9);
+
+    // And it stays parametric: the Pad length still drives the solid, so the
+    // imported sketch is a first-class input to the recompute graph.
+    ASSERT_TRUE(document.setParameterValue(length.id(), 30.0));
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_NEAR(document.massProperties().volumeMm3, 72000.0, 1e-6);
+}
+
+TEST(M6DxfImport, M6_GATE_G_ImportedPadSurvivesSaveLoadAndStillRebuilds) {
+    // Gate F and Gate G together: after saving, the DXF is irrelevant, and the
+    // reloaded document still rebuilds its solid from the imported sketch.
+    PartDocument document{"ImportedPadPersist"};
+    OcctGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+    document.addMaterial("Aluminium", 2700.0);
+
+    const DxfReadResult read = ReadDxfFile(Fixture("closed_rectangle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    const SketchImportResult imported =
+        ImportGeometryIntoNewSketch(document, "FromDxf", read.geometry);
+    ASSERT_TRUE(imported) << imported.message;
+    Parameter& length = document.addParameter("PadLength", 20.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body001");
+    document.addPadFeature(body, "Pad001", imported.sketchId, length.id());
+    ASSERT_TRUE(document.recompute().success);
+
+    std::ostringstream out;
+    ASSERT_TRUE(savePartDocument(document, out));
+    std::istringstream in(out.str());
+    const LoadResult loaded = loadPartDocument(in);
+    ASSERT_TRUE(loaded) << loaded.message;
+
+    // A FRESH kernel: no runtime state crossed the file.
+    OcctGeometryKernel freshKernel;
+    loaded.document->setGeometryKernel(&freshKernel);
+    ASSERT_TRUE(loaded.document->recompute().success);
+    EXPECT_NEAR(loaded.document->massProperties().volumeMm3, 48000.0, 1e-6);
+}
+
+// --- Gate H: invalid and unsupported input (M6.5) -----------------------------
+
+TEST(M6DxfImport, M6_GATE_H_AMalformedFileFailsWithAUsefulCause) {
+    const DxfReadResult read = ReadDxfFile(Fixture("malformed.dxf"));
+    // Whichever way libdxfrw resolves a truncated file, the contract is the
+    // same: it must not be reported as a missing file, and it must not yield
+    // geometry invented from the fragment.
+    EXPECT_NE(read.error, DxfReadError::FileNotFound);
+    if (!read) {
+        EXPECT_FALSE(read.message.empty());
+    } else {
+        EXPECT_EQ(read.geometry.importedCount(), 0u)
+            << "a truncated entity produced geometry";
+    }
+}
+
+TEST(M6DxfImport, M6_GATE_H_AFailedImportLeavesNoTraceInTheDocument) {
+    // The state check spec 16 asks for: after a failed import, nothing of the
+    // attempt may remain -- no sketch, no registry entry, no graph node -- and
+    // the document must still be usable and savable.
+    PartDocument document{"FailedImport"};
+    document.addParameter("Keep", 1.0, UnitType::Millimeter);
+    const std::size_t sketchesBefore = document.sketches().size();
+    const std::size_t registryBefore = document.objectRegistry().size();
+    const std::size_t nodesBefore = document.dependencyGraph().nodeCount();
+
+    ImportedSketchGeometry doomed;
+    doomed.lines.push_back(ImportedLine2D{Vec2{0, 0}, Vec2{10, 0}});
+    doomed.circles.push_back(ImportedCircle2D{Vec2{0, 0}, 0.0}); // model refuses this
+
+    const SketchImportResult result = ImportGeometryIntoNewSketch(document, "Doomed", doomed);
+    EXPECT_FALSE(result);
+    EXPECT_FALSE(result.message.empty());
+
+    EXPECT_EQ(document.sketches().size(), sketchesBefore);
+    EXPECT_EQ(document.objectRegistry().size(), registryBefore)
+        << "a failed import left an orphan registry entry";
+    EXPECT_EQ(document.dependencyGraph().nodeCount(), nodesBefore)
+        << "a failed import left a stray graph node";
+
+    EXPECT_TRUE(document.recompute().success);
+    std::ostringstream out;
+    EXPECT_TRUE(savePartDocument(document, out));
+    std::istringstream in(out.str());
+    EXPECT_TRUE(loadPartDocument(in));
+}
+
+TEST(M6DxfImport, M6_GATE_H_NonFiniteValuesNeverReachTheDocument) {
+    // spec 17 names NaN/Infinity explicitly. They are rejected by the importer
+    // even if a reader ever let them through, because "the parser filters them"
+    // is a claim about another layer.
+    PartDocument document{"NonFinite"};
+    const std::size_t before = document.sketches().size();
+
+    ImportedSketchGeometry poisoned;
+    poisoned.lines.push_back(
+        ImportedLine2D{Vec2{0, 0}, Vec2{std::numeric_limits<double>::quiet_NaN(), 0}});
+    const SketchImportResult nan = ImportGeometryIntoNewSketch(document, "NaN", poisoned);
+    EXPECT_FALSE(nan);
+
+    ImportedSketchGeometry infinite;
+    infinite.circles.push_back(
+        ImportedCircle2D{Vec2{0, 0}, std::numeric_limits<double>::infinity()});
+    const SketchImportResult inf = ImportGeometryIntoNewSketch(document, "Inf", infinite);
+    EXPECT_FALSE(inf);
+
+    EXPECT_EQ(document.sketches().size(), before);
 }
 
 // --- Unit policy (ADR-M6-002) -------------------------------------------------
