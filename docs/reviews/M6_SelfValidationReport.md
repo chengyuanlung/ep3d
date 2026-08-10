@@ -5,6 +5,23 @@
 **Commit under validation:** branch `m6-wip`, head recorded in
 `M6_CompletionReport.md` when the milestone closes.
 
+> ## CORRECTED after independent review
+>
+> Two reviewers verified this report's claims by execution. **Three of them were
+> false**, and the falsest was one this document leaned on hardest:
+>
+> - "Unguarded mutations: **none**" — the ARC unit conversion could be removed
+>   entirely with all 526 tests still green.
+> - "Blocks (INSERT) are skipped, not expanded. A drawing built from blocks
+>   imports as nothing plus a diagnostic" — **false in both halves**. Block
+>   contents were imported as model geometry, including the annotation lines of
+>   every DIMENSION.
+> - The ARC-near-360° NOT EXECUTED row's justification ("`arc_crossing_zero.dxf`
+>   covers the wrap") — it does not, and a Major lived exactly there.
+>
+> Each is corrected in place and marked **[CORRECTED]**; nothing was deleted.
+> Full accounting in `M6_IndependentReview.md`.
+
 Spec 22 governs this document: nothing here is reported PASS unless it was
 actually executed, and anything not executed says **NOT EXECUTED** and why.
 
@@ -70,13 +87,14 @@ Core compiles, links and tests with libdxfrw absent: the import target is behind
 | | Result |
 |---|---|
 | Debug build | **PASS** — 0 errors |
-| Debug tests | **539 / 539** |
+| Debug tests | **546 / 546** |
 | Release build | **PASS** — 0 errors |
-| Release tests | **539 / 539** |
-| Release actually ran Release binaries | **PASS** — 539 of 539 ctest command lines name `build/Release/...`, zero name `build/Debug/` (301 Core, 87 Integration, 53 Solver, 47 KernelOcct, 38 Import, 13 Viewer) |
+| Release tests | **546 / 546** |
+| Release actually ran Release binaries | **PASS** — every ctest command line names `build/Release/...`, none names `build/Debug/`. Independently reproduced by a reviewer with `ctest -C Release -N -V`. |
 | M0–M5 regression | **PASS** — every pre-M6 test still passes |
 
-Baseline was 498 at the end of M5; **41 tests added**.
+Baseline was 498 at the end of M5; **48 tests added**, seven of them regressions
+for review findings.
 
 ---
 
@@ -123,6 +141,12 @@ test mean something:
 Every mutation was applied, the suite rebuilt, the failures recorded, then the
 source restored **and rebuilt again** before re-verifying.
 
+**[CORRECTED]** The table below was accurate for the mutations it lists, and
+the conclusion drawn from it — "unguarded mutations: none" — was **false**. A
+reviewer removed the ARC unit conversion and all 526 tests stayed green, because
+no fixture contained an arc in a non-millimetre file. Six mutations chosen by me
+proved six things about the code I had chosen to test.
+
 | Mutation | Tests killed |
 |---|---|
 | Omit the unit conversion | `M6_UNITS_001`, `M6_UNITS_003` |
@@ -132,7 +156,18 @@ source restored **and rebuilt again** before re-verifying.
 | Duplicate an imported entity | 13 tests incl. `M6_GATE_A`, `M6_GATE_D`, both `M6_GATE_G` |
 | Stop reporting skipped entities | `M6_SKIP_001` |
 
-**Unguarded mutations: none.**
+**Originally claimed: "Unguarded mutations: none." That was false.** Two fixes
+were entirely unguarded and a reviewer proved it by execution:
+
+| Unguarded fix | How it was found | Now covered by |
+|---|---|---|
+| ARC unit conversion | removed `* scale()` from all three arc values; 526/526 still passed | `M6_REV_003` (an arc in an inches file) |
+| ARC sweep direction | flipped `counterClockwise`, turning a 170° arc into 190°; exactly ONE assertion failed, and it restated the ADR rather than measuring a curve | `M6_REV_004` (a 90° sector's padded volume, which differs 3× from the 270° one) |
+
+Six further mutations were run against the review fixes — block guard, scale
+timing, arc scaling, sweep guard, extrusion guard, mil mapping — and each killed
+its own test. **Unguarded among those: none**, a claim that now rests on
+mutations chosen against findings rather than against my own code.
 
 ---
 
@@ -154,8 +189,8 @@ source restored **and rebuilt again** before re-verifying.
 | Deleting the imported sketch, then recompute | **PASS** — `M6_MIXED_002`, `M6_ADV_005` |
 | Malformed DXF | **PASS** — `M6_GATE_H_AMalformedFileFailsWithAUsefulCause` |
 | **Duplicate / missing DXF handles** | **NOT EXECUTED** — nothing in M6 reads a DXF handle, by design (ADR-M6-004): identity comes from the shared id generator, so a duplicate or missing handle cannot affect correctness. There is no code path to exercise. |
-| **ARC near 360°** | **NOT EXECUTED** — `arc_crossing_zero.dxf` covers the wrap; a near-full-turn arc was not built. |
-| **Fresh-process load** | **NOT EXECUTED as a separate process.** Save/load is exercised in-process and onto a fresh kernel. M5 found that in-process serialization tests are structurally blind to id-generator collisions; the equivalent risk here is covered by M5's `M5_SER_015`, but no M6 test starts a second process. |
+| **ARC near 360°** | **[CORRECTED] PASS, and the original justification was wrong.** This row said `arc_crossing_zero.dxf` covered the wrap. It does not, and a Major lived precisely there: a 0°→360° arc aborted the entire file import. Now `M6_REV_005` (`arc_full_turn.dxf`) and ADR-M6-012. |
+| **Fresh-process load** | **PASS — executed by a reviewer, not by me.** A reviewer wrote the probe this row admitted was missing: three genuinely separate processes, with the imported sketch/entity ids deliberately the largest in the file. Both sketches resolve as `Sketch*` (not aliased), every entity id resolves, the mass node does not collide, the Pad rebuilds to 48000 mm³, and geometry compares bit-exactly across processes. Mutation-verified. **Still NOT in the suite** — the probe lives in the reviewer's scratch, so nothing in CI runs it. |
 
 ---
 
@@ -182,14 +217,35 @@ source restored **and rebuilt again** before re-verifying.
   diagnostic can name them.
 - **Binary DXF is untested.** libdxfrw reads it; no fixture exercises it.
 - **Blocks (`INSERT`) are skipped, not expanded.** A drawing built from blocks
-  imports as nothing plus a diagnostic.
-- **3D DXF is flattened by ignoring Z**, and the extrusion direction (code 210)
-  is not applied. A drawing on a non-XY plane imports at the wrong orientation.
-  Not detected, not reported — **the most likely source of a silently wrong
-  import**, and the first thing to fix if M6 is extended.
+  imports as nothing plus a diagnostic. **[CORRECTED]** — when first written
+  this was false in both halves: block CONTENTS were imported as model geometry
+  at definition coordinates, and a drawing with one DIMENSION imported its three
+  annotation lines as real entities. Fixed in ADR-M6-009; the sentence is true
+  now.
+- **3D DXF is flattened by ignoring Z.** Entities are read as their X and Y.
+- **A non-default extrusion (code 210) is now REFUSED and reported**, not
+  imported. **[CORRECTED]** — this bullet used to say the entity imported "at
+  the wrong orientation, not detected, not reported". A reviewer measured it and
+  found worse: for the common `(0,0,-1)` the correct result is a **mirror**, and
+  a mirrored part has identical area, volume and mass, so no oracle this project
+  uses could detect it. And because LINE is stored in world coordinates while
+  CIRCLE/ARC are stored in the entity's own, ignoring 210 mixed two frames in
+  one file — a hole imported at (−25, 30) instead of (25, 30) with `IMPORT OK`.
+  See ADR-M6-013.
 - **DXF `$INSUNITS` values other than 0/1/2/4/5/6** map to `Unrecognized` and
   take the millimetre default with a diagnostic.
-- **The owner UI validation and an independent review have not been run.**
+- **A truncated LINE is silently misinterpreted.** libdxfrw default-initialises
+  a missing second point to (0,0,0) and exposes no presence flag, so a LINE with
+  codes 10/20 and no 11/21 imports as a line to the sketch origin, with no skip
+  record. Found by a reviewer. Detecting it needs a group-code-presence hook the
+  library does not offer. In practice it opens or branches the loop and the Pad
+  fails loudly, so it produces a phantom entity and a misleading success message
+  rather than a wrong solid — but it is a real hole in "never silently
+  misinterpreted".
+- **`INSERT` is not expanded**, so block-based drawings import as nothing.
+- **`$INSUNITS` 11, 12, 17–20** (angstrom, nanometre, gigametre, astronomical
+  unit, light year, parsec) are deliberately unmapped — see ADR-M6-011.
+- **The owner UI validation has not been run.**
 
 ---
 
@@ -202,6 +258,12 @@ independent review is worth nothing.
 
 ## Ready for review
 
-**YES.** Gates A–I pass, mutation verification shows no unguarded fix, the
-dependency and boundary audits are measured rather than asserted, and the
-limitations above are listed rather than omitted.
+**[CORRECTED] Originally "YES", with "mutation verification shows no unguarded
+fix" as part of the reason. That reason was false.** Two independent reviews
+then found 1 Critical and 7 Major, all now fixed with mutation-verified tests.
+
+**Ready for RE-review: YES.** Not ready to be called complete: the round of
+fixes above has not itself been reviewed, and on this project's record — M5
+needed four rounds, each finding defects the previous round's fixes introduced —
+that is not a formality. Owner manual UI validation of the import workflow is
+also outstanding and is the owner's to perform (ADR-M4-016).
