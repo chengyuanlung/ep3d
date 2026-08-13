@@ -41,9 +41,15 @@
 
 **Baseline:** `a6e7078` — the accepted M5 master state.
 
-**Branch:** `m6-wip`, merged to `master` at `M6.14` (`a521af3`). This file was
-rewritten by each round, so naming a head commit here was wrong more often than
-right; `git log` is the authority.
+**Branch:** `m6-wip`, head `89e49de`, squash-merged to `master` as **`88f8f5e`**
+— "M6: DXF import to stable Sketch entities". This file was rewritten by each
+round, so naming a head commit here was wrong more often than right; `git log`
+is the authority.
+
+**Verified on `master` after the merge, not only on the branch:** both viewer
+binaries deleted, rebuilt, asserted present, then **561/561 in Debug and
+561/561 in Release**, with all 561 Release command lines naming
+`build\Release\` and none naming `build\Debug\`.
 
 ### `M6.14` — the defect owner UI validation found before it was written down
 
