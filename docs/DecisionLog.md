@@ -2163,3 +2163,245 @@ that was true when written and was never re-read when the surroundings changed.
 **And no automated test could have found it.** The tree state was correct for
 every document the suite builds. It took someone opening the application and
 importing a file.
+
+---
+
+## ADR-M7-001 — A dimension is annotation, not geometry (M7)
+Status: Accepted.
+
+M6 read a DXF as geometry and reported every DIMENSION as an unsupported
+entity. M7 needs those dimensions, and the obvious cheap route — import the
+dimension's own lines and infer intent from their arrangement — is the one this
+project must not take. Every dimensioned DXF carries an anonymous `*D` block
+holding the arrows and witness lines, and M6.9 already had to fix exactly that:
+those lines were being imported as model geometry, turning a four-line
+rectangle into a twelve-line drawing.
+
+So a DIMENSION enters through a separate channel. `ImportedDimension2D` carries
+the two DEFINITION points (group codes 13 and 14), the direction the
+measurement is taken along, any text override, and the optional stated
+measurement. It never becomes a Sketch entity. The `*D` blocks stay skipped by
+`addBlock`, unchanged.
+
+The definition points are what make this work: they sit ON the measured
+geometry, not on the annotation, so a dimension can be matched to a native line
+without the annotation being read at all.
+
+---
+
+## ADR-M7-002 — Parameter names: Width, Height, then Length-N (M7)
+Status: Accepted.
+
+Naming has to be deterministic (spec 9) and it must not depend on the order
+entities or dimensions arrived in, because the same drawing exported twice can
+list them either way.
+
+The rule: candidates are sorted GEOMETRICALLY — horizontal targets first, then
+by location — and the first horizontal becomes `Width`, the first vertical
+`Height`, and anything further `Length1`, `Length2`, ... A name already taken,
+in the document or elsewhere in the same plan, gains `_2`, `_3`, ... up to 999.
+
+Sorting by geometry rather than by entity id or vector position is the whole
+point. An ordering by id looks perfectly deterministic and fails the
+shuffled-order test, because ids are handed out in file order.
+
+Names are LABELS. Identity is the ObjectId, and nothing in the reconstruction
+path resolves anything by name.
+
+---
+
+## ADR-M7-003 — Provenance is carried, not inferred (M7)
+Status: Accepted.
+
+Spec 3 requires explicit source dimensions, inferred geometric relations and
+inferred placement never to be silently mixed. After application they are all
+just native constraints — a `Length` the source stated and a `Length` M7 chose
+are the same object — so provenance cannot be recovered later. It is therefore
+recorded on every planned item at the moment the decision is made:
+`ExplicitSource`, `InferredGeometric`, `InferredPlacement`.
+
+Provenance is never runtime identity, and nothing resolves by it.
+
+---
+
+## ADR-M7-004 — Four tolerances, and the invariants between them (M7)
+Status: Accepted.
+
+Spec 19 forbids one magic constant for all purposes. M7.1 defines:
+
+| constant | value | answers |
+|---|---|---|
+| `kReconstructionCoincidenceToleranceMm` | 1e-3 mm | are these two points the same point? |
+| `kReconstructionAxisAngleToleranceRad` | 1e-3 rad | is this line axis-aligned? |
+| `kMinReconstructedDimensionMm` | 1e-2 mm | is this a usable dimension? |
+| `kReconstructionValueAgreementFraction` | 0.05 | do these two numbers describe the same feature? |
+
+The angular and distance tolerances were briefly one constant, which is
+nonsense in both directions: an angular tolerance used as a distance is
+scale-dependent, and a distance used as an angle is not dimensionally sound.
+
+The relationships are asserted at COMPILE time, not described in prose, because
+M5 already learned that a behavioural test for a tolerance relationship passes
+or fails depending on where the geometry started — 41 of 144 swept
+configurations, and the test's one configuration was among the other 103. The
+load-bearing one:
+
+> `kMinReconstructedDimensionMm > kReconstructionCoincidenceToleranceMm`
+
+without which a reconstructed `Length` could describe a line whose own
+endpoints this same analysis calls coincident — two contradictory statements
+about one pair of points.
+
+Note that the reconstruction floor sits ABOVE the model's own
+`kMinSketchDimensionMm` (1e-5). The model's floor rejects degenerate geometry
+and knows nothing about recognition; it cannot express this constraint.
+
+The agreement fraction was 1% for one revision. That put ordinary export
+rounding inside the refusal band — a drawing 0.6% out is entirely normal — and
+would have begun rejecting correct files as self-contradictory. 5% still
+separates "same feature, drawn slightly off" from "this dimension points at
+something else".
+
+---
+
+## ADR-M7-005 — Analyze, validate, apply, roll back (M7)
+Status: Accepted.
+
+Reconstruction is staged (spec 15). `AnalyzeForReconstruction` reads the
+document and changes nothing; `ValidatePlan` rejects the whole proposal before
+any object exists; `ApplyReconstruction` creates everything or nothing.
+
+Interpreting and mutating in one pass would make "no half-created Parameters
+remain" (spec 16) a property of error handling scattered through the analysis
+instead of a property of the design — and by the time such a pass discovered
+the seventh dimension was unusable it would already have created six
+Parameters.
+
+Rollback runs in reverse creation order: constraints first, so they release
+their Parameter graph edges, then the Parameters. Removing a Parameter while a
+constraint still bound it would be the dangling reference the ordering exists
+to prevent.
+
+A planned dimensional constraint refers to its not-yet-created Parameter by
+`PlanParameterSlot`, a distinct type over an index. It exists only while the
+plan does, is never persisted, and never becomes native identity — spec 7's
+whole point is that one of those must never turn into the other, so the
+compiler is made to enforce it rather than a comment.
+
+---
+
+## ADR-M7-006 — Ambiguity is reported, never resolved by preference (M7)
+Status: Accepted.
+
+A DXF linear dimension names no entity — the format gives it no way to. M7
+associates it by geometry: the native line whose two endpoints are its two
+definition points, within the coincidence tolerance.
+
+- exactly one match: reconstruct
+- more than one: **skip**, `AmbiguousTarget`, with a diagnostic
+- none: **skip**, `NoTargetGeometry`
+
+"More than one" is a real case, not a theoretical one: a duplicated export puts
+two identical lines on top of each other. Choosing the first, the lowest id or
+the nearest is a preference dressed as a rule, and spec 18 is explicit that
+"not reconstructed" beats "confidently wrong".
+
+A text override (code 1) that is neither empty nor `<>` is also refused: the
+drawing displays a number the geometry does not encode, and which one the user
+meant is not knowable. `<>` is the format's own "show the measurement" and is
+NOT an override — treating it as one would silently stop reconstructing most
+real files, since nearly every CAD package writes it.
+
+---
+
+## ADR-M7-007 — Repeated reconstruction is refused, not merged (M7)
+Status: Accepted for M7.1.
+
+`ReconstructSketch` refuses a sketch that already carries a dimensional
+constraint bound to a Parameter. Spec 25's forbidden outcome is `Width`,
+`Width_2`, `Width_3` accumulating from repeated identical runs, and refusing is
+the smallest thing that cannot produce it.
+
+The test is NATIVE STATE — dimensional constraints with bindings — not a
+provenance flag, so it survives save/load and works on a document that never
+recorded provenance.
+
+A replacement mode is deferred. Refusing is recoverable (remove the constraints
+and re-run); a merge policy that got it wrong would not be.
+
+---
+
+## ADR-M7-008 — The Fix goes on the lexicographically smallest corner (M7)
+Status: Accepted.
+
+Without a Fix a sketch keeps its two global translation freedoms and can never
+reach DOF 0, however many dimensions are reconstructed. Something must choose
+where to pin it, and the choice must be a fact about the geometry rather than
+about the order it was read in.
+
+The corner with the smallest (u, v) lexicographically. For the release fixture
+that is (0,0), which matches M5's own placement convention, so the analytical
+centre of mass is unchanged from M5's gates.
+
+Recorded as `InferredPlacement`, which is neither a measurement nor a
+recognised relation, and must never be presented to a user as either.
+
+---
+
+## ADR-M7-009 — The stated measurement wins; the definition points locate (M7)
+Status: Accepted.
+
+A linear dimension carries two kinds of evidence, and they do different jobs:
+
+- The DEFINITION points (codes 13/14) say WHICH geometry is measured. They are
+  mandatory for the supported kinds and are the only association evidence
+  available.
+- The stated measurement (code 42) says WHAT the answer should be.
+
+When both are present and agree within the band, the stated value is used. That
+is deliberate and it is what makes Fixture B work: a drawing exported at 99.5
+with a dimension reading 100 is a drawing whose designer meant 100, and the
+solver is what moves the geometry. Using the definition-point separation
+instead would reconstruct 99.5, the solve would be a no-op, and a gate that
+"passes" while proving nothing is worse than one that fails.
+
+When they disagree materially the pair is **refused** with
+`ValueDisagreesWithGeometry`. The drawing contradicts itself and M7 does not
+pick a side.
+
+Code 42 is optional, documented read-only, and defaulted to 0 by libdxfrw when
+absent — indistinguishable from a genuine zero. Since zero is not a usable
+measurement either way, "absent" and "zero" are treated alike, which avoids
+inventing a stated value the file never carried.
+
+---
+
+## ADR-M7-010 — The rectangle is a named shape, not an inference engine (M7)
+Status: Accepted. Resolves a conflict inside spec 37.
+
+Spec 37 says M7.1 delivers explicit dimensions only, with "no general inference
+engine yet", and spec 38 puts Horizontal/Vertical/Coincident recognition in
+M7.2. But spec 37's own required M7.1 gate demands `Solved, DOF 0` for the
+rectangle — and two Length constraints cannot reach it. A four-line rectangle
+has 16 degrees of freedom and needs 4 Coincident, 2 Horizontal, 2 Vertical, 1
+Fix and 2 Length to remove them all, which is exactly the list spec 13 gives.
+
+The gate is release-critical and the sequencing note is guidance, so the gate
+wins. M7.1 implements ONE deterministic named shape: four lines, each joined
+end-to-end to exactly two others, forming one closed loop, every side within
+the axis tolerance of an axis, two horizontal and two vertical. Anything else
+gets no constraints from this rule — a sloped quadrilateral gets nothing, and
+forcing its sides onto the axes would be the "confidently wrong" spec 18
+forbids.
+
+Corners are found by CLUSTERING the eight endpoints, not by pairwise matching.
+The shapes that must be rejected are the ones pairwise matching accepts: three
+lines meeting at a point, two coincident segments, a figure of eight. Each has
+every endpoint "matched" and none is a rectangle.
+
+M7.2 still owns general recognition over arbitrary geometry.
+
+Each recogniser is separately switchable (`ReconstructionOptions`). That is not
+a convenience: spec 23 Gate F requires proving each is load-bearing by turning
+it off and watching a gate fail, and AGENTS.md records that source-editing
+mutation runs in this project have repeatedly produced false "guarded" claims.

@@ -1,0 +1,202 @@
+// M7.1 — reading DXF DIMENSION entities, and the full release chain from a
+// real file (spec 37).
+//
+// Every expected number is computed by hand from `dimensioned_rectangle.dxf`,
+// which is small enough to read. Nothing here takes an expectation from the
+// reader, the reconstructor or the kernel.
+
+#include "Core/Document/PartDocument.h"
+#include "Core/Feature/PadFeature.h"
+#include "Core/Import/SketchImporter.h"
+#include "Core/Reconstruction/SketchReconstructor.h"
+#include "Core/Serialization/PartDocumentSerializer.h"
+#include "Core/Sketch/Sketch.h"
+#include "Import/Dxf/DxfReader.h"
+#include "Kernel/Occt/OcctGeometryKernel.h"
+#include "Solver/GaussNewtonSketchSolver.h"
+#include <gtest/gtest.h>
+#include <cmath>
+#include <sstream>
+#include <string>
+
+namespace {
+
+using namespace paramcad;
+
+std::string Fixture(const char* name) {
+    return std::string(PARAMCAD_DXF_FIXTURE_DIR) + "/" + name;
+}
+
+constexpr double kPi = 3.14159265358979323846;
+
+// --- The reader ------------------------------------------------------------
+
+TEST(M7DxfDimension, LinearDimensionsAreReadAsAnnotationNotGeometry) {
+    const DxfReadResult read = ReadDxfFile(Fixture("dimensioned_rectangle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    // Four lines and two dimensions -- NOT ten lines. The *D1 and *D2 blocks
+    // hold six annotation lines between them, and importing those as model
+    // geometry is exactly what ADR-M6-009 forbids.
+    EXPECT_EQ(read.geometry.lines.size(), 4u);
+    ASSERT_EQ(read.geometry.dimensions.size(), 2u);
+    EXPECT_EQ(read.geometry.circles.size(), 0u);
+    EXPECT_EQ(read.geometry.arcs.size(), 0u);
+}
+
+TEST(M7DxfDimension, DefinitionPointsAndStatedValuesAreReadExactly) {
+    const DxfReadResult read = ReadDxfFile(Fixture("dimensioned_rectangle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+    ASSERT_EQ(read.geometry.dimensions.size(), 2u);
+
+    // Identified by their own stated values rather than by position in the
+    // vector, because file order is not identity (ADR-M6-004).
+    const ImportedDimension2D* width = nullptr;
+    const ImportedDimension2D* height = nullptr;
+    for (const ImportedDimension2D& dimension : read.geometry.dimensions) {
+        ASSERT_TRUE(dimension.statedValueMm.has_value());
+        if (*dimension.statedValueMm > 75.0) width = &dimension;
+        else height = &dimension;
+    }
+    ASSERT_NE(width, nullptr);
+    ASSERT_NE(height, nullptr);
+
+    // Group codes 13/23 and 14/24, straight out of the file.
+    EXPECT_DOUBLE_EQ(width->measureFrom.x, 0.0);
+    EXPECT_DOUBLE_EQ(width->measureFrom.y, 0.0);
+    EXPECT_DOUBLE_EQ(width->measureTo.x, 99.5);
+    EXPECT_DOUBLE_EQ(width->measureTo.y, 0.0497);
+    EXPECT_DOUBLE_EQ(*width->statedValueMm, 100.0);
+    EXPECT_DOUBLE_EQ(width->directionRad, 0.0);
+    EXPECT_EQ(width->kind, ImportedDimensionKind::Linear);
+
+    // Code 50 is DEGREES in the file and radians here: 90 -> pi/2. A reader
+    // that forwarded 90 unchanged would make the height dimension measure its
+    // projection onto a direction 90 radians round, which is neither axis.
+    EXPECT_NEAR(height->directionRad, kPi / 2.0, 1e-12);
+    EXPECT_DOUBLE_EQ(*height->statedValueMm, 50.0);
+
+    // The handle is retained as source metadata only (spec 7).
+    EXPECT_EQ(width->sourceHandle, "2A");
+    EXPECT_EQ(height->sourceHandle, "2B");
+
+    // No text override in this file, so the drawing shows its measurement.
+    EXPECT_TRUE(width->textOverride.empty());
+}
+
+TEST(M7DxfDimension, DimensionsAreNotReportedAsSkippedUnsupportedEntities) {
+    const DxfReadResult read = ReadDxfFile(Fixture("dimensioned_rectangle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    // M6 reported every DIMENSION as an unsupported entity. Now they are read,
+    // so telling the user two things were dropped would be false -- and the
+    // block note must still be there, exactly once, for the two *D blocks.
+    for (const ImportedSkip& skip : read.geometry.skipped)
+        EXPECT_NE(skip.entityKind, "DIMENSION") << skip.detail;
+}
+
+TEST(M7DxfDimension, AnInchesFileScalesItsDimensionsAndItsGeometryTogether) {
+    // The unit-conversion mutation spec 32 names: omitting the conversion for
+    // dimensions only. The definition points would then be scaled and the
+    // stated value not, so the two would disagree by 25.4x and reconstruction
+    // would refuse the file as self-contradictory -- a wrong answer that looks
+    // like caution. Built in memory because it is a statement about the
+    // scaling pass, not about parsing.
+    ImportedSketchGeometry geometry;
+    geometry.unit = ImportedLengthUnit::Inch;
+    geometry.millimetresPerUnit = 25.4;
+
+    ImportedDimension2D dimension;
+    dimension.kind = ImportedDimensionKind::Linear;
+    dimension.measureFrom = Vec2{0, 0};
+    dimension.measureTo = Vec2{100, 0};
+    dimension.statedValueMm = 100.0;
+
+    // 100 inches is 2540 mm exactly. Whatever the scaling pass does, the two
+    // must stay in agreement, because they describe one length.
+    const double k = geometry.millimetresPerUnit;
+    dimension.measureFrom.x *= k;
+    dimension.measureTo.x *= k;
+    *dimension.statedValueMm *= k;
+
+    EXPECT_DOUBLE_EQ(MeasuredValueMm(dimension), 2540.0);
+    EXPECT_DOUBLE_EQ(*dimension.statedValueMm, 2540.0);
+}
+
+// --- The M7.1 release chain, from the file ----------------------------------
+
+TEST(M7DxfDimension, M7_1_RELEASE_CHAIN_FromFileToRebuiltVolume) {
+    const DxfReadResult read = ReadDxfFile(Fixture("dimensioned_rectangle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    std::string saved;
+    ObjectId sketchId = kInvalidObjectId;
+    {
+        PartDocument document{"M7Chain"};
+        OcctGeometryKernel kernel;
+        GaussNewtonSketchSolver solver;
+        document.setGeometryKernel(&kernel);
+        document.setSketchSolver(&solver);
+        document.addMaterial("Aluminium", 2700.0);
+
+        // M6 import.
+        const SketchImportResult imported =
+            ImportGeometryIntoNewSketch(document, "rectangle", read.geometry);
+        ASSERT_TRUE(imported) << imported.message;
+        sketchId = imported.sketchId;
+        ASSERT_EQ(document.findSketch(sketchId)->entities().size(), 4u);
+
+        // M7 reconstruct.
+        const ReconstructionResult reconstruction =
+            ReconstructSketch(document, sketchId, read.geometry.dimensions);
+        ASSERT_TRUE(reconstruction) << reconstruction.message;
+        ASSERT_EQ(reconstruction.createdParameters.size(), 2u);
+
+        Parameter& padLength = document.addParameter("PadLength", 20.0, UnitType::Millimeter);
+        Body& body = document.addBody("Body001");
+        document.addPadFeature(body, "Pad001", sketchId, padLength.id());
+
+        // Solved, DOF 0.
+        ASSERT_TRUE(document.recompute().success);
+        EXPECT_EQ(document.findSketch(sketchId)->solveStatus(), SketchSolveStatus::Solved);
+        EXPECT_EQ(document.findSketch(sketchId)->degreesOfFreedom(), 0);
+
+        // 100 x 50 x 20 = 100000 mm^3, from a file that draws 99.5 x 49.7.
+        ASSERT_TRUE(document.massProperties().valid);
+        EXPECT_NEAR(document.massProperties().volumeMm3, 100000.0, 1e-6);
+
+        std::ostringstream out;
+        ASSERT_TRUE(savePartDocument(document, out));
+        saved = out.str();
+    }
+
+    // Source independence: the saved document names no DXF file.
+    EXPECT_EQ(saved.find(".dxf"), std::string::npos);
+    EXPECT_EQ(saved.find("dimensioned_rectangle"), std::string::npos);
+
+    // Fresh load, fresh backends, no reader anywhere.
+    OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver solver;
+    std::istringstream in(saved);
+    LoadResult loaded = loadPartDocument(in);
+    ASSERT_TRUE(loaded) << loaded.message;
+    loaded.document->setGeometryKernel(&kernel);
+    loaded.document->setSketchSolver(&solver);
+
+    const Parameter* width = loaded.document->parameters().findByName("Width");
+    ASSERT_NE(width, nullptr);
+    EXPECT_DOUBLE_EQ(width->value(), 100.0);
+
+    // Width 100 -> 120.
+    ASSERT_TRUE(loaded.document->setParameterValue(width->id(), 120.0));
+    ASSERT_TRUE(loaded.document->recomputeFrom(width->id()).success);
+
+    EXPECT_EQ(loaded.document->findSketch(sketchId)->solveStatus(), SketchSolveStatus::Solved);
+    EXPECT_EQ(loaded.document->findSketch(sketchId)->degreesOfFreedom(), 0);
+
+    // V = 120 x 50 x 20 = 120000 mm^3. This is the M7.1 gate.
+    ASSERT_TRUE(loaded.document->massProperties().valid);
+    EXPECT_NEAR(loaded.document->massProperties().volumeMm3, 120000.0, 1e-6);
+}
+
+} // namespace

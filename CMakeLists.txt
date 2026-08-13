@@ -31,6 +31,8 @@ add_library(ParametricCADCore
     src/Core/Serialization/PartDocumentSerializer.cpp
     src/Core/Import/ImportedGeometry.cpp
     src/Core/Import/SketchImporter.cpp
+    src/Core/Reconstruction/ReconstructionPlan.cpp
+    src/Core/Reconstruction/SketchReconstructor.cpp
     src/Core/Sketch/Profile.cpp
     src/Core/Sketch/SketchConstraint.cpp
     src/Core/Sketch/ISketchSolver.cpp
@@ -367,6 +369,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/DocumentOutlineTests.cpp
         tests/SerializationV5Tests.cpp
         tests/SerializationTests.cpp
+        tests/ReconstructionTests.cpp
     )
     target_link_libraries(ParametricCADCoreTests
         PRIVATE ParametricCADCore ParametricCADViewerCore GTest::gtest_main)
@@ -445,7 +448,9 @@ if(PARAMCAD_BUILD_TESTS)
     # links ParametricCADImportDxf rather than libdxfrw -- if a test needed the
     # library directly, the import boundary would not be where ADR-M6-003 says.
     if(TARGET ParametricCADImportDxf)
-        add_executable(ParametricCADImportTests tests/Import/DxfImportTests.cpp)
+        add_executable(ParametricCADImportTests
+            tests/Import/DxfImportTests.cpp
+            tests/Import/DxfDimensionTests.cpp)
         target_link_libraries(ParametricCADImportTests
             PRIVATE ParametricCADCore ParametricCADImportDxf GTest::gtest_main
         )
@@ -479,6 +484,7 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Integration/M5UiTests.cpp
             tests/Integration/M5ReleaseGateTests.cpp
             tests/Integration/M5AdversarialTests.cpp
+            tests/Integration/M7ReleaseGateTests.cpp
         )
         # ViewerCore joins so the UI's decisions can be checked against a REAL
         # solve. Faking solver output would make those tests agree with a stub

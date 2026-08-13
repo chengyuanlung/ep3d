@@ -86,6 +86,81 @@ struct ImportedSkip {
     std::string detail;     // why, in words a user can act on
 };
 
+// --- Annotation (M7, spec 6) ------------------------------------------------
+//
+// What the source said it MEASURED, as opposed to what it drew. M6 read only
+// geometry; M7 reconstructs design intent, and intent is what a dimension
+// carries.
+//
+// The same boundary rules apply as to the geometry above and for the same
+// reason: no parser pointer, no `DRW_*` type, no file offset, no array position
+// standing in for identity (spec 6). A dimension arrives as the two points it
+// measures between and the direction it measures along -- which is enough to
+// resolve it against native geometry, and is the whole of what M7.1 needs.
+
+enum class ImportedDimensionKind {
+    Linear,   // measured along a fixed direction (DXF rotated/horizontal/vertical)
+    Aligned,  // measured along its own definition points
+    Radius,
+    Diameter,
+    Angular
+};
+
+const char* ImportedDimensionKindName(ImportedDimensionKind kind) noexcept;
+
+struct ImportedDimension2D {
+    ImportedDimensionKind kind{ImportedDimensionKind::Linear};
+
+    // The two points the dimension measures BETWEEN, already in millimetres
+    // (DXF group codes 13/23 and 14/24 for a linear dimension). These are the
+    // extension-line origins -- the points on the GEOMETRY, not on the
+    // annotation -- which is precisely why they can be matched against native
+    // entities without ever consulting the annotation lines.
+    Vec2 measureFrom{};
+    Vec2 measureTo{};
+
+    // Direction the measurement is taken along, radians counter-clockwise from
+    // +u (DXF group code 50). Meaningful for Linear; for Aligned the direction
+    // IS measureFrom -> measureTo and this is set to match.
+    //
+    // This is why Linear and Aligned are different kinds rather than one:
+    // a rotated linear dimension measures the PROJECTION onto this direction,
+    // so for a sloped pair of points it legitimately states a smaller number
+    // than their separation. Collapsing the two kinds would silently turn every
+    // such dimension into a wrong one.
+    double directionRad{0.0};
+
+    // The value the source stated outright (DXF code 42, "actual measurement"),
+    // when it stated one at all. Optional in the format and absent from most
+    // files, so it is a CROSS-CHECK and never the authority -- see
+    // MeasuredValueMm below and ADR-M7-009.
+    std::optional<double> statedValueMm{};
+
+    // A text override (DXF code 1). Empty, or the literal "<>", both mean "show
+    // the measurement". ANYTHING ELSE means the drawing displays a number that
+    // is not the one the geometry encodes, and M7 refuses to guess which the
+    // user meant (spec 18).
+    std::string textOverride;
+
+    // Optional source metadata, for diagnostics and provenance only. Spec 7:
+    // a DXF handle may be retained, but correctness must not depend on it, and
+    // nothing here is ever native identity.
+    std::string sourceHandle;
+};
+
+// What this dimension measures, in millimetres.
+//
+// Derived from the definition points rather than read from code 42, because
+// code 42 is optional, is documented read-only, defaults to zero when absent,
+// and cannot be distinguished from a genuine zero. The definition points are
+// mandatory for the kinds M7 supports, so they are the authority and code 42 is
+// the cross-check (ADR-M7-009).
+//
+// Linear projects onto `directionRad`; Aligned takes the full separation.
+// Returns 0 for kinds with no linear measurement (Radius/Diameter/Angular),
+// which callers must not treat as a measurement -- check the kind first.
+double MeasuredValueMm(const ImportedDimension2D& dimension) noexcept;
+
 // Everything one file yielded. Ordering within each vector is the order the
 // reader encountered the entities, which is convenient for diagnostics and is
 // explicitly NOT identity (ADR-M6-004) -- the shuffled-order test exists to
@@ -94,6 +169,7 @@ struct ImportedSketchGeometry {
     std::vector<ImportedLine2D> lines;
     std::vector<ImportedCircle2D> circles;
     std::vector<ImportedArc2D> arcs;
+    std::vector<ImportedDimension2D> dimensions;
     std::vector<ImportedSkip> skipped;
 
     // What the numbers were interpreted as, and whether the file said so.

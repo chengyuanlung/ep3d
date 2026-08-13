@@ -1,5 +1,7 @@
 #include "Core/Import/ImportedGeometry.h"
 
+#include <cmath>
+
 namespace paramcad {
 
 const char* ImportedLengthUnitName(ImportedLengthUnit unit) noexcept {
@@ -56,6 +58,48 @@ std::optional<double> MillimetresPerUnit(ImportedLengthUnit unit) noexcept {
             return std::nullopt;
     }
     return std::nullopt;
+}
+
+const char* ImportedDimensionKindName(ImportedDimensionKind kind) noexcept {
+    switch (kind) {
+        case ImportedDimensionKind::Linear: return "linear";
+        case ImportedDimensionKind::Aligned: return "aligned";
+        case ImportedDimensionKind::Radius: return "radius";
+        case ImportedDimensionKind::Diameter: return "diameter";
+        case ImportedDimensionKind::Angular: return "angular";
+    }
+    return "unknown";
+}
+
+double MeasuredValueMm(const ImportedDimension2D& dimension) noexcept {
+    const double du = dimension.measureTo.x - dimension.measureFrom.x;
+    const double dv = dimension.measureTo.y - dimension.measureFrom.y;
+    switch (dimension.kind) {
+        case ImportedDimensionKind::Aligned:
+            return std::sqrt(du * du + dv * dv);
+        case ImportedDimensionKind::Linear: {
+            // The PROJECTION onto the dimension's own direction, not the
+            // separation of the points. For a horizontal dimension across a
+            // sloped pair of corners those differ, and the projection is the
+            // number the drawing displays.
+            //
+            // std::abs because a dimension measures a magnitude: which
+            // definition point was written first is an artefact of how the
+            // drawing was authored, and a negative length is not a length.
+            const double c = std::cos(dimension.directionRad);
+            const double s = std::sin(dimension.directionRad);
+            return std::abs(du * c + dv * s);
+        }
+        case ImportedDimensionKind::Radius:
+        case ImportedDimensionKind::Diameter:
+        case ImportedDimensionKind::Angular:
+            // No linear measurement to derive. Deliberately 0 rather than the
+            // point separation, which would be a plausible wrong answer: these
+            // kinds are not supported in M7.1 and a caller that reaches here
+            // has not checked the kind.
+            return 0.0;
+    }
+    return 0.0;
 }
 
 const char* ImportSkipReasonName(ImportSkipReason reason) noexcept {

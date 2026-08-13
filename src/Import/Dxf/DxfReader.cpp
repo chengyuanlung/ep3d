@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 #include <initializer_list>
+#include <type_traits>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -237,6 +238,23 @@ bool AllFinite(std::initializer_list<double> values) noexcept {
     return true;
 }
 
+// A DXF handle in the uppercase hex the format writes it in, so a diagnostic
+// naming a dimension names it the way the user's own file and CAD package do.
+//
+// DIAGNOSTIC ONLY. Spec 7 allows a handle to be retained as source metadata and
+// forbids correctness from depending on it: nothing downstream resolves,
+// matches or persists anything by this string.
+std::string ToHexHandle(duint32 handle) {
+    static constexpr char kDigits[] = "0123456789ABCDEF";
+    if (handle == 0) return {};
+    std::string text;
+    while (handle != 0) {
+        text.insert(text.begin(), kDigits[handle & 0xF]);
+        handle >>= 4;
+    }
+    return text;
+}
+
 // Collects entities as libdxfrw walks the file, converting to millimetres on
 // the way in. This is the single unit-conversion boundary (ADR-M6-002): nothing
 // downstream converts again, and nothing downstream may guess.
@@ -282,6 +300,18 @@ public:
         for (ImportedArc2D& arc : geometry.arcs) {
             arc.center.x *= k; arc.center.y *= k;
             arc.radiusMm *= k; // angles are not lengths
+        }
+        for (ImportedDimension2D& dimension : geometry.dimensions) {
+            // The definition POINTS are lengths and scale; the direction is an
+            // angle and does not. A stated measurement is a length in the same
+            // drawing units as everything else, so it scales too -- omitting it
+            // would make a dimension in an inches file state 100 mm while its
+            // own definition points said 2540, and M7 would then refuse the
+            // pair as disagreeing (ADR-M7-009). Wrong in a way that looks like
+            // caution.
+            dimension.measureFrom.x *= k; dimension.measureFrom.y *= k;
+            dimension.measureTo.x *= k;   dimension.measureTo.y *= k;
+            if (dimension.statedValueMm.has_value()) *dimension.statedValueMm *= k;
         }
 
         // The degenerate checks have to run on the SCALED values, because
@@ -340,11 +370,29 @@ public:
             }
         }
 
+        for (auto it = geometry.dimensions.begin(); it != geometry.dimensions.end();) {
+            const double stated = it->statedValueMm.value_or(0.0);
+            if (overflowed({it->measureFrom.x, it->measureFrom.y, it->measureTo.x,
+                            it->measureTo.y, stated})) {
+                note(ImportSkipReason::NonFiniteValue, "DIMENSION",
+                     "a value overflowed to infinity during unit conversion");
+                it = geometry.dimensions.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
         // Angles are deliberately NOT re-checked here: they are not scaled, so
         // unit conversion cannot make a finite angle infinite. The raw check in
         // addArc is their only guard -- which is exactly why it needs a test of
         // its own, and now has one.
-
+        //
+        // A dimension whose points are too CLOSE together is likewise not
+        // dropped here. That is a reconstruction judgement, not an import one:
+        // the reader's job is to report faithfully what the file said, and M7's
+        // analysis is where "too small to be a usable dimension" is decided,
+        // with a diagnostic naming the dimension. Dropping it here would delete
+        // the evidence before anything could explain it.
     }
 
     // Removes the LINEs the file never gave an end point. Runs BEFORE finalise
@@ -521,8 +569,24 @@ public:
     virtual void addSolid(const DRW_Solid& data) override { noteUnsupported("SOLID"); }
     virtual void addMText(const DRW_MText& data) override { noteUnsupported("MTEXT"); }
     virtual void addText(const DRW_Text& data) override { noteUnsupported("TEXT"); }
-    virtual void addDimAlign(const DRW_DimAligned *data) override { noteUnsupported("DIMENSION"); }
-    virtual void addDimLinear(const DRW_DimLinear *data) override { noteUnsupported("DIMENSION"); }
+    // LINEAR and ALIGNED dimensions are read as ANNOTATION (M7), not geometry.
+    //
+    // What is read is the pair of DEFINITION points (group codes 13 and 14) --
+    // the extension-line origins, which sit on the geometry being measured --
+    // plus the dimension's own direction, any explicit text, and the optional
+    // stated measurement. The annotation LINES that draw the arrows and witness
+    // lines live in an anonymous *D block and are still skipped by addBlock, as
+    // ADR-M6-009 requires: reading a dimension deliberately is precisely what
+    // stops those lines being imported as model geometry by accident.
+    //
+    // Nothing here becomes a Sketch entity. A dimension is not geometry, and
+    // M7's reconstruction decides separately whether it resolves to any.
+    virtual void addDimAlign(const DRW_DimAligned *data) override {
+        collectLinearDimension(data, ImportedDimensionKind::Aligned);
+    }
+    virtual void addDimLinear(const DRW_DimLinear *data) override {
+        collectLinearDimension(data, ImportedDimensionKind::Linear);
+    }
     virtual void addDimRadial(const DRW_DimRadial *data) override { noteUnsupported("DIMENSION"); }
     virtual void addDimDiametric(const DRW_DimDiametric *data) override { noteUnsupported("DIMENSION"); }
     virtual void addDimAngular(const DRW_DimAngular *data) override { noteUnsupported("DIMENSION"); }
@@ -591,6 +655,66 @@ private:
 
     void note(ImportSkipReason reason, const char* kind, const char* detail) {
         geometry.skipped.push_back(ImportedSkip{reason, kind, detail});
+    }
+
+    // The shared body of addDimLinear and addDimAlign.
+    //
+    // One function for both, because the two differ in exactly one thing --
+    // whether the measurement is projected onto a stated direction -- and that
+    // difference is carried by the KIND, which the reconstruction layer honours.
+    // Two near-identical overrides is how the third one ends up subtly
+    // different from the first two.
+    template <typename DimType>
+    void collectLinearDimension(const DimType* data, ImportedDimensionKind kind) {
+        if (data == nullptr) return;
+        // A dimension inside a block definition is part of that block, not of
+        // model space -- the same rule its geometry follows (ADR-M6-009).
+        if (skipBlockContent("DIMENSION")) return;
+
+        const DRW_Coord def1 = data->getDef1Point();
+        const DRW_Coord def2 = data->getDef2Point();
+        if (!AllFinite({def1.x, def1.y, def2.x, def2.y})) {
+            note(ImportSkipReason::NonFiniteValue, "DIMENSION",
+                 "a definition point coordinate is not a finite number");
+            return;
+        }
+
+        ImportedDimension2D dimension;
+        dimension.kind = kind;
+        dimension.measureFrom = Vec2{def1.x, def1.y};
+        dimension.measureTo = Vec2{def2.x, def2.y};
+        dimension.textOverride = data->getText();
+        dimension.sourceHandle = data->handle == 0 ? std::string{} : ToHexHandle(data->handle);
+
+        if constexpr (std::is_same_v<DimType, DRW_DimLinear>) {
+            // Code 50, in DEGREES like every other DXF angle, converted here so
+            // nothing downstream has to know the format's convention. An
+            // unrotated linear dimension carries 0 and measures along +X.
+            const double degrees = data->getAngle();
+            if (!AllFinite({degrees})) {
+                note(ImportSkipReason::NonFiniteValue, "DIMENSION",
+                     "the dimension rotation angle is not a finite number");
+                return;
+            }
+            dimension.directionRad = degrees * kPi / 180.0;
+        } else {
+            // Aligned measures along its own definition points, so its
+            // direction IS that of def1 -> def2. Recorded rather than left at
+            // zero, because a consumer reading `directionRad` must get the
+            // truth for both kinds.
+            dimension.directionRad =
+                std::atan2(def2.y - def1.y, def2.x - def1.x);
+        }
+
+        // Code 42, the "actual measurement": optional, documented read-only,
+        // and defaulted to 0 by the library when the file omits it -- which is
+        // indistinguishable from a genuine zero. Zero is not a usable
+        // measurement either way, so treating "absent" and "zero" alike loses
+        // nothing and avoids inventing a stated value the file never carried.
+        const double measured = data->getMeasureValue();
+        if (std::isfinite(measured) && measured > 0.0) dimension.statedValueMm = measured;
+
+        geometry.dimensions.push_back(dimension);
     }
 
     // An entity kind M6 does not import. Reported, never reinterpreted as
