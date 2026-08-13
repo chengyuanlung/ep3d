@@ -441,7 +441,7 @@ TEST(M7Reconstruction, DisablingEachRecognizerRemovesExactlyItsConstraints) {
 
 // --- Shapes that are NOT rectangles -----------------------------------------
 
-TEST(M7Reconstruction, ASlopedQuadrilateralGetsNoAxisConstraints) {
+TEST(M7Reconstruction, ASlopedQuadrilateralGetsItsCornersButNoAxisConstraints) {
     PartDocument document{"M7Sloped"};
     Sketch& sketch = document.addSketch("Imported");
     sketch.addLine(Vec2{0, 0}, Vec2{100, 10});
@@ -451,15 +451,16 @@ TEST(M7Reconstruction, ASlopedQuadrilateralGetsNoAxisConstraints) {
 
     const ReconstructionPlan plan = AnalyzeForReconstruction(document, sketch.id(), {});
 
-    // Not the recognised shape, so the rule says nothing about it -- rather
-    // than forcing four sides that are visibly not axis-aligned onto the axes,
-    // which would be the "confidently wrong" spec 18 forbids.
+    // The corners are real and are reconstructed. The SIDES are visibly not
+    // axis-aligned, and forcing them onto the axes would be the "confidently
+    // wrong" spec 18 forbids -- so the two rules are asserted separately here,
+    // because they are separate rules with separate tolerances.
+    EXPECT_EQ(CountKind(plan, "Coincident"), 4u);
     EXPECT_EQ(CountKind(plan, "Horizontal"), 0u);
     EXPECT_EQ(CountKind(plan, "Vertical"), 0u);
-    EXPECT_EQ(CountKind(plan, "Coincident"), 0u);
 }
 
-TEST(M7Reconstruction, AnOpenChainOfFourLinesIsNotARectangle) {
+TEST(M7Reconstruction, AnOpenChainIsNotSilentlyClosed) {
     PartDocument document{"M7Open"};
     Sketch& sketch = document.addSketch("Imported");
     sketch.addLine(Vec2{0, 0}, Vec2{100, 0});
@@ -469,8 +470,10 @@ TEST(M7Reconstruction, AnOpenChainOfFourLinesIsNotARectangle) {
 
     const ReconstructionPlan plan = AnalyzeForReconstruction(document, sketch.id(), {});
 
-    EXPECT_EQ(CountKind(plan, "Coincident"), 0u);
-    EXPECT_EQ(CountKind(plan, "Fix"), 0u);
+    // THREE joints, not four. The fourth corner is 10 mm short -- four orders
+    // of magnitude outside the coincidence tolerance -- and inventing it would
+    // be reconstructing geometry the drawing does not contain.
+    EXPECT_EQ(CountKind(plan, "Coincident"), 3u);
 }
 
 // --- Tolerance boundaries (spec 19, Fixture F) ------------------------------
@@ -498,10 +501,16 @@ TEST(M7Reconstruction, ACornerJustOutsideTheCoincidenceToleranceDoesNot) {
     sketch.addLine(Vec2{0, 50}, Vec2{gap, 0});
 
     const ReconstructionPlan plan = AnalyzeForReconstruction(document, sketch.id(), {});
+    // THREE, not four: the three corners inside the tolerance still join and
+    // only the one just outside does not.
+    //
     // The pair either side of the threshold is the point (spec 19): a test only
     // inside proves the tolerance is not zero, and one only outside proves it
-    // is not infinite. Neither alone proves it is what it says.
-    EXPECT_EQ(CountKind(plan, "Coincident"), 0u);
+    // is not infinite. Neither alone proves it is what it says. Since M7.2 this
+    // pair is sharper than it was -- it names WHICH corner was refused, where
+    // M7.1's named-shape rule could only fail the whole shape, and would have
+    // read identically if the tolerance had been zero.
+    EXPECT_EQ(CountKind(plan, "Coincident"), 3u);
 }
 
 TEST(M7Reconstruction, ALineJustInsideTheAxisToleranceIsStillHorizontal) {
@@ -528,7 +537,10 @@ TEST(M7Reconstruction, ALineJustOutsideTheAxisToleranceIsNot) {
     sketch.addLine(Vec2{0, 50}, Vec2{0, 0});
 
     const ReconstructionPlan plan = AnalyzeForReconstruction(document, sketch.id(), {});
-    EXPECT_EQ(CountKind(plan, "Horizontal"), 0u);
+    // ONE, not two: the top side is still exactly horizontal, and only the
+    // skewed bottom side is refused. Expecting zero here would have passed just
+    // as well if the recogniser had stopped working altogether.
+    EXPECT_EQ(CountKind(plan, "Horizontal"), 1u);
 }
 
 // --- Direction handling -----------------------------------------------------

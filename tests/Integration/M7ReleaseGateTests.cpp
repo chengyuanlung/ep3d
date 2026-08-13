@@ -396,6 +396,147 @@ TEST(M7ReleaseGate, GATE_F_DisablingExplicitDimensionsLosesDof0) {
     EXPECT_EQ(fx.document.parameters().findByName("Width"), nullptr);
 }
 
+// --- M7.2: general recognition, measured through the real solver ------------
+//
+// The Core tests count planned constraints. These check what the SOLVER makes
+// of them, which is the only place an over-constrained plan actually shows up.
+
+struct SolvedSketch {
+    PartDocument document{"M7General"};
+    OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver solver;
+    ObjectId sketchId{kInvalidObjectId};
+
+    SolvedSketch() {
+        document.setGeometryKernel(&kernel);
+        document.setSketchSolver(&solver);
+    }
+
+    Sketch& begin() {
+        Sketch& sketch = document.addSketch("Imported");
+        sketchId = sketch.id();
+        return sketch;
+    }
+
+    void reconstructAndSolve() {
+        ReconstructSketch(document, sketchId, {});
+        document.recompute();
+    }
+
+    const Sketch& sketch() const { return *document.findSketch(sketchId); }
+};
+
+TEST(M7ReleaseGate, GATE_F2_AThreeWayJunctionIsNotOverConstrained) {
+    SolvedSketch fx;
+    Sketch& sketch = fx.begin();
+    sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+    sketch.addLine(Vec2{0, 0}, Vec2{0, 40});
+    sketch.addLine(Vec2{0, 0}, Vec2{-30, 0});
+    fx.reconstructAndSolve();
+
+    EXPECT_NE(fx.sketch().solveStatus(), SketchSolveStatus::OverConstrained);
+    EXPECT_NE(fx.sketch().solveStatus(), SketchSolveStatus::Conflicting);
+
+    // 3 lines x 4 = 12 variables; 2 Coincident x 2 + 2 Horizontal + 1 Vertical
+    // + 1 Fix x 2 = 9 residuals. DOF = 3, computed by hand.
+    EXPECT_EQ(fx.sketch().degreesOfFreedom(), 3);
+
+    // NOTE, because it limits what this test proves: it does NOT discriminate
+    // between a spanning set and all pairs. M5 gives DOF priority over
+    // redundancy, so while DOF > 0 the extra rows are invisible here and this
+    // test passes either way -- verified by running it against that mutation.
+    // The test below is the one that sees the difference.
+}
+
+TEST(M7ReleaseGate, GATE_F2_AFullyDimensionedJunctionSolvesRatherThanOverConstrains) {
+    SolvedSketch fx;
+    Sketch& sketch = fx.begin();
+    const SketchEntityId right = sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+    const SketchEntityId up = sketch.addLine(Vec2{0, 0}, Vec2{0, 40});
+    const SketchEntityId left = sketch.addLine(Vec2{0, 0}, Vec2{-30, 0});
+    ReconstructSketch(fx.document, fx.sketchId, {});
+
+    // Take the junction the rest of the way to DOF 0 by hand. This is where a
+    // redundant Coincident stops being masked: with no freedom left, M5 makes
+    // redundancy the headline, and an ordinary T-junction would report
+    // OverConstrained -- which blocks downstream rebuild under M5's contracts.
+    //
+    // The harm is DEFERRED, appearing only once the user finishes dimensioning
+    // rather than when the junction is drawn, so it has to be provoked
+    // deliberately. It cannot be seen on the release rectangle at all, whose
+    // clusters all have two members.
+    const auto length = [&](SketchEntityId line, double mm) {
+        Parameter& parameter = fx.document.addParameter(
+            "L" + std::to_string(static_cast<unsigned long long>(line)), mm,
+            UnitType::Millimeter);
+        fx.document.addSketchConstraint(fx.sketchId, LengthConstraint{line, parameter.id()});
+    };
+    length(right, 50.0);
+    length(up, 40.0);
+    length(left, 30.0);
+    ASSERT_TRUE(fx.document.recompute().success);
+
+    EXPECT_EQ(fx.sketch().degreesOfFreedom(), 0);
+    EXPECT_EQ(fx.sketch().solveStatus(), SketchSolveStatus::Solved)
+        << fx.sketch().solveMessage();
+}
+
+TEST(M7ReleaseGate, GATE_F2_AnLShapeSolvesToItsHandCountedDof) {
+    SolvedSketch fx;
+    Sketch& sketch = fx.begin();
+    sketch.addLine(Vec2{0, 0}, Vec2{60, 0});
+    sketch.addLine(Vec2{60, 0}, Vec2{60, 20});
+    sketch.addLine(Vec2{60, 20}, Vec2{20, 20});
+    sketch.addLine(Vec2{20, 20}, Vec2{20, 50});
+    sketch.addLine(Vec2{20, 50}, Vec2{0, 50});
+    sketch.addLine(Vec2{0, 50}, Vec2{0, 0});
+    fx.reconstructAndSolve();
+
+    EXPECT_NE(fx.sketch().solveStatus(), SketchSolveStatus::OverConstrained);
+    EXPECT_NE(fx.sketch().solveStatus(), SketchSolveStatus::Conflicting);
+
+    // 6 lines x 4 = 24 variables; 6 Coincident x 2 + 3 Horizontal + 3 Vertical
+    // + 1 Fix x 2 = 20 residuals. DOF = 4 -- the four free lengths of the L.
+    // A shape M7.1 refused entirely, now fully recognised except its sizes.
+    EXPECT_EQ(fx.sketch().degreesOfFreedom(), 4);
+}
+
+TEST(M7ReleaseGate, GATE_F2_ASkewedRectangleIsStraightenedByTheSolverNotTheReader) {
+    SolvedSketch fx;
+    Sketch& sketch = fx.begin();
+    // Drawn with every corner missing and every side off axis, all inside the
+    // recognition tolerances.
+    const double gap = 0.4 * kReconstructionCoincidenceToleranceMm;
+    const double skew = 0.4 * kReconstructionAxisAngleToleranceRad;
+    sketch.addLine(Vec2{0, 0}, Vec2{60, 60 * std::sin(skew)});
+    sketch.addLine(Vec2{60, 60 * std::sin(skew) + gap}, Vec2{60 + gap, 40});
+    sketch.addLine(Vec2{60, 40}, Vec2{gap, 40 + gap});
+    sketch.addLine(Vec2{0, 40}, Vec2{gap, 0});
+    fx.reconstructAndSolve();
+
+    // No dimensions here, so the SHAPE is determined and the two SIZES are not:
+    // 16 variables - (4 Coincident x 2 + 2 Horizontal + 2 Vertical + 1 Fix x 2)
+    // = 2. Under-constrained is the correct outcome, not a failure, and M5
+    // still commits the solved geometry -- which is what the check below reads.
+    EXPECT_EQ(fx.sketch().solveStatus(), SketchSolveStatus::UnderConstrained);
+    EXPECT_EQ(fx.sketch().degreesOfFreedom(), 2);
+
+    // Tolerance is a RECOGNITION rule, not permission to rewrite geometry
+    // (spec 11, ADR-M7-011). Nothing snapped the coordinates: the corners are
+    // closed and the sides are on-axis because the SOLVER moved them, and the
+    // proof is that they are now exact rather than merely within tolerance.
+    for (const SketchEntity& entity : fx.sketch().entities()) {
+        const auto* line = std::get_if<SketchLine>(&entity.geometry);
+        ASSERT_NE(line, nullptr);
+        const double du = std::abs(line->end.x - line->start.x);
+        const double dv = std::abs(line->end.y - line->start.y);
+        // Exactly axis-aligned now -- far tighter than the 1e-3 rad that let it
+        // be recognised in the first place.
+        EXPECT_TRUE(du < 1e-9 || dv < 1e-9)
+            << "a side is still off axis: du=" << du << " dv=" << dv;
+    }
+}
+
 // --- Selective recompute (spec 21, Gate K) ----------------------------------
 
 TEST(M7ReleaseGate, GATE_K_DensityDoesNotResolveTheSketch) {

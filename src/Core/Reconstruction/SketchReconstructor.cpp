@@ -63,13 +63,6 @@ bool IsVertical(const LineRef& line, double toleranceRad) noexcept {
     return std::abs(line.end.x - line.start.x) / length <= std::sin(toleranceRad);
 }
 
-// A corner: two lines meeting at a point, named by which end of each meets.
-struct Corner {
-    SketchElementRef a{};
-    SketchElementRef b{};
-    Vec2 at{};
-};
-
 // Lexicographic order on a point, used wherever a deterministic CHOICE has to
 // be made among candidates -- which corner to Fix, which dimension is Width.
 //
@@ -81,78 +74,78 @@ bool Before(Vec2 a, Vec2 b) noexcept {
     return a.y < b.y;
 }
 
-// --- The rectangle rule (ADR-M7-010) ---------------------------------------
+// --- General endpoint clustering (M7.2, ADR-M7-011) ------------------------
 //
-// Four lines, each joined end-to-end to exactly two others, forming ONE closed
-// loop, every side within the axis tolerance of horizontal or vertical, two of
-// each. Anything else is not this shape and gets no constraints from this rule.
-struct Rectangle {
-    std::vector<Corner> corners;                 // 4
-    std::vector<SketchEntityId> horizontalLines; // 2
-    std::vector<SketchEntityId> verticalLines;   // 2
+// Every endpoint in the sketch, grouped by location. This replaces M7.1's
+// named-rectangle rule: the rectangle now falls OUT of the general rules
+// rather than being recognised as a shape, which is what spec 38 asks M7.2 for.
+//
+// Clustering rather than pairwise matching, because clustering is what makes
+// junctions describable at all. Three lines meeting at a point is a cluster of
+// three; pairwise matching sees three separate "matches" and cannot tell that
+// from a triangle whose corners happen to be near each other.
+struct Endpoint {
+    SketchElementRef ref{};
+    Vec2 at{};
+    // The owning entity's midpoint, used only for deterministic ORDER. It is a
+    // geometric property, so the order does not change when the file lists the
+    // same entities differently -- which an ordering by entity id would, since
+    // ids are handed out in file order.
+    Vec2 owner{};
 };
 
-std::optional<Rectangle> RecognizeRectangle(const std::vector<LineRef>& lines,
-                                            const ReconstructionOptions& options) {
-    if (lines.size() != 4) return std::nullopt;
+struct EndpointCluster {
+    Vec2 at{};
+    std::vector<Endpoint> members;
+};
 
-    Rectangle rectangle;
-    for (const LineRef& line : lines) {
-        const bool horizontal = IsHorizontal(line, options.axisAngleToleranceRad);
-        const bool vertical = IsVertical(line, options.axisAngleToleranceRad);
-        // A line that is both is degenerate (shorter than the tolerance can
-        // resolve); a line that is neither is a slope, and neither belongs to
-        // the shape this rule recognises.
-        if (horizontal == vertical) return std::nullopt;
-        if (horizontal) rectangle.horizontalLines.push_back(line.id);
-        else rectangle.verticalLines.push_back(line.id);
+std::vector<Endpoint> CollectEndpoints(const Sketch& sketch) {
+    std::vector<Endpoint> endpoints;
+    for (const SketchEntity& entity : sketch.entities()) {
+        // Points and circles have no endpoints a coincidence could join
+        // (HasEndpoints is the model's own answer, so this cannot drift from
+        // it). Arcs DO, and their endpoints are as joinable as a line's --
+        // leaving them out would silently refuse to close any profile with a
+        // rounded corner in it.
+        if (!HasEndpoints(entity.geometry)) continue;
+        const Vec2 mid = MidPointOf(entity.geometry);
+        endpoints.push_back(Endpoint{SketchElementRef{entity.id, SketchSubElement::StartPoint},
+                                     StartPointOf(entity.geometry), mid});
+        endpoints.push_back(Endpoint{SketchElementRef{entity.id, SketchSubElement::EndPoint},
+                                     EndPointOf(entity.geometry), mid});
     }
-    if (rectangle.horizontalLines.size() != 2 || rectangle.verticalLines.size() != 2)
-        return std::nullopt;
+    return endpoints;
+}
 
-    // Cluster the eight endpoints by location. A closed quadrilateral gives
-    // exactly four clusters of exactly two endpoints, and the two in a cluster
-    // belong to different lines.
-    //
-    // Clustering rather than pairwise matching because the shapes that must be
-    // REJECTED are the ones a pairwise check accepts: three lines meeting at a
-    // point makes a cluster of three, two coincident segments make a cluster of
-    // four, and a figure of eight makes two clusters of four. Each of those has
-    // every endpoint "matched" and none of them is a rectangle.
-    struct Cluster {
-        Vec2 at{};
-        std::vector<SketchElementRef> members;
-    };
-    std::vector<Cluster> clusters;
-    const SketchSubElement ends[2]{SketchSubElement::StartPoint, SketchSubElement::EndPoint};
-    for (const LineRef& line : lines) {
-        for (SketchSubElement end : ends) {
-            const Vec2 point = line.point(end);
-            Cluster* found = nullptr;
-            for (Cluster& cluster : clusters)
-                if (Near(cluster.at, point, options.coincidenceToleranceMm)) found = &cluster;
-            if (found == nullptr) {
-                clusters.push_back(Cluster{point, {}});
-                found = &clusters.back();
-            }
-            found->members.push_back(SketchElementRef{line.id, end});
+std::vector<EndpointCluster> ClusterEndpoints(const std::vector<Endpoint>& endpoints,
+                                              double toleranceMm) {
+    std::vector<EndpointCluster> clusters;
+    for (const Endpoint& endpoint : endpoints) {
+        EndpointCluster* found = nullptr;
+        for (EndpointCluster& cluster : clusters)
+            if (Near(cluster.at, endpoint.at, toleranceMm)) found = &cluster;
+        if (found == nullptr) {
+            clusters.push_back(EndpointCluster{endpoint.at, {}});
+            found = &clusters.back();
         }
+        found->members.push_back(endpoint);
     }
 
-    if (clusters.size() != 4) return std::nullopt;
-    for (const Cluster& cluster : clusters) {
-        if (cluster.members.size() != 2) return std::nullopt;
-        if (cluster.members[0].entityId == cluster.members[1].entityId) return std::nullopt;
-        rectangle.corners.push_back(Corner{cluster.members[0], cluster.members[1], cluster.at});
-    }
-
-    // Deterministic corner order, by location. Nothing downstream may depend on
-    // the order lines were stored in (ADR-M6-004 is the same rule for entities).
-    std::sort(rectangle.corners.begin(), rectangle.corners.end(),
-              [](const Corner& a, const Corner& b) { return Before(a.at, b.at); });
-    std::sort(rectangle.horizontalLines.begin(), rectangle.horizontalLines.end());
-    std::sort(rectangle.verticalLines.begin(), rectangle.verticalLines.end());
-    return rectangle;
+    // Deterministic throughout: clusters by location, members by their owning
+    // entity's midpoint and then by which end. Nothing downstream may depend on
+    // the order entities were stored in (ADR-M6-004 is the same rule).
+    for (EndpointCluster& cluster : clusters)
+        std::sort(cluster.members.begin(), cluster.members.end(),
+                  [](const Endpoint& a, const Endpoint& b) {
+                      if (a.owner.x != b.owner.x || a.owner.y != b.owner.y)
+                          return Before(a.owner, b.owner);
+                      return a.ref.subElement < b.ref.subElement;
+                  });
+    std::sort(clusters.begin(), clusters.end(),
+              [](const EndpointCluster& a, const EndpointCluster& b) {
+                  return Before(a.at, b.at);
+              });
+    return clusters;
 }
 
 // --- Naming (spec 9) --------------------------------------------------------
@@ -209,41 +202,81 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
     plan.sketchId = sketchId;
 
     const std::vector<LineRef> lines = CollectLines(*sketch);
-    const std::optional<Rectangle> rectangle =
-        options.recognizeRectangle ? RecognizeRectangle(lines, options) : std::nullopt;
+    const std::vector<EndpointCluster> clusters =
+        ClusterEndpoints(CollectEndpoints(*sketch), options.coincidenceToleranceMm);
 
-    // --- Geometric relations (spec 8, Class C) ------------------------------
-    if (rectangle.has_value()) {
-        if (options.recognizeCoincident) {
-            for (const Corner& corner : rectangle->corners)
-                plan.constraints.push_back(
-                    PlannedConstraint{CoincidentConstraint{corner.a, corner.b},
-                                      kInvalidPlanParameterSlot,
-                                      ReconstructionOrigin::InferredGeometric,
-                                      "rectangle corner"});
-        }
-        if (options.recognizeHorizontal) {
-            for (SketchEntityId line : rectangle->horizontalLines)
+    // --- Geometric relations (spec 8 Class C, spec 11) ----------------------
+    //
+    // General rules over whatever geometry is present, not a named shape. The
+    // rectangle now falls out of these rather than being special-cased: four
+    // clusters of two give four Coincidents, two sides each land on an axis,
+    // and one Fix pins the whole thing.
+    if (options.recognizeCoincident) {
+        for (const EndpointCluster& cluster : clusters) {
+            // A SPANNING set, not every pair. n endpoints at one location need
+            // n-1 constraints to be tied together; all n(n-1)/2 pairs say the
+            // same thing with (n-1)(n-2)/2 redundant residuals.
+            //
+            // WHEN THAT ACTUALLY BITES, measured rather than assumed. An
+            // earlier version of this comment claimed all-pairs turns a
+            // three-line junction into an OverConstrained sketch. It does not,
+            // and the integration test proved it: M5 gives DOF priority over
+            // redundancy (GaussNewtonSketchSolver, "DOF OUTRANKS REDUNDANCY"),
+            // so while any freedom remains the sketch reports UnderConstrained
+            // and the redundant rows are invisible.
+            //
+            // The masking ends exactly when dimensions bring the sketch to
+            // DOF 0 -- then `redundant` becomes the headline and a fully
+            // dimensioned part containing one T-junction reports
+            // OverConstrained instead of Solved. So the harm is real but
+            // deferred, which is the worst shape for a defect: it appears when
+            // the user finishes constraining, not when the junction is made.
+            //
+            // For the two-member clusters of a rectangle the two constructions
+            // are identical, which is why this difference has to be tested on a
+            // junction and cannot be seen on the release fixture at all.
+            for (std::size_t i = 1; i < cluster.members.size(); ++i) {
+                if (cluster.members[i].ref.entityId == cluster.members[0].ref.entityId)
+                    // Both ends of ONE entity in the same cluster: a closed or
+                    // degenerate curve. Constraining it to itself says nothing
+                    // and the solver would carry a residual that is always
+                    // zero.
+                    continue;
                 plan.constraints.push_back(PlannedConstraint{
-                    HorizontalConstraint{line}, kInvalidPlanParameterSlot,
-                    ReconstructionOrigin::InferredGeometric, "rectangle side within axis tolerance"});
+                    CoincidentConstraint{cluster.members[0].ref, cluster.members[i].ref},
+                    kInvalidPlanParameterSlot, ReconstructionOrigin::InferredGeometric,
+                    "endpoints within the coincidence tolerance"});
+            }
         }
-        if (options.recognizeVertical) {
-            for (SketchEntityId line : rectangle->verticalLines)
-                plan.constraints.push_back(PlannedConstraint{
-                    VerticalConstraint{line}, kInvalidPlanParameterSlot,
-                    ReconstructionOrigin::InferredGeometric, "rectangle side within axis tolerance"});
-        }
-        if (options.placeFix && !rectangle->corners.empty()) {
-            // The lexicographically smallest corner, so the choice is a fact
-            // about the geometry and not about the order it was read in
-            // (ADR-M7-008). Without a Fix the sketch keeps its two global
-            // translation freedoms and can never reach DOF 0, however many
-            // dimensions are reconstructed.
+    }
+
+    for (const LineRef& line : lines) {
+        const bool horizontal = IsHorizontal(line, options.axisAngleToleranceRad);
+        const bool vertical = IsVertical(line, options.axisAngleToleranceRad);
+        // A line inside BOTH tolerances is shorter than the tolerance can
+        // resolve -- its direction is noise. Asserting either axis about it
+        // would be a coin toss, and asserting both would be a contradiction the
+        // solver reports as Conflicting on geometry that is merely tiny.
+        if (horizontal && vertical) continue;
+        if (horizontal && options.recognizeHorizontal)
             plan.constraints.push_back(PlannedConstraint{
-                FixConstraint{rectangle->corners.front().a}, kInvalidPlanParameterSlot,
-                ReconstructionOrigin::InferredPlacement, "deterministic placement"});
-        }
+                HorizontalConstraint{line.id}, kInvalidPlanParameterSlot,
+                ReconstructionOrigin::InferredGeometric, "within the axis tolerance of horizontal"});
+        if (vertical && options.recognizeVertical)
+            plan.constraints.push_back(PlannedConstraint{
+                VerticalConstraint{line.id}, kInvalidPlanParameterSlot,
+                ReconstructionOrigin::InferredGeometric, "within the axis tolerance of vertical"});
+    }
+
+    if (options.placeFix && !clusters.empty()) {
+        // The lexicographically smallest endpoint, so the choice is a fact
+        // about the geometry and not about the order it was read in
+        // (ADR-M7-008). Without a Fix the sketch keeps its two global
+        // translation freedoms and can never reach DOF 0, however many
+        // dimensions are reconstructed.
+        plan.constraints.push_back(PlannedConstraint{
+            FixConstraint{clusters.front().members.front().ref}, kInvalidPlanParameterSlot,
+            ReconstructionOrigin::InferredPlacement, "deterministic placement"});
     }
 
     if (!options.reconstructExplicitDimensions) return plan;

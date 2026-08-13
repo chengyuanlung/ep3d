@@ -108,14 +108,6 @@ struct ReconstructionOptions {
     // Explicit source dimensions -> Parameter + dimensional constraint.
     bool reconstructExplicitDimensions{true};
 
-    // The deterministic rectangle rule (ADR-M7-010): four axis-aligned lines
-    // forming one closed loop gain their corner, axis and placement
-    // constraints. This is a NAMED SHAPE, not a general inference engine --
-    // spec 38 keeps general Horizontal/Vertical/Coincident recognition for
-    // M7.2, but spec 37's own M7.1 gate demands DOF 0, which two Length
-    // constraints cannot reach.
-    bool recognizeRectangle{true};
-
     // Individually, so Gate F can name which recogniser it disabled.
     bool recognizeHorizontal{true};
     bool recognizeVertical{true};

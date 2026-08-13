@@ -2377,7 +2377,9 @@ inventing a stated value the file never carried.
 ---
 
 ## ADR-M7-010 — The rectangle is a named shape, not an inference engine (M7)
-Status: Accepted. Resolves a conflict inside spec 37.
+Status: **Superseded by ADR-M7-013 (M7.2)** as to the shape restriction. Its
+reading of spec 37's internal conflict still stands and is why M7.1 shipped
+geometric constraints at all.
 
 Spec 37 says M7.1 delivers explicit dimensions only, with "no general inference
 engine yet", and spec 38 puts Horizontal/Vertical/Coincident recognition in
@@ -2405,3 +2407,105 @@ Each recogniser is separately switchable (`ReconstructionOptions`). That is not
 a convenience: spec 23 Gate F requires proving each is load-bearing by turning
 it off and watching a gate fail, and AGENTS.md records that source-editing
 mutation runs in this project have repeatedly produced false "guarded" claims.
+
+---
+
+## ADR-M7-011 — Recognition never writes geometry; the solver does (M7.2)
+Status: Accepted. Required explicitly by spec 11.
+
+Spec 11 demands a decision on record: is geometry snapped before solving, left
+unchanged and solved, or normalised by some other explicit mechanism?
+
+**Left unchanged and solved.** Reconstruction reads geometry and writes only
+Parameters and constraints. Not one coordinate is rewritten by the analysis or
+by the apply step. The corners close and the sides straighten because the M5
+solver moves them and commits on success, through exactly the path an
+interactive edit uses.
+
+This is what spec 11's own rule demands:
+
+> Tolerance is a recognition rule, not permission to permanently corrupt
+> geometry.
+
+Snapping would violate it in a way that is very hard to detect afterwards. A
+snapped coordinate is indistinguishable from a drawn one, so a user who
+disagreed with a recognition would have no way back — the evidence would be
+gone, and the "original" geometry in the document would be M7's edit of it. It
+would also make the tolerance load-bearing on the DATA rather than on the
+DECISION: widen it later and old documents silently mean something different.
+
+Proved rather than asserted:
+`GATE_F2_ASkewedRectangleIsStraightenedByTheSolverNotTheReader` draws every
+corner open and every side off-axis, all inside the tolerances, then checks
+after solving that the sides are axis-aligned to 1e-9 — a thousand times
+tighter than the 1e-3 rad that let them be recognised. Only a solve produces
+that.
+
+---
+
+## ADR-M7-012 — Coincidence uses a spanning set, not every pair (M7.2)
+Status: Accepted.
+
+n endpoints clustered at one location need n-1 Coincident constraints. Emitting
+all n(n-1)/2 pairs states the same thing with (n-1)(n-2)/2 redundant residuals.
+For n = 2 the two are identical, which is why a rectangle cannot show the
+difference at all and a junction must.
+
+**When the redundancy actually bites — measured, not assumed.** An earlier
+draft of this decision claimed all-pairs turns a three-line junction into an
+OverConstrained sketch. That is false, and the integration test disproved it:
+M5 gives DOF priority over redundancy ("DOF OUTRANKS REDUNDANCY" in
+`GaussNewtonSketchSolver`), so while any freedom remains the sketch reports
+UnderConstrained and the redundant rows are invisible.
+
+The masking ends exactly when dimensions bring the sketch to DOF 0. Then
+redundancy becomes the headline and a fully dimensioned part containing one
+T-junction reports **OverConstrained instead of Solved**, which blocks
+downstream rebuild under M5's contracts.
+
+That is the worst shape a defect can have: it appears when the user finishes
+constraining, not when the junction is drawn, and it points at the dimension
+they just added rather than at the junction that caused it.
+
+Both facts are pinned by tests, and the pair is deliberate:
+`GATE_F2_AThreeWayJunctionIsNotOverConstrained` documents that it does NOT
+discriminate, and `GATE_F2_AFullyDimensionedJunctionSolvesRatherThanOverConstrains`
+is the one that does. Keeping the non-discriminating test with its limitation
+written down is worth more than deleting it — it records where the masking is.
+
+---
+
+## ADR-M7-013 — What the general rules decline to say (M7.2)
+Status: Accepted. Supersedes the shape restriction of ADR-M7-010.
+
+M7.1 recognised one named shape. M7.2 replaces it with rules over arbitrary
+geometry, and the rectangle now falls out of them rather than being
+special-cased — the release fixture's design intent is unchanged, which
+`TheRectangleStillGetsExactlyWhatM7_1GaveIt` pins.
+
+Generalising means deciding what NOT to say, and each of these is a case where
+a rule that fired would be worse than one that stayed quiet:
+
+- **A line inside BOTH axis tolerances gets neither.** It is shorter than the
+  tolerance can resolve, so its direction is noise. Picking one axis is a coin
+  toss; asserting both is a contradiction the solver would report as
+  Conflicting on geometry whose only fault is being small.
+- **A curve whose own two endpoints cluster together is not made coincident
+  with itself.** A closed or near-closed arc says nothing by being tied to
+  itself, and the solver would carry a residual that is identically zero.
+- **A circle contributes no coincidence.** It has no endpoints; treating its
+  centre as one would tie it to any line that happened to start there and
+  silently change what the drawing means.
+- **An open chain is not closed.** The joints that exist are reconstructed and
+  the missing one is not invented.
+- **Sloped sides get no axis constraint**, however close the shape looks to a
+  rectangle overall.
+- **One Fix per sketch, not one per connected shape.** A second would be a
+  second placement policy; other shapes stay free to be placed by dimensions.
+
+Arcs DO take part in coincidence clustering, because their endpoints are as
+joinable as a line's — excluding them would silently refuse to close any
+profile with a rounded corner, which is most bracket and sheet-metal geometry.
+They take no Horizontal or Vertical: those are line-only in the model and the
+solver rejects them on anything else, so proposing one would produce
+InvalidInput rather than a constraint.
