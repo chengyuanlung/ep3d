@@ -1,0 +1,13 @@
+999
+Fixture F (M6 spec 15): structurally broken -- a SECTION that never ends and a
+truncated entity. Must produce a diagnostic that says the file is malformed,
+not one that says it is missing.
+0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+0
+10

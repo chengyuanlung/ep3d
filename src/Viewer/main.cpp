@@ -19,6 +19,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QPalette>
+#include <QString>
 #include <QTimer>
 #include <cstring>
 #include <cstdio>
@@ -199,6 +200,7 @@ int main(int argc, char** argv) {
     // mock-ups. Each name matches a UI-0xx entry in the self-validation report.
     const char* scenario = nullptr;
     const char* sampleName = nullptr;
+    const char* importPath = nullptr;
     // Accepts BOTH `--flag value` and `--flag=value`.
     //
     // Matching only the separate-token form meant `--sample=m5-circle` failed
@@ -220,6 +222,13 @@ int main(int argc, char** argv) {
         bool present = false;
         if (const char* value = valueFor(i, "--scenario", present); present && value != nullptr)
             scenario = value;
+        if (const char* value = valueFor(i, "--import", present); present) {
+            // An --import with no path is an error, not a silent no-op: the
+            // same rule --sample learned three times over (ADR-M6-025's
+            // sibling, ADR-M5-025).
+            if (value == nullptr || value[0] == '\0') gUnknownSample = true;
+            else importPath = value;
+        }
         if (const char* value = valueFor(i, "--sample", present); present) {
             // An EMPTY or MISSING value is an error, not a silent default.
             if (value == nullptr || value[0] == '\0') gUnknownSample = true;
@@ -280,6 +289,12 @@ int main(int argc, char** argv) {
     MainWindow window(model->document, presenter);
     window.resize(1440, 900);
     window.show();
+
+    // DXF import, driven through MainWindow exactly as the menu action does.
+    // This is the half of the workflow no unit test reaches: the panel commit,
+    // the recompute, the redisplay and the status message.
+    QString importReport;
+    if (importPath != nullptr) importReport = window.importDxfFile(QString::fromUtf8(importPath));
 
     // Selection scenarios need the window to exist first.
     if (scenario != nullptr && std::strcmp(scenario, "pad-selected") == 0)
@@ -406,9 +421,70 @@ int main(int argc, char** argv) {
             }
         }
 
+        // The DXF import workflow really ran, in the running application.
+        if (importPath != nullptr) {
+            if (importReport.isEmpty()) fail("the import produced no status message");
+            if (importReport.contains(QStringLiteral("failed")))
+                fail("the DXF import failed");
+            if (model->document.sketches().empty())
+                fail("the import produced no sketch");
+            else {
+                const Sketch* imported = model->document.sketches().back();
+                if (imported->entities().empty())
+                    fail("the imported sketch has no entities");
+
+                // Select it exactly as a user clicking the tree row does, then
+                // check the panel is READABLE -- not merely correct.
+                //
+                // This is the half no data-level test reaches. propertiesOf()
+                // returned ten fully populated rows while the owner, looking at
+                // the running application, saw ten labels and no values: the
+                // sketch's ninety-character profile diagnostic had sized the
+                // value column to itself and pushed the whole column out of the
+                // panel. Correct data, invisible to the person it was for.
+                window.selectObject(imported->id());
+                if (!window.propertyPanelFitsItsPanel())
+                    fail("the property panel is wider than its dock, so values are "
+                         "pushed out of sight");
+            }
+            // The tree must SHOW it -- an import the model tree does not list
+            // is an import the user cannot select or delete.
+            const DocumentOutline outline(model->document);
+            const OutlineNode root = outline.build();
+            std::size_t sketchRows = 0;
+            const std::function<void(const OutlineNode&)> count =
+                [&](const OutlineNode& node) {
+                    if (node.kind == OutlineKind::Sketch) ++sketchRows;
+                    for (const OutlineNode& child : node.children) count(child);
+                };
+            count(root);
+            if (sketchRows < 2) fail("the imported sketch is not in the model tree");
+        }
+
         // Selection round-trips through the shell by ObjectId.
         window.selectObject(model->pad->id());
         if (window.selectedObjectId() != model->pad->id()) fail("selection did not round-trip");
+
+        // The panel must stay readable for EVERY selectable object, not only
+        // the imported sketch the defect happened to be found on.
+        //
+        // The column-width defect belongs to whichever row holds the longest
+        // value, and every sample grows a different long one: the failed-profile
+        // and imported sketches carry a ninety-character profile diagnostic, a
+        // conflicting sketch names its offending constraint. Guarding only the
+        // DXF path would have left the same defect reachable from samples that
+        // run on every build -- the third-leg-of-the-triple shape this project
+        // has now found in three review rounds.
+        window.selectObject(model->pad->id());
+        if (!window.propertyPanelFitsItsPanel())
+            fail("the Pad property panel is wider than its dock, so values are "
+                 "pushed out of sight");
+        for (const Sketch* sketch : model->document.sketches()) {
+            window.selectObject(sketch->id());
+            if (!window.propertyPanelFitsItsPanel())
+                fail("a Sketch property panel is wider than its dock, so values "
+                     "are pushed out of sight");
+        }
 
         if (status == 0) std::printf("SELFTEST OK\n");
         app.quit();

@@ -127,6 +127,43 @@ TEST(DocumentOutlineTest, UI_TREE_005_FailedProfileIsVisibleWithItsDiagnostic) {
     EXPECT_EQ(Find(root, "Pad001")->state, OutlineState::Failed);
 }
 
+TEST(DocumentOutlineTest, M6_UI_001_AnOpenSketchNothingConsumesIsNotAFailure) {
+    // Reported by the owner's manual UI validation of M6, on the very first
+    // import: line.dxf imported one line, drew it correctly, and the tree said
+    // "[Skt]! line". Nothing had failed.
+    //
+    // "Profile is not closed" describes a sketch that cannot be padded YET.
+    // That is a failure when a Pad is asking for it -- UI_TREE_005 above, which
+    // still holds -- and it is simply the state of the drawing when nothing is.
+    // The rule was right; its scope was not. It was invisible before M6 because
+    // every sketch the viewer could previously build closed its own profile.
+    //
+    // A user who sees "Failed" after a successful import learns to distrust the
+    // marker, and then it cannot do its job when something really has failed.
+    PartDocument document{"Part001"};
+    Sketch& sketch = document.addSketch("line");
+    sketch.addLine(Vec2{0, 0}, Vec2{100, 50});
+    ASSERT_TRUE(document.recompute().success)
+        << "a document holding one open sketch failed to recompute";
+
+    // The root is bound to a NAMED value. Find() returns a pointer into the
+    // tree, so passing the temporary directly reads freed memory the instant
+    // the full expression ends -- which is exactly what this test did first,
+    // and is the same mistake M5's test helpers made.
+    const OutlineNode root = DocumentOutline(document).build();
+    const OutlineNode* node = Find(root, "line");
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->state, OutlineState::Valid)
+        << "an open sketch with no consumer was marked failed";
+
+    // The reason is still offered -- this is about the STATE channel, not about
+    // hiding information. A user who wonders why they cannot pad it must still
+    // be able to find out without opening a log.
+    EXPECT_FALSE(node->diagnostic.empty())
+        << "the state was corrected by throwing the explanation away";
+    EXPECT_NE(node->diagnostic.find("closed"), std::string::npos) << node->diagnostic;
+}
+
 TEST(DocumentOutlineTest, UI_TREE_006_MassPropertiesNeverShowsCurrentWhenItIsNot) {
     // The display-layer form of ADR-M3-006 (UI spec 13): retained numbers must
     // not be presented as up to date.
@@ -257,3 +294,4 @@ TEST(DocumentOutlineTest, UI_PROP_006_UnknownIdYieldsNoRows) {
 }
 
 } // namespace
+

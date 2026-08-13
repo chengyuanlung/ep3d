@@ -29,6 +29,8 @@ add_library(ParametricCADCore
     src/Core/Physics/MassPropertiesNode.cpp
     src/Core/Serialization/JsonValue.cpp
     src/Core/Serialization/PartDocumentSerializer.cpp
+    src/Core/Import/ImportedGeometry.cpp
+    src/Core/Import/SketchImporter.cpp
     src/Core/Sketch/Profile.cpp
     src/Core/Sketch/SketchConstraint.cpp
     src/Core/Sketch/ISketchSolver.cpp
@@ -134,6 +136,41 @@ else()
                     "and its tests will be skipped. Core still builds.")
 endif()
 
+# --- DXF import (M6, ADR-M6-001/003) ----------------------------------------
+# LICENCE, stated where the dependency is introduced rather than only in an ADR:
+# libdxfrw is GPL-2.0-only, adopted by EXPLICIT OWNER DECISION as spec 20
+# requires. GPL-2.0 is copyleft: linking it generally makes the combined work a
+# derivative that must be distributed under GPL-2.0-compatible terms, including
+# corresponding source. If EP3D is to ship closed-source, this dependency must
+# be replaced first -- nothing in the build will warn about that.
+#
+# It is confined to ParametricCADImportDxf and is PRIVATE to it, so
+# ParametricCADCore gains no libdxfrw include path and no link dependency, and
+# the Core test binary cannot pull a symbol from it. That containment is what
+# makes replacing the parser a matter of rewriting one translation unit.
+find_package(libdxfrw CONFIG QUIET
+    NO_CMAKE_PACKAGE_REGISTRY
+    NO_CMAKE_SYSTEM_PACKAGE_REGISTRY
+)
+
+if(libdxfrw_FOUND)
+    add_library(ParametricCADImportDxf src/Import/Dxf/DxfReader.cpp)
+    target_include_directories(ParametricCADImportDxf PUBLIC src)
+    target_link_libraries(ParametricCADImportDxf
+        PUBLIC ParametricCADCore
+        PRIVATE libdxfrw::libdxfrw
+    )
+    target_compile_features(ParametricCADImportDxf PUBLIC cxx_std_20)
+    if(MSVC)
+        target_compile_options(ParametricCADImportDxf PRIVATE /utf-8)
+    endif()
+    message(STATUS "ParametricCADImportDxf: libdxfrw found (GPL-2.0-only) -- "
+                    "DXF import will be built.")
+else()
+    message(STATUS "ParametricCADImportDxf: libdxfrw not found -- skipping DXF "
+                    "import and its tests. Core and every other target still build.")
+endif()
+
 # --- Minimal Qt viewer (M4, ADR-M4-006) -------------------------------------
 # Qt is a hard dependency of the VIEWER TARGET ONLY. Without Qt this block is
 # skipped and Core, Kernel and every non-viewer test still configure and build
@@ -183,6 +220,13 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
     # kernel (ADR-M3-003 / ADR-M5-003). Core still links neither.
     if(TARGET ParametricCADSolver)
         target_link_libraries(ParametricCADViewer PRIVATE ParametricCADSolver)
+    endif()
+    # DXF import in the shell (M6.7). The viewer is an application, so it may
+    # name a concrete backend -- and it inherits libdxfrw's GPL-2.0 copyleft by
+    # doing so (ADR-M6-001). Core still links neither.
+    if(TARGET ParametricCADImportDxf)
+        target_link_libraries(ParametricCADViewer PRIVATE ParametricCADImportDxf)
+        target_compile_definitions(ParametricCADViewer PRIVATE PARAMCAD_HAVE_DXF_IMPORT)
     endif()
     target_compile_features(ParametricCADViewer PRIVATE cxx_std_20)
     if(MSVC)
@@ -249,6 +293,27 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
         add_test(NAME ViewerSmokeTest_AcceptsEqualsForm
                  COMMAND ParametricCADViewer --selftest --sample=m5-circle)
         set_tests_properties(ViewerSmokeTest_AcceptsEqualsForm PROPERTIES TIMEOUT 60)
+
+        # M6.7: the DXF import workflow driven through MainWindow in the running
+        # application -- the half of it no unit test reaches (the panel commit,
+        # the recompute, the redisplay, the model-tree row and the status
+        # message). Only registered when the import target exists.
+        if(TARGET ParametricCADImportDxf)
+            add_test(NAME ViewerSmokeTest_ImportsDxf
+                     COMMAND ParametricCADViewer --selftest
+                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/mixed.dxf")
+            set_tests_properties(ViewerSmokeTest_ImportsDxf PROPERTIES TIMEOUT 60)
+            # A failed import must FAIL the selftest, so a broken import cannot
+            # pass CI by producing an empty document quietly.
+            add_test(NAME ViewerSmokeTest_ReportsFailedImport
+                     COMMAND ParametricCADViewer --selftest
+                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/nope.dxf")
+            add_test(NAME ViewerSmokeTest_RejectsMissingImportPath
+                     COMMAND ParametricCADViewer --selftest --import)
+            set_tests_properties(ViewerSmokeTest_ReportsFailedImport
+                                 ViewerSmokeTest_RejectsMissingImportPath
+                                 PROPERTIES WILL_FAIL TRUE TIMEOUT 60)
+        endif()
     endif()
 
     message(STATUS "ParametricCADViewer: Qt ${Qt6_VERSION} found -- viewer will be built.")
@@ -374,6 +439,32 @@ if(PARAMCAD_BUILD_TESTS)
         # ParametricCADCoreTests. The DLL argument below is why this suite
         # needed it FIRST, not why the others may go without it.
         gtest_discover_tests(ParametricCADKernelOcctTests DISCOVERY_MODE PRE_TEST)
+    endif()
+
+    # DXF import suite (M6). Built only when the import target exists, and it
+    # links ParametricCADImportDxf rather than libdxfrw -- if a test needed the
+    # library directly, the import boundary would not be where ADR-M6-003 says.
+    if(TARGET ParametricCADImportDxf)
+        add_executable(ParametricCADImportTests tests/Import/DxfImportTests.cpp)
+        target_link_libraries(ParametricCADImportTests
+            PRIVATE ParametricCADCore ParametricCADImportDxf GTest::gtest_main
+        )
+        # Fixture path baked in, so the tests do not depend on ctest's working
+        # directory.
+        target_compile_definitions(ParametricCADImportTests
+            PRIVATE PARAMCAD_DXF_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf")
+        if(TARGET ParametricCADKernelOcct)
+            target_link_libraries(ParametricCADImportTests PRIVATE ParametricCADKernelOcct)
+        endif()
+        # The solver too: the strongest test of "imported entities are ordinary"
+        # is constraining one and letting M5's solver move it.
+        if(TARGET ParametricCADSolver)
+            target_link_libraries(ParametricCADImportTests PRIVATE ParametricCADSolver)
+        endif()
+        if(MSVC)
+            target_compile_options(ParametricCADImportTests PRIVATE /utf-8)
+        endif()
+        gtest_discover_tests(ParametricCADImportTests DISCOVERY_MODE PRE_TEST)
     endif()
 
     # Full-stack integration (M5-J/K). The ONLY target linking Core + Solver +

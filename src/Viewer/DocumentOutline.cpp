@@ -220,8 +220,24 @@ OutlineNode DocumentOutline::build(const std::set<ObjectId>& hiddenIds) const {
         } else {
             const ProfileResult profile = BuildProfile(*sketch);
             if (!profile) {
-                node.state = OutlineState::Failed;
+                // The REASON is always offered. Whether it is a FAILURE depends
+                // on whether anything is waiting for that profile.
+                //
+                // "Not a closed loop" describes a sketch that cannot be padded
+                // yet. That is a failure when a Pad is asking for it -- UI spec
+                // 12, UI_TREE_005 -- and it is simply the state of the drawing
+                // when nothing is. Marking every open sketch "Failed" was
+                // invisible until M6, because before DXF import every sketch in
+                // the viewer was built by a flow that closed its profile.
+                //
+                // The owner's first manual import of `line.dxf` showed it at
+                // once: one line imported correctly, drawn correctly, and the
+                // tree said `[Skt]! line`. Nothing had failed. A user who sees
+                // "Failed" after a successful import learns to distrust the
+                // marker, which costs more than the marker is worth.
                 node.diagnostic = profile.message;
+                const bool somethingNeedsTheProfile = !graph.dependentsOf(sketch->id()).empty();
+                if (somethingNeedsTheProfile) node.state = OutlineState::Failed;
             }
         }
 

@@ -1676,3 +1676,490 @@ containing an `=`.
 
 Twice was a coincidence. Three times is a category: an argument the program does
 not understand must fail, never default.
+
+---
+
+# M6 — DXF Import to Stable Sketch Entities
+
+## ADR-M6-001 — DXF parser selection: libdxfrw, and what its licence costs (M6)
+Status: Accepted by explicit owner decision.
+
+| | |
+|---|---|
+| Library | **libdxfrw** |
+| Version | `2025-09-25` (vcpkg port) |
+| Licence | **GPL-2.0-only** |
+| Linkage | vcpkg `x64-windows` triplet — dynamic |
+| Target | `ParametricCADImportDxf` **only** |
+| Crosses into Core? | **No** — see ADR-M6-003 |
+
+**The owner was asked and chose this**, which is what spec 20 requires: "No new
+GPL dependency may be introduced into the commercial application without an
+explicit owner decision."
+
+**What the alternatives were**, recorded so the decision can be revisited on its
+merits rather than re-argued from memory:
+
+| Option | Licence | Why not chosen |
+|---|---|---|
+| **libdxfrw** | GPL-2.0-only | **Chosen.** Closest fit to the requirement; mature; reads ASCII and binary DXF. |
+| `dime` (Coin3D) | BSD-3-Clause | Permissive and would have carried no licence consequence; a larger surface than M6 needs. |
+| Own minimal ASCII reader | n/a | Zero dependency and zero licence risk. M6 requires only LINE, CIRCLE and ARC, and DXF group-code parsing for those is small — the same reasoning that produced the project's own solver (ADR-M5-003). |
+
+**The consequence, stated once and not softened.** GPL-2.0-only is a copyleft
+licence. Linking it — statically or dynamically — generally makes the combined
+work a derivative, which must then be distributed under GPL-2.0-compatible
+terms, including corresponding source. If EP3D is ever to be distributed as
+closed-source commercial software, this dependency has to be removed or replaced
+first. That is a distribution question, not a build question, and nothing in the
+code will warn about it.
+
+**What limits the damage, and it is required anyway.** libdxfrw is confined to a
+single CMake target that Core never links, and it reaches the document only
+through a format-neutral representation (ADR-M6-003). Swapping it for `dime` or
+for an own reader is therefore an exercise in replacing one translation unit —
+the same replaceability ADR-M5-003 gave the sketch solver, for the same reason.
+A binary-level check asserts Core carries no libdxfrw symbol, so the boundary is
+measured rather than asserted.
+
+## ADR-M6-002 — DXF unit policy (M6)
+Status: **PARTLY SUPERSEDED.** The policy stands; two of its statements do not.
+
+> **Superseded by ADR-M6-010** (timing): this ADR says conversion happens "as
+> DXF units enter the format-neutral representation". It now happens ONCE after
+> the whole file is read, because libdxfrw dispatches sections in file order and
+> the old timing produced 25.4x-wrong geometry while reporting success.
+>
+> **Corrected by ADR-M6-011** (coverage): this ADR's claim that the mapping
+> covers "the remaining ISO units libdxfrw exposes" was false. It covered six
+> values; fifteen are now mapped.
+>
+> These markers were added after a reviewer pointed out that the cross-
+> references existed only in the superseding ADRs, so anyone reading this one
+> would take its false statements at face value. **That is the third time on
+> this project an ADR has been left asserting behaviour the code does not have**
+> -- ADR-M5-006 needed three corrections for the same reason.
+
+DXF stores lengths as unitless numbers plus a header variable, `$INSUNITS`,
+which says what those numbers mean. It is frequently absent or `0`
+("unitless"), so a policy is required rather than a lookup.
+
+- **One conversion boundary.** Conversion happens exactly once, in the importer,
+  as DXF units enter the format-neutral representation. Nothing downstream
+  converts again, and no caller may guess (spec 8).
+- **Internal geometry stays in millimetres**, unchanged from M4/M5.
+- **`$INSUNITS` is honoured when present and recognised.** The mapping covers
+  the values a real file carries: unitless(0), inches(1), feet(2), millimetres(4),
+  centimetres(5), metres(6), and the remaining ISO units libdxfrw exposes.
+- **Absent, zero, or unrecognised `$INSUNITS` means MILLIMETRES**, and the
+  import diagnostics say so explicitly. Silently assuming a unit and not
+  reporting it is how a drawing arrives 25.4x wrong with nothing to point at.
+- **The assumption is reported, not hidden**: the import result carries the unit
+  actually used and whether it was read from the file or defaulted.
+
+Chosen over "reject unitless files" because a large share of real DXF output is
+unitless and rejecting them would make the importer useless for the files it
+exists to read; chosen over "ask the user" because M6's UI scope is a file
+picker (spec 19), and a policy that depends on a dialog cannot be tested.
+
+## ADR-M6-003 — Import architecture and the Core boundary (M6)
+Status: Accepted
+
+```
+DXF file -> libdxfrw -> ImportedSketchGeometry (format-neutral) -> importer -> PartDocument API -> Sketch entities
+```
+
+- `src/Core` gains **no** DXF type, header or link dependency. The check is the
+  same one M5 used for Eigen and M3 used for OCCT: a source scan plus
+  `dumpbin` on the Core test binary, which links neither the importer nor
+  libdxfrw and therefore cannot pull a symbol from either.
+- The format-neutral representation carries **semantic geometry and import
+  metadata only**: coordinates already converted to millimetres, radii, angles,
+  and a source description. No parser pointer, no `DRW_*` type, no file offset,
+  no library handle (spec 6).
+- The importer writes through the ordinary `PartDocument` / `Sketch` API, so an
+  imported entity is indistinguishable from one created natively — which is the
+  property spec 3 requires and Gate G proves by driving a Pad from it.
+
+The layering follows M4's viewer split exactly: the document-facing half is free
+of the third-party type and is unit-testable without it; only the adapter names
+`libdxfrw`.
+
+## ADR-M6-004 — Imported entity identity (M6)
+Status: Accepted
+
+**DXF order is not identity, and a DXF handle is not identity.**
+
+Every imported entity receives an ordinary `SketchEntityId` from the shared
+generator, exactly as `Sketch::addLine` produces. After import there is nothing
+about the entity that says it came from DXF, and that is the point: the M5
+identity, persistence and solving contracts apply unchanged (spec 7).
+
+- Vector position is not identity, file offset is not identity, memory address
+  is not identity, DXF handle is not identity.
+- A DXF handle **may** be kept as informational metadata, but no correctness
+  claim may depend on it. Nothing in M6.1 reads one.
+- Save/load preserves ParametricCAD identity. It does **not** re-derive identity
+  from DXF ordering, which is what Gate E and the shuffled-order adversarial
+  test exist to prove.
+
+Two separate imports of the same file are not required to produce equal ids
+(spec 13); identity stability is required across save/load of **one** imported
+document.
+
+## ADR-M6-005 — Unsupported entity policy (M6)
+Status: Accepted
+
+An entity kind M6 does not import is **reported and skipped**, never
+reinterpreted as another kind (spec 4), and never fatal.
+
+- The reader records `ImportSkipReason::UnsupportedEntity` with the kind as the
+  file named it, so the diagnostic can say `SPLINE` rather than "something".
+- Skipping is **not** silent: the count reaches the import result and the status
+  bar. A user who cannot see that something was dropped will assume nothing was.
+- **Unsupported** is distinct from **invalid**: `CIRCLE` is supported, and a
+  circle with a zero radius is a supported kind carrying values the model
+  refuses. Spec 11 wants those told apart because they call for different user
+  actions — one means "M6 does not do this yet", the other means "your drawing
+  has a degenerate entity".
+- A file consisting **only** of skipped entities is a FAILED import with a
+  message saying so, distinct from an empty file. Returning an empty sketch
+  would make the user discover the emptiness themselves.
+
+The fixtures place unsupported and degenerate entities **between** valid ones,
+because a trailing one cannot distinguish "skipped it and carried on" from
+"stopped there".
+
+## ADR-M6-006 — Transactional import (M6)
+Status: Accepted
+
+Import is transactional at the **sketch** level (spec 10). Any failure removes
+the sketch again, leaving no half-built sketch, no orphan registry entry, no
+stray graph node and no dangling id.
+
+Returning a partially-populated sketch would be worse than failing: the user
+would have to work out which half arrived, and a drawing that is half-imported
+looks like a drawing that was half-drawn.
+
+Entities the READER rejected (unsupported kinds, degenerate geometry) arrive as
+skip records and do **not** fail the import — the file is legitimate, it simply
+contains more than M6 handles. Entities the reader passed but the model refuses
+DO fail it: the two layers disagreeing is a fault worth surfacing, not an entity
+to drop quietly.
+
+`M6_GATE_H_AFailedImportLeavesNoTraceInTheDocument` checks sketch count,
+registry size and graph node count, because "the sketch is gone" is a weaker
+claim than "nothing of the attempt remains".
+
+## ADR-M6-007 — ARC orientation and angle convention (M6)
+Status: Accepted
+
+- DXF stores arc angles as **degrees**, counter-clockwise from +X, in group
+  codes 50 (start) and 51 (end). libdxfrw converts them to radians before the
+  reader sees them.
+- **That conversion is verified, not trusted.** `M6_ARC_001` measures it and
+  fails in either direction. libdxfrw's header comment asserts it; this project
+  has already shipped one Critical because two comments described an algorithm
+  the code did not implement.
+- A DXF arc always sweeps **counter-clockwise from start to end**, so
+  350° → 40° is a 50° sweep through zero, not 310° the other way. An importer
+  assuming `end > start` gets it backwards, which is why a fixture that crosses
+  zero exists — an arc that does not cross it cannot reveal the mistake.
+- `SketchArc::counterClockwise` is therefore always `true` for an imported arc.
+- **Arcs are tested by measuring their endpoints**, computed from the model's
+  stored centre, radius and angles and compared with hand-computed coordinates.
+  Re-deriving the importer's own conversion would prove only that it agrees with
+  itself — the failure mode that let a broken Angle constraint ship in M5 with a
+  green test beside it (spec 16 says the same thing).
+
+## ADR-M6-008 — What M6 does NOT read, and the one that can be silently wrong (M6)
+Status: **SUPERSEDED by ADR-M6-013.**
+
+> The assessment below is wrong in both directions and is kept only as a record
+> of what was believed. It says the reader "ignores... the extrusion direction
+> (group code 210)" and therefore "imports at the wrong orientation --
+> silently". Measured: for the common `(0,0,-1)` the correct result is a
+> **mirror**, which no analytical oracle in this project could detect; and
+> CIRCLE/ARC entities carrying a non-default extrusion are now **refused and
+> reported**, not imported. LINE is unaffected because DXF stores it in world
+> coordinates. See ADR-M6-013.
+
+M6 imports LINE, CIRCLE and ARC. Everything else is reported and skipped
+(ADR-M6-005). Most of those omissions are loud: a drawing made of SPLINEs
+imports as nothing plus a diagnostic naming SPLINE.
+
+**One omission is not loud, and it is recorded here so it is not discovered as a
+surprise:** the reader takes DXF X and Y and **ignores Z and the extrusion
+direction (group code 210)**. A drawing whose entities sit on a non-XY plane, or
+that carries a non-default extrusion vector, therefore imports at the wrong
+orientation — silently, because nothing in the file marks it as unusual and the
+resulting geometry is perfectly valid.
+
+It is left this way for M6 deliberately: applying the extrusion direction
+correctly means deciding how an arbitrary OCS plane maps onto a sketch's frame,
+which is a modelling decision rather than a parsing one and is out of scope for
+"import LINE, CIRCLE and ARC". Detecting and REPORTING a non-default extrusion
+would be the cheap half of the fix and is the first thing to add if M6 is
+extended.
+
+Recorded as a known limitation in `M6_SelfValidationReport.md` rather than left
+in the code, because a limitation only in the code is one nobody reads.
+
+## ADR-M6-009 — Block definitions are not model geometry (M6)
+Status: Accepted. Corrects a Critical found by independent review.
+
+libdxfrw dispatches a BLOCK's contents through the same `addLine`/`addCircle`/
+`addArc` callbacks it uses for model space. Without tracking the block state the
+collector could not tell them apart, and it did not: a file whose ENTITIES
+section held only an `INSERT` imported the block's geometry at **definition**
+coordinates — losing placement, scale, rotation and multiplicity — while
+reporting the `INSERT` that places it as "skipped".
+
+The realistic case is worse. **Every DXF carrying a DIMENSION also carries an
+anonymous block holding its dimension and extension lines.** A drawing with one
+real line and one dimension imported **four** lines. Spec 4 states that
+dimensions and annotations must not silently become model content; they were.
+
+`addBlock` / `endBlock` now bracket block definitions and everything inside is
+skipped, reported once per block rather than once per entity.
+
+**Correction (M6.9 re-review): "once per block" was false when written** -- the
+flag was set once and never reset, so a drawing with forty dimension blocks
+reported "skipped 1". It is reset in `addBlock` now, and `M6_RR_005` checks that
+a two-block file produces two reports.
+
+**And the EXIT half of this fix was entirely unguarded.** Making `endBlock()` a
+no-op left all 45 tests green, while a file with a BLOCKS section followed by
+real model geometry imported **nothing** -- a worse defect than the one this ADR
+fixed. The only block fixture had an ENTITIES section containing a single
+INSERT, so no test could observe whether the block state was ever cleared.
+`M6_RR_002` covers it.
+
+Unsupported entities *inside* a block are also no longer reported as model-level
+entities: doing so told the user their drawing contained an INSERT and a TEXT it
+does not contain, and inflated the skip count by the contents of every block.
+
+`INSERT` is still not expanded, so a drawing built from blocks imports as
+nothing plus a diagnostic. That is now true — it was claimed in the M6.1
+self-validation report while being false in both halves.
+
+## ADR-M6-010 — Units are applied once, after the whole file is read (M6)
+Status: Accepted. Supersedes the parse-time scaling of ADR-M6-002.
+
+ADR-M6-002 got the policy right and the timing wrong. Scaling each entity as it
+arrived assumed the HEADER reached the reader before the ENTITIES section.
+libdxfrw dispatches sections in **file order**, so a file with entities first
+was scaled by the 1.0 default and only then learned the unit — 25.4x wrong,
+while the result reported `unit = inches, unitWasDefaulted = false`. The one
+signal ADR-M6-002 relies on to make that error visible was asserting the
+opposite. A file with two HEADER sections split one sketch across two scales.
+
+The reader now collects **raw** values and applies the factor once, after the
+read completes. That removes the ordering assumption rather than checking it,
+which is the only version a file we have not seen cannot defeat. The
+degenerate-geometry checks moved with it, because "shorter than
+`kMinSketchDimensionMm`" is a statement about millimetres.
+
+The comment that used to assert the ordering is gone. An assumption stated in a
+comment and nowhere else is the failure mode this project hit twice in M5 and
+once here.
+
+## ADR-M6-011 — Every $INSUNITS value the format defines (M6)
+Status: Accepted. Corrects ADR-M6-002.
+
+ADR-M6-002 claimed the mapping covered "the remaining ISO units libdxfrw
+exposes". It covered 0, 1, 2, 4, 5, 6. Values 3 and 7–20 fell through to
+`Unrecognized` and took the millimetre default **with a message saying the file
+had not stated a usable unit** — which it had. Mils (9) made PCB geometry 39.4x
+too large; microns (13), 1000x; kilometres (7), 1e6x too small.
+
+Now mapped: micrometre, millimetre, centimetre, decimetre, metre, decametre,
+hectometre, kilometre, microinch, mil, inch, foot, yard, mile. Imperial values
+are multiples of the exact 1959 definition, so nothing drifts.
+
+Angstrom, nanometre, gigametre, astronomical unit, light year and parsec are
+deliberately left unmapped: the format defines them, but they are not units a
+CAD part is modelled in, and mapping them would let a typo produce a 1e16 scale
+factor. They report as unrecognised.
+
+## ADR-M6-012 — A degenerate sweep is skipped, not fatal (M6)
+Status: Accepted. Closes a hole in ADR-M6-005.
+
+The reader validated an arc's radius and finiteness but never its **sweep**. A
+0 to 360 degree arc — legal DXF, and what several exporters emit instead of a
+CIRCLE — reached the importer, failed the model's validation, and rolled back
+the **whole file**. A drawing with 500 good lines and one such arc imported as
+nothing.
+
+ADR-M6-005 says a degenerate entity is skipped and reported; the sweep was the
+one hole in that rule, and it turned a skippable entity into a fatal one. The
+reader now applies the same sweep test the model uses.
+
+**Correction (M6.9 re-review): it did not, and the difference froze the
+application.** The reader normalised with `while (sweep >= 2*pi) sweep -= 2*pi`
+while the model uses `std::fmod`. Subtracting in a loop never terminates once
+the value exceeds about `2^53 * 2*pi`, and libdxfrw applies no range check to
+codes 50/51 -- so an ARC with end angle `1e20` made `ReadDxfFile` never return,
+synchronously on the Qt GUI thread, with no cancel.
+
+**This project had already fixed that exact bug in M5** and recorded the reason
+in ADR-M5-006. Writing it again, on the one code path that reads untrusted
+external files, is the plainest evidence yet that a lesson written into an ADR
+is not a lesson applied. The reader uses `fmod` now, and `M6_RR_001` fails -- by
+hanging -- if the loop returns.
+
+**Second correction: the guard has two clauses and only one was tested.** A
+sweep of `2*pi - 1.7e-7` (an arc of 359.99999 degrees) is inside the model's
+rejection band but is not caught by the lower bound, so removing the upper
+clause left all 45 import tests green while restoring the whole-file abort this
+ADR exists to prevent. `arc_full_turn.dxf` is exactly 0->360, which normalises
+to 0, so it could never exercise the other clause. `M6_RR_003` does.
+
+## ADR-M6-013 — A non-default extrusion is refused, not guessed (M6)
+Status: Accepted. Replaces ADR-M6-008's assessment, which understated the risk.
+
+ADR-M6-008 described ignoring group code 210 as producing "the wrong
+orientation". Independent review measured it and found two things worse:
+
+1. For the common `210 = (0,0,-1)` the correct result is a **mirror**, not a
+   rotation. A mirrored part has identical area, volume, mass and centre of
+   mass, so **no analytical oracle of the kind every gate in this project uses
+   can detect it.**
+2. DXF stores **LINE in world coordinates and CIRCLE/ARC in the entity's own
+   system**, so ignoring 210 mixes two frames inside one file. A plate with a
+   hole imported the hole at (-25, 30) instead of (25, 30), reported success,
+   and produced a part wrong in a way nothing downstream can see.
+
+Applying an arbitrary OCS plane means deciding how it maps onto a sketch frame,
+which is a modelling decision beyond M6's scope. Entities carrying a non-default
+extrusion are therefore **skipped and reported**.
+
+The rule this turns on: when the choice is between refusing and guessing, and a
+wrong guess is undetectable, refuse.
+
+## ADR-M6-014 — Finiteness is checked on both sides of the unit multiply (M6)
+Status: Accepted. Records a fix that had no ADR at all.
+
+ADR-M6-010 moved unit scaling to the end of the read. It recorded that "the
+degenerate-geometry checks moved with it" and stopped there. What it did not
+record is that the move put every `AllFinite` check **before** the multiply, so
+a coordinate that was finite in the file and infinite after conversion — 1e305
+in a drawing measured in miles — passed the reader untouched and was refused by
+the model, aborting the whole file. That is exactly the failure ADR-M6-012
+exists to eliminate, reintroduced through the door ADR-M6-010 opened.
+
+The rule: **a value is checked for finiteness both as it arrives and after it is
+scaled.** `tooSmall` cannot stand in for the second check — `inf < 1e-5` is
+false, and `hypot` of two infinities is NaN.
+
+Angles are the deliberate exception. They are never scaled, so conversion cannot
+make a finite angle infinite; the raw check in `addArc` is their only guard. That
+is a reason to test that one line harder, not to add a second check that can
+never fire — `M6_R3_003` is that test.
+
+**This ADR is written three rounds late.** The fix shipped in M6.10 with a test
+(`M6_RR_004`) and no entry here, and a reviewer found it by grepping the log for
+"overflow" and getting nothing. A fix with no ADR is a fix the next person will
+undo.
+
+**And the fix itself covered one third of its own case.** `overflow_on_scale.dxf`
+held only LINEs, so deleting either the CIRCLE or the ARC re-check left all fifty
+tests green. `M6_R3_002` covers all three, centre and radius separately.
+
+## ADR-M6-015 — Two structural facts are read outside the parser (M6)
+Status: Accepted. Extended after the scan it introduced made a second, older
+finding fixable.
+
+A `BLOCK` with no `ENDBLK` makes libdxfrw read **the entire rest of the file** as
+block content. The whole ENTITIES section disappears, `read()` returns true, and
+the user is told "every entity in the file was skipped; nothing to import" —
+which aims them at their geometry when the fault is one missing group code in a
+section they never open. Unbounded silent data loss with a misleading diagnostic.
+
+The callback interface cannot see this. `DRW_Interface` has no
+section-transition hook (`setBlock` is never called), and libdxfrw calls
+`endBlock()` at EOF, so the obvious check — "are we still inside a block when the
+read finishes?" — is **always false**. I wrote that check first and measured it
+doing nothing before replacing it; it is recorded here because it is the check
+anyone would reach for.
+
+So the file is scanned separately for one structural fact: does the BLOCKS
+section close every BLOCK it opens? This is not a second DXF parser. It reads
+group code 0 values, is bounded to the BLOCKS section, answers one question, and
+returns `Unknown` for binary DXF rather than guessing. `BLOCK_RECORD` in TABLES
+does not collide because the comparison is for equality.
+
+The geometry is not recoverable — once the callbacks have been dispatched there
+is nothing left to re-attribute. **The diagnostic is.** The rule this turns on is
+the same one as ADR-M6-013: when a fault cannot be repaired, it must at least be
+named, and it must be named after the thing that is actually broken.
+
+
+**Extension — a LINE with no end point is no longer invented.**
+
+libdxfrw default-initialises a missing second point to (0,0,0) and exposes no
+group-code-presence flag, so a LINE with codes 10/20 and no 11/21 arrived
+indistinguishable from a real line drawn to the origin. It imported silently: a
+phantom entity, `IMPORT OK`, and a profile that opens or branches. Spec 4 says
+nothing may be silently misinterpreted; this was the last place in M6 where
+something was.
+
+It was accepted as a limitation for two review rounds, on the recorded grounds
+that "detecting it needs a group-code-presence hook the library does not offer".
+**That reason expired the moment this ADR forced a group-code scan to exist.**
+The hook is not needed — the file states the absence directly. Two rounds of
+"cannot be fixed" turned out to mean "cannot be fixed with the tools we had
+then", and nothing re-examined it when the tools changed.
+
+Two things about the identification, both found by mutating this code rather
+than by reading it:
+
+- The phantom is matched by **both** endpoints. A real line may share a start
+  point with a phantom, and erasing genuine geometry to remove an invented
+  entity would be worse than the bug.
+- A LINE with code 11 and **no 21** becomes `(x11, 0)`, not the origin. Half a
+  second point is still no second point, and the phantom to look for is exactly
+  what the library will have built — so the scan records the synthesised end,
+  it does not assume it.
+
+Failing to match removes nothing and reports nothing, which is precisely the
+behaviour this replaces: the change cannot make any file worse.
+
+## ADR-M6-016 — An unclosed profile is a failure only when something needs it (M6)
+Status: Accepted. Narrows the scope of an M4 rule without reversing it.
+
+The Model Tree marked every sketch whose profile does not close as **Failed**,
+with a red `!` and the message "profile is not closed".
+
+That rule is right when a Pad is asking for the profile — UI spec 12 requires a
+failed feature to be identifiable from the tree with a useful reason, and
+`UI_TREE_005` has pinned it since M4. It is wrong when nothing is asking.
+
+**It was invisible until M6.** Every sketch the viewer could previously produce
+was built by a flow that closed its own profile, so the two cases never
+separated. DXF import is the first way to put arbitrary open geometry into a
+document, and the owner's *first* manual import — `line.dxf`, one line, drawn
+correctly — showed `[Skt]! line`. Nothing had failed.
+
+The cost is not cosmetic. A marker that fires after a successful operation
+teaches the user to ignore it, and then it cannot do its job when something has
+genuinely broken. A state channel is only worth having while it is trusted.
+
+So: the diagnostic is **always** offered, because a user who wonders why they
+cannot pad a sketch must be able to find out without opening a log. The
+**state** becomes Failed only when the dependency graph shows something
+downstream waiting for that profile.
+
+Both directions are pinned, by different tests: reverting to "always fail" is
+caught by `M6_UI_001`, and dropping the failure entirely is caught by M4's
+`UI_TREE_005`.
+
+The generalisable point: **this was a scope error, not a logic error.** The rule
+was correct for every case that existed when it was written. A new input path
+created a case it had never been asked about, and nothing re-derived it. That is
+the same shape as the truncated-LINE limitation retired in M6.12 — a statement
+that was true when written and was never re-read when the surroundings changed.
+
+**And no automated test could have found it.** The tree state was correct for
+every document the suite builds. It took someone opening the application and
+importing a file.

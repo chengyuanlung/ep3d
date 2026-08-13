@@ -1,0 +1,58 @@
+999
+Round 3: an ARC whose end angle parses to infinity. The raw AllFinite check
+999
+in addArc is the ONLY thing stopping it -- angles are never re-checked after
+999
+scaling because they are never scaled -- and that line had no test. Worse,
+999
+fmod(inf, 2pi) is NaN, and the old negative-form sweep guard was false on
+999
+BOTH clauses for NaN, so it offered no second line of defence.
+0
+SECTION
+2
+HEADER
+9
+$ACADVER
+1
+AC1015
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+0
+10
+0
+20
+0
+11
+10
+21
+0
+0
+ARC
+8
+0
+10
+0
+20
+0
+40
+5
+50
+0
+51
+1e+400
+0
+ENDSEC
+0
+EOF

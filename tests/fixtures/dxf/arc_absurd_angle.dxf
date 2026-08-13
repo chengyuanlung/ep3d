@@ -1,0 +1,56 @@
+999
+Re-review N1: an ARC whose end angle is 1e20 degrees -- legal DXF syntax,
+999
+finite, and libdxfrw applies no range check. The while-loop normaliser never
+999
+terminated on this, freezing the GUI thread permanently. If this test hangs,
+999
+the loop is back.
+0
+SECTION
+2
+HEADER
+9
+$ACADVER
+1
+AC1015
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+0
+10
+0
+20
+0
+11
+10
+21
+0
+0
+ARC
+8
+0
+10
+0
+20
+0
+40
+5
+50
+0
+51
+1e+20
+0
+ENDSEC
+0
+EOF

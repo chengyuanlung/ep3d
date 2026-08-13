@@ -1,0 +1,64 @@
+999
+Round 3: the ARC half of the code-210 refusal. ocs_extrusion.dxf carries a
+999
+LINE and a CIRCLE only, so deleting the ARC guard left all 50 tests green.
+999
+ADR-M6-013 says a mirrored part has identical area, volume, mass and centre
+999
+of mass -- no analytical oracle can catch this one, so the GUARD is the whole
+999
+defence, and an unguarded guard is no defence.
+0
+SECTION
+2
+HEADER
+9
+$ACADVER
+1
+AC1015
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+0
+10
+0
+20
+0
+11
+100
+21
+0
+0
+ARC
+8
+0
+10
+25
+20
+30
+40
+5
+50
+0
+51
+90
+210
+0
+220
+0
+230
+-1
+0
+ENDSEC
+0
+EOF

@@ -38,9 +38,59 @@ Functional independent review APPROVE 96/100; the UI was validated by owner
 manual validation rather than an independent UI review, per ADR-M4-016. See
 `docs/reviews/M4_CompletionReport.md`.
 
-Current target: M5 — Sketch Constraints & Dimensional Parameterization (see
-`docs/Roadmap.md`). No M5 implementation specification exists yet; the UI
-validation workflow for it is `docs/M5_UI_User_Assisted_Validation_Guide.md`.
+M5 — Sketch Constraints & Dimensional Parameterization — is complete on
+`master` (`7238548`). It needed **four** independent review rounds, and every
+one of them found defects that the previous round's fixes had introduced. Its
+owner UI validation passed; DPI scaling remains unverified at the owner's
+direction. See `docs/reviews/M5_CompletionReport.md`.
+
+M6 — DXF Import to Stable Sketch Entities — is **merged to `master` with two
+items open**, at the owner's explicit direction on 2026-08-13 so that M7 could
+start. 561/561 in Debug and Release, Gates A–I pass. What is *not* established:
+
+1. `M6.11`–`M6.14` have never been reviewed by anyone but their author. Three
+   rounds ran before them; each found defects the previous round's fixes had
+   introduced.
+2. Owner manual UI validation is **NOT EXECUTED**. The checklist is written and
+   waiting at `docs/reviews/M6_UI_UserValidation.md`. The one attempt at it
+   produced `M6.14` — a property panel showing ten labels and no values, which
+   none of the 561 tests could see, because all of them asked the model and none
+   asked the widget.
+
+Do not report either item as done because M6 is on `master`. See
+`docs/reviews/M6_CompletionReport.md`.
+
+Current target: **M7 — DXF Dimension and Constraint Reconstruction**
+(`docs/M7_SPEC.md`). Not started. Spec 37 requires the first slice to be
+**M7.1 — explicit rectangle Width/Height reconstruction** alone, on a branch
+`m7-wip` off the M6 master state.
+
+**The pattern is now the most reliable prediction this project makes.** Every
+review round since M5 has found defects introduced by the previous round's
+fixes, and in four of them the implementer's own claim that "every fix is
+mutation-verified" was false. A mutation suite written by the author of a fix
+measures the author's imagination; only a reviewer removing a line the author
+did not think to remove has ever found an unguarded fix here. Plan for a review
+round after every round of fixes, not after the implementation.
+
+**Two rules earned by that pattern, both mechanical enough to apply without
+judgement:**
+
+1. **Parallel kinds get parallel fixtures.** Every unguarded line M6 round 3
+   found was the third leg of a LINE / CIRCLE / ARC triple where only one or two
+   legs got a fixture — including in the test written for that very finding. A
+   guard added to `addLine` needs a sibling fixture exercising `addCircle` and
+   `addArc`, and the reverse. This one rule would have caught five of six
+   mechanically. It generalises past DXF: wherever the code enumerates kinds,
+   the fixtures must too.
+2. **A mutation run that cannot fail loudly proves nothing.** A killed process
+   keeps holding the test binary on Windows, the next build then fails
+   *silently*, and the stale binary is re-run — which once produced five
+   identical results and a confident "no unguarded fix". Delete the executable
+   before each rebuild, assert it exists afterward, require a completion summary
+   in the output, and keep **INCONCLUSIVE** separate from **guarded**. Never run
+   two mutating agents in one working tree; give each its own `git archive`
+   export and build directory.
 
 ## Independent Review Role
 

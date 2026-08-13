@@ -270,9 +270,16 @@ Sketch& PartDocument::addSketch(std::string name, SketchFrame frame) {
     // Checked, not ignored: registerObject returns false on a duplicate id, and
     // a silently unregistered sketch is invisible to both the recompute engine
     // and PadFeature's profile lookup (see restoreSketch).
-    const bool registered = registry_.registerObject(ref.id(), &ref);
-    (void)registered;
-    assert(registered && "sketch id collided with an existing document object");
+    // Checked in EVERY configuration, not only asserted in Debug. An assert
+    // disappears in Release, and a sketch that failed to register is in
+    // sketches_ and in the graph but invisible to the recompute engine --
+    // and removeObject would then return false and leave it behind.
+    // restoreSketch was hardened after M5; addSketch was the one path left.
+    if (!registry_.registerObject(ref.id(), &ref)) {
+        sketches_.pop_back();
+        throw std::runtime_error("addSketch: id " + std::to_string(ref.id()) +
+                                 " is already registered in this document");
+    }
     // Since M5 a Sketch is a RECOMPUTABLE node, not a bare dirty source: its
     // geometry is derived from its constraints. The engine reaches it through
     // ObjectRegistry::findRecomputable, which upcasts from the Sketch*
