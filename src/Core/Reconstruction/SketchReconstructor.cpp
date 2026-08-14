@@ -539,6 +539,12 @@ ReconstructionResult ApplyReconstruction(PartDocument& document, const Reconstru
     ReconstructionResult result;
     result.sketchId = plan.sketchId;
     result.skippedCount = plan.skipped.size();
+    // Carried before anything can fail. What the analysis DECLINED to
+    // reconstruct is the half of the report that matters most when the rest
+    // goes wrong, and a failure path that returns no diagnostics leaves the
+    // user with "it did not work" and nothing else (spec 18).
+    result.report.sketchId = plan.sketchId;
+    result.report.skipped = plan.skipped;
 
     const PlanValidation validation = ValidatePlan(plan);
     if (!validation) {
@@ -611,6 +617,22 @@ ReconstructionResult ApplyReconstruction(PartDocument& document, const Reconstru
             return result;
         }
         result.createdConstraints.push_back(id);
+
+        // Provenance, recorded HERE because this is the last moment the answers
+        // exist. One line later the constraint is an ordinary native object and
+        // nothing distinguishes what the source stated from what M7 chose.
+        ProvenanceEntry entry;
+        entry.constraintId = id;
+        entry.constraintKind = ConstraintKindName(data);
+        entry.origin = planned.origin;
+        entry.sourceRef = planned.sourceRef;
+        entry.targets = ReferencedEntities(data);
+        entry.parameterId = BoundParameterId(data);
+        if (entry.parameterId != kInvalidObjectId) {
+            const Parameter* bound = document.parameters().findById(entry.parameterId);
+            if (bound != nullptr) entry.parameterName = bound->name();
+        }
+        result.report.entries.push_back(std::move(entry));
     }
 
     result.ok = true;
@@ -620,6 +642,50 @@ ReconstructionResult ApplyReconstruction(PartDocument& document, const Reconstru
     if (result.skippedCount > 0)
         result.message += ", skipped " + std::to_string(result.skippedCount);
     return result;
+}
+
+const ProvenanceEntry* ReconstructionReport::find(SketchConstraintId id) const noexcept {
+    for (const ProvenanceEntry& entry : entries)
+        if (entry.constraintId == id) return &entry;
+    return nullptr;
+}
+
+std::size_t ReconstructionReport::countByOrigin(ReconstructionOrigin origin) const noexcept {
+    std::size_t count = 0;
+    for (const ProvenanceEntry& entry : entries)
+        if (entry.origin == origin) ++count;
+    return count;
+}
+
+std::string FormatReconstructionReport(const ReconstructionReport& report) {
+    std::string text = "Reconstruction report\n";
+    text += "  reconstructed: " + std::to_string(report.entries.size()) + " constraint(s)\n";
+    text += "    explicit in source: " +
+            std::to_string(report.countByOrigin(ReconstructionOrigin::ExplicitSource)) + "\n";
+    text += "    inferred from geometry: " +
+            std::to_string(report.countByOrigin(ReconstructionOrigin::InferredGeometric)) + "\n";
+    text += "    inferred placement: " +
+            std::to_string(report.countByOrigin(ReconstructionOrigin::InferredPlacement)) + "\n";
+
+    for (const ProvenanceEntry& entry : report.entries) {
+        text += "  - " + entry.constraintKind + " [" + ReconstructionOriginName(entry.origin) + "]";
+        if (!entry.parameterName.empty()) text += " controlled by " + entry.parameterName;
+        if (!entry.sourceRef.empty()) text += " from " + entry.sourceRef;
+        text += "\n";
+    }
+
+    // Always emitted, even when empty. A report that omits the section when
+    // nothing was skipped cannot be told from one where the question was never
+    // asked -- and "nothing was skipped" is exactly the claim a user needs to
+    // be able to trust before they rely on the result.
+    text += "  skipped: " + std::to_string(report.skipped.size()) + "\n";
+    for (const ReconstructionSkip& skip : report.skipped) {
+        text += "  - [" + std::string(ReconstructionSkipReasonName(skip.reason)) + "] " +
+                skip.detail;
+        if (!skip.sourceRef.empty()) text += " (source " + skip.sourceRef + ")";
+        text += "\n";
+    }
+    return text;
 }
 
 bool SketchAlreadyReconstructed(const PartDocument& document, ObjectId sketchId) {

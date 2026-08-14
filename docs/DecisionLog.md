@@ -2577,3 +2577,44 @@ own test: a circle centred at (-50,-50) sorts before every corner of a rectangle
 at the origin, so a rule that simply took the smallest anchor of ANY kind would
 move the Fix -- relocating every previously imported part that later gains a
 hole.
+
+---
+
+## ADR-M7-017 — Provenance is a session-scoped report, not document state (M7.4)
+Status: Accepted. This is the documented policy spec 20 requires.
+
+Spec 26 asks that the diagnostic layer be able to answer five questions: was
+this constraint explicit or inferred, which source item produced it, which
+entities does it target, which Parameter controls it, and was anything skipped.
+`ReconstructionReport` answers all five and is returned from reconstruction.
+
+It is recorded AT APPLY TIME because that is the last moment the answers exist.
+One line later the constraint is an ordinary native object, and a `Length` the
+source stated is indistinguishable from a `Length` M7 chose.
+
+**It is NOT persisted, and that is a stated limitation rather than an
+oversight.** After save and reload the document carries no DXF handle, no origin
+classification and no skip list. Pinned by a test that asserts their ABSENCE
+from the saved text, so this cannot quietly become a claim that it does persist.
+
+Why not persist it:
+
+- Spec 26 draws the line itself -- "provenance must not become runtime
+  identity" -- and the surest way to honour that is for correctness never to
+  have access to it.
+- Persisting would mean a v6 schema whose only content is advisory strings, on a
+  document format that four milestones depend on. The cost lands on the part of
+  the system with the worst failure modes, for information that changes no
+  behaviour.
+- The information is most useful exactly when it is available: at import, when
+  the user still has the drawing open and can act on "these two dimensions were
+  ambiguous".
+
+What this costs, stated plainly: a user who reopens a document six months later
+cannot ask where a constraint came from. If that turns out to matter, the fix is
+a v6 schema addition, and nothing in the current design blocks it -- the report
+is already a plain value type with no pointers into the document.
+
+The failure path carries the report too. What the analysis DECLINED is the half
+that matters most when the rest goes wrong, and "it did not work" with no
+diagnostics is the least useful failure there is.

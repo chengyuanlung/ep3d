@@ -134,6 +134,57 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
 
 // --- Application (spec 16) --------------------------------------------------
 
+// --- Provenance (spec 26) ---------------------------------------------------
+//
+// One record per constraint reconstruction created, answering the five
+// questions spec 26 requires the diagnostic layer to be able to answer:
+// was it explicit or inferred, which source item produced it, which native
+// entities does it target, which Parameter controls it, and -- through
+// `skipped` on the report -- was anything dropped.
+//
+// This exists because after application the answers are UNRECOVERABLE. A
+// Length the source stated and a Length M7 chose are the same native object,
+// and no amount of inspecting the document afterwards can separate them.
+//
+// PROVENANCE IS NOT IDENTITY. Every field here is either a native id (which is
+// identity, and is authoritative on its own) or a human-facing string. Nothing
+// resolves, matches or persists anything by this record, and deleting the whole
+// report would leave the document exactly as correct as it was.
+struct ProvenanceEntry {
+    SketchConstraintId constraintId{kInvalidSketchConstraintId};
+    std::string constraintKind;
+    ReconstructionOrigin origin{ReconstructionOrigin::ExplicitSource};
+    // Which source item produced it -- a DXF handle, or the rule that fired.
+    // Diagnostic only (spec 7).
+    std::string sourceRef;
+    std::vector<SketchEntityId> targets;
+    // kInvalidObjectId for the non-dimensional kinds. The name is a snapshot
+    // for display; the id is what means anything.
+    ObjectId parameterId{kInvalidObjectId};
+    std::string parameterName;
+};
+
+struct ReconstructionReport {
+    ObjectId sketchId{kInvalidObjectId};
+    std::vector<ProvenanceEntry> entries;
+    std::vector<ReconstructionSkip> skipped;
+
+    const ProvenanceEntry* find(SketchConstraintId id) const noexcept;
+    std::size_t countByOrigin(ReconstructionOrigin origin) const noexcept;
+    // Everything the source stated outright, as opposed to what M7 chose. The
+    // distinction spec 3 says must never be silently mixed.
+    std::size_t explicitCount() const noexcept {
+        return countByOrigin(ReconstructionOrigin::ExplicitSource);
+    }
+};
+
+// A human-readable rendering, for the UI's diagnostic panel and for logs.
+//
+// Skipped items are listed even when nothing was skipped ("none"), because a
+// report that simply omits the section when it is empty cannot be told from one
+// where the question was never asked.
+std::string FormatReconstructionReport(const ReconstructionReport& report);
+
 struct ReconstructionResult {
     bool ok{false};
     ObjectId sketchId{kInvalidObjectId};
@@ -143,6 +194,7 @@ struct ReconstructionResult {
     std::vector<SketchConstraintId> createdConstraints;
     std::size_t skippedCount{0};
     std::string message;
+    ReconstructionReport report;
 
     explicit operator bool() const noexcept { return ok; }
 };
