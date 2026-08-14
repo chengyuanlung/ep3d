@@ -722,6 +722,41 @@ TEST(M7ReleaseGate, GATE_H_ConflictIsExplicitCommitsNothingCorruptAndRecovers) {
 
 // --- Selective recompute (spec 21, Gate K) ----------------------------------
 
+TEST(M7ReleaseGate, GATE_K_NoParameterEditEverReRunsReconstruction) {
+    GateFixture fx;
+    ASSERT_TRUE(fx.reconstruction) << fx.reconstruction.message;
+    ASSERT_TRUE(fx.document.recompute().success);
+
+    const std::size_t parametersAfterReconstruction = fx.document.parameters().items().size();
+    const std::size_t constraintsAfterReconstruction = fx.sketch().constraints().size();
+
+    // Reconstruction is an EXPLICIT ONE-SHOT OPERATION, not a graph node. It is
+    // not scheduled, cannot be dirtied, and no recompute can invoke it -- which
+    // is the architectural reason spec 23's "PadLength does not re-run
+    // reconstruction" holds. Asserted by its observable consequence, because
+    // "cannot happen by construction" is exactly the kind of claim this project
+    // has repeatedly found to be false: if reconstruction ran again, Parameters
+    // and constraints would appear.
+    const ObjectId padLength = fx.parameterNamed("PadLength");
+    ASSERT_NE(padLength, kInvalidObjectId);
+    ASSERT_TRUE(fx.document.setParameterValue(padLength, 35.0));
+    ASSERT_TRUE(fx.document.recomputeFrom(padLength).success);
+    EXPECT_EQ(fx.document.parameters().items().size(), parametersAfterReconstruction);
+    EXPECT_EQ(fx.sketch().constraints().size(), constraintsAfterReconstruction);
+
+    // ...and the pad length DID take effect: 100 x 50 x 35.
+    ExpectRel(fx.document.massProperties().volumeMm3, 175000.0, kVolumeRelTol);
+
+    // An unrelated Parameter touches nothing at all.
+    Parameter& unrelated = fx.document.addParameter("Unrelated", 3.0, UnitType::Millimeter);
+    const double before = fx.document.massProperties().volumeMm3;
+    ASSERT_TRUE(fx.document.setParameterValue(unrelated.id(), 9.0));
+    ASSERT_TRUE(fx.document.recomputeFrom(unrelated.id()).success);
+    EXPECT_EQ(fx.sketch().constraints().size(), constraintsAfterReconstruction);
+    ExpectRel(fx.document.massProperties().volumeMm3, before, kVolumeRelTol);
+    EXPECT_NEAR(fx.measuredWidth(), 100.0, kGeometryTolMm);
+}
+
 TEST(M7ReleaseGate, GATE_K_DensityDoesNotResolveTheSketch) {
     class CountingSolver final : public ISketchSolver {
     public:
