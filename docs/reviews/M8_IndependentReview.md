@@ -1,0 +1,120 @@
+# M8 Independent Review — Round 1 (Consolidated)
+
+**Reviewed commit:** `880e6cc` (m8-wip head at review time).
+**Method:** three reviewers, disjoint partitions (spec 33's protocol, as in M7),
+each in an isolated `git archive` export at `D:/Program2/EP3D/m8review/{r1,r2,r3}`
+with its own configured build. Each was instructed to treat
+`M8_SelfValidationReport.md` as claims, re-derive oracles independently, and
+run its own mutations with delete-binaries-before-rebuild discipline.
+
+| Reviewer | Partition | Decision | Score |
+|---|---|---|---|
+| R1 | feature chain semantics / geometry | **REQUEST CHANGES** | 73/100 |
+| R2 | identity / persistence / transactions | **REQUEST CHANGES** | 70/100 |
+| R3 | recompute / evidence quality / mutation audit | APPROVE WITH MINOR CHANGES | 88/100 |
+
+**Round verdict: REQUEST CHANGES.** Two Criticals, both demonstrated by
+execution. Fix status is tracked in the register below; the fix commit(s) are
+on `m8-wip` after `880e6cc`.
+
+**What survived attack (the honest-negative side, all three reviewers):**
+every volume oracle re-derived independently and confirmed — including
+GATE_CB's 320π, the item the self-report flagged as least confident (derived
+two more times, by two reviewers, both matching). The 17-mutation table is
+honest: R3 re-ran 10 of 17 himself, 10 CONFIRMED / 0 REFUTED, including the
+MUT6 "unreachable through the engine" claim, which R3 attacked via its
+strongest candidate path and confirmed. Headline numbers (737 ctest both
+configs, 406/406 single-process both configs, Release command-line proof)
+independently reproduced by R2 and R3. The C2 registration-order net works
+(R3 reintroduced the violation: 65 tests poisoned, WholeSuite entry red,
+per-test ctest green — exactly the failure the net exists to catch).
+R2's 19-probe adversarial battery: 13 held, 6 failed — all six one defect
+(C-R2-1). Dress-then-cut (Pocket on a Fillet base) composes correctly to
+1e-6 (R1, untested capability, now proven by probe).
+
+---
+
+## Findings register
+
+IDs keep each reviewer's numbering. "Demonstrated" = by execution in the
+reviewer's export unless marked inspection.
+
+### Critical
+
+| ID | Finding | Status |
+|---|---|---|
+| R1-C1 | **A diamond — two features consuming the SAME base — is silently accepted**: both pockets cut the original pad, mass silently follows the last-wired consumer, the viewer shows two overlapping solids, and the file round-trips (save/load check only "earlier in same body", never "not already consumed"). Violates spec §5's chain rule with no diagnostic; M9 history would inherit it. | FIXED |
+| R2-C1 | **`savePartDocument` writes files its own loader refuses — six ways, all four new M8 types** (ADR-M3-008's named worst class, fourth recurrence): `validateSaveable` misses Pocket depth-parameter and sketch, Revolve angle-parameter, sketch and axis-entity, and Fillet/Chamfer size-parameter references. Sharpest: deleting any sketch line that happens to be a revolve axis (A5) silently poisons every future save. All six demonstrated save-OK → load-refused through the public facade. | FIXED |
+
+### Major
+
+| ID | Finding | Status |
+|---|---|---|
+| R1-M1 | ADR-M8-005 and RevolveFeature.h claim the axis MAY be a profile member ("canonical first cylinder") — but the unconditional exclusion breaks the loop and the case fails. ADR asserting an untested (and untrue) capability — M7's penalized defect class. | FIXED (capability implemented + gated) |
+| R1-M2 | Cross-body consumption: legal at creation, presenter's consumed-set is per body → base AND consumer both display (transient state; save already refuses). | FIXED (creation refused; presenter set doc-wide) |
+| R1-M3 | Dress-feature chain semantics structurally untested: base→dress edge deleted, `consumedSolidId()`→invalid — all tests stay green (2 UNGUARDED mutations). No upstream-edit or tail-display test for a dress chain. | FIXED (GATE_FE, GATE_FF) |
+| R1-M4 | Chamfer's `BRepCheck_Analyzer` unverified: analyzer deleted from `chamferAllEdges` → all green. Kernel layer duplicates the guard per verb; F6 pinned only the fillet's copy. | FIXED (shared helper + chamfer refusal test) |
+| R1-M5 | Sketch→Pocket edge unguarded: deleted → all green. No test edits a pocket's sketch. | FIXED (GATE_KC) |
+| R1-M6 | Spec §8 adversarial rows absent at document level (behavior correct by probe; coverage missing): same-sketch pocket, invalid base id, depth at/below floor, open pocket profile. | FIXED (tests added) |
+| R2-M1 | Core suite blind to the chain edge and to the pocket half of the save-side base rule — both killed only by the OCCT-linked Integration suite; a Core-only build has zero failing test for ADR-M8-001's central invariant. | FIXED (Core twins added) |
+| R2-M2 | Loader accepts a chain base that is not a solid feature (e.g. a Placeholder), then `wire*` silently discards the failed `addDependency` `GraphResult` — the exact unrepresentable state ADR-M8-001 promises. Mitigations hold (loud recompute failure, no crash, symmetric save) but acceptance and dropped edge are silent, unpinned. | FIXED (loader refuses; wire throws; both pinned) |
+| R3-M1 | GATE_RC does not discriminate selectivity: under an engine degraded to global-recompute, GATE_D and GATE_FB go red but GATE_RC stays green (fixture has no constraints and no second counter-bearing node). Same class as M7 review's Gate K finding. | FIXED (GATE_RC2) |
+| R3-M2 | m8-chain selftest panel rows assert only non-emptiness; hard-coding `displayedPropertyValue` to `"42"` leaves the smoke green (caught only one step removed by DXF smokes). Same pattern the same file already fixed for import counts. | FIXED (exact values) |
+
+### Minor
+
+| ID | Finding | Status |
+|---|---|---|
+| R1/R2-m | `featuresReferencingSketch` enumerates only `PadFeature`; its header contract is false for Pocket/Revolve sketches. | FIXED |
+| R2-m1 / R3-m2 | F5's guard misattributed: M8_SER_202 is swap-blind (symmetric swap keeps counts 1/1); the kill is M8_SER_201's per-id `dynamic_cast` + GATE_FD. Self-report corrected; 202 strengthened to per-id type mapping. | FIXED |
+| R2-m2 | Schema version is a ceiling, not a content gate (v6-stamped file with v8 records loads). Defensible, was undocumented. | DOCUMENTED |
+| R2-m3 | `M5_SER_001_SchemaVersionIsFive` name rot (asserts 8). | FIXED |
+| R2-m5 | Self-report's `removeObject` limitation wording wrong (conservative direction): mass is detached and invalidated, not left dangling; real limitation is no re-point to the new tail. | CORRECTED |
+| R2-m6 / R3-m3 / R1 | "737/737" counts one permanently-Skipped fresh-process child; 736 execute. Same accounting nit M7 was corrected for. | CORRECTED |
+| R3-m1 | Persisted-failure barrier credited to GATE_E2 (ADR-M8-004, PocketFeature comment); actually pinned only by unit-level `DependencyGraphTests.StaleFailureGates*`. | FIXED (GATE_E3 + docs corrected) |
+| R1-m | `wire*` helpers discard `GraphResult` (subsumed by R2-M2). | FIXED |
+| R1-m | `validateSaveable` chain walk uses concrete-type `dynamic_cast` enumeration instead of `consumedSolidId()` capability. | FIXED (capability used) |
+| R1-m | GATE_CB implicitly relies on OCCT ignoring full-revolution seam edges; uncommented. | COMMENTED |
+| R1-m | Empty-shape legal-cut result (volume 0, mass valid) matches ADR-M8-002 but unpinned. | PINNED |
+
+### Harness lesson (R1 and R3, independently)
+
+Timestamp-preserving restores (`Copy-Item`, `cp -p`) make MSBuild skip
+recompiles — a **second flavor of the stale-binary hazard**: the source is
+restored but the object file still carries the mutation (or vice versa). Both
+reviewers hit it, both detected it (R3: two mutations with byte-identical
+failure lists; R1: a probe surviving in a binary after source restore), both
+re-ran affected cycles with forced-touch restores. AGENTS.md rule 2 extended.
+
+---
+
+## Reviewer mutation records
+
+R1 (5): base→dress edge **UNGUARDED**; Sketch→Pocket edge **UNGUARDED**;
+chamfer analyzer **UNGUARDED**; dress `consumedSolidId()`→invalid
+**UNGUARDED**; BuildProfile exclusion made positional **guarded** (GATE_RB2
+direct).
+
+R2 (9): loader pocket earlier-base KILLED (M8_SER_003); loader dress
+earlier-base KILLED (M8_SER_203); save-side earlier-base block KILLED
+(M8_SER_204) — but pocket-only branch: Core **406/406 green**, killed only by
+Integration GATE_H; axis-of-sketch check KILLED (M8_SER_102); base→pocket
+edge: Core green, killed by 4 integration gates; dress-size-into-depth-slot
+KILLED (M8_SER_201); restore dispatch swap KILLED by M8_SER_201 (not 202);
+schema pin 8→7 KILLED by 5 tests — no pin vacuous.
+
+R3 (10 of the author's 17 re-run): all verdicts **CONFIRMED** as recorded,
+including MUT6's documented-unreachable (attacked via stale-base path, held);
+plus his own: engine degraded to global recompute → GATE_D and GATE_FB red,
+GATE_RC green (R3-M1); `displayedPropertyValue` hard-coded → m8-chain smoke
+green (R3-M2); persisted-failure barrier deleted → integration green, 3 unit
+tests red (R3-m1); registration-order violation reintroduced → WholeSuite
+entry red, per-test ctest green.
+
+---
+
+## Standing blocks (unchanged by this round)
+
+M8 close remains blocked on: **M7 round 2 review**, **M7 owner UI
+validation**, and the two inherited M6 items (M8 spec §2). Fixing this
+round's findings does not close M8; it makes M8 eligible for round 2.
