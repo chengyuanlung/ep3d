@@ -7,6 +7,7 @@
 
 #include "Core/Document/PartDocument.h"
 #include "Core/Physics/MassProperties.h"
+#include "Core/Sketch/Profile.h"
 #include "Core/Sketch/Sketch.h"
 #include "Core/Feature/PadFeature.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
@@ -301,7 +302,15 @@ int main(int argc, char** argv) {
     // This is the half of the workflow no unit test reaches: the panel commit,
     // the recompute, the redisplay and the status message.
     QString importReport;
-    if (importPath != nullptr) importReport = window.importDxfFile(QString::fromUtf8(importPath));
+    bool importedSketchIsClosed = false;
+    if (importPath != nullptr) {
+        importReport = window.importDxfFile(QString::fromUtf8(importPath));
+        // Whether the import yielded an extrudable profile, which decides how
+        // many solids the viewer should be showing.
+        if (!model->document.sketches().empty())
+            importedSketchIsClosed =
+                static_cast<bool>(BuildProfile(*model->document.sketches().back()));
+    }
 
     // Selection scenarios need the window to exist first.
     if (scenario != nullptr && std::strcmp(scenario, "pad-selected") == 0)
@@ -324,10 +333,19 @@ int main(int argc, char** argv) {
         if (window.width() < 800 || window.height() < 500) fail("main window is undersized");
 
         // The document produced a solid and the viewer is willing to show it.
+        //
+        // TWO when a file was imported: the demo model's own Pad, plus the one
+        // the import now builds on the imported sketch. That second solid is
+        // the point -- until M7's review, importing produced no solid at all,
+        // so editing a reconstructed Width changed nothing the user could see
+        // (spec 27 steps 9-10). A closed profile is required for it, so a
+        // drawing that does not close still yields just the one.
         const Sample sampleBuilt = SampleFromName(sampleName);
+        const std::size_t expectedSolids =
+            (importPath != nullptr && importedSketchIsClosed) ? 2u : 1u;
         if (sampleBuilt != Sample::FailedProfile && sampleBuilt != Sample::M5Conflict &&
-            presenter.displayableSolids().size() != 1)
-            fail("expected exactly one displayable solid");
+            presenter.displayableSolids().size() != expectedSolids)
+            fail("the viewer is not showing the expected number of solids");
 
         // Mass properties are current and match the analytical oracle, so the
         // status bar cannot be showing stale or wrong numbers. The expected

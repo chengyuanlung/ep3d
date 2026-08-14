@@ -2486,10 +2486,19 @@ special-cased — the release fixture's design intent is unchanged, which
 Generalising means deciding what NOT to say, and each of these is a case where
 a rule that fired would be worse than one that stayed quiet:
 
-- **A line inside BOTH axis tolerances gets neither.** It is shorter than the
-  tolerance can resolve, so its direction is noise. Picking one axis is a coin
-  toss; asserting both is a contradiction the solver would report as
-  Conflicting on geometry whose only fault is being small.
+- **A line inside BOTH axis tolerances gets neither.** **[CORRECTED after
+  independent review.]** The justification originally given here -- "it is
+  shorter than the tolerance can resolve, so its direction is noise" -- is
+  wrong. `IsHorizontal`/`IsVertical` divide the perpendicular offset by the
+  LENGTH, so the test is scale-invariant: a 1e-4 mm line is exactly as
+  resolvable as a 100 mm one. A reviewer sweept 14,400 valid lines over 3,600
+  angles and four length scales and **none** received both axes; satisfying
+  both needs a tolerance of 45 degrees. The branch is therefore unreachable
+  dead code under any sane tolerance, kept only as a guard against someone
+  configuring one, and `ALineInsideBothAxisTolerancesGetsNeither` passes for an
+  unrelated reason (its line is at 45 degrees). If the rule the original
+  sentence DESCRIBED is wanted -- distrust the direction of a line shorter than
+  the coincidence tolerance -- it is not implemented anywhere.
 - **A curve whose own two endpoints cluster together is not made coincident
   with itself.** A closed or near-closed arc says nothing by being tied to
   itself, and the solver would carry a residual that is identically zero.
@@ -2577,6 +2586,17 @@ own test: a circle centred at (-50,-50) sorts before every corner of a rectangle
 at the origin, so a rule that simply took the smallest anchor of ANY kind would
 move the Fix -- relocating every previously imported part that later gains a
 hole.
+
+**[CORRECTED after independent review.]** This ADR also claimed the
+lexicographic min-search AMONG circle centres "has its own test". It did not.
+The test named above covers the endpoint-preferred-over-centre ordering, which
+is a different rule; a reviewer deleted the min-search and nothing failed, and
+the Fix then followed entity vector position -- a persistent placement decision
+made by an array index, which ADR-M4-004 forbids. `M7_REV_M9` now pins it.
+
+The general lesson, since this is the second ADR in this milestone to assert a
+test that did not exist: a sentence claiming coverage is worth nothing unless
+someone has deleted the line and watched something go red.
 
 ---
 

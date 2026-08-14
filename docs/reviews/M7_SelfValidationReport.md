@@ -136,6 +136,7 @@ a changed test is where a regression hides:
 | Radius | **Yes** | `Radius` + Parameter |
 | Diameter | **Yes** | `Diameter` + Parameter (holds the diameter; the constraint halves it) |
 | Angular | **No** | reported `UnsupportedKind` |
+| **Distance (point-to-point)** | **No** — **[ADDED after independent review]** | Spec 3 lists it under REQUIRED and spec 12 gives it a subsection. No code path constructs a `DistanceConstraint`. In practice a linear dimension whose two definition points are not both ends of ONE line -- across two parallel sides, or corner to corner -- is skipped `NoTargetGeometry`. The gap was real; its absence from this table was the defect, because silence reads as coverage. |
 | Ordinate, Leader, GD&T, tolerance | **No** | reported as unsupported entities by the M6 reader |
 
 | Geometric relation | Supported | Rule |
@@ -252,6 +253,10 @@ masking lives.
   rather than on the initial solve.
 - **Equal / Parallel / Perpendicular / Tangent / Concentric are not
   reconstructed.** Optional in spec 3, not promoted.
+- **Point-to-point `Distance` is not reconstructed**, though spec 3 lists it as
+  required. A dimension spanning two different entities is skipped with
+  `NoTargetGeometry` rather than becoming a `Distance`. Deferred, and now stated
+  rather than left silent.
 - **One Fix per sketch.** A drawing of several disconnected shapes has one
   anchored and the rest free.
 - **`INSERT` is still not expanded** (inherited from M6), so a block-based

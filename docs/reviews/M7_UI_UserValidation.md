@@ -87,6 +87,15 @@ means reconstruction read the dimensions and the solver applied them.
 | B3 | No modal dialog appeared | |
 | B4 | The solid **visibly widens**, promptly | |
 | B5 | Volume becomes **120000 mm³** | |
+
+> **B4/B5 were unrunnable when this checklist was written**, and that was a
+> defect in the checklist. The viewer never extruded the imported sketch, so
+> editing a reconstructed Width re-solved the sketch correctly while the 3D view
+> and the volume readout went on describing an unrelated demo box. Fixed after
+> independent review; verified in the running application, where the edit now
+> gives **Volume 120000.0 mm³, Mass 0.3240 kg, COM (60.00, 25.00, 10.00)** — the
+> centre of mass moving from x=50 to x=60 is what proves it is the imported box
+> and not the demo one.
 | B6 | Status stays **Solved**, DOF stays **0** | |
 | B7 | The viewer never shows the old shape while claiming it is current | |
 | B8 | Change **Height 50 → 80**. Volume becomes **192000 mm³** | |

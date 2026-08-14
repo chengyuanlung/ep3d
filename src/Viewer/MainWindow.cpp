@@ -6,6 +6,9 @@
 #include "Viewer/DocumentOutline.h"
 #include "Viewer/DocumentPresenter.h"
 #include "Core/Import/SketchImporter.h"
+#include "Core/Sketch/Profile.h"
+#include "Core/Sketch/Sketch.h"
+#include "Core/Body/Body.h"
 #include "Import/Dxf/DxfReader.h"
 #include "Viewer/OcctViewWidget.h"
 
@@ -609,6 +612,44 @@ QString MainWindow::importDxfFile(const QString& path) {
         ReconstructSketch(*document_, imported.sketchId, read.geometry.dimensions);
     if (reconstruction) reconstructionReports_[imported.sketchId] = reconstruction.report;
 
+    // Solve FIRST, then extrude.
+    //
+    // Ordering is not incidental here. At import time the drawn corners still
+    // miss by up to the coincidence tolerance -- that is the whole point of
+    // reconstruction -- and BuildProfile uses the model's much tighter 1e-6 mm
+    // connectivity tolerance, so the profile is still OPEN. Checking it before
+    // the solve silently created no Pad at all, and the viewer went on showing
+    // the previous solid. It took running the application to see that; the
+    // profile check looked obviously correct.
+    onRecomputeRequested();
+
+    // EXTRUDE IT, so the user can actually see the thing they imported.
+    //
+    // Without this the shell imports a sketch, reconstructs its dimensions and
+    // then goes on displaying whatever solid was already there -- so editing a
+    // reconstructed Width re-solves the sketch correctly while the 3D view and
+    // the volume readout describe something else entirely. Spec 27 steps 9 and
+    // 10 did not happen for an imported file. No automated test could see it:
+    // every test wires its own Pad to the imported sketch, which is exactly
+    // what the application did not do.
+    //
+    // Only when the sketch actually yields a closed profile: an open or
+    // multi-loop import is a legal state, and failing the import over it would
+    // be worse than showing nothing.
+    if (const Sketch* importedSketch = document_->findSketch(imported.sketchId)) {
+        if (BuildProfile(*importedSketch)) {
+            Body* body = document_->bodies().empty() ? &document_->addBody("Body001")
+                                                     : document_->bodies().front().get();
+            const Parameter* existing = document_->parameters().findByName("PadLength");
+            const ObjectId lengthId =
+                existing != nullptr
+                    ? existing->id()
+                    : document_->addParameter("PadLength", 20.0, UnitType::Millimeter).id();
+            document_->addPadFeature(*body, name.toStdString() + "_Pad", imported.sketchId,
+                                     lengthId);
+        }
+    }
+
     // The imported sketch is an ordinary document object, so the ordinary
     // refresh path shows it: recompute, then rebuild tree, panel and view.
     onRecomputeRequested();
@@ -622,12 +663,14 @@ QString MainWindow::importDxfFile(const QString& path) {
                        .arg(reconstruction.createdParameters.size());
     if (reconstruction.skippedCount > 0)
         message += QStringLiteral(" [%1 not reconstructed]").arg(reconstruction.skippedCount);
-    if (imported.skippedCount > 0) {
-        // Skipped entities are reported in the status bar rather than only in a
-        // log: a user who cannot see that something was dropped will assume
-        // nothing was.
-        message += QStringLiteral(" [%1 skipped]").arg(imported.skippedCount);
-    }
+    // The IMPORT's own skip count is deliberately NOT appended here.
+    //
+    // Skipped entities must be visible -- a user who cannot see that something
+    // was dropped will assume nothing was -- and they are: SketchImporter's
+    // message already ends with "; skipped N", which `imported.message` carries
+    // above. Appending "[N skipped]" printed the same number a second time, and
+    // M7 made that conspicuous by adding a third bracketed clause between them.
+    // Found by reading the status bar in the running application.
     statusLeft_->setText(message);
     statusLeft_->setToolTip(message);
     return message;

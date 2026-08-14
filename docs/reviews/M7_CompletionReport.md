@@ -1,18 +1,31 @@
 # M7 Completion Report — DXF Dimension and Constraint Reconstruction
 
-> **STATUS: FUNCTIONALLY COMPLETE — NOT COMPLETE.**
+> **STATUS: REQUEST CHANGES — round 1 complete, round 2 required.**
 >
-> All ten implementation slices are delivered, Gates A–L pass, and 668/668 tests
-> pass in Debug and Release. **Two of spec 36's conditions are unmet**, and
-> neither can be closed by more of my own testing:
+> Independent review round 1 ran three partitioned reviewers per spec 33. All
+> three returned `REQUEST CHANGES` at **71/100**, and two reached the same
+> Critical from opposite directions.
 >
-> - **Independent review: NOT EXECUTED.** Spec 33 requires three partitioned
->   reviewers. Nobody but the author has read this code.
-> - **Owner manual UI validation: NOT EXECUTED.** The checklist is written and
->   waiting at `M7_UI_UserValidation.md`, every row blank.
+> Of **30 guards** the reviewers deliberately removed, **11 were caught by no
+> test.** My own nine mutations touched none of those eleven — Reviewer 3
+> re-ran all nine and confirmed 9/9, so the table was honest, it was simply
+> aimed where I was already looking.
 >
-> Two items inherited from M6 are also still open: `M6.11`–`M6.14` were never
-> reviewed, and M6's own owner UI validation was never run.
+> **Two claims in the self-validation report were false**: "668/668 in Debug and
+> Release" was true under `ctest` only (665/668 in a single-process run), and
+> mutation 8 was credited with guarding Gate J against a skipping child, which
+> it does not. Both corrected in place.
+>
+> **All four Criticals and all fourteen Majors are now fixed and
+> mutation-verified**, in five commits. What remains before M7 can close:
+>
+> - **Round 2 review: NOT EXECUTED.** This project has never had a review round
+>   that did not find defects introduced by the previous round's fixes. Round 1
+>   changed a great deal.
+> - **Owner manual UI validation: NOT EXECUTED.** `M7_UI_UserValidation.md`,
+>   every row blank. Its Test B is now actually runnable — see below.
+> - Two items inherited from M6: `M6.11`–`M6.14` were never reviewed, and M6's
+>   own owner UI validation was never run.
 >
 > M7 is **not declared complete here.**
 
@@ -36,7 +49,13 @@ native parametric model.
 | M7.7 | `e7cbc6a` | persistence, source independence, a real fresh process |
 | M7.8 | `ad078e9` | the workflow in the running application |
 | M7.9 | `d4a5bd3` | Gate K completion, self-validation report |
-| M7.10 | *this* | owner checklist, completion report |
+| M7.10 | `264eba3` | owner checklist, completion report |
+| review | `e6821ab` | three reviewers, `REQUEST CHANGES`, two false claims corrected |
+| fix 1 | `1f9448c` | C1, C3, C4, M1, M7, M12 + five previously untested rules |
+| fix 2 | `d20050a` | C2 save-cap, and five WholeSuite ctest entries |
+| fix 3 | `05d64e5` | UI evidence now discriminates (M2, M3, M4) |
+| fix 4 | `531f608` | Gate J proof-of-work, counter-based Gate K, Gate H stale state |
+| fix 5 | *this* | the viewer extrudes the imported sketch; doc corrections |
 
 **The architecture in one line:** DXF → M6 parser → format-neutral geometry
 *and annotation* → native Sketch → M7 analysis → `ReconstructionPlan` →
@@ -80,8 +99,10 @@ an implementation that reconstructed nothing would pass every assertion.
 | `ParametricCADKernelOcctTests` | 47 | 47 |
 | Viewer smoke (ctest) | 13 | 13 |
 
-**668/668 in Debug and Release**, with all 668 Release command lines naming
-`build\Release\` and none naming `build\Debug\`. **107 tests added.**
+**690/690 in Debug and Release** after round 1's fixes, plus **395/395 in a
+single-process run** of the Core binary — the number the first report got wrong.
+Five new `WholeSuite_*` ctest entries run each binary once, unfiltered, so
+single-process state leakage can never again be invisible.
 
 ---
 
@@ -165,6 +186,10 @@ radius-**30** circle. If it gives radius 60, that is a Critical.
 - Provenance is not persisted (ADR-M7-017) — deliberate, documented, pinned by a
   test asserting its absence from the saved file.
 - Angular dimensions are not reconstructed.
+- **Point-to-point `Distance` is not reconstructed**, though spec 3 lists it as
+  required. A dimension spanning two different entities is skipped with a
+  diagnostic. Deferred; named here because independent review found the gap was
+  invisible rather than merely open.
 - Equal / Parallel / Perpendicular / Tangent / Concentric are not reconstructed
   (optional in spec 3, not promoted by ADR).
 - One Fix per sketch: a drawing of several disconnected shapes has one anchored
