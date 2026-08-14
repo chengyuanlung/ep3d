@@ -426,3 +426,8 @@ TEST(M7_REV_M13, ALineJustOutsideTheVerticalToleranceIsNot) {
 }
 
 } // namespace
+
+// C2's regression test lives in tests/SerializationTests.cpp, inside
+// GeneratorLimitTest. It has to advance the shared ObjectId generator past the
+// cap to reproduce the defect, which poisons every test registered after it --
+// putting it here failed 14 of them, reintroducing the exact bug it pins.

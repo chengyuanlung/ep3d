@@ -921,4 +921,31 @@ TEST(GeneratorLimitTest, AdvancePastMaxUint64DoesNotWrapGenerator) {
     EXPECT_GT(next2, next1) << "ids stopped increasing after AdvancePast(max)";
 }
 
+// The other half of the same hazard, and it belongs in THIS suite for the same
+// reason: it must leave the generator past the cap to mean anything.
+//
+// The counter surviving is only half the contract. Every id issued after that
+// point is ABOVE what the loader accepts, so a save that succeeds produces a
+// file that can never be opened -- independent review found
+// `ASSERT_TRUE(savePartDocument(...))` passing and the very next
+// `loadPartDocument` refusing the bytes it had just written. ObjectId.h claimed
+// "2^63 organic allocations of headroom"; the SAVABLE headroom is zero.
+//
+// validateSaveable now refuses, turning silent data loss into a reported error.
+TEST(GeneratorLimitTest, SavingIsRefusedOnceTheGeneratorHasPassedTheCap) {
+    ObjectIdGenerator::AdvancePast(kMaxObjectId);
+
+    PartDocument document{"beyondTheCap"};
+    Sketch& sketch = document.addSketch("s");
+    sketch.addLine(Vec2{0, 0}, Vec2{100, 0});
+    ASSERT_GT(document.id(), kMaxObjectId);
+
+    std::ostringstream out;
+    const SaveResult saved = savePartDocument(document, out);
+
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("could never be loaded back"), std::string::npos)
+        << saved.message;
+}
+
 } // namespace

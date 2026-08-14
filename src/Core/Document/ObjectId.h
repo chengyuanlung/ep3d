@@ -7,10 +7,20 @@ namespace paramcad {
 
 using ObjectId = std::uint64_t;
 constexpr ObjectId kInvalidObjectId = 0;
-// Largest id a restore path may inject (2^63 - 1). AdvancePast clamps to this
-// value, so restored ids can push the counter to at most 2^63 -- it can never
-// wrap to kInvalidObjectId and still leaves 2^63 organic allocations of
-// headroom. Schema v1 rejects persisted ids above this cap.
+// Largest id a restore path may inject, and the largest the SERIALIZER will
+// accept (2^63 - 1). AdvancePast clamps to this value, so restored ids can push
+// the counter to at most 2^63 and it can never wrap to kInvalidObjectId.
+//
+// An earlier version of this comment claimed the clamp "still leaves 2^63
+// organic allocations of headroom". That was false in the way that matters: the
+// counter can go on issuing ids past the cap, but every one of them is ABOVE
+// what the loader accepts, so the SAVABLE headroom is zero. A process that
+// restores an id of 2^63-1 thereafter produces documents that save cleanly and
+// can never be opened again.
+//
+// `validateSaveable` now refuses such a save outright, which converts silent
+// data loss into a reported failure. It does not create headroom -- there is
+// none to create -- and a process in that state must be restarted.
 constexpr ObjectId kMaxObjectId = 0x7FFF'FFFF'FFFF'FFFF;
 
 class ObjectIdGenerator {

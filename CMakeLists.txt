@@ -404,7 +404,27 @@ if(PARAMCAD_BUILD_TESTS)
     #
     # PRE_TEST defers enumeration to ctest time and emits per-config
     # _include-<CONFIG>.cmake files, so -C selects the binary it names.
+
+    # WHOLE-SUITE runs, one process per binary, in ADDITION to the per-test
+    # registrations below.
+    #
+    # gtest_discover_tests gives every test its own process, which is what makes
+    # `ctest -C Release` honest about which binaries it invokes -- but it also
+    # makes any state one test leaks into another INVISIBLE. M7 registered its
+    # files after the test that advances the shared ObjectId generator past its
+    # cap; three M7 persistence tests then ran against a poisoned generator and
+    # could not save. ctest said 668/668. A direct run of the binary said
+    # 665/668, in both configurations, and independent review found it.
+    #
+    # One extra test per binary closes that hole permanently, and costs one
+    # process each.
+    function(paramcad_add_whole_suite_test target)
+        add_test(NAME WholeSuite_${target} COMMAND ${target})
+        set_tests_properties(WholeSuite_${target} PROPERTIES TIMEOUT 600)
+    endfunction()
+
     gtest_discover_tests(ParametricCADCoreTests DISCOVERY_MODE PRE_TEST)
+    paramcad_add_whole_suite_test(ParametricCADCoreTests)
 
     # Solver test suite (M5). Built only when the solver target exists, and it
     # links ParametricCADSolver rather than Eigen -- if a test needed Eigen
@@ -421,6 +441,7 @@ if(PARAMCAD_BUILD_TESTS)
             target_compile_options(ParametricCADSolverTests PRIVATE /utf-8)
         endif()
         gtest_discover_tests(ParametricCADSolverTests DISCOVERY_MODE PRE_TEST)
+        paramcad_add_whole_suite_test(ParametricCADSolverTests)
     endif()
 
     # OCCT-linked test suite (M3-KERNEL-*, Mass, Inertia, real-geometry
@@ -454,6 +475,7 @@ if(PARAMCAD_BUILD_TESTS)
         # ParametricCADCoreTests. The DLL argument below is why this suite
         # needed it FIRST, not why the others may go without it.
         gtest_discover_tests(ParametricCADKernelOcctTests DISCOVERY_MODE PRE_TEST)
+        paramcad_add_whole_suite_test(ParametricCADKernelOcctTests)
     endif()
 
     # DXF import suite (M6). Built only when the import target exists, and it
@@ -491,6 +513,7 @@ if(PARAMCAD_BUILD_TESTS)
             target_compile_options(ParametricCADImportTests PRIVATE /utf-8)
         endif()
         gtest_discover_tests(ParametricCADImportTests DISCOVERY_MODE PRE_TEST)
+        paramcad_add_whole_suite_test(ParametricCADImportTests)
     endif()
 
     # Full-stack integration (M5-J/K). The ONLY target linking Core + Solver +
@@ -518,5 +541,6 @@ if(PARAMCAD_BUILD_TESTS)
             target_compile_options(ParametricCADIntegrationTests PRIVATE /utf-8)
         endif()
         gtest_discover_tests(ParametricCADIntegrationTests DISCOVERY_MODE PRE_TEST)
+        paramcad_add_whole_suite_test(ParametricCADIntegrationTests)
     endif()
 endif()

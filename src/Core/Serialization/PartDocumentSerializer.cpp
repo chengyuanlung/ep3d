@@ -430,6 +430,51 @@ LoadResult loadFailure(SerializationError error, std::string message) {
 // document is still intact and repairable. The message deliberately mirrors the
 // load-side wording so the two report the same defect recognisably.
 SaveResult validateSaveable(const PartDocument& document) {
+    // NO id may exceed the cap the LOADER enforces.
+    //
+    // `ObjectIdGenerator::AdvancePast` clamps to kMaxObjectId and then adds one,
+    // so a document that restores an id of 2^63-1 leaves the process counter at
+    // 2^63. Every id issued after that is above the cap this file's own loader
+    // rejects -- so the save succeeded, and the file could never be opened
+    // again. Independent review found `ASSERT_TRUE(savePartDocument(...))`
+    // passing and the very next `loadPartDocument` refusing the bytes it had
+    // just written.
+    //
+    // Refused here for the same reason as the placeholder case below: a save
+    // that emits an unopenable document is worse than a save that fails, because
+    // the user finds out later and has nothing left to recover from.
+    //
+    // ObjectId.h's claim of "2^63 organic allocations of headroom" was wrong --
+    // the SAVABLE headroom is zero -- and is corrected there.
+    const auto capCheck = [](ObjectId id, const char* what) -> SaveResult {
+        if (id <= kMaxObjectId) return SaveResult{};
+        return SaveResult{SerializationError::InvalidFieldType,
+                          std::string(what) + " has id " + idToString(id) +
+                              ", above the maximum this format can load (2^63 - 1); the "
+                              "resulting file could never be loaded back"};
+    };
+    if (const SaveResult bad = capCheck(document.id(), "the document"); !bad) return bad;
+    for (const auto& parameter : document.parameters().items())
+        if (const SaveResult bad = capCheck(parameter->id(), "a parameter"); !bad) return bad;
+    for (const auto& body : document.bodies()) {
+        if (const SaveResult bad = capCheck(body->id(), "a body"); !bad) return bad;
+        for (const auto& feature : body->features())
+            if (const SaveResult bad = capCheck(feature->id(), "a feature"); !bad) return bad;
+    }
+    for (const Sketch* sketch : document.sketches()) {
+        if (const SaveResult bad = capCheck(sketch->id(), "a sketch"); !bad) return bad;
+        for (const SketchEntity& entity : sketch->entities())
+            if (const SaveResult bad = capCheck(ToObjectId(entity.id), "a sketch entity"); !bad)
+                return bad;
+        for (const SketchConstraint& constraint : sketch->constraints())
+            if (const SaveResult bad = capCheck(ToObjectId(constraint.id), "a sketch constraint");
+                !bad)
+                return bad;
+    }
+    if (document.material() != nullptr)
+        if (const SaveResult bad = capCheck(document.material()->id(), "the material"); !bad)
+            return bad;
+
     std::unordered_set<ObjectId> parameterIds;
     for (const auto& parameter : document.parameters().items())
         parameterIds.insert(parameter->id());
