@@ -19,7 +19,14 @@ std::vector<ObjectId> DocumentPresenter::displayableSolids() const {
         for (const auto& feature : body->features()) {
             const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get());
             if (solid == nullptr) continue;
-            if (solid->currentState() != ComputeState::Valid) continue;
+            // REGARDLESS of the consumer's state -- and Gate H had to fail to
+            // teach this. The first version counted only Valid consumers, so a
+            // FAILED pocket un-consumed its base and the viewer fell back to
+            // the bare pad: a healthy-looking solid that is not the part, shown
+            // precisely when the part is broken -- spec 34's "stale geometry
+            // displayed as current" wearing a fresh coat. An intermediate is
+            // structural: once something consumes a solid, that solid alone is
+            // never again the thing to draw, whatever state its consumer is in.
             if (solid->consumedSolidId() != kInvalidObjectId)
                 consumed.insert(solid->consumedSolidId());
         }

@@ -2638,3 +2638,82 @@ is already a plain value type with no pointers into the document.
 The failure path carries the report too. What the analysis DECLINED is the half
 that matters most when the rest goes wrong, and "it did not work" with no
 diagnostics is the least useful failure there is.
+
+---
+
+## ADR-M8-001 — The feature chain: consumers reference their base by ObjectId (M8)
+Status: Accepted.
+
+A Body's shape becomes the ordered result of features that consume each other.
+The consuming feature (Pocket first) holds its base's **feature ObjectId**,
+resolves it through `ISolidFeature` at recompute time, and never caches the
+base's geometry — a copy would be a second version of upstream state whose
+staleness nothing tracks, the failure family ADR-M3-006/007 record.
+
+The chain edge `base → consumer` is wired by the PartDocument facade exactly as
+Parameter edges are, so an upstream edit dirties the consumer through the
+ordinary M2 machinery. Nothing about the chain schedules itself, and the gate
+for the edge is analytical: with it removed, a Width edit rebuilds the pad while
+the pocket goes on cutting yesterday's solid, and mass properties — which follow
+the chain tail — report 94000 for a 114000 part. Current-looking, wrong.
+
+Resolution is by CAPABILITY (`ISolidFeature`), not concrete type: tomorrow's
+Revolve is a legal base with no change to Pocket.
+
+Persistence (schema v6) enforces the chain's shape from BOTH sides: a pocket
+whose base is not an EARLIER feature of the same body is refused at save
+(ADR-M3-008 — a file the loader would reject must never be savable) and
+re-checked at load, because restore replays features in array order and a
+consumer restored before its base would wire an edge to a node that does not
+exist yet.
+
+## ADR-M8-002 — Tool direction and the legal cut (M8)
+Status: Accepted.
+
+The pocket's tool prism grows along its sketch's **+normal** by Depth — the
+same direction Pad grows from the same plane. A pocket sketched on the pad's
+own plane therefore cuts INTO the material it sits on, and a depth equal to the
+pad's length cuts through. One direction convention, not two.
+
+A tool that misses the base entirely, or swallows it entirely, is a **legal
+cut**: the result is the base unchanged, or an empty shape. A pocket dragged
+off the part is a modelling state, not an error — refusing it would make
+ordinary modelling fail, and the mass properties report the true volume either
+way, including zero. Both cases have kernel-level tests with hand-computed
+volumes.
+
+`subtractShape` consumes neither operand: the base feature goes on owning its
+own result, which is the state selective recompute depends on being stable.
+
+## ADR-M8-003 — Display and physics follow the chain tail (M8)
+Status: Accepted.
+
+Once something consumes a solid, that solid alone is never again the thing to
+draw or weigh. MassProperties is re-pointed at the new tail on creation;
+`displayableSolids` skips any solid consumed by a downstream feature, asked
+through the `consumedSolidId()` capability rather than by enumerating types.
+
+**The consumer's STATE does not matter for consumption, and Gate H had to fail
+to teach this.** The first implementation counted only Valid consumers, so a
+FAILED pocket un-consumed its base and the viewer fell back to the bare pad — a
+healthy-looking solid that is not the part, shown precisely when the part is
+broken. Consumption is structural. With a failed tail, nothing in that body
+displays: stale is visible as absence, never as a confident wrong solid.
+
+## ADR-M8-004 — Blocked consumers, and where the truth lives (M8)
+Status: Accepted.
+
+When a base fails, the engine BLOCKS its dependents — records them Failed in
+the graph and never invokes them (M5 semantics, unchanged). Two consequences M8
+makes explicit:
+
+1. A blocked pocket's cached `Feature::state()` legitimately still reads Valid;
+   the GRAPH is authoritative (ADR-M3-004). GATE_E2's first draft read the
+   cache and learned the difference; the gate now asserts the graph state and,
+   by kernel counter, that **no boolean ran against the failed base's retained
+   shape**.
+2. `PocketFeature::recompute`'s own base-state check is therefore DEFENSE IN
+   DEPTH that the engine makes unreachable, and it is documented as
+   NOT mutation-guarded at the check itself — recorded there in as many words,
+   because M7's review found an ADR asserting a test that did not exist, and
+   this project does not write that sentence twice.

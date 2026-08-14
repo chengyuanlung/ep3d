@@ -387,6 +387,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/ReconstructionProvenanceTests.cpp
         tests/ReconstructionAdversarialTests.cpp
         tests/ReconstructionReviewFindingTests.cpp
+        tests/SerializationV6Tests.cpp
         # LAST, and the comment above says why. M7 added its five files BELOW
         # this line and broke the rule the comment states in capitals: three
         # M7 persistence tests then ran against a generator already advanced to
@@ -467,6 +468,7 @@ if(PARAMCAD_BUILD_TESTS)
         add_executable(ParametricCADKernelOcctTests
             tests/Kernel/OcctGeometryKernelTests.cpp
             tests/Kernel/OcctExtrudeTests.cpp
+            tests/Kernel/OcctBooleanTests.cpp
             tests/Kernel/M4ReleaseGateTests.cpp
             tests/Kernel/OcctRecomputeIntegrationTests.cpp
         )
@@ -542,6 +544,7 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Integration/M5ReleaseGateTests.cpp
             tests/Integration/M5AdversarialTests.cpp
             tests/Integration/M7ReleaseGateTests.cpp
+            tests/Integration/M8ReleaseGateTests.cpp
         )
         # ViewerCore joins so the UI's decisions can be checked against a REAL
         # solve. Faking solver output would make those tests agree with a stub

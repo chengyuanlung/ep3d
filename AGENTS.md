@@ -60,19 +60,24 @@ start. 561/561 in Debug and Release, Gates A–I pass. What is *not* established
 Do not report either item as done because M6 is on `master`. See
 `docs/reviews/M6_CompletionReport.md`.
 
-Current target: **M7 — DXF Dimension and Constraint Reconstruction**
-(`docs/M7_SPEC.md`), on branch `m7-wip`. **Functionally complete, NOT complete.**
+Current target: **M8 — Core Feature Modeling** (`docs/M8_SPEC.md`), on branch
+`m8-wip`, guided by the adopted `docs/EP3D_Onshape_Alignment_Roadmap.md`.
 
-All ten slices are delivered, Gates A-L pass, 668/668 in Debug and Release, nine
-mutations verified. What is missing is the half this project's history says
-matters most:
+M8.1 (kernel subtract + PocketFeature + the feature chain + schema v6) is
+implemented and gated: 708/708 in Debug and Release, 399/399 single-process,
+six mutations run (five guarded; the sixth is a documented defense-in-depth
+branch the engine makes unreachable -- the honesty about that lives on the
+check itself in PocketFeature.cpp).
 
-- **Independent review: ZERO ROUNDS.** M5 needed four and M6 needed three, and
-  every one of them found defects the previous round's fixes had introduced.
-- **M7 owner UI validation: NOT EXECUTED** (`docs/reviews/M7_UI_UserValidation.md`).
-- Plus the two inherited M6 items above, which merging M6 did not close.
+M7 state: functionally complete PLUS review round 1's fixes (all 4 Criticals,
+14 Majors closed). **Still open, and M8 cannot close before they do:**
 
-Read `docs/reviews/M7_SelfValidationReport.md` as CLAIMS. It names what I am
-least confident about; start there. One entry is not hypothetical: a mutation
-disproved a claim I had written in the code, and the test I had written to prove
-that claim passed under the mutation.
+- M7 round 2 independent review -- this project has never had a review round
+  that did not find defects introduced by the previous round's fixes.
+- M7 owner UI validation (`docs/reviews/M7_UI_UserValidation.md`, every row
+  blank; Test B is runnable now).
+- The two inherited M6 items (M6.11-M6.14 unreviewed; M6 owner UI validation
+  not run).
+
+Read `docs/reviews/M7_IndependentReview.md` before trusting any M7 claim, and
+`docs/reviews/M7_SelfValidationReport.md` only as corrected.

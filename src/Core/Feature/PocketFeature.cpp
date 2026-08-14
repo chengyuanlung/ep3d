@@ -67,9 +67,16 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
     // The base FIRST, and its state is checked, not just its existence. A
     // pocket cut into a Failed base's retained shape would be a boolean against
     // stale geometry, presented as current -- spec 34's Critical in one step
-    // (M8 spec 6). The graph guarantees the base ran before this feature in the
-    // same pass (the base -> pocket edge); this check is what makes the
-    // guarantee inspectable rather than assumed.
+    // (M8 spec 6).
+    //
+    // DEFENSE IN DEPTH, stated honestly: through the engine this branch is
+    // UNREACHABLE, because dependents of failed nodes are blocked, never
+    // invoked (DocumentRecomputeEngine), and RecomputeContext cannot be built
+    // from public API to reach it directly. It is therefore NOT mutation-
+    // guarded, and no test claims otherwise -- M7's review found an ADR
+    // asserting a test that did not exist, and this comment exists so this
+    // check can never grow that sentence. What IS guarded, by GATE_E2's
+    // subtract counter, is the engine-level contract this check backs up.
     const ISolidFeature* base = resolveSolidFeature(context.registry, baseFeatureId_);
     if (base == nullptr)
         return fail("pocket base feature not found or does not produce a solid");
