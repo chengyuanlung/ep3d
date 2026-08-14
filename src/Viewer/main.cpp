@@ -21,9 +21,11 @@
 #include <QPalette>
 #include <QString>
 #include <QTimer>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 
@@ -161,6 +163,11 @@ private:
 };
 
 bool gUnknownSample = false;
+
+// What the imported file SHOULD produce, when the caller says. -1 means "no
+// expectation", so the existing dimensionless fixture keeps working unchanged.
+int gExpectFromSource = -1;
+int gExpectSkipped = -1;
 
 Sample SampleFromName(const char* name) {
     if (name == nullptr) return Sample::Rectangle;
@@ -453,23 +460,58 @@ int main(int argc, char** argv) {
                 // be silently mixed.
                 const ReconstructionReport* report =
                     window.reconstructionReportFor(imported->id());
-                if (report == nullptr)
-                    fail("the import produced no reconstruction report");
-                else if (report->entries.empty())
+                // Everything below reads THROUGH `report`, so it is scoped
+                // rather than guarded statement by statement. Two mistakes in a
+                // row here are worth the comment: reporting the failure and
+                // then dereferencing anyway segfaulted (`fail()` records, it
+                // does not return), and an early `return` skipped the
+                // `app.quit()` at the end of this timer callback and hung the
+                // test until ctest's timeout.
+                if (report == nullptr) fail("the import produced no reconstruction report");
+                if (report != nullptr) {
+                if (report->entries.empty())
                     fail("reconstruction produced no constraints for an imported rectangle");
 
                 // Read from the TABLE, not from propertiesOf: these rows are
                 // added by the shell, and M6.14's lesson is that a UI claim has
                 // to ask the widget.
-                if (window.displayedPropertyValue("From source").empty())
-                    fail("the panel does not say how much came from the drawing");
-                if (window.displayedPropertyValue("Inferred").empty())
-                    fail("the panel does not say how much EP3D inferred");
-                // Present even when zero: a row that appears only when
-                // something was skipped cannot be told from one where nothing
-                // asked the question.
-                if (window.displayedPropertyValue("Skipped").empty())
-                    fail("the panel does not report how many items were skipped");
+                // EXACT VALUES, not merely non-empty.
+                //
+                // Asserting `!empty()` was worthless: independent review swapped
+                // the "From source" and "Inferred" counts, deleted every skip
+                // diagnostic row, and hard-coded the panel-fit guard to true --
+                // and all 13 viewer smoke tests stayed green through each.
+                //
+                // The expected numbers depend on the file, so they come from
+                // the report and are cross-checked against the panel: the panel
+                // must agree with the model AND the model must be right.
+                const std::string fromSource = window.displayedPropertyValue("From source");
+                const std::string inferred = window.displayedPropertyValue("Inferred");
+                const std::string skippedShown = window.displayedPropertyValue("Skipped");
+                if (fromSource != std::to_string(report->explicitCount()))
+                    fail("the panel's source-dimension count disagrees with the report");
+                if (inferred !=
+                    std::to_string(report->entries.size() - report->explicitCount()))
+                    fail("the panel's inferred count disagrees with the report");
+                if (skippedShown != std::to_string(report->skipped.size()))
+                    fail("the panel's skipped count disagrees with the report");
+
+                // And the counts must be RIGHT, not merely consistent. Which
+                // file was imported decides them, so each registered fixture
+                // states its own.
+                if (gExpectFromSource >= 0 &&
+                    fromSource != std::to_string(gExpectFromSource))
+                    fail("the panel does not show the expected number of source dimensions");
+                if (gExpectSkipped >= 0 && skippedShown != std::to_string(gExpectSkipped))
+                    fail("the panel does not show the expected number of skipped items");
+
+                // Every skip must be READABLE, not merely present: a row whose
+                // value column is nine characters wide delivers three different
+                // diagnostics as three identical strings.
+                if (!report->skipped.empty() &&
+                    window.displayedPropertyValue("Skipped item").empty())
+                    fail("items were skipped but no diagnostic row is shown");
+                }
             }
             // The tree must SHOW it -- an import the model tree does not list
             // is an import the user cannot select or delete.
@@ -503,6 +545,11 @@ int main(int argc, char** argv) {
         if (!window.propertyPanelFitsItsPanel())
             fail("the Pad property panel is wider than its dock, so values are "
                  "pushed out of sight");
+        // ...and the guard must be ABLE to say no. Without this, hard-coding it
+        // to `return true` passes every smoke test -- which independent review
+        // demonstrated.
+        if (!window.panelFitGuardCanFail())
+            fail("the panel-fit guard cannot detect an unreadable panel");
         for (const Sketch* sketch : model->document.sketches()) {
             window.selectObject(sketch->id());
             if (!window.propertyPanelFitsItsPanel())

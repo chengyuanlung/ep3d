@@ -73,6 +73,18 @@ public:
     // widget. Empty string when no row carries that label.
     std::string displayedPropertyValue(const std::string& label) const;
 
+    // NEGATIVE CONTROL for propertyPanelFitsItsPanel().
+    //
+    // Widens the label column past what leaves the value column readable,
+    // samples the guard, and puts the column back. Returns true if the guard
+    // correctly reported NOT-fitting.
+    //
+    // This exists because independent review hard-coded that guard to `return
+    // true` and all thirteen viewer smoke tests stayed green: a guard that can
+    // only ever say yes is untestable by any amount of well-formed input. The
+    // only way to test it is to give it something it must reject.
+    bool panelFitGuardCanFail();
+
 private:
     std::map<ObjectId, ReconstructionReport> reconstructionReports_;
 
@@ -91,6 +103,7 @@ private:
     void buildDocks();
     void rebuildTree();
     void rebuildProperties();
+    void clampLabelColumn();
     void updateStatus();
     void reportHealth();
     QString selectionSummary() const;

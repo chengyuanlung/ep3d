@@ -22,6 +22,7 @@
 #include <QTreeWidget>
 #include <QPalette>
 #include <QVariant>
+#include <algorithm>
 #include <functional>
 
 namespace paramcad {
@@ -168,9 +169,18 @@ void MainWindow::buildDocks() {
     // A value can be any length, so it must take the space that is left and
     // elide, with the full text in the tooltip -- nothing is lost, and no single
     // row can push the rest off the panel.
-    properties_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    // ...and the LABEL column is capped, which the first version of this fix
+    // was missing. ResizeToContents on column 0 is only safe while labels are
+    // short, and "Reconstruction / Skipped item" was already long enough to
+    // squeeze the value column to nine characters. Interactive with an explicit
+    // width bounds it; the value column then always has room left.
+    properties_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
     properties_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     properties_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    // The cap itself is applied per rebuild, in clampLabelColumn(), because it
+    // depends on how wide the dock actually is -- a fixed maximum computed from
+    // the panel's MINIMUM width starves the value column on a narrow panel and
+    // wastes space on a wide one.
     connect(properties_, &QTableWidget::cellChanged, this, &MainWindow::onPropertyCommitted);
 
     auto* propertyDock = new QDockWidget(QStringLiteral("Properties"), this);
@@ -309,6 +319,10 @@ void MainWindow::rebuildProperties() {
         properties_->setItem(i, 1, value);
         properties_->setItem(i, 2, unit);
     }
+
+    // After the rows exist, so the label column can be sized to what is
+    // actually in it and then capped.
+    clampLabelColumn();
 }
 
 const ReconstructionReport* MainWindow::reconstructionReportFor(ObjectId sketchId) const {
@@ -330,12 +344,47 @@ std::string MainWindow::displayedPropertyValue(const std::string& label) const {
     return {};
 }
 
+bool MainWindow::panelFitGuardCanFail() {
+    if (properties_->rowCount() == 0) return false;
+    const int restore = properties_->columnWidth(0);
+    // Deliberately starve the value column.
+    properties_->setColumnWidth(0, properties_->viewport()->width() -
+                                       properties_->columnWidth(2) -
+                                       (ui::size::kMinValueColumnWidth / 2));
+    const bool refused = !propertyPanelFitsItsPanel();
+    properties_->setColumnWidth(0, restore);
+    return refused;
+}
+
+void MainWindow::clampLabelColumn() {
+    // Size the label column to its content, then take width back from it until
+    // the VALUE column clears its readable minimum.
+    //
+    // Labels elide with a tooltip when that happens, which is the right way
+    // round: a truncated label is still identifiable from its neighbours, while
+    // a truncated value is just a shorter number.
+    properties_->resizeColumnToContents(0);
+    const int available = properties_->viewport()->width() - properties_->columnWidth(2);
+    const int maxLabel = std::max(60, available - ui::size::kMinValueColumnWidth);
+    if (properties_->columnWidth(0) > maxLabel) properties_->setColumnWidth(0, maxLabel);
+}
+
 bool MainWindow::propertyPanelFitsItsPanel() const {
     if (properties_->rowCount() == 0) return true;
-    // header()->length() is the sum of the section widths; the viewport is what
-    // the user can actually see. Wider than that means a horizontal scrollbar
-    // and content off the right edge.
-    return properties_->horizontalHeader()->length() <= properties_->viewport()->width();
+    // Two separate questions, because M6.14 turned out to have two answers.
+    //
+    // FIRST: does the table fit its viewport? That is what the original guard
+    // asked -- and on its own it is nearly a tautology, because column 1 is
+    // Stretch, so the header length equals the viewport width by construction.
+    // It still earns its place: it catches a column-mode regression, which is
+    // exactly the mutation that produced M6.14 in the first place.
+    if (properties_->horizontalHeader()->length() > properties_->viewport()->width()) return false;
+
+    // SECOND, and this is the half independent review found missing: is the
+    // VALUE column wide enough to read? Fitting and being readable are not the
+    // same thing. A 133-character diagnostic squeezed into nine characters
+    // "fits" perfectly, and three different skip rows then render identically.
+    return properties_->columnWidth(1) >= ui::size::kMinValueColumnWidth;
 }
 
 void MainWindow::updateStatus() {

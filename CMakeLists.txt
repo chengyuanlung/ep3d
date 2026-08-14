@@ -301,10 +301,22 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
         # the recompute, the redisplay, the model-tree row and the status
         # message). Only registered when the import target exists.
         if(TARGET ParametricCADImportDxf)
+            # mixed.dxf carries NO dimensions, so this exercises the
+            # inference-only path: 0 from source, 0 skipped.
             add_test(NAME ViewerSmokeTest_ImportsDxf
                      COMMAND ParametricCADViewer --selftest
-                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/mixed.dxf")
+                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/mixed.dxf"
+                             --expect-from-source 0 --expect-skipped 0)
             set_tests_properties(ViewerSmokeTest_ImportsDxf PROPERTIES TIMEOUT 60)
+            # ...and a DIMENSIONED file, which until independent review no
+            # registered test imported at all. Without this, "From source" was
+            # always "0" in CI and the skip-diagnostic row never rendered once,
+            # so spec 27 steps 5-10 had no automated coverage at any layer.
+            add_test(NAME ViewerSmokeTest_ImportsDimensionedDxf
+                     COMMAND ParametricCADViewer --selftest
+                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/dimensioned_rectangle.dxf"
+                             --expect-from-source 2 --expect-skipped 0)
+            set_tests_properties(ViewerSmokeTest_ImportsDimensionedDxf PROPERTIES TIMEOUT 60)
             # A failed import must FAIL the selftest, so a broken import cannot
             # pass CI by producing an empty document quietly.
             add_test(NAME ViewerSmokeTest_ReportsFailedImport

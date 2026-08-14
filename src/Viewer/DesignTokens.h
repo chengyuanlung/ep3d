@@ -29,8 +29,20 @@ inline constexpr int kTreeRowHeight = 26;
 inline constexpr int kStatusBarHeight = 24;
 inline constexpr int kModelTreeMinWidth = 220;
 inline constexpr int kPropertyPanelWidth = 300;
-inline constexpr int kBorder = 1;
-
+// Narrowest the VALUE column may become before the panel stops being readable.
+//
+// The M6.14 fix stopped values being pushed off the right edge; independent
+// review then showed it had turned that failure into a different one -- the
+// value column being squeezed to nothing by a long LABEL. A 133-character skip
+// diagnostic was being delivered as nine characters, and three different skip
+// rows rendered identically. Both failures are "the user cannot read the
+// value"; only the first was ever measured.
+//
+// 120 px is roughly 18 characters at the panel's font -- enough to tell two
+// diagnostics apart and to show a dimension with its sign and decimals.
+inline constexpr int kMinValueColumnWidth = 110;
+// Widest the LABEL column may become. Labels are bounded by design; this is
+// what makes that assumption enforceable rather than a comment.
 // The smallest window the shell must stay usable in (UI spec 5). Enforced as a
 // minimum size so the layout cannot be dragged into an unusable state.
 inline constexpr int kMinWindowWidth = 1000;
