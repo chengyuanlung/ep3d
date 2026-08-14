@@ -209,6 +209,36 @@ Reported so the negatives are legible:
 
 ---
 
+## Fix status — all round-1 findings closed
+
+| Finding | Fix | Mutation-verified |
+|---|---|---|
+| **C1** projection applied as a Length | refused, with the axis tolerance | `M7_REV_C1` (+ Aligned and along-the-line counterparts) |
+| **C2** save writes unopenable files | refused at save; five `WholeSuite_*` ctest entries | `GeneratorLimitTest`, and the ordering mutation now fails WholeSuite while per-test passes 10/10 |
+| **C3** plan applied to another document | `ValidatePlanAgainstDocument` checks geometry, not identity | `M7_REV_C3` (+ the still-describes counterpart) |
+| **C4** unbounded slot index | `ValidatePlan` branch pinned | `M7_REV_C4` |
+| **M1** undimensioned sketch reconstructed twice | idempotence widened to the Fix | `M7_REV_M1` |
+| **M2/M3/M4** UI evidence did not discriminate | exact values, value-column measure, dimensioned fixture, negative control | all three review mutations now fail 2, 8 and 8 smoke tests |
+| **M5** Gate K proved nothing | counter-based gate | solver/kernel counters |
+| **M6** Gate H ignored stale state | mass properties asserted invalid then current | — |
+| **M7** curve naming by file order | geometric sort, parallel to the linear path | `M7_REV_M7` |
+| **M8** linear sort untested | — | `M7_REV_M8` |
+| **M9** circle Fix min-search untested | — | `M7_REV_M9` |
+| **M10** test ran on an empty sketch | sweep the model accepts, plus an entity-count assertion | `M7_REV_M10` |
+| **M11** Gate J tautology | child deletes the document; parent asserts it is gone | forced skip now fails |
+| **M12** rollback left a lying report | `report.entries` cleared | `M7_REV_M12` |
+| **M13** vertical boundary pair missing | added | `M7_REV_M13` ×2 |
+| **M14** Distance silently absent | declared in the matrix and Known Limitations | — |
+| minors | `PANELFIT` fprintf removed, duplicate skip count removed, ADR-M7-013 and ADR-M7-016 corrected | — |
+
+Plus the finding from running the application: **the viewer now extrudes the
+imported sketch**, so spec 27 steps 9–10 happen for the first time. Verified in
+the running app — Width 100 → 120 gives 120000 mm³ and COM x 50 → 60.
+
+**690/690 in Debug and Release, 395/395 single-process.**
+
+---
+
 ## Required before round 2
 
 Ordered by severity, not by effort.
