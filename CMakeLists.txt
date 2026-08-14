@@ -25,6 +25,7 @@ add_library(ParametricCADCore
     src/Core/Feature/PadFeature.cpp
     src/Core/Feature/PocketFeature.cpp
     src/Core/Feature/RevolveFeature.cpp
+    src/Core/Feature/EdgeDressFeatures.cpp
     src/Core/Feature/PlaceholderFeature.cpp
     src/Core/Kernel/KernelShape.cpp
     src/Core/Kernel/ProfileDefinition.cpp
@@ -265,7 +266,7 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
         # solved, under-constrained and conflicting paths unexercised in the
         # running program -- and those are exactly the states spec 18's UI
         # requirements are about.
-        foreach(sample m5-rectangle m5-underconstrained m5-conflict m5-circle)
+        foreach(sample m5-rectangle m5-underconstrained m5-conflict m5-circle m8-chain)
             add_test(NAME ViewerSmokeTest_${sample}
                      COMMAND ParametricCADViewer --selftest --sample ${sample})
             set_tests_properties(ViewerSmokeTest_${sample} PROPERTIES TIMEOUT 60)
@@ -390,6 +391,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/ReconstructionReviewFindingTests.cpp
         tests/SerializationV6Tests.cpp
         tests/SerializationV7Tests.cpp
+        tests/SerializationV8Tests.cpp
         # LAST, and the comment above says why. M7 added its five files BELOW
         # this line and broke the rule the comment states in capitals: three
         # M7 persistence tests then ran against a generator already advanced to
@@ -472,6 +474,7 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Kernel/OcctExtrudeTests.cpp
             tests/Kernel/OcctBooleanTests.cpp
             tests/Kernel/OcctRevolveTests.cpp
+            tests/Kernel/OcctFilletChamferTests.cpp
             tests/Kernel/M4ReleaseGateTests.cpp
             tests/Kernel/OcctRecomputeIntegrationTests.cpp
         )

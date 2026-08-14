@@ -26,6 +26,8 @@ class ISketchSolver;
 class PadFeature;
 class PocketFeature;
 class RevolveFeature;
+class FilletFeature;
+class ChamferFeature;
 
 // DEPENDENCY DIRECTION (single rule, ADR-007/ADR-012): an edge points
 // prerequisite -> dependent; "A -> B" means B depends on A and dirtiness
@@ -252,6 +254,20 @@ public:
                                           SketchEntityId axisEntityId,
                                           ObjectId angleParameterId, ObjectId materialId);
 
+    // --- Fillet / Chamfer (M8.3, ADR-M8-006) -------------------------------
+    // Edge-dressing consumers: every edge of `baseFeatureId`'s result, by one
+    // length Parameter. Chain semantics identical to Pocket's.
+    FilletFeature& addFilletFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                    ObjectId radiusParameterId);
+    FilletFeature& restoreFilletFeature(Body& body, ObjectId id, std::string name,
+                                        ComputeState state, ObjectId baseFeatureId,
+                                        ObjectId radiusParameterId, ObjectId materialId);
+    ChamferFeature& addChamferFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                      ObjectId distanceParameterId);
+    ChamferFeature& restoreChamferFeature(Body& body, ObjectId id, std::string name,
+                                          ComputeState state, ObjectId baseFeatureId,
+                                          ObjectId distanceParameterId, ObjectId materialId);
+
     // Non-owning; the caller keeps the concrete kernel alive for every
     // subsequent recompute()/recomputeFrom() call (ADR-M3-003, mirrors
     // ADR-010's externally-owned IRecomputable lifetime pattern).
@@ -316,6 +332,8 @@ private:
                            ObjectId depthParameterId, ObjectId materialId);
     void wireRevolveFeature(RevolveFeature& feature, ObjectId sketchId,
                             ObjectId angleParameterId, ObjectId materialId);
+    void wireEdgeDressFeature(class EdgeDressFeature& feature, ObjectId baseFeatureId,
+                              ObjectId sizeParameterId, ObjectId materialId);
     void wirePadFeature(PadFeature& feature, ObjectId sketchId, ObjectId lengthParameterId,
                        ObjectId materialId);
 

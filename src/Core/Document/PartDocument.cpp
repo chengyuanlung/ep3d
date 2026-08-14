@@ -4,6 +4,7 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Feature/RevolveFeature.h"
+#include "Core/Feature/EdgeDressFeatures.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <algorithm>
 #include <cassert>
@@ -597,6 +598,61 @@ RevolveFeature& PartDocument::restoreRevolveFeature(Body& body, ObjectId id, std
     RevolveFeature& feature = body.addFeature<RevolveFeature>(
         id, std::move(name), state, sketchId, axisEntityId, angleParameterId, materialId);
     wireRevolveFeature(feature, sketchId, angleParameterId, materialId);
+    return feature;
+}
+
+
+void PartDocument::wireEdgeDressFeature(EdgeDressFeature& feature, ObjectId baseFeatureId,
+                                        ObjectId sizeParameterId, ObjectId materialId) {
+    addRecomputableNode(feature);
+    addDependency(feature.id(), baseFeatureId);    // Base -> Fillet/Chamfer
+    addDependency(feature.id(), sizeParameterId);  // Size -> Fillet/Chamfer
+    rewireMassPropertiesSource(feature.id(), materialId); // chain tail
+}
+
+FilletFeature& PartDocument::addFilletFeature(Body& body, std::string name,
+                                              ObjectId baseFeatureId,
+                                              ObjectId radiusParameterId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    FilletFeature& feature = body.addFeature<FilletFeature>(std::move(name), baseFeatureId,
+                                                            radiusParameterId, materialId);
+    wireEdgeDressFeature(feature, baseFeatureId, radiusParameterId, materialId);
+    return feature;
+}
+
+FilletFeature& PartDocument::restoreFilletFeature(Body& body, ObjectId id, std::string name,
+                                                  ComputeState state, ObjectId baseFeatureId,
+                                                  ObjectId radiusParameterId,
+                                                  ObjectId materialId) {
+    if (registry_.contains(id))
+        throw std::runtime_error("restoreFilletFeature: id " + std::to_string(id) +
+                                 " is already registered in this document");
+    FilletFeature& feature = body.addFeature<FilletFeature>(
+        id, std::move(name), state, baseFeatureId, radiusParameterId, materialId);
+    wireEdgeDressFeature(feature, baseFeatureId, radiusParameterId, materialId);
+    return feature;
+}
+
+ChamferFeature& PartDocument::addChamferFeature(Body& body, std::string name,
+                                                ObjectId baseFeatureId,
+                                                ObjectId distanceParameterId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    ChamferFeature& feature = body.addFeature<ChamferFeature>(std::move(name), baseFeatureId,
+                                                              distanceParameterId, materialId);
+    wireEdgeDressFeature(feature, baseFeatureId, distanceParameterId, materialId);
+    return feature;
+}
+
+ChamferFeature& PartDocument::restoreChamferFeature(Body& body, ObjectId id, std::string name,
+                                                    ComputeState state, ObjectId baseFeatureId,
+                                                    ObjectId distanceParameterId,
+                                                    ObjectId materialId) {
+    if (registry_.contains(id))
+        throw std::runtime_error("restoreChamferFeature: id " + std::to_string(id) +
+                                 " is already registered in this document");
+    ChamferFeature& feature = body.addFeature<ChamferFeature>(
+        id, std::move(name), state, baseFeatureId, distanceParameterId, materialId);
+    wireEdgeDressFeature(feature, baseFeatureId, distanceParameterId, materialId);
     return feature;
 }
 

@@ -332,11 +332,34 @@ public:
                            KernelError::None, {}};
     }
 
+    ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) override {
+        ++filletCallCount;
+        (void)shape;
+        (void)radiusMm;
+        // No analytical model, DELIBERATELY: a rounded box's volume formula
+        // exists, but carrying it here would make Core tests agree with this
+        // file's arithmetic rather than with geometry -- the line this fake
+        // has drawn from the start. Fillet correctness lives in
+        // tests/Kernel/OcctFilletChamferTests.cpp against real OCCT;
+        // Core-level v8 tests assert round-trip identity without recompute.
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "FakeGeometryKernel does not model fillets; use the OCCT kernel"};
+    }
+    ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) override {
+        ++chamferCallCount;
+        (void)shape;
+        (void)distanceMm;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "FakeGeometryKernel does not model chamfers; use the OCCT kernel"};
+    }
+
     int createBoxCallCount = 0;
     int extrudeProfileCallCount = 0;
     int calculateMassPropertiesCallCount = 0;
     int subtractShapeCallCount = 0;
     int revolveProfileCallCount = 0;
+    int filletCallCount = 0;
+    int chamferCallCount = 0;
 
 private:
     static constexpr double kPi = 3.14159265358979323846;

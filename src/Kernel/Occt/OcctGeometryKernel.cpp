@@ -7,7 +7,13 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
 #include <gp_Ax1.hxx>
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
@@ -295,6 +301,90 @@ ShapeResult OcctGeometryKernel::subtractShape(const KernelShape& base, const Ker
     } catch (const Standard_Failure& failure) {
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            std::string("OCCT raised while cutting: ") + describe(failure)};
+    }
+}
+
+
+ShapeResult OcctGeometryKernel::filletAllEdges(const KernelShape& shape, double radiusMm) {
+    const auto* occtShape = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occtShape == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "fillet input is not an OcctShape (null or foreign kernel)"};
+    if (!IsValidExtrusionDistance(radiusMm))
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "invalid fillet radius: must be finite and at least " +
+                               std::to_string(kMinExtrusionDistanceMm) + " mm"};
+
+    try {
+        BRepFilletAPI_MakeFillet fillet(occtShape->shape());
+        // MapShapes, not a raw explorer: an explorer visits a shared edge once
+        // per owning face, and Add-ing the same edge twice is undefined
+        // behaviour territory in ChFi3d. The indexed map is the deduplicated
+        // edge set.
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(occtShape->shape(), TopAbs_EDGE, edges);
+        if (edges.IsEmpty())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the shape has no edges to fillet"};
+        for (int i = 1; i <= edges.Extent(); ++i)
+            fillet.Add(radiusMm, TopoDS::Edge(edges(i)));
+        fillet.Build();
+        if (!fillet.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not fillet every edge at this radius; the radius "
+                               "may exceed what the geometry accommodates"};
+        // IsDone() is NOT sufficient, and a test had to fail to prove it: a
+        // radius wider than half the part's thickness (15 on a 20mm slab)
+        // reported done while producing self-intersecting geometry. The
+        // analyzer is the check ChFi3d itself does not make.
+        if (!BRepCheck_Analyzer(fillet.Shape()).IsValid())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the filleted result is not a valid solid; the radius exceeds "
+                               "what the geometry accommodates"};
+        auto handle = std::make_shared<OcctShape>(fillet.Shape());
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT raised while filleting: ") + describe(failure)};
+    }
+}
+
+ShapeResult OcctGeometryKernel::chamferAllEdges(const KernelShape& shape, double distanceMm) {
+    const auto* occtShape = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occtShape == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "chamfer input is not an OcctShape (null or foreign kernel)"};
+    if (!IsValidExtrusionDistance(distanceMm))
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "invalid chamfer distance: must be finite and at least " +
+                               std::to_string(kMinExtrusionDistanceMm) + " mm"};
+
+    try {
+        BRepFilletAPI_MakeChamfer chamfer(occtShape->shape());
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(occtShape->shape(), TopAbs_EDGE, edges);
+        if (edges.IsEmpty())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the shape has no edges to chamfer"};
+        // One distance = the symmetric 45-degree bevel, which is what a bare
+        // "chamfer 2mm" means on a drawing.
+        for (int i = 1; i <= edges.Extent(); ++i)
+            chamfer.Add(distanceMm, TopoDS::Edge(edges(i)));
+        chamfer.Build();
+        if (!chamfer.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not chamfer every edge at this distance; the "
+                               "distance may exceed what the geometry accommodates"};
+        // Same analyzer as the fillet, same reason (see above).
+        if (!BRepCheck_Analyzer(chamfer.Shape()).IsValid())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the chamfered result is not a valid solid; the distance "
+                               "exceeds what the geometry accommodates"};
+        auto handle = std::make_shared<OcctShape>(chamfer.Shape());
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT raised while chamfering: ") + describe(failure)};
     }
 }
 

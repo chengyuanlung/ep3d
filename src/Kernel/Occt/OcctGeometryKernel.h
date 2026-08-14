@@ -18,6 +18,8 @@ public:
     ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override;
     ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
                                const Vec3& axisDirection, double angleRad) override;
+    ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) override;
+    ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) override;
 };
 
 } // namespace paramcad

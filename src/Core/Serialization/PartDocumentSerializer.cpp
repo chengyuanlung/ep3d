@@ -5,6 +5,7 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Feature/RevolveFeature.h"
+#include "Core/Feature/EdgeDressFeatures.h"
 #include "Core/Sketch/Sketch.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Material/Material.h"
@@ -24,7 +25,7 @@ namespace paramcad {
 
 namespace {
 
-constexpr int kSchemaVersion = 7;           // v7 adds the Revolve feature (M8.2)
+constexpr int kSchemaVersion = 8;           // v8 adds Fillet and Chamfer (M8.3)
 constexpr int kMinSupportedSchemaVersion = 1; // v1 (no edges) and v2 files still load
 constexpr std::string_view kFormatName = "ParametricCAD";
 
@@ -218,6 +219,15 @@ JsonValue toJson(const PartDocument& document) {
                                  JsonValue::makeString(idToString(revolve->angleParameterId())));
                 featureEntry.set("materialId",
                                  JsonValue::makeString(idToString(revolve->materialId())));
+            } else if (const auto* dress = dynamic_cast<const EdgeDressFeature*>(feature.get())) {
+                // v8 (ADR-M8-006): Fillet and Chamfer share one record shape;
+                // the "type" field is the discriminator, exactly as everywhere.
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(dress->baseFeatureId())));
+                featureEntry.set("sizeParameterId",
+                                 JsonValue::makeString(idToString(dress->sizeParameterId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(dress->materialId())));
             } else if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
                 // v6 (ADR-M8-001): the chain reference is the base feature's
                 // ObjectId -- semantic, like every other reference here. The
@@ -524,9 +534,10 @@ SaveResult validateSaveable(const PartDocument& document) {
             if (dynamic_cast<const PadFeature*>(feature.get()) != nullptr) continue;
             if (dynamic_cast<const PocketFeature*>(feature.get()) != nullptr) continue;
             if (dynamic_cast<const RevolveFeature*>(feature.get()) != nullptr) continue;
+            if (dynamic_cast<const EdgeDressFeature*>(feature.get()) != nullptr) continue;
             const std::string_view typeName = feature->typeName();
             if (typeName != "Box" && typeName != "Pad" && typeName != "Pocket" &&
-                typeName != "Revolve")
+                typeName != "Revolve" && typeName != "Fillet" && typeName != "Chamfer")
                 continue;
             return SaveResult{SerializationError::InvalidFieldType,
                               "feature " + idToString(feature->id()) + " (" + feature->name() +
@@ -548,13 +559,17 @@ SaveResult validateSaveable(const PartDocument& document) {
     for (const auto& body : document.bodies()) {
         std::unordered_set<ObjectId> earlier;
         for (const auto& feature : body->features()) {
-            if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
-                if (earlier.count(pocket->baseFeatureId()) == 0)
+            ObjectId consumedBase = kInvalidObjectId;
+            if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get()))
+                consumedBase = pocket->baseFeatureId();
+            else if (const auto* dress = dynamic_cast<const EdgeDressFeature*>(feature.get()))
+                consumedBase = dress->baseFeatureId();
+            if (consumedBase != kInvalidObjectId) {
+                if (earlier.count(consumedBase) == 0)
                     return SaveResult{SerializationError::UnknownDependencyId,
-                                      "feature " + idToString(pocket->id()) + " (" +
-                                          pocket->name() +
-                                          "): its base feature " +
-                                          idToString(pocket->baseFeatureId()) +
+                                      "feature " + idToString(feature->id()) + " (" +
+                                          feature->name() +
+                                          "): its base feature " + idToString(consumedBase) +
                                           " is not an earlier feature of the same body; the "
                                           "resulting file could never be loaded back"};
             }
@@ -775,6 +790,8 @@ LoadResult loadPartDocument(std::istream& in) {
         // Revolve-specific (v7, ADR-M8-005; only meaningful when type == "Revolve").
         ObjectId axisEntityId = kInvalidObjectId;
         ObjectId angleParameterId = kInvalidObjectId;
+        // Fillet/Chamfer-specific (v8, ADR-M8-006).
+        ObjectId sizeParameterId = kInvalidObjectId;
     };
     struct BodyData {
         ObjectId id;
@@ -1091,6 +1108,42 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.axisEntityId = *axisRef;
                 featureData.angleParameterId = *angleRef;
                 featureData.materialId = *revolveMaterialId;
+            } else if (featureData.type == "Fillet" || featureData.type == "Chamfer") {
+                const JsonValue* baseField = requireField(featureEntry, "baseFeatureId",
+                                                          JsonType::String, featureContext, err);
+                if (baseField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* sizeField = requireField(
+                    featureEntry, "sizeParameterId", JsonType::String, featureContext, err);
+                if (sizeField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* dressMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (dressMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                const auto baseRef = idFromString(baseField->asString());
+                const auto sizeRef = idFromString(sizeField->asString());
+                const auto dressMaterialId = idFromString(dressMaterialField->asString());
+                if (!baseRef || !sizeRef || !dressMaterialId || *baseRef > kMaxObjectId ||
+                    *sizeRef > kMaxObjectId || *dressMaterialId > kMaxObjectId) {
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext +
+                                           ": fillet/chamfer base/parameter/material id is not "
+                                           "a valid decimal ObjectId string");
+                }
+                if (parameterIds.count(*sizeRef) == 0)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext + ": fillet/chamfer size parameter id " +
+                                           idToString(*sizeRef) +
+                                           " is not a parameter in this document");
+                if (*dressMaterialId != kInvalidObjectId &&
+                    (!materialData.has_value() || materialData->id != *dressMaterialId)) {
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext + ": fillet/chamfer materialId " +
+                                           idToString(*dressMaterialId) +
+                                           " does not match this document's material");
+                }
+                featureData.baseFeatureId = *baseRef;
+                featureData.sizeParameterId = *sizeRef;
+                featureData.materialId = *dressMaterialId;
             }
 
             body.features.push_back(std::move(featureData));
@@ -1443,6 +1496,14 @@ LoadResult loadPartDocument(std::istream& in) {
     for (const auto& body : bodyData) {
         std::unordered_set<ObjectId> earlierFeatures;
         for (const auto& feature : body.features) {
+            if (feature.type == "Fillet" || feature.type == "Chamfer") {
+                if (earlierFeatures.count(feature.baseFeatureId) == 0)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       "feature " + idToString(feature.id) +
+                                           ": fillet/chamfer base feature id " +
+                                           idToString(feature.baseFeatureId) +
+                                           " is not an earlier feature of the same body");
+            }
             if (feature.type == "Pocket") {
                 if (sketchIds.count(feature.sketchId) == 0)
                     return loadFailure(SerializationError::UnknownDependencyId,
@@ -1667,6 +1728,14 @@ LoadResult loadPartDocument(std::istream& in) {
                     restored, feature.id, std::move(feature.name), feature.state,
                     feature.sketchId, static_cast<SketchEntityId>(feature.axisEntityId),
                     feature.angleParameterId, feature.materialId);
+            } else if (feature.type == "Fillet") {
+                document->restoreFilletFeature(restored, feature.id, std::move(feature.name),
+                                               feature.state, feature.baseFeatureId,
+                                               feature.sizeParameterId, feature.materialId);
+            } else if (feature.type == "Chamfer") {
+                document->restoreChamferFeature(restored, feature.id, std::move(feature.name),
+                                                feature.state, feature.baseFeatureId,
+                                                feature.sizeParameterId, feature.materialId);
             } else {
                 restored.addFeature<PlaceholderFeature>(feature.id, std::move(feature.name),
                                                         feature.state, std::move(feature.type));

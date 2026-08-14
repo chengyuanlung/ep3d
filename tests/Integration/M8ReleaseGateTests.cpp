@@ -18,6 +18,7 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Feature/RevolveFeature.h"
+#include "Core/Feature/EdgeDressFeatures.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Core/Sketch/Sketch.h"
 #include "Viewer/DocumentPresenter.h"
@@ -62,9 +63,19 @@ public:
         ++revolveCallCount;
         return inner_.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);
     }
+    ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) override {
+        ++filletCallCount;
+        return inner_.filletAllEdges(shape, radiusMm);
+    }
+    ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) override {
+        ++chamferCallCount;
+        return inner_.chamferAllEdges(shape, distanceMm);
+    }
     int extrudes = 0;
     int subtracts = 0;
     int revolveCallCount = 0;
+    int filletCallCount = 0;
+    int chamferCallCount = 0;
 
 private:
     OcctGeometryKernel inner_;
@@ -603,6 +614,148 @@ TEST(M8ReleaseGate, GATE_RG_DeletingTheAxisLineFailsTheRevolveLoudly) {
     fx.document.recompute();
     EXPECT_EQ(fx.revolve->state(), ComputeState::Failed);
     EXPECT_FALSE(fx.document.massProperties().valid);
+}
+
+
+
+// --- M8.3: Fillet / Chamfer gates --------------------------------------------
+
+TEST(M8ReleaseGate, GATE_FB_PadThenFilletMatchesTheMinkowskiOracle) {
+    ChainFixture fx; // 100 x 50 x 20 pad (constrained sketch)
+    Parameter& radius = fx.document.addParameter("FilletRadius", 2.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    FilletFeature& fillet =
+        fx.document.addFilletFeature(body, "Fillet001", fx.pad->id(), radius.id());
+    // The ChainFixture already chains a pocket onto the pad; re-point this test
+    // at a clean pad->fillet chain by removing the pocket first.
+    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
+
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(fillet.state(), ComputeState::Valid);
+
+    // The Minkowski rounded box (see OcctFilletChamferTests for the derivation):
+    // 70656 + 26752 + 632*pi + (4/3)*pi*8.
+    const double expected = 70656.0 + 26752.0 + 632.0 * kPi + (4.0 / 3.0) * kPi * 8.0;
+    ASSERT_TRUE(fx.document.massProperties().valid);
+    ExpectRel(fx.volume(), expected, 1e-6);
+
+    // Selectivity: a radius edit runs ONE fillet call, no solve, no extrude.
+    const int solves = fx.solver.calls;
+    const int extrudes = fx.kernel.extrudes;
+    const int fillets = fx.kernel.filletCallCount;
+    ASSERT_TRUE(fx.document.setParameterValue(radius.id(), 1.0));
+    ASSERT_TRUE(fx.document.recomputeFrom(radius.id()).success);
+    EXPECT_EQ(fx.solver.calls, solves);
+    EXPECT_EQ(fx.kernel.extrudes, extrudes);
+    EXPECT_EQ(fx.kernel.filletCallCount, fillets + 1);
+}
+
+TEST(M8ReleaseGate, GATE_CB_RevolveThenChamferIsAThreeKindChain) {
+    RevolveFixture fx; // annulus about the axis line, pi*40000
+    // Chamfering the annulus's FOUR rim edges (outer r=30 and inner r=10, both
+    // ends): Pappus per rim with the triangle centroid a third of the way in
+    // from each rim toward the material:
+    //   outer rims: 2 * 2*pi*(30 - 2/3)*2 = 8*pi*(88/3)
+    //   inner rims: 2 * 2*pi*(10 + 2/3)*2 = 8*pi*(32/3)
+    // total removed = 8*pi*40 = 320*pi.
+    Parameter& distance = fx.document.addParameter("ChamferDistance", 2.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    ChamferFeature& chamfer =
+        fx.document.addChamferFeature(body, "Chamfer001", fx.revolve->id(), distance.id());
+
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(chamfer.state(), ComputeState::Valid);
+
+    const double expected = kAnnulusVolume - 320.0 * kPi;
+    ASSERT_TRUE(fx.document.massProperties().valid);
+    ExpectRel(fx.volume(), expected, 1e-6);
+
+    // Sketch -> Revolve -> Chamfer: a three-kind chain where the middle link
+    // was created two slices after the chain machinery -- the capability
+    // resolution paying out a second time.
+}
+
+TEST(M8ReleaseGate, GATE_FC_AnImpossibleRadiusFailsTheFilletOnlyAndRecovers) {
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
+    Parameter& radius = fx.document.addParameter("FilletRadius", 2.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    FilletFeature& fillet =
+        fx.document.addFilletFeature(body, "Fillet001", fx.pad->id(), radius.id());
+    ASSERT_TRUE(fx.document.recompute().success);
+    const double good = fx.volume();
+
+    // Radius 15 > half the 20mm thickness: the rounds collide, OCCT refuses.
+    ASSERT_TRUE(fx.document.setParameterValue(radius.id(), 15.0));
+    fx.document.recompute();
+    EXPECT_EQ(fillet.state(), ComputeState::Failed);
+    EXPECT_EQ(fx.pad->state(), ComputeState::Valid) << "failure travelled upstream";
+    EXPECT_FALSE(fx.document.massProperties().valid);
+
+    ASSERT_TRUE(fx.document.setParameterValue(radius.id(), 2.0));
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(fillet.state(), ComputeState::Valid);
+    ExpectRel(fx.volume(), good, 1e-9);
+}
+
+TEST(M8ReleaseGate, GATE_FD_FilletSurvivesSaveLoadAndStillRebuilds) {
+    std::string saved;
+    ObjectId radiusId = kInvalidObjectId;
+    const double expected = 70656.0 + 26752.0 + 632.0 * kPi + (4.0 / 3.0) * kPi * 8.0;
+    {
+        ChainFixture fx;
+        ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
+        Parameter& radius = fx.document.addParameter("FilletRadius", 2.0, UnitType::Millimeter);
+        radiusId = radius.id();
+        Body& body = *fx.document.bodies().front();
+        fx.document.addFilletFeature(body, "Fillet001", fx.pad->id(), radius.id());
+        ASSERT_TRUE(fx.document.recompute().success);
+        std::ostringstream out;
+        ASSERT_TRUE(savePartDocument(fx.document, out));
+        saved = out.str();
+    }
+
+    OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver solver;
+    std::istringstream in(saved);
+    LoadResult loaded = loadPartDocument(in);
+    ASSERT_TRUE(loaded) << loaded.message;
+    loaded.document->setGeometryKernel(&kernel);
+    loaded.document->setSketchSolver(&solver);
+
+    ASSERT_TRUE(loaded.document->recompute().success);
+    ExpectRel(loaded.document->massProperties().volumeMm3, expected, 1e-6);
+
+    // The radius still drives geometry after a fresh load: r=1 has its own
+    // Minkowski value, computed the same way with r=1:
+    // 98*48*18 + 2*1*(98*48+98*18+48*18) + pi*1*(98+48+18) + (4/3)*pi.
+    ASSERT_TRUE(loaded.document->setParameterValue(radiusId, 1.0));
+    ASSERT_TRUE(loaded.document->recomputeFrom(radiusId).success);
+    const double expectedR1 =
+        84672.0 + 2.0 * (4704.0 + 1764.0 + 864.0) + kPi * 164.0 + (4.0 / 3.0) * kPi;
+    ExpectRel(loaded.document->massProperties().volumeMm3, expectedR1, 1e-6);
+}
+
+// --- M8.4: the Hole deferral, DEMONSTRATED rather than asserted --------------
+
+TEST(M8ReleaseGate, GATE_HOLE_AHoleIsExpressibleTodayAsACirclePocket) {
+    // ADR-M8-007 defers a dedicated Hole feature on the grounds that the
+    // CAPABILITY already exists: a hole is a Pocket whose sketch is one
+    // circle. A deferral resting on "it is expressible" owes a demonstration,
+    // and this is it -- a 6mm-radius hole through the 20mm pad:
+    // 100000 - pi*36*20.
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
+    Sketch& hole = fx.document.addSketch("HoleSketch");
+    hole.addCircle(Vec2{50, 25}, 6.0);
+    Parameter& depth = fx.document.addParameter("HoleDepth", 20.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    PocketFeature& pocket =
+        fx.document.addPocketFeature(body, "Hole001", fx.pad->id(), hole.id(), depth.id());
+
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(pocket.state(), ComputeState::Valid);
+    ExpectRel(fx.volume(), 100000.0 - kPi * 36.0 * 20.0, 1e-6);
 }
 
 } // namespace

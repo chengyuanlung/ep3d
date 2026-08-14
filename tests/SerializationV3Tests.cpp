@@ -142,7 +142,7 @@ TEST(SerializationV3Test, M3_SER_004_ByteIdenticalRoundTrip) {
     // added sketch constraints. This document exercises only v3-era
     // features; the point of the assertion is byte-identical round-tripping
     // at whatever version is current, not that it is any particular number.
-    EXPECT_NE(firstSave.find("\"schemaVersion\": 7"), std::string::npos); // v7: M8.2 Revolve
+    EXPECT_NE(firstSave.find("\"schemaVersion\": 8"), std::string::npos); // v8: M8.3 Fillet/Chamfer
     const LoadResult loaded = loadFromString(firstSave);
     ASSERT_TRUE(loaded) << loaded.message;
     EXPECT_EQ(saveToString(*loaded.document), firstSave);
@@ -257,7 +257,7 @@ TEST(SerializationV3Test, M3_SER_011_UnknownFeatureTypeFallsBackToPlaceholderLos
       "format": "ParametricCAD", "schemaVersion": 3, "documentType": "Part",
       "id": "9301", "name": "Future", "material": null, "parameters": [],
       "bodies": [ {"id": "9302", "name": "Body001",
-                   "features": [ {"id": "9303", "name": "Fillet001", "type": "Fillet",
+                   "features": [ {"id": "9303", "name": "Sweep001", "type": "Sweep",
                                   "state": "Dirty"} ]} ],
       "dependencies": []
     })";
@@ -265,7 +265,7 @@ TEST(SerializationV3Test, M3_SER_011_UnknownFeatureTypeFallsBackToPlaceholderLos
     ASSERT_TRUE(loaded) << loaded.message;
     ASSERT_EQ(loaded.document->bodies()[0]->features().size(), 1u);
     const Feature& feature = *loaded.document->bodies()[0]->features()[0];
-    EXPECT_EQ(feature.typeName(), "Fillet");
+    EXPECT_EQ(feature.typeName(), "Sweep");
     EXPECT_NE(dynamic_cast<const PlaceholderFeature*>(&feature), nullptr);
 }
 

@@ -54,7 +54,12 @@ enum class Sample {
     M5Rectangle,      // Gate A: fully constrained rectangle, DOF = 0
     M5UnderConstrained, // Gate C: the same rectangle missing its dimensions
     M5Conflict,       // Gate E: two disagreeing Lengths on one line
-    M5Circle          // Gate F: fixed-centre circle driven by a Radius Parameter
+    M5Circle,         // Gate F: fixed-centre circle driven by a Radius Parameter
+    // M8 (spec 27-equivalent for the chain): the feature history visible and
+    // editable in the running shell. Creation DIALOGS are deferred to M9 with
+    // the edit-transaction work (ADR-M8-007); what M8 ships is the chain
+    // reachable, displayed as its tail, and driven by panel edits.
+    M8Chain           // Pad 100x50x20 minus Pocket 20x30x10 = 94000 mm^3
 };
 
 bool IsM5(Sample sample) noexcept {
@@ -86,6 +91,20 @@ struct DemoModel {
         Sketch& sketch = document.addSketch("Sketch001");
         sketchId = sketch.id();
 
+        if (sample == Sample::M8Chain) {
+            buildConstrainedRectangle(sketch, Sample::M5Rectangle);
+            Sketch& pocketSketch = document.addSketch("PocketSketch");
+            pocketSketch.addLine(Vec2{10, 10}, Vec2{30, 10});
+            pocketSketch.addLine(Vec2{30, 10}, Vec2{30, 40});
+            pocketSketch.addLine(Vec2{30, 40}, Vec2{10, 40});
+            pocketSketch.addLine(Vec2{10, 40}, Vec2{10, 10});
+            Parameter& depth = document.addParameter("PocketDepth", 10.0, UnitType::Millimeter);
+            Body& body = document.addBody("Body001");
+            pad = &document.addPadFeature(body, "Pad001", sketch.id(), padLength->id());
+            document.addPocketFeature(body, "Pocket001", pad->id(), pocketSketch.id(),
+                                      depth.id());
+            return;
+        }
         if (sample == Sample::M5Circle) {
             buildConstrainedCircle(sketch);
         } else if (IsM5(sample)) {
@@ -179,6 +198,7 @@ Sample SampleFromName(const char* name) {
     if (std::strcmp(name, "m5-underconstrained") == 0) return Sample::M5UnderConstrained;
     if (std::strcmp(name, "m5-conflict") == 0) return Sample::M5Conflict;
     if (std::strcmp(name, "m5-circle") == 0) return Sample::M5Circle;
+    if (std::strcmp(name, "m8-chain") == 0) return Sample::M8Chain;
     // An unknown name is an ERROR, not a fallback. Falling back to the M4
     // rectangle and still printing SELFTEST OK meant a typo in CI silently
     // downgraded an M5 gate to an M4 smoke test that passes.
@@ -358,6 +378,8 @@ int main(int argc, char** argv) {
         if (built == Sample::CircleR20) expectedVolume = kPi * 400.0 * 30.0;
         // pi * 20^2 * 20: the M5 circle's PadLength is the rectangle's 20 mm.
         if (built == Sample::M5Circle) expectedVolume = kPi * 400.0 * 20.0;
+        // Pad minus pocket: 100*50*20 - 20*30*10 (M8 chain).
+        if (built == Sample::M8Chain) expectedVolume = 94000.0;
         // The M5 rectangle solves to the SAME 100 x 50 the M4 one is drawn at,
         // padded 20 -- which is the point: the solved result must match the
         // analytical oracle, not merely be self-consistent.
@@ -543,6 +565,23 @@ int main(int argc, char** argv) {
                 };
             count(root);
             if (sketchRows < 2) fail("the imported sketch is not in the model tree");
+        }
+
+        // M8 chain: the viewer shows the TAIL only, and the pocket's Depth is
+        // an editable panel row -- the two facts that make the chain a usable
+        // model rather than internal state (ADR-M8-003, M8.5).
+        if (sampleBuilt == Sample::M8Chain) {
+            if (presenter.displayableSolids().size() != 1)
+                fail("the chain does not display exactly its tail");
+            // Select the pocket (the tail) and read its panel THROUGH THE
+            // WIDGET (M6.14's lesson).
+            if (!presenter.displayableSolids().empty()) {
+                window.selectObject(presenter.displayableSolids().front());
+                if (window.displayedPropertyValue("Depth").empty())
+                    fail("the pocket's Depth is not shown in the panel");
+                if (window.displayedPropertyValue("Base feature").empty())
+                    fail("the pocket's chain base is not shown in the panel");
+            }
         }
 
         // Selection round-trips through the shell by ObjectId.

@@ -754,7 +754,7 @@ TEST(SerializationV2Test, M2_SER_001_StableIdsSurviveRoundTrip) {
     // Save always writes the CURRENT schema version (v5 as of M5), even
     // though this document only exercises v2-era features (parameters +
     // generic dependency edges, no Material/BoxFeature).
-    EXPECT_NE(saved.find("\"schemaVersion\": 7"), std::string::npos); // v7: M8.2 Revolve
+    EXPECT_NE(saved.find("\"schemaVersion\": 8"), std::string::npos); // v8: M8.3 Fillet/Chamfer
     const LoadResult loaded = loadFromString(saved);
     ASSERT_TRUE(loaded) << loaded.message;
     EXPECT_EQ(loaded.document->id(), original.id());

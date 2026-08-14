@@ -82,6 +82,24 @@ public:
     virtual ShapeResult revolveProfile(const PlanarProfileDefinition& profile,
                                        const Vec3& axisOriginMm, const Vec3& axisDirection,
                                        double angleRad) = 0;
+
+    // Fillets (rounds) or chamfers (bevels) EVERY edge of the shape by one
+    // radius/distance (M8.3, ADR-M8-006).
+    //
+    // ALL edges, deliberately. Selective edge treatment needs an edge the
+    // document can NAME, and today the only available name is an OCCT explorer
+    // position -- transient topology, the exact thing ADR-M4-004 forbids as
+    // identity. Rather than smuggle that in through a parameter, per-edge
+    // selection waits for the selection architecture (roadmap section 13) and
+    // a semantic edge-naming scheme; ADR-M8-006 records the deferral.
+    //
+    // A radius/distance the geometry cannot accommodate (larger than half the
+    // smallest adjacent dimension, degenerate results) surfaces as a
+    // controlled GeometryConstructionFailed from OCCT's own algorithms --
+    // there is no cheap a-priori bound worth half-checking. Neither call
+    // modifies its input shape. Never throws.
+    virtual ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) = 0;
+    virtual ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) = 0;
 };
 
 } // namespace paramcad

@@ -63,6 +63,14 @@ public:
         ++revolveCallCount;
         return inner_.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);
     }
+    ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) override {
+        ++filletCallCount;
+        return inner_.filletAllEdges(shape, radiusMm);
+    }
+    ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) override {
+        ++chamferCallCount;
+        return inner_.chamferAllEdges(shape, distanceMm);
+    }
 
 
     int createBoxCallCount = 0;
@@ -70,6 +78,8 @@ public:
     int calculateMassPropertiesCallCount = 0;
     int subtractCallCount = 0;
     int revolveCallCount = 0;
+    int filletCallCount = 0;
+    int chamferCallCount = 0;
 
 private:
     OcctGeometryKernel inner_;

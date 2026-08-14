@@ -63,11 +63,14 @@ Do not report either item as done because M6 is on `master`. See
 Current target: **M8 — Core Feature Modeling** (`docs/M8_SPEC.md`), on branch
 `m8-wip`, guided by the adopted `docs/EP3D_Onshape_Alignment_Roadmap.md`.
 
-M8.1 (kernel subtract + PocketFeature + the feature chain + schema v6) is
-implemented and gated: 708/708 in Debug and Release, 399/399 single-process,
-six mutations run (five guarded; the sixth is a documented defense-in-depth
-branch the engine makes unreachable -- the honesty about that lives on the
-check itself in PocketFeature.cpp).
+M8 is implemented through all its slices (M8.1 Pocket+chain, M8.2 Revolve,
+M8.3 Fillet/Chamfer, M8.4 deferral ADRs with demonstrations, M8.5 m8-chain
+sample, M8.6 self-validation): 737/737 in Debug and Release, 406/406
+single-process, 17 mutations (16 guarded + 1 documented-unreachable).
+M8.7's REVIEW round is launched; M8 CANNOT CLOSE until it returns clean AND
+M7 closes. Schema is at v8; the "unreserved type name" examples in old tests
+have been renamed three times now (Radius->, Revolve->Loft, Fillet->Sweep) --
+when adding a feature type, grep tests for its name as a placeholder first.
 
 M7 state: functionally complete PLUS review round 1's fixes (all 4 Criticals,
 14 Majors closed). **Still open, and M8 cannot close before they do:**

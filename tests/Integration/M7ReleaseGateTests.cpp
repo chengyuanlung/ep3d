@@ -806,10 +806,20 @@ public:
         ++revolveCallCount;
         return inner.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);
     }
+    ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) override {
+        ++filletCallCount;
+        return inner.filletAllEdges(shape, radiusMm);
+    }
+    ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) override {
+        ++chamferCallCount;
+        return inner.chamferAllEdges(shape, distanceMm);
+    }
     int extrudes = 0;
     int massCalls = 0;
     int subtracts = 0;
     int revolveCallCount = 0;
+    int filletCallCount = 0;
+    int chamferCallCount = 0;
     OcctGeometryKernel inner;
 };
 

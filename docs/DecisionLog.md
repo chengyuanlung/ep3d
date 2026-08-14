@@ -2761,3 +2761,62 @@ the gate could not discriminate and mutation R2 slipped past it to be caught
 one step removed. The fixture is 20x50 now, and the comment on
 `kAnnulusVolume` records why. An oracle is only as good as the coincidences it
 avoids.
+
+---
+
+## ADR-M8-006 — Fillet and Chamfer dress ALL edges; per-edge selection is deferred (M8.3)
+Status: Accepted.
+
+Selective edge treatment needs an edge the DOCUMENT can name. A solid's edges
+are born in the kernel, and the only handle available today is an OCCT explorer
+position -- transient topology, the exact thing ADR-M4-004 forbids as
+persistent identity. Any per-edge parameter added now would smuggle that in.
+
+So M8.3 ships all-edges Fillet and Chamfer, and per-edge selection waits for
+two things the roadmap already schedules: the selection architecture (section
+13, Vertex/Edge/Face selection levels) and a semantic edge-naming scheme (an
+edge described by its GENERATORS -- "the edge where the face from sketch line A
+meets the top cap", stable because sketch entities are stable). Nothing in
+M8.3 pre-decides that scheme's shape.
+
+Implementation decisions that carry weight:
+
+- **One shared base class** (`EdgeDressFeature`), one file for both types --
+  deliberately breaking the one-file-per-feature convention, because these two
+  are the same feature with a different kernel verb, and this project's most
+  repeated defect is parallel kinds diverging. A guard added to one cannot be
+  forgotten on the other if there is only one place to add it.
+- **`IsDone()` is not trusted alone**, and a test had to fail to prove it:
+  OCCT's ChFi3d reports done for a radius wider than half the part's thickness
+  while producing self-intersecting geometry. `BRepCheck_Analyzer` runs on
+  every dress result; F6's mutation removes it and two tests go red.
+- **The dedup map, not a raw explorer**: an explorer visits a shared edge once
+  per owning face, and Add-ing an edge twice is undefined in ChFi3d.
+- Volume oracles avoid corner arithmetic by construction: the fillet oracle is
+  the Minkowski rounded box (exact); the chamfer oracle is Pappus on a
+  cylinder's rims (exact, no corners to double-count).
+
+## ADR-M8-007 — What M8 defers, and why each deferral is safe (M8.4/M8.5)
+Status: Accepted. This is the explicit deferral record M8's spec requires.
+
+- **Hole**: deferred as a TYPE because it already exists as a CAPABILITY -- a
+  hole is a Pocket whose sketch is one circle, and `GATE_HOLE_*` demonstrates
+  it end-to-end (100000 - pi*36*20, exact). A dedicated Hole feature adds
+  vocabulary (counterbore/countersink presets), not power; vocabulary can wait
+  for the UI milestone that would surface it.
+- **Mirror / Pattern**: produce N dependent copies of upstream features --
+  feature-array semantics whose editing story (what does deleting one instance
+  mean?) belongs with M9's history/editing infrastructure. Building them
+  before Undo/Redo exists would fix their semantics twice.
+- **Shell**: requires face selection -- the same transient-topology identity
+  problem as per-edge fillets (ADR-M8-006), deferred with it.
+- **Feature creation DIALOGS**: deferred to M9 with the roadmap's own
+  edit-transaction workflow (section 10: temporary state, preview,
+  accept/cancel). M8.5 ships the chain REACHABLE in the running shell -- the
+  m8-chain sample builds Pad->Pocket, the viewer displays the tail, and the
+  panel edits the pocket's Depth -- so the deferral is of dialogs, not of the
+  workflow.
+
+Each deferral leaves a capability demonstrated or a successor milestone named.
+None is silent -- silence reads as coverage, which M7's review already
+penalized once.

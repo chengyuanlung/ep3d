@@ -65,7 +65,7 @@ struct PadDoc {
 // rather than producing files an older loader silently mis-reads.
 TEST(SerializationV4Test, M4_SER_001_SaveWritesTheCurrentSchemaVersion) {
     PadDoc doc;
-    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 7"), std::string::npos); // v7: M8.2 Revolve
+    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 8"), std::string::npos); // v8: M8.3 Fillet/Chamfer
 }
 
 TEST(SerializationV4Test, M4_SER_002_SketchAndEntityIdsSurvive) {

@@ -9,6 +9,7 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Feature/RevolveFeature.h"
+#include "Core/Feature/EdgeDressFeatures.h"
 #include "Core/Material/Material.h"
 #include "Core/Parameter/Parameter.h"
 #include "Core/Physics/MassProperties.h"
@@ -477,6 +478,21 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
                 }
                 rows.push_back(PropertyRow{"Chain", "Base feature",
                                            std::to_string(pocket->baseFeatureId()), "", false,
+                                           kInvalidObjectId, 0.0});
+            }
+
+            // Fillet/Chamfer (M8.3): the editable size, plus the consumed base.
+            if (const auto* dress = dynamic_cast<const EdgeDressFeature*>(feature.get())) {
+                const bool isFillet = dress->typeName() == "Fillet";
+                for (const auto& parameter : document.parameters().items()) {
+                    if (parameter->id() != dress->sizeParameterId()) continue;
+                    rows.push_back(PropertyRow{"Geometry", isFillet ? "Radius" : "Distance",
+                                               Number(parameter->value()),
+                                               UnitLabel(parameter->unit()), true,
+                                               parameter->id(), parameter->value()});
+                }
+                rows.push_back(PropertyRow{"Chain", "Base feature",
+                                           std::to_string(dress->baseFeatureId()), "", false,
                                            kInvalidObjectId, 0.0});
             }
 
