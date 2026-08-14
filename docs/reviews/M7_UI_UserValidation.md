@@ -10,10 +10,11 @@ until it has actually been run (spec 31).
 
 ## What is already checked, so you do not need to
 
-Automated, **668/668 in Debug and Release**: every supported dimension kind
+Automated, **690/690 in Debug and Release** (and 395/395 in a single-process run of the Core binary): every supported dimension kind
 reconstructs against hand-computed oracles, Gates A–L pass, nine mutations were
 verified, and a real child process edits a reconstructed document with the DXF
-deleted.
+deleted. Independent review round 1 has since run: three reviewers, all
+`REQUEST CHANGES`, all findings fixed and mutation-verified.
 
 **What automation cannot see.** Whether the reconstructed dimensions are
 *findable*. Whether "From source 2 / Inferred 9" means anything to a person.
@@ -87,18 +88,21 @@ means reconstruction read the dimensions and the solver applied them.
 | B3 | No modal dialog appeared | |
 | B4 | The solid **visibly widens**, promptly | |
 | B5 | Volume becomes **120000 mm³** | |
-
-> **B4/B5 were unrunnable when this checklist was written**, and that was a
-> defect in the checklist. The viewer never extruded the imported sketch, so
-> editing a reconstructed Width re-solved the sketch correctly while the 3D view
-> and the volume readout went on describing an unrelated demo box. Fixed after
-> independent review; verified in the running application, where the edit now
-> gives **Volume 120000.0 mm³, Mass 0.3240 kg, COM (60.00, 25.00, 10.00)** — the
-> centre of mass moving from x=50 to x=60 is what proves it is the imported box
-> and not the demo one.
 | B6 | Status stays **Solved**, DOF stays **0** | |
 | B7 | The viewer never shows the old shape while claiming it is current | |
 | B8 | Change **Height 50 → 80**. Volume becomes **192000 mm³** | |
+
+> **B4/B5 were unrunnable when this checklist was first written**, and that was
+> a defect in the checklist rather than in the steps. The viewer never extruded
+> the imported sketch, so editing a reconstructed Width re-solved the sketch
+> correctly while the 3D view and the volume readout went on describing an
+> unrelated demo box.
+>
+> Fixed after independent review, and verified in the running application: the
+> edit now gives **Volume 120000.0 mm³, Mass 0.3240 kg, COM (60.00, 25.00,
+> 10.00)**. The centre of mass moving from x=50 to x=60 is what proves it is the
+> imported box and not the demo one — both are 100 × 50 × 20 before the edit, so
+> the volume alone cannot tell them apart.
 
 ---
 
