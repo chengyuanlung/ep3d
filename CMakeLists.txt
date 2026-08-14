@@ -462,6 +462,15 @@ if(PARAMCAD_BUILD_TESTS)
         # directory.
         target_compile_definitions(ParametricCADImportTests
             PRIVATE PARAMCAD_DXF_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf")
+        # M7.7's fresh-process gate re-invokes THIS binary as a child process,
+        # so it needs its own path and somewhere to write. A generator
+        # expression, because the path differs per configuration -- hard-coding
+        # one would make the Release run drive the Debug binary, which is the
+        # same class of false evidence gtest_discover_tests' PRE_TEST mode
+        # exists to prevent.
+        target_compile_definitions(ParametricCADImportTests PRIVATE
+            PARAMCAD_IMPORT_TEST_EXE="$<TARGET_FILE:ParametricCADImportTests>"
+            PARAMCAD_M7_SCRATCH_DIR="$<TARGET_FILE_DIR:ParametricCADImportTests>")
         if(TARGET ParametricCADKernelOcct)
             target_link_libraries(ParametricCADImportTests PRIVATE ParametricCADKernelOcct)
         endif()

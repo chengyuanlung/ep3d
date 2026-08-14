@@ -16,8 +16,12 @@
 #include "Solver/GaussNewtonSketchSolver.h"
 #include <gtest/gtest.h>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <string>
+#include <system_error>
 
 namespace {
 
@@ -273,6 +277,110 @@ TEST(M7DxfDimension, M7_1_RELEASE_CHAIN_FromFileToRebuiltVolume) {
     // V = 120 x 50 x 20 = 120000 mm^3. This is the M7.1 gate.
     ASSERT_TRUE(loaded.document->massProperties().valid);
     EXPECT_NEAR(loaded.document->massProperties().volumeMm3, 120000.0, 1e-6);
+}
+
+// --- M7.7: a genuinely FRESH PROCESS (spec 24, Gate J) ----------------------
+//
+// Every "fresh load" test above builds a new PartDocument inside the same
+// process. That proves the document does not depend on the previous document --
+// it cannot prove the document does not depend on process state: a static
+// cache, a leaked generator counter, an id that only resolves because the
+// ObjectIdGenerator has already been advanced past it.
+//
+// M6 recorded this exact gap ("fresh-process load is proven but not in CI; a
+// reviewer's three-process probe passed and lives in scratch"). This closes it
+// by spawning a real child process.
+
+std::string ScratchPath(const char* name) {
+    return std::string(PARAMCAD_M7_SCRATCH_DIR) + "/" + name;
+}
+
+constexpr const char* kFreshProcessDocument = "m7_fresh_process.pcad";
+
+// The CHILD half. Skips when its input is absent, so the ordinary test sweep --
+// where this runs on its own, before any parent has written anything -- passes
+// without pretending to have verified something.
+TEST(M7FreshProcessChild, LoadEditAndVerifyVolume) {
+    const std::string path = ScratchPath(kFreshProcessDocument);
+    std::ifstream probe(path);
+    if (!probe) GTEST_SKIP() << "no document to load; this test is driven by its parent";
+    probe.close();
+
+    OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver solver;
+    LoadResult loaded = loadPartDocumentFromFile(path);
+    ASSERT_TRUE(loaded) << loaded.message;
+    loaded.document->setGeometryKernel(&kernel);
+    loaded.document->setSketchSolver(&solver);
+
+    const Parameter* width = loaded.document->parameters().findByName("Width");
+    ASSERT_NE(width, nullptr);
+    EXPECT_DOUBLE_EQ(width->value(), 100.0);
+
+    ASSERT_TRUE(loaded.document->recompute().success);
+    ASSERT_TRUE(loaded.document->setParameterValue(width->id(), 120.0));
+    ASSERT_TRUE(loaded.document->recomputeFrom(width->id()).success);
+
+    // 120 x 50 x 20 = 120000 mm^3, in a process that has never seen the DXF
+    // file, the parser, or the reconstruction code.
+    ASSERT_TRUE(loaded.document->massProperties().valid);
+    EXPECT_NEAR(loaded.document->massProperties().volumeMm3, 120000.0, 1e-6);
+}
+
+TEST(M7FreshProcess, GATE_J_EditWorksInASecondProcessWithTheDxfDeleted) {
+    const std::string path = ScratchPath(kFreshProcessDocument);
+    const std::string copiedDxf = ScratchPath("m7_source_copy.dxf");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    // Import from a COPY of the fixture, so the copy can be deleted afterwards
+    // without touching the repository's fixtures.
+    std::filesystem::copy_file(Fixture("dimensioned_rectangle.dxf"), copiedDxf,
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    ASSERT_FALSE(ec) << ec.message();
+
+    {
+        const DxfReadResult read = ReadDxfFile(copiedDxf);
+        ASSERT_TRUE(read) << read.message;
+
+        PartDocument document{"M7Fresh"};
+        OcctGeometryKernel kernel;
+        GaussNewtonSketchSolver solver;
+        document.setGeometryKernel(&kernel);
+        document.setSketchSolver(&solver);
+        document.addMaterial("Aluminium", 2700.0);
+
+        const SketchImportResult imported =
+            ImportGeometryIntoNewSketch(document, "rectangle", read.geometry);
+        ASSERT_TRUE(imported) << imported.message;
+        ASSERT_TRUE(ReconstructSketch(document, imported.sketchId, read.geometry.dimensions));
+
+        Parameter& padLength = document.addParameter("PadLength", 20.0, UnitType::Millimeter);
+        Body& body = document.addBody("Body001");
+        document.addPadFeature(body, "Pad001", imported.sketchId, padLength.id());
+        ASSERT_TRUE(document.recompute().success);
+        ASSERT_TRUE(savePartDocumentToFile(document, path));
+    }
+
+    // Gate J: the original DXF is GONE before anything reads the document.
+    std::filesystem::remove(copiedDxf, ec);
+    ASSERT_FALSE(std::filesystem::exists(copiedDxf));
+
+    // A real second process. Quoted, because the build path contains a drive
+    // letter and may contain spaces.
+    const std::string command = "\"\"" + std::string(PARAMCAD_IMPORT_TEST_EXE) +
+                                "\" --gtest_filter=M7FreshProcessChild.*\"";
+    const int status = std::system(command.c_str());
+
+    EXPECT_EQ(status, 0) << "the child process failed; command was: " << command;
+
+    // A child that SKIPPED also exits 0, which would make this gate pass while
+    // proving nothing -- the exact shape of false evidence AGENTS.md warns
+    // about. So the document it needed must demonstrably have been there.
+    EXPECT_TRUE(std::filesystem::exists(path))
+        << "the document was not written, so the child can only have skipped";
+
+    std::filesystem::remove(path, ec);
 }
 
 } // namespace
