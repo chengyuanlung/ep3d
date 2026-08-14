@@ -209,6 +209,18 @@ struct Candidate {
     Vec2 sortKey{};
 };
 
+// A resolved Radius/Diameter dimension, held until naming. Parallel to
+// `Candidate` above, and deliberately so: the two kinds are named by different
+// rules but must both be ordered geometrically before naming.
+struct CurveCandidate {
+    const ImportedDimension2D* dimension{nullptr};
+    double valueMm{0.0};
+    SketchEntityId target{kInvalidSketchEntityId};
+    bool diameter{false};
+    Vec2 center{};
+    double radiusMm{0.0};
+};
+
 std::string Describe(const ImportedDimension2D& dimension) {
     std::string text = std::string(ImportedDimensionKindName(dimension.kind)) + " dimension";
     if (!dimension.sourceHandle.empty()) text += " (handle " + dimension.sourceHandle + ")";
@@ -223,6 +235,7 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
     ReconstructionPlan plan;
     const Sketch* sketch = document.findSketch(sketchId);
     if (sketch == nullptr) return plan;
+    plan.documentId = document.id();
     plan.sketchId = sketchId;
 
     const std::vector<LineRef> lines = CollectLines(*sketch);
@@ -325,6 +338,7 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
 
     // --- Explicit source dimensions (spec 8, Class A / Class B) -------------
     std::vector<Candidate> resolved;
+    std::vector<CurveCandidate> resolvedCurves;
     for (const ImportedDimension2D& dimension : dimensions) {
         const std::string what = Describe(dimension);
 
@@ -426,30 +440,17 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
             }
 
             const CurveRef& target = *curveMatches.front();
-            const bool diameter = dimension.kind == ImportedDimensionKind::Diameter;
-            const std::string preferred = diameter ? "Diameter" : "Radius";
-            const std::string name = FreeName(document, plan, preferred);
-            if (name.empty()) {
-                plan.skipped.push_back(ReconstructionSkip{
-                    ReconstructionSkipReason::NameCollision,
-                    "no free Parameter name could be formed from '" + preferred + "'",
-                    dimension.sourceHandle});
-                continue;
-            }
-
-            const auto slot = static_cast<PlanParameterSlot>(plan.parameters.size());
-            // The Parameter carries what the DIMENSION says, not the radius:
-            // a Diameter parameter reading 20 for a radius-10 hole is what the
-            // drawing shows and what the user will edit. The constraint kind is
-            // what tells the solver to halve it.
-            plan.parameters.push_back(PlannedParameter{name, value, UnitType::Millimeter,
-                                                       ReconstructionOrigin::ExplicitSource,
-                                                       dimension.sourceHandle});
-            SketchConstraintData data =
-                diameter ? SketchConstraintData{DiameterConstraint{target.id, kInvalidObjectId}}
-                         : SketchConstraintData{RadiusConstraint{target.id, kInvalidObjectId}};
-            plan.constraints.push_back(PlannedConstraint{std::move(data), slot,
-                                                        ReconstructionOrigin::ExplicitSource, what});
+            // COLLECTED, not named here. Naming happens after the loop against a
+            // geometric sort, exactly as the linear path does -- naming inline
+            // made `Radius` and `Radius_2` swap places when the same drawing was
+            // exported with its dimensions listed the other way round, which
+            // ADR-M7-002 forbids in as many words. The two paths are now
+            // structurally parallel; that they were not is why the linear leg
+            // had a test and this one did not.
+            resolvedCurves.push_back(CurveCandidate{
+                &dimension, value, target.id,
+                dimension.kind == ImportedDimensionKind::Diameter, target.center,
+                target.radiusMm});
             continue;
         }
 
@@ -484,6 +485,43 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
         }
 
         const LineRef& target = *matches.front();
+
+        // A Length constraint controls the line's LENGTH. A Linear dimension
+        // states the PROJECTION of its two points onto `directionRad`, and those
+        // are the same number only when the dimension is measured along the
+        // line. For any other direction the value is a different quantity -- a
+        // horizontal run, a vertical rise, an offset -- and this model has no
+        // constraint that means it.
+        //
+        // Without this check a perfectly ordinary drawing is silently ruined: a
+        // horizontal DIMLINEAR across the ends of a 13 mm sloped line states 5,
+        // reconstruction reports success with no diagnostic, and the solver then
+        // shortens the line to 5. That is spec 34's first Critical, and
+        // MeasuredValueMm's own comment predicted it -- the two kinds are kept
+        // apart at the value layer and were being collapsed here, one level up.
+        //
+        // Aligned is exempt by construction: its direction IS its definition
+        // points, so the projection is the separation.
+        if (dimension.kind == ImportedDimensionKind::Linear) {
+            const double du = target.end.x - target.start.x;
+            const double dv = target.end.y - target.start.y;
+            const double length = std::sqrt(du * du + dv * dv);
+            const double along =
+                std::abs(du * std::cos(dimension.directionRad) + dv * std::sin(dimension.directionRad));
+            // Compared against the axis tolerance expressed as a shortening
+            // ratio, so the same angular allowance that lets a nearly-horizontal
+            // side be called Horizontal also lets its dimension be believed.
+            if (length <= 0.0 ||
+                (length - along) / length > 1.0 - std::cos(options.axisAngleToleranceRad)) {
+                plan.skipped.push_back(ReconstructionSkip{
+                    ReconstructionSkipReason::ValueDisagreesWithGeometry,
+                    what + " measures along a direction the line it names does not follow, so its "
+                           "value is a projection rather than that line's length",
+                    dimension.sourceHandle});
+                continue;
+            }
+        }
+
         resolved.push_back(Candidate{&dimension, value, target.id,
                                      IsHorizontal(target, options.axisAngleToleranceRad),
                                      Before(target.start, target.end) ? target.start : target.end});
@@ -532,7 +570,104 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
                               Describe(*candidate.dimension)});
     }
 
+    // Curve dimensions, ordered by the geometry they name -- centre first, then
+    // radius to separate concentric curves. Never by the order they appeared in
+    // the file (ADR-M7-002).
+    std::sort(resolvedCurves.begin(), resolvedCurves.end(),
+              [](const CurveCandidate& a, const CurveCandidate& b) {
+                  if (a.center.x != b.center.x || a.center.y != b.center.y)
+                      return Before(a.center, b.center);
+                  return a.radiusMm < b.radiusMm;
+              });
+
+    for (const CurveCandidate& candidate : resolvedCurves) {
+        const std::string preferred = candidate.diameter ? "Diameter" : "Radius";
+        const std::string name = FreeName(document, plan, preferred);
+        if (name.empty()) {
+            plan.skipped.push_back(ReconstructionSkip{
+                ReconstructionSkipReason::NameCollision,
+                "no free Parameter name could be formed from '" + preferred + "'",
+                candidate.dimension->sourceHandle});
+            continue;
+        }
+
+        const auto slot = static_cast<PlanParameterSlot>(plan.parameters.size());
+        // The Parameter carries what the DIMENSION says, not the radius: a
+        // Diameter parameter reading 20 for a radius-10 hole is what the drawing
+        // shows and what the user will edit. The constraint kind is what tells
+        // the solver to halve it (ADR-M7-015).
+        plan.parameters.push_back(PlannedParameter{name, candidate.valueMm, UnitType::Millimeter,
+                                                   ReconstructionOrigin::ExplicitSource,
+                                                   candidate.dimension->sourceHandle});
+        SketchConstraintData data =
+            candidate.diameter
+                ? SketchConstraintData{DiameterConstraint{candidate.target, kInvalidObjectId}}
+                : SketchConstraintData{RadiusConstraint{candidate.target, kInvalidObjectId}};
+        plan.constraints.push_back(PlannedConstraint{std::move(data), slot,
+                                                    ReconstructionOrigin::ExplicitSource,
+                                                    Describe(*candidate.dimension)});
+    }
+
     return plan;
+}
+
+PlanValidation ValidatePlanAgainstDocument(const PartDocument& document,
+                                           const ReconstructionPlan& plan) {
+    const Sketch* sketch = document.findSketch(plan.sketchId);
+    if (sketch == nullptr)
+        return {false, "reconstruction plan names a sketch this document does not have"};
+
+    for (const PlannedConstraint& planned : plan.constraints) {
+        for (SketchEntityId target : ReferencedEntities(planned.data)) {
+            if (sketch->findEntity(target) == nullptr)
+                return {false, std::string("the plan names a ") +
+                                   ConstraintKindName(planned.data) +
+                                   " on geometry this sketch does not have"};
+        }
+
+        if (!IsDimensional(planned.data)) continue;
+        const PlannedParameter* bound = plan.find(planned.parameter);
+        if (bound == nullptr) continue; // ValidatePlan already refuses this
+
+        // What the geometry currently measures for this constraint's kind.
+        double measured = -1.0;
+        if (const auto* length = std::get_if<LengthConstraint>(&planned.data)) {
+            const SketchEntity* entity = sketch->findEntity(length->line);
+            if (const auto* line = std::get_if<SketchLine>(&entity->geometry))
+                measured = std::hypot(line->end.x - line->start.x, line->end.y - line->start.y);
+        } else if (const auto* radius = std::get_if<RadiusConstraint>(&planned.data)) {
+            const SketchEntity* entity = sketch->findEntity(radius->curve);
+            if (const auto* circle = std::get_if<SketchCircle>(&entity->geometry))
+                measured = circle->radiusMm;
+            else if (const auto* arc = std::get_if<SketchArc>(&entity->geometry))
+                measured = arc->radiusMm;
+        } else if (const auto* diameter = std::get_if<DiameterConstraint>(&planned.data)) {
+            const SketchEntity* entity = sketch->findEntity(diameter->curve);
+            if (const auto* circle = std::get_if<SketchCircle>(&entity->geometry))
+                measured = 2.0 * circle->radiusMm;
+            else if (const auto* arc = std::get_if<SketchArc>(&entity->geometry))
+                measured = 2.0 * arc->radiusMm;
+        } else {
+            continue; // Distance/Angle are not planned by M7
+        }
+
+        if (measured < 0.0)
+            return {false, std::string("the plan puts a ") + ConstraintKindName(planned.data) +
+                               " on geometry of the wrong kind"};
+
+        // The SAME band the analysis believed the source over the drawing with
+        // (ADR-M7-009). A plan measured from geometry that has since moved
+        // further than that no longer describes this document.
+        const double reference = std::max(std::abs(bound->value), std::abs(measured));
+        if (reference > 0.0 &&
+            std::abs(bound->value - measured) / reference > kReconstructionValueAgreementFraction)
+            return {false, "Parameter '" + bound->name + "' was measured as " +
+                               std::to_string(bound->value) +
+                               " mm but the geometry it names now measures " +
+                               std::to_string(measured) +
+                               " mm; this plan no longer describes this document"};
+    }
+    return {true, {}};
 }
 
 ReconstructionResult ApplyReconstruction(PartDocument& document, const ReconstructionPlan& plan) {
@@ -551,8 +686,16 @@ ReconstructionResult ApplyReconstruction(PartDocument& document, const Reconstru
         result.message = "reconstruction plan rejected: " + validation.message;
         return result;
     }
-    if (document.findSketch(plan.sketchId) == nullptr) {
-        result.message = "reconstruction plan names a sketch this document does not have";
+    if (plan.documentId != document.id()) {
+        // Cheap first pass. It catches two genuinely different documents, and it
+        // does NOT catch two loads of one file -- those share this id, which is
+        // why the geometric check below is the one that carries the contract.
+        result.message = "reconstruction plan was built for a different document";
+        return result;
+    }
+    const PlanValidation describes = ValidatePlanAgainstDocument(document, plan);
+    if (!describes) {
+        result.message = "reconstruction plan rejected: " + describes.message;
         return result;
     }
 
@@ -570,6 +713,13 @@ ReconstructionResult ApplyReconstruction(PartDocument& document, const Reconstru
             document.removeObject(*it);
         result.createdConstraints.clear();
         result.createdParameters.clear();
+        // The entries name ids this unwind has just destroyed, and
+        // FormatReconstructionReport would otherwise tell the user
+        // "reconstructed: 10 constraint(s)" about an operation that
+        // reconstructed nothing. `skipped` is deliberately NOT cleared: what
+        // the analysis declined is exactly the half worth keeping on a failure
+        // path (ADR-M7-017).
+        result.report.entries.clear();
     };
 
     std::vector<ObjectId> slotToParameter(plan.parameters.size(), kInvalidObjectId);
@@ -691,10 +841,24 @@ std::string FormatReconstructionReport(const ReconstructionReport& report) {
 bool SketchAlreadyReconstructed(const PartDocument& document, ObjectId sketchId) {
     const Sketch* sketch = document.findSketch(sketchId);
     if (sketch == nullptr) return false;
-    for (const SketchConstraint& constraint : sketch->constraints())
+    for (const SketchConstraint& constraint : sketch->constraints()) {
         if (IsDimensional(constraint.data) &&
             BoundParameterId(constraint.data) != kInvalidObjectId)
             return true;
+        // A drawing with NO dimensions -- the common case -- still reconstructs
+        // a Fix, and exactly one Fix per sketch is the placement policy
+        // (ADR-M7-013). Keying only on dimensional constraints let such a
+        // sketch be reconstructed repeatedly: 9 constraints became 18 became
+        // 27, each run reporting success, with a duplicate Fix and duplicate
+        // Coincidents every time.
+        //
+        // Spec 25 forbids duplicating "equivalent Parameters AND constraints",
+        // and the damage here is the worst shape there is (ADR-M7-012): the
+        // redundancy is masked while any freedom remains, and only surfaces as
+        // OverConstrained once the USER finishes dimensioning -- pointing at
+        // the dimension they just added rather than at the double import.
+        if (std::holds_alternative<FixConstraint>(constraint.data)) return true;
+    }
     return false;
 }
 

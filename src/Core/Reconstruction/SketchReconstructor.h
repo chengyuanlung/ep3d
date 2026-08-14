@@ -211,6 +211,25 @@ struct ReconstructionResult {
 // that interpreted source data and mutated as it went could not offer this,
 // because by the time it discovered the seventh dimension was unusable it would
 // already have created six Parameters.
+// Whether a plan still DESCRIBES this document.
+//
+// `ValidatePlan` checks a plan against itself and needs no document. This is
+// the other half: every entity the plan names must exist in the sketch it
+// names, and every dimensional value must still agree with the geometry it was
+// measured from, within the same band the analysis used.
+//
+// The document id alone cannot do this job. `ObjectId` is a process-local
+// counter, and two documents loaded from ONE saved file carry not just
+// overlapping ids but identical ones -- independent review applied document A's
+// plan to document B and drove B's 250 mm edge with A's Width=100. What
+// separates them is not their identity but their geometry, so that is what is
+// checked.
+//
+// It also covers the narrower cases for free: an entity deleted between analyze
+// and apply, and geometry edited in between.
+PlanValidation ValidatePlanAgainstDocument(const PartDocument& document,
+                                           const ReconstructionPlan& plan);
+
 ReconstructionResult ApplyReconstruction(PartDocument& document, const ReconstructionPlan& plan);
 
 // Analyze, validate and apply in one call, for callers with nothing to inspect.

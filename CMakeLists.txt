@@ -373,6 +373,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/ReconstructionCurveTests.cpp
         tests/ReconstructionProvenanceTests.cpp
         tests/ReconstructionAdversarialTests.cpp
+        tests/ReconstructionReviewFindingTests.cpp
         # LAST, and the comment above says why. M7 added its five files BELOW
         # this line and broke the rule the comment states in capitals: three
         # M7 persistence tests then ran against a generator already advanced to

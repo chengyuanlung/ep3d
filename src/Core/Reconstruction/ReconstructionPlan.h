@@ -116,10 +116,18 @@ struct PlannedConstraint {
 };
 
 struct ReconstructionPlan {
-    // The sketch this plan was built for. A plan is not portable between
-    // sketches: its SketchEntityIds mean nothing anywhere else, and applying it
-    // to the wrong sketch is the "silently targets wrong geometry" Critical of
-    // spec 34.
+    // The document AND the sketch this plan was built for. A plan is not
+    // portable: its SketchEntityIds mean nothing anywhere else, and applying it
+    // elsewhere is the "silently targets wrong geometry" Critical of spec 34.
+    //
+    // BOTH are needed, and the sketch id alone is not enough. `ObjectId` is a
+    // PROCESS-LOCAL counter starting at 1, so two documents loaded in one
+    // session carry overlapping ids by construction -- independent review
+    // demonstrated a plan built for document A applying cleanly to document B
+    // and driving B's 250 mm edge with A's Width=100, with no diagnostic. An
+    // earlier revision of this comment claimed the case was covered; it was
+    // checking an id space that is not unique across documents.
+    ObjectId documentId{kInvalidObjectId};
     ObjectId sketchId{kInvalidObjectId};
 
     std::vector<PlannedParameter> parameters;

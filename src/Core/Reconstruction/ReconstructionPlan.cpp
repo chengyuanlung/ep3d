@@ -43,6 +43,8 @@ const PlannedParameter* ReconstructionPlan::find(PlanParameterSlot slot) const n
 }
 
 PlanValidation ValidatePlan(const ReconstructionPlan& plan) {
+    if (plan.documentId == kInvalidObjectId)
+        return {false, "the plan names no document"};
     if (plan.sketchId == kInvalidObjectId)
         return {false, "the plan names no sketch"};
 
