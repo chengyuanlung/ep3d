@@ -797,8 +797,13 @@ public:
         ++massCalls;
         return inner.calculateMassProperties(shape);
     }
+    ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override {
+        ++subtracts;
+        return inner.subtractShape(base, tool);
+    }
     int extrudes = 0;
     int massCalls = 0;
+    int subtracts = 0;
     OcctGeometryKernel inner;
 };
 

@@ -27,44 +27,6 @@ const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
     return sketch != nullptr ? *sketch : nullptr;
 }
 
-// Translates a validated semantic loop into the kernel-neutral definition
-// (ADR-M4-003). Every segment is looked up by SketchEntityId, never by
-// position, and orientation from the validator is applied here so the kernel
-// receives a loop that already reads start-to-end.
-bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
-                        PlanarProfileDefinition& out) {
-    const SketchFrame& frame = sketch.frame();
-    out.plane.origin = frame.toWorld(Vec2{0.0, 0.0});
-    out.plane.uAxis = frame.uAxis();
-    out.plane.vAxis = frame.vAxis();
-    out.plane.normal = frame.normal();
-    out.segments.clear();
-    out.segments.reserve(validated.outer.entities.size());
-
-    for (const OrientedSketchEntityRef& ref : validated.outer.entities) {
-        const SketchEntity* entity = sketch.findEntity(ref.entityId);
-        if (entity == nullptr) return false;
-
-        if (const auto* line = std::get_if<SketchLine>(&entity->geometry)) {
-            out.segments.push_back(ref.reversed
-                                       ? ProfileLineSegment{line->end, line->start}
-                                       : ProfileLineSegment{line->start, line->end});
-        } else if (const auto* arc = std::get_if<SketchArc>(&entity->geometry)) {
-            // Reversing an arc swaps its endpoints AND its direction, so the
-            // traversal still runs start-to-end along the same curve.
-            out.segments.push_back(
-                ref.reversed ? ProfileArcSegment{arc->center, arc->radiusMm, arc->endAngleRad,
-                                                 arc->startAngleRad, !arc->counterClockwise}
-                             : ProfileArcSegment{arc->center, arc->radiusMm, arc->startAngleRad,
-                                                 arc->endAngleRad, arc->counterClockwise});
-        } else if (const auto* circle = std::get_if<SketchCircle>(&entity->geometry)) {
-            out.segments.push_back(ProfileCircleSegment{circle->center, circle->radiusMm});
-        } else {
-            return false; // a Point can never be a loop member
-        }
-    }
-    return true;
-}
 
 } // namespace
 

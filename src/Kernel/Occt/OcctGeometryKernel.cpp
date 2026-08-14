@@ -4,6 +4,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepGProp.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <GProp_GProps.hxx>
@@ -188,6 +189,35 @@ ShapeResult OcctGeometryKernel::extrudeProfile(const PlanarProfileDefinition& pr
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            std::string("OCCT raised while extruding the profile: ") +
                                describe(failure)};
+    }
+}
+
+ShapeResult OcctGeometryKernel::subtractShape(const KernelShape& base, const KernelShape& tool) {
+    // Same handle discipline as calculateMassProperties: dynamic_cast, never UB
+    // on a null or foreign handle (ADR-M3-001).
+    const auto* occtBase = dynamic_cast<const OcctShape*>(base.handle());
+    if (occtBase == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "subtract base is not an OcctShape (null or foreign kernel)"};
+    const auto* occtTool = dynamic_cast<const OcctShape*>(tool.handle());
+    if (occtTool == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "subtract tool is not an OcctShape (null or foreign kernel)"};
+
+    try {
+        BRepAlgoAPI_Cut cut(occtBase->shape(), occtTool->shape());
+        if (!cut.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT boolean cut did not complete"};
+        // A disjoint tool yields the base unchanged and a swallowing tool
+        // yields an empty compound -- both LEGAL results (M8 spec 6), returned
+        // as ordinary shapes rather than refused. The caller's mass properties
+        // then read the true volume, including zero.
+        auto handle = std::make_shared<OcctShape>(cut.Shape());
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT raised while cutting: ") + describe(failure)};
     }
 }
 

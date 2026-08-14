@@ -3,6 +3,7 @@
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/PadFeature.h"
+#include "Core/Feature/PocketFeature.h"
 #include "Core/Sketch/Sketch.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Material/Material.h"
@@ -22,7 +23,7 @@ namespace paramcad {
 
 namespace {
 
-constexpr int kSchemaVersion = 5;           // v5 adds sketch constraints
+constexpr int kSchemaVersion = 6;           // v6 adds the Pocket feature (M8)
 constexpr int kMinSupportedSchemaVersion = 1; // v1 (no edges) and v2 files still load
 constexpr std::string_view kFormatName = "ParametricCAD";
 
@@ -203,6 +204,20 @@ JsonValue toJson(const PartDocument& document) {
                 featureEntry.set("lengthParameterId",
                                  JsonValue::makeString(idToString(pad->lengthParameterId())));
                 featureEntry.set("materialId", JsonValue::makeString(idToString(pad->materialId())));
+            } else if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
+                // v6 (ADR-M8-001): the chain reference is the base feature's
+                // ObjectId -- semantic, like every other reference here. The
+                // restore path requires the base to appear EARLIER in this
+                // body's feature array, which creation order guarantees; the
+                // save-side counterpart of that rule lives in validateSaveable.
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(pocket->baseFeatureId())));
+                featureEntry.set("sketchId",
+                                 JsonValue::makeString(idToString(pocket->sketchId())));
+                featureEntry.set("depthParameterId",
+                                 JsonValue::makeString(idToString(pocket->depthParameterId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(pocket->materialId())));
             }
             features.add(std::move(featureEntry));
         }
@@ -493,8 +508,9 @@ SaveResult validateSaveable(const PartDocument& document) {
         for (const auto& feature : body->features()) {
             if (dynamic_cast<const BoxFeature*>(feature.get()) != nullptr) continue;
             if (dynamic_cast<const PadFeature*>(feature.get()) != nullptr) continue;
+            if (dynamic_cast<const PocketFeature*>(feature.get()) != nullptr) continue;
             const std::string_view typeName = feature->typeName();
-            if (typeName != "Box" && typeName != "Pad") continue;
+            if (typeName != "Box" && typeName != "Pad" && typeName != "Pocket") continue;
             return SaveResult{SerializationError::InvalidFieldType,
                               "feature " + idToString(feature->id()) + " (" + feature->name() +
                                   ") is a placeholder carrying the reserved type name '" +
@@ -505,6 +521,29 @@ SaveResult validateSaveable(const PartDocument& document) {
 
     std::unordered_set<ObjectId> sketchIds;
     for (const Sketch* sketch : document.sketches()) sketchIds.insert(sketch->id());
+
+    // A Pocket must reference a base feature that exists EARLIER in the same
+    // body (ADR-M3-008 again: a file the loader would reject must never be
+    // savable). "Earlier" matters because restore replays features in array
+    // order, and a consumer restored before its base would wire an edge to a
+    // node that does not exist yet. Creation order makes this naturally true;
+    // deleting a pocket's base is how it becomes false.
+    for (const auto& body : document.bodies()) {
+        std::unordered_set<ObjectId> earlier;
+        for (const auto& feature : body->features()) {
+            if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
+                if (earlier.count(pocket->baseFeatureId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(pocket->id()) + " (" +
+                                          pocket->name() +
+                                          "): its base feature " +
+                                          idToString(pocket->baseFeatureId()) +
+                                          " is not an earlier feature of the same body; the "
+                                          "resulting file could never be loaded back"};
+            }
+            earlier.insert(feature->id());
+        }
+    }
 
     // Material references, checked for every referring feature type at once.
     // Enumerating concrete types here is what let this rule lapse when Pad was
@@ -711,6 +750,11 @@ LoadResult loadPartDocument(std::istream& in) {
         // Pad-specific (v4, ADR-M4-004; only meaningful when type == "Pad").
         ObjectId sketchId = kInvalidObjectId;
         ObjectId lengthParameterId = kInvalidObjectId;
+        // Pocket-specific (v6, ADR-M8-001; only meaningful when type == "Pocket").
+        // depthParameterId is SHARED with the Box block above -- one slot, only
+        // ever meaningful for the type the record declares, like every other
+        // per-type field here.
+        ObjectId baseFeatureId = kInvalidObjectId;
     };
     struct BodyData {
         ObjectId id;
@@ -943,6 +987,48 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.sketchId = *sketchRef;
                 featureData.lengthParameterId = *lengthRef;
                 featureData.materialId = *padMaterialId;
+            } else if (featureData.type == "Pocket") {
+                const JsonValue* baseField = requireField(featureEntry, "baseFeatureId",
+                                                          JsonType::String, featureContext, err);
+                if (baseField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* sketchField = requireField(featureEntry, "sketchId",
+                                                            JsonType::String, featureContext, err);
+                if (sketchField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* depthField = requireField(
+                    featureEntry, "depthParameterId", JsonType::String, featureContext, err);
+                if (depthField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* pocketMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (pocketMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                const auto baseRef = idFromString(baseField->asString());
+                const auto sketchRef = idFromString(sketchField->asString());
+                const auto depthRef = idFromString(depthField->asString());
+                const auto pocketMaterialId = idFromString(pocketMaterialField->asString());
+                if (!baseRef || !sketchRef || !depthRef || !pocketMaterialId ||
+                    *baseRef > kMaxObjectId || *sketchRef > kMaxObjectId ||
+                    *depthRef > kMaxObjectId || *pocketMaterialId > kMaxObjectId) {
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext +
+                                           ": pocket base/sketch/parameter/material id is not a "
+                                           "valid decimal ObjectId string");
+                }
+                if (parameterIds.count(*depthRef) == 0)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext + ": pocket depth parameter id " +
+                                           idToString(*depthRef) +
+                                           " is not a parameter in this document");
+                if (*pocketMaterialId != kInvalidObjectId &&
+                    (!materialData.has_value() || materialData->id != *pocketMaterialId)) {
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext + ": pocket materialId " +
+                                           idToString(*pocketMaterialId) +
+                                           " does not match this document's material");
+                }
+                featureData.baseFeatureId = *baseRef;
+                featureData.sketchId = *sketchRef;
+                featureData.depthParameterId = *depthRef;
+                featureData.materialId = *pocketMaterialId;
             }
 
             body.features.push_back(std::move(featureData));
@@ -1286,6 +1372,32 @@ LoadResult loadPartDocument(std::istream& in) {
         }
     }
 
+    // Every Pocket must reference a Sketch in this file and a base feature that
+    // appears EARLIER in the same body -- restore replays features in array
+    // order, so a base that follows its consumer (or lives in another body)
+    // would be an edge to a node that does not exist yet. validateSaveable
+    // enforces the same rule at save time; both halves exist so neither can
+    // drift alone.
+    for (const auto& body : bodyData) {
+        std::unordered_set<ObjectId> earlierFeatures;
+        for (const auto& feature : body.features) {
+            if (feature.type == "Pocket") {
+                if (sketchIds.count(feature.sketchId) == 0)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       "feature " + idToString(feature.id) +
+                                           ": pocket sketch id " + idToString(feature.sketchId) +
+                                           " is not a sketch in this document");
+                if (earlierFeatures.count(feature.baseFeatureId) == 0)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       "feature " + idToString(feature.id) +
+                                           ": pocket base feature id " +
+                                           idToString(feature.baseFeatureId) +
+                                           " is not an earlier feature of the same body");
+            }
+            earlierFeatures.insert(feature.id);
+        }
+    }
+
     // Dependencies (Option A, ADR-012/ADR-M3-005; optional array). Validated
     // fully BEFORE any document construction on a scratch graph holding
     // exactly the node set the real document will have (parameter nodes --
@@ -1453,6 +1565,11 @@ LoadResult loadPartDocument(std::istream& in) {
                 document->restorePadFeature(restored, feature.id, std::move(feature.name),
                                             feature.state, feature.sketchId,
                                             feature.lengthParameterId, feature.materialId);
+            } else if (feature.type == "Pocket") {
+                document->restorePocketFeature(restored, feature.id, std::move(feature.name),
+                                               feature.state, feature.baseFeatureId,
+                                               feature.sketchId, feature.depthParameterId,
+                                               feature.materialId);
             } else {
                 restored.addFeature<PlaceholderFeature>(feature.id, std::move(feature.name),
                                                         feature.state, std::move(feature.type));

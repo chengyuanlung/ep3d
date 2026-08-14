@@ -54,10 +54,16 @@ public:
         ++calculateMassPropertiesCallCount;
         return inner_.calculateMassProperties(shape);
     }
+    ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override {
+        ++subtractCallCount;
+        return inner_.subtractShape(base, tool);
+    }
+
 
     int createBoxCallCount = 0;
     int extrudeProfileCallCount = 0;
     int calculateMassPropertiesCallCount = 0;
+    int subtractCallCount = 0;
 
 private:
     OcctGeometryKernel inner_;

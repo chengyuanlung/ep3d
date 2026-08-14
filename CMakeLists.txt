@@ -23,6 +23,7 @@ add_library(ParametricCADCore
     src/Core/Feature/BoxFeature.cpp
     src/Core/Feature/Feature.cpp
     src/Core/Feature/PadFeature.cpp
+    src/Core/Feature/PocketFeature.cpp
     src/Core/Feature/PlaceholderFeature.cpp
     src/Core/Kernel/KernelShape.cpp
     src/Core/Kernel/ProfileDefinition.cpp

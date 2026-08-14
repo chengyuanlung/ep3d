@@ -2,6 +2,7 @@
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/PadFeature.h"
+#include "Core/Feature/PocketFeature.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <algorithm>
 #include <cassert>
@@ -516,6 +517,48 @@ PadFeature& PartDocument::restorePadFeature(Body& body, ObjectId id, std::string
     PadFeature& feature = body.addFeature<PadFeature>(id, std::move(name), state, sketchId,
                                                       lengthParameterId, materialId);
     wirePadFeature(feature, sketchId, lengthParameterId, materialId);
+    return feature;
+}
+
+
+void PartDocument::wirePocketFeature(PocketFeature& feature, ObjectId baseFeatureId,
+                                     ObjectId sketchId, ObjectId depthParameterId,
+                                     ObjectId materialId) {
+    addRecomputableNode(feature); // registry + graph node (IRecomputable*)
+    // THE chain edge (ADR-M8-001): editing anything that rebuilds the base
+    // dirties the pocket through the ordinary M2 machinery. Without it, a
+    // Width edit would rebuild the pad and leave the pocket cutting yesterday's
+    // solid -- current-looking, analytically wrong.
+    addDependency(feature.id(), baseFeatureId);     // Base   -> Pocket
+    addDependency(feature.id(), sketchId);          // Sketch -> Pocket
+    addDependency(feature.id(), depthParameterId);  // Depth  -> Pocket
+    // Physics follows the chain TAIL (ADR-M8-003): the pocketed result is the
+    // part; the pad alone is now an intermediate value.
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+PocketFeature& PartDocument::addPocketFeature(Body& body, std::string name,
+                                              ObjectId baseFeatureId, ObjectId sketchId,
+                                              ObjectId depthParameterId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    PocketFeature& feature = body.addFeature<PocketFeature>(
+        std::move(name), baseFeatureId, sketchId, depthParameterId, materialId);
+    wirePocketFeature(feature, baseFeatureId, sketchId, depthParameterId, materialId);
+    return feature;
+}
+
+PocketFeature& PartDocument::restorePocketFeature(Body& body, ObjectId id, std::string name,
+                                                  ComputeState state, ObjectId baseFeatureId,
+                                                  ObjectId sketchId, ObjectId depthParameterId,
+                                                  ObjectId materialId) {
+    // Same duplicate-id guard as every restored type (ADR-M5-018, and the M6
+    // review that found the types the fix skipped).
+    if (registry_.contains(id))
+        throw std::runtime_error("restorePocketFeature: id " + std::to_string(id) +
+                                 " is already registered in this document");
+    PocketFeature& feature = body.addFeature<PocketFeature>(
+        id, std::move(name), state, baseFeatureId, sketchId, depthParameterId, materialId);
+    wirePocketFeature(feature, baseFeatureId, sketchId, depthParameterId, materialId);
     return feature;
 }
 

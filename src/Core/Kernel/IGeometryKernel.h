@@ -54,6 +54,21 @@ public:
     // KernelMassPropertiesResult with KernelError::GeometryConstructionFailed
     // rather than dereferencing anything unsafely.
     virtual KernelMassPropertiesResult calculateMassProperties(const KernelShape& shape) = 0;
+
+    // base minus tool, as a NEW shape (M8, spec 5). Neither input is modified
+    // or invalidated: the feature chain reads its base through ISolidFeature
+    // and the base feature goes on owning its own result, so a boolean that
+    // mutated its operands would corrupt the very state selective recompute
+    // relies on being stable.
+    //
+    // A tool that misses the base entirely, or swallows it entirely, is a
+    // LEGAL cut (M8 spec 6): the result is the base unchanged, or an empty
+    // shape, respectively. Refusing either would make ordinary modelling fail
+    // -- a pocket dragged off the part is a modelling state, not an error.
+    //
+    // Invalid or foreign handles return a controlled ShapeResult with
+    // KernelError::GeometryConstructionFailed. Never throws.
+    virtual ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) = 0;
 };
 
 } // namespace paramcad

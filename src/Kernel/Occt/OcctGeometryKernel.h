@@ -15,6 +15,7 @@ public:
     ShapeResult extrudeProfile(const PlanarProfileDefinition& profile,
                                double distanceMm) override;
     KernelMassPropertiesResult calculateMassProperties(const KernelShape& shape) override;
+    ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override;
 };
 
 } // namespace paramcad

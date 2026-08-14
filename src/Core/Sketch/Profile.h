@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Sketch/Sketch.h"
+#include "Core/Kernel/ProfileDefinition.h"
 #include "Core/Sketch/SketchTypes.h"
 #include <string>
 #include <vector>
@@ -68,5 +69,18 @@ ProfileResult BuildProfile(const Sketch& sketch);
 // (ADR-M4-005). Shares kSketchToleranceMm's value so the project keeps one
 // length-scale story across M3 and M4.
 inline constexpr double kProfileConnectivityToleranceMm = kSketchToleranceMm;
+
+// Translates a validated semantic loop into the kernel-neutral definition
+// (ADR-M4-003). Every segment is looked up by SketchEntityId, never by
+// position, and the validator's orientation is applied here so the kernel
+// receives a loop that already reads start-to-end.
+//
+// Was file-local in PadFeature.cpp until M8's PocketFeature needed the same
+// translation for its tool prism. Promoted rather than duplicated: two copies
+// of segment orientation logic would be two places to disagree about arc
+// reversal, and that is a geometry bug that looks like a solver bug.
+// False if a loop member no longer exists in the sketch or is a Point.
+bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
+                        PlanarProfileDefinition& out);
 
 } // namespace paramcad

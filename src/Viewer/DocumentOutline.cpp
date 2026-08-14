@@ -7,6 +7,7 @@
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Feature/PadFeature.h"
+#include "Core/Feature/PocketFeature.h"
 #include "Core/Material/Material.h"
 #include "Core/Parameter/Parameter.h"
 #include "Core/Physics/MassProperties.h"
@@ -461,6 +462,21 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
                                                UnitLabel(parameter->unit()), true,
                                                parameter->id(), parameter->value()});
                 }
+            }
+
+            // Pocket (M8): the editable Depth, exactly as Pad's Length, plus
+            // the base it consumes -- read-only, because the chain reference is
+            // structure, not a value to type over.
+            if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
+                for (const auto& parameter : document.parameters().items()) {
+                    if (parameter->id() != pocket->depthParameterId()) continue;
+                    rows.push_back(PropertyRow{"Geometry", "Depth", Number(parameter->value()),
+                                               UnitLabel(parameter->unit()), true,
+                                               parameter->id(), parameter->value()});
+                }
+                rows.push_back(PropertyRow{"Chain", "Base feature",
+                                           std::to_string(pocket->baseFeatureId()), "", false,
+                                           kInvalidObjectId, 0.0});
             }
 
             if (const auto* referencing =

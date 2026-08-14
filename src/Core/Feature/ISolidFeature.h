@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/Document/ObjectId.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Kernel/KernelShape.h"
 
@@ -31,6 +32,18 @@ public:
     // scheduling (ADR-M3-004/007); this is the same synchronized cache
     // Feature::state() exposes, reachable without naming a concrete type.
     virtual ComputeState currentState() const noexcept = 0;
+
+    // The upstream solid this feature CONSUMES, or kInvalidObjectId for a
+    // feature that builds from nothing (Box, Pad). M8's chain declaration
+    // (ADR-M8-001/003): consumers like Pocket override this, and anything that
+    // must follow the chain tail -- the viewer, above all -- asks this
+    // capability instead of enumerating concrete feature types, which is
+    // ADR-M3-007's rule applied to the chain.
+    //
+    // Defaulted rather than pure, deliberately: building-from-nothing is the
+    // common case, and forcing every such feature to write "invalid" would
+    // add a line per type that says nothing.
+    virtual ObjectId consumedSolidId() const noexcept { return kInvalidObjectId; }
 };
 
 } // namespace paramcad

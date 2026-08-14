@@ -142,7 +142,7 @@ TEST(SerializationV3Test, M3_SER_004_ByteIdenticalRoundTrip) {
     // added sketch constraints. This document exercises only v3-era
     // features; the point of the assertion is byte-identical round-tripping
     // at whatever version is current, not that it is any particular number.
-    EXPECT_NE(firstSave.find("\"schemaVersion\": 5"), std::string::npos);
+    EXPECT_NE(firstSave.find("\"schemaVersion\": 6"), std::string::npos); // v6: M8 Pocket
     const LoadResult loaded = loadFromString(firstSave);
     ASSERT_TRUE(loaded) << loaded.message;
     EXPECT_EQ(saveToString(*loaded.document), firstSave);

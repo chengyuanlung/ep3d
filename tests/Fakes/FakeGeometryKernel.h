@@ -201,9 +201,50 @@ public:
         return KernelMassPropertiesResult{fake->properties(), KernelError::None, {}};
     }
 
+    ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override {
+        ++subtractShapeCallCount;
+        const auto* fakeBase = dynamic_cast<const FakeShapeHandle*>(base.handle());
+        if (fakeBase == nullptr)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "subtract base is not a FakeShapeHandle (null or foreign kernel)"};
+        const auto* fakeTool = dynamic_cast<const FakeShapeHandle*>(tool.handle());
+        if (fakeTool == nullptr)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "subtract tool is not a FakeShapeHandle (null or foreign kernel)"};
+
+        // ANALYTICAL MODEL, and a deliberately narrow one, exactly like the
+        // fake's extrudeProfile: volume subtracts, centre of mass recombines by
+        // volume-weighted difference, and the second moment is NOT modelled
+        // (zeroed). The fake exists so Core-side tests can run without OCCT;
+        // any test whose oracle needs a real boolean's inertia belongs in
+        // tests/Kernel with the real kernel, not here agreeing with a formula.
+        //
+        // The volume floors at zero: the fake cannot know overlap, so it
+        // models the FULL-CONTAINMENT case (pocket tool entirely inside the
+        // base), which is what every Core-level chain test constructs. A
+        // disjoint or partial cut is real geometry and belongs to OCCT tests.
+        const KernelMassProperties& b = fakeBase->properties();
+        const KernelMassProperties& t = fakeTool->properties();
+        KernelMassProperties result;
+        result.volumeMm3 = b.volumeMm3 - t.volumeMm3;
+        if (result.volumeMm3 < 0.0) result.volumeMm3 = 0.0;
+        if (result.volumeMm3 > 0.0) {
+            result.centerOfMassMm =
+                Vec3{(b.centerOfMassMm.x * b.volumeMm3 - t.centerOfMassMm.x * t.volumeMm3) /
+                         result.volumeMm3,
+                     (b.centerOfMassMm.y * b.volumeMm3 - t.centerOfMassMm.y * t.volumeMm3) /
+                         result.volumeMm3,
+                     (b.centerOfMassMm.z * b.volumeMm3 - t.centerOfMassMm.z * t.volumeMm3) /
+                         result.volumeMm3};
+        }
+        return ShapeResult{KernelShape(std::make_shared<FakeShapeHandle>(result)),
+                           KernelError::None, {}};
+    }
+
     int createBoxCallCount = 0;
     int extrudeProfileCallCount = 0;
     int calculateMassPropertiesCallCount = 0;
+    int subtractShapeCallCount = 0;
 
 private:
     static constexpr double kPi = 3.14159265358979323846;

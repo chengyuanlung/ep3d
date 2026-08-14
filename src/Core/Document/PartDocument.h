@@ -24,6 +24,7 @@ class IGeometryKernel;
 class BoxFeature;
 class ISketchSolver;
 class PadFeature;
+class PocketFeature;
 
 // DEPENDENCY DIRECTION (single rule, ADR-007/ADR-012): an edge points
 // prerequisite -> dependent; "A -> B" means B depends on A and dirtiness
@@ -228,6 +229,18 @@ public:
                                   ObjectId sketchId, ObjectId lengthParameterId,
                                   ObjectId materialId);
 
+    // --- Pocket feature (M8, ADR-M8-001) -----------------------------------
+    // The first CONSUMING feature: removes material from `baseFeatureId`'s
+    // result. Wires the chain edge base -> pocket alongside the Sketch and
+    // Depth edges, and re-points the document's MassPropertiesNode at the
+    // pocket -- the chain TAIL is what downstream physics reads (ADR-M8-003).
+    PocketFeature& addPocketFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                    ObjectId sketchId, ObjectId depthParameterId);
+    PocketFeature& restorePocketFeature(Body& body, ObjectId id, std::string name,
+                                        ComputeState state, ObjectId baseFeatureId,
+                                        ObjectId sketchId, ObjectId depthParameterId,
+                                        ObjectId materialId);
+
     // Non-owning; the caller keeps the concrete kernel alive for every
     // subsequent recompute()/recomputeFrom() call (ADR-M3-003, mirrors
     // ADR-010's externally-owned IRecomputable lifetime pattern).
@@ -288,6 +301,8 @@ private:
 
     // Shared Pad registration/wiring for addPadFeature and restorePadFeature
     // (single registration path, spec 13).
+    void wirePocketFeature(PocketFeature& feature, ObjectId baseFeatureId, ObjectId sketchId,
+                           ObjectId depthParameterId, ObjectId materialId);
     void wirePadFeature(PadFeature& feature, ObjectId sketchId, ObjectId lengthParameterId,
                        ObjectId materialId);
 
