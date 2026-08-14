@@ -446,6 +446,30 @@ int main(int argc, char** argv) {
                 if (!window.propertyPanelFitsItsPanel())
                     fail("the property panel is wider than its dock, so values are "
                          "pushed out of sight");
+
+                // M7 (spec 27): reconstruction ran as part of the import, and
+                // the panel SHOWS what it did -- separating what the drawing
+                // stated from what EP3D inferred, which spec 3 says must never
+                // be silently mixed.
+                const ReconstructionReport* report =
+                    window.reconstructionReportFor(imported->id());
+                if (report == nullptr)
+                    fail("the import produced no reconstruction report");
+                else if (report->entries.empty())
+                    fail("reconstruction produced no constraints for an imported rectangle");
+
+                // Read from the TABLE, not from propertiesOf: these rows are
+                // added by the shell, and M6.14's lesson is that a UI claim has
+                // to ask the widget.
+                if (window.displayedPropertyValue("From source").empty())
+                    fail("the panel does not say how much came from the drawing");
+                if (window.displayedPropertyValue("Inferred").empty())
+                    fail("the panel does not say how much EP3D inferred");
+                // Present even when zero: a row that appears only when
+                // something was skipped cannot be told from one where nothing
+                // asked the question.
+                if (window.displayedPropertyValue("Skipped").empty())
+                    fail("the panel does not report how many items were skipped");
             }
             // The tree must SHOW it -- an import the model tree does not list
             // is an import the user cannot select or delete.

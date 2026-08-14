@@ -1,8 +1,11 @@
 #pragma once
 
 #include "Core/Document/ObjectId.h"
+#include "Core/Reconstruction/SketchReconstructor.h"
 #include <QMainWindow>
 #include <QString>
+#include <map>
+#include <string>
 #include <set>
 
 class QTreeWidget;
@@ -53,6 +56,25 @@ public:
     // pushed the value column out of the visible area. `propertiesOf` returned
     // ten good rows while the user saw ten labels and no values.
     bool propertyPanelFitsItsPanel() const;
+
+    // What reconstruction did to each imported sketch, kept by the SHELL.
+    //
+    // Session state, not document state (ADR-M7-017): it is not persisted, and
+    // a document reopened later simply has no entry. Keyed by sketch id, so a
+    // second import into the same document keeps its own report.
+    const ReconstructionReport* reconstructionReportFor(ObjectId sketchId) const;
+
+    // The value the panel is DISPLAYING for a property, read out of the table
+    // widget itself rather than recomputed from the model.
+    //
+    // That distinction is the whole lesson of M6.14: propertiesOf() returned
+    // ten correct rows while the user saw ten labels and no values, and every
+    // data-level test agreed with the model. A UI assertion has to ask the
+    // widget. Empty string when no row carries that label.
+    std::string displayedPropertyValue(const std::string& label) const;
+
+private:
+    std::map<ObjectId, ReconstructionReport> reconstructionReports_;
 
 private slots:
     void onTreeSelectionChanged();

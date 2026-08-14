@@ -226,7 +226,51 @@ void MainWindow::rebuildTree() {
 
 void MainWindow::rebuildProperties() {
     const DocumentOutline outline(*document_);
-    const std::vector<PropertyRow> rows = outline.propertiesOf(selectedId_);
+    std::vector<PropertyRow> rows = outline.propertiesOf(selectedId_);
+
+    // Reconstruction provenance, appended HERE rather than in DocumentOutline.
+    //
+    // The report is session state held by the shell (ADR-M7-017: it is not part
+    // of the document and is not persisted), so ViewerCore has no business
+    // knowing about it -- and giving it a reconstruction dependency to display
+    // three rows would invert the layering for nothing.
+    const auto reconstruction = reconstructionReports_.find(selectedId_);
+    if (reconstruction != reconstructionReports_.end()) {
+        const ReconstructionReport& report = reconstruction->second;
+        // Spec 27 item 11 and spec 3: explicit and inferred must be visibly
+        // distinguishable, so they are separate rows rather than one total.
+        // A single "11 constraints reconstructed" would hide the fact that two
+        // came from the drawing and nine were this program's own inference.
+        //
+        // LABELS ARE KEPT SHORT ON PURPOSE. The property table sizes its label
+        // column to content, which is only safe while labels are bounded --
+        // that is the documented assumption the M6.14 fix rests on. The first
+        // draft of these rows said "From source dimensions" and "Inferred by
+        // EP3D", and the panel-fit guard failed immediately: 39 characters was
+        // enough to push the value column out of the dock again. The guard was
+        // right and the labels were wrong.
+        rows.push_back(PropertyRow{"Reconstruction", "From source",
+                                   std::to_string(report.explicitCount()), "", false,
+                                   kInvalidObjectId, 0.0});
+        rows.push_back(
+            PropertyRow{"Reconstruction", "Inferred",
+                        std::to_string(report.entries.size() - report.explicitCount()), "",
+                        false, kInvalidObjectId, 0.0});
+        // ALWAYS shown, including "0". A row that appears only when something
+        // was skipped cannot be told from one where nothing asked the question,
+        // and "nothing was skipped" is the claim a user needs before trusting
+        // the result.
+        rows.push_back(PropertyRow{"Reconstruction", "Skipped",
+                                   std::to_string(report.skipped.size()), "", false,
+                                   kInvalidObjectId, 0.0});
+        for (const ReconstructionSkip& skip : report.skipped) {
+            std::string detail = std::string(ReconstructionSkipReasonName(skip.reason)) + ": " +
+                                 skip.detail;
+            if (!skip.sourceRef.empty()) detail += " (source " + skip.sourceRef + ")";
+            rows.push_back(PropertyRow{"Reconstruction", "Skipped item", detail, "", false,
+                                       kInvalidObjectId, 0.0});
+        }
+    }
 
     properties_->setRowCount(static_cast<int>(rows.size()));
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
@@ -267,11 +311,34 @@ void MainWindow::rebuildProperties() {
     }
 }
 
+const ReconstructionReport* MainWindow::reconstructionReportFor(ObjectId sketchId) const {
+    const auto it = reconstructionReports_.find(sketchId);
+    return it == reconstructionReports_.end() ? nullptr : &it->second;
+}
+
+std::string MainWindow::displayedPropertyValue(const std::string& label) const {
+    for (int row = 0; row < properties_->rowCount(); ++row) {
+        const QTableWidgetItem* name = properties_->item(row, 0);
+        const QTableWidgetItem* value = properties_->item(row, 1);
+        if (name == nullptr || value == nullptr) continue;
+        // Labels are rendered as "Group / Label", so match the tail.
+        const QString text = name->text();
+        const int slash = text.lastIndexOf(QStringLiteral(" / "));
+        const QString bare = slash < 0 ? text : text.mid(slash + 3);
+        if (bare == QString::fromStdString(label)) return value->text().toStdString();
+    }
+    return {};
+}
+
 bool MainWindow::propertyPanelFitsItsPanel() const {
     if (properties_->rowCount() == 0) return true;
     // header()->length() is the sum of the section widths; the viewport is what
     // the user can actually see. Wider than that means a horizontal scrollbar
     // and content off the right edge.
+    std::fprintf(stderr, "PANELFIT header=%d viewport=%d c0=%d c1=%d c2=%d rows=%d\n",
+                 properties_->horizontalHeader()->length(), properties_->viewport()->width(),
+                 properties_->columnWidth(0), properties_->columnWidth(1),
+                 properties_->columnWidth(2), properties_->rowCount());
     return properties_->horizontalHeader()->length() <= properties_->viewport()->width();
 }
 
@@ -482,6 +549,21 @@ QString MainWindow::importDxfFile(const QString& path) {
         return message;
     }
 
+    // M7: reconstruct design intent from the dimensions the file carried,
+    // immediately and automatically (spec 27 step 2).
+    //
+    // Automatic rather than a separate command, because the alternative is a
+    // user staring at an unconstrained import with no reason to suspect the
+    // drawing's own dimensions could be applied. Re-running is refused
+    // (ADR-M7-007), so importing the same file twice cannot accumulate
+    // parameters.
+    //
+    // A reconstruction FAILURE is not an import failure: the geometry is
+    // already in and usable. It is reported, not rolled back over.
+    const ReconstructionResult reconstruction =
+        ReconstructSketch(*document_, imported.sketchId, read.geometry.dimensions);
+    if (reconstruction) reconstructionReports_[imported.sketchId] = reconstruction.report;
+
     // The imported sketch is an ordinary document object, so the ordinary
     // refresh path shows it: recompute, then rebuild tree, panel and view.
     onRecomputeRequested();
@@ -490,6 +572,11 @@ QString MainWindow::importDxfFile(const QString& path) {
     QString message = QStringLiteral("Imported %1: %2")
                           .arg(QFileInfo(path).fileName(),
                                QString::fromStdString(imported.message));
+    if (!reconstruction.createdParameters.empty())
+        message += QStringLiteral(" [%1 dimension(s) reconstructed]")
+                       .arg(reconstruction.createdParameters.size());
+    if (reconstruction.skippedCount > 0)
+        message += QStringLiteral(" [%1 not reconstructed]").arg(reconstruction.skippedCount);
     if (imported.skippedCount > 0) {
         // Skipped entities are reported in the status bar rather than only in a
         // log: a user who cannot see that something was dropped will assume
