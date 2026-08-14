@@ -664,6 +664,62 @@ TEST(M7ReleaseGate, GATE_E_DiameterDrivesTheSameGeometryAsRadiusWould) {
     ExpectRel(fx.document.massProperties().volumeMm3, kPi * 400.0 * 30.0, 1e-6);
 }
 
+// --- Gate H: conflict and recovery (spec 23) --------------------------------
+
+TEST(M7ReleaseGate, GATE_H_ConflictIsExplicitCommitsNothingCorruptAndRecovers) {
+    GateFixture fx;
+    ASSERT_TRUE(fx.reconstruction) << fx.reconstruction.message;
+    ASSERT_TRUE(fx.document.recompute().success);
+    const double goodVolume = fx.document.massProperties().volumeMm3;
+    ExpectRel(goodVolume, 100000.0, kVolumeRelTol);
+
+    // A second Length on the bottom edge that disagrees with Width: 100 and 60
+    // cannot both hold. Added directly rather than through reconstruction,
+    // because a second run is refused (ADR-M7-007) and this is about the
+    // solver's response to conflicting intent, not about the analysis.
+    SketchEntityId bottom = kInvalidSketchEntityId;
+    for (const SketchConstraint& constraint : fx.sketch().constraints())
+        if (const auto* length = std::get_if<LengthConstraint>(&constraint.data)) {
+            const ObjectId bound = BoundParameterId(constraint.data);
+            const Parameter* parameter = fx.document.parameters().findById(bound);
+            if (parameter != nullptr && parameter->name() == "Width") bottom = length->line;
+        }
+    ASSERT_NE(bottom, kInvalidSketchEntityId);
+
+    Parameter& rival = fx.document.addParameter("Rival", 60.0, UnitType::Millimeter);
+    const SketchConstraintId offender =
+        fx.document.addSketchConstraint(fx.sketchId, LengthConstraint{bottom, rival.id()});
+    ASSERT_NE(offender, kInvalidSketchConstraintId);
+    fx.document.recompute();
+
+    // Explicit conflict, not a quiet wrong answer.
+    EXPECT_EQ(fx.sketch().solveStatus(), SketchSolveStatus::Conflicting)
+        << SolveStatusName(fx.sketch().solveStatus()) << ": " << fx.sketch().solveMessage();
+    // Spec 17: offending constraints identified where possible.
+    EXPECT_FALSE(fx.sketch().offendingConstraints().empty());
+
+    // No corrupt geometry was committed: the sketch still measures what it did
+    // before the conflict, rather than some half-solved compromise between 100
+    // and 60. This is the "solver reports a state while geometry is wrong"
+    // Critical of spec 34, checked by measurement rather than by status.
+    EXPECT_NEAR(fx.measuredWidth(), 100.0, kGeometryTolMm);
+
+    // Recovery: remove the offender, and the model comes back.
+    ASSERT_TRUE(fx.document.removeSketchConstraint(fx.sketchId, offender));
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(fx.sketch().solveStatus(), SketchSolveStatus::Solved);
+    EXPECT_EQ(fx.sketch().degreesOfFreedom(), 0);
+    ExpectRel(fx.document.massProperties().volumeMm3, goodVolume, kVolumeRelTol);
+
+    // And a Parameter edit still drives geometry afterwards -- the part that
+    // proves recovery was real rather than merely quiet.
+    const ObjectId widthId = fx.parameterNamed("Width");
+    ASSERT_TRUE(fx.document.setParameterValue(widthId, 120.0));
+    ASSERT_TRUE(fx.document.recomputeFrom(widthId).success);
+    EXPECT_EQ(fx.sketch().solveStatus(), SketchSolveStatus::Solved);
+    ExpectRel(fx.document.massProperties().volumeMm3, 120000.0, kVolumeRelTol);
+}
+
 // --- Selective recompute (spec 21, Gate K) ----------------------------------
 
 TEST(M7ReleaseGate, GATE_K_DensityDoesNotResolveTheSketch) {
