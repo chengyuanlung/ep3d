@@ -91,15 +91,41 @@ double MeasuredValueMm(const ImportedDimension2D& dimension) noexcept {
             return std::abs(du * c + dv * s);
         }
         case ImportedDimensionKind::Radius:
+            // Centre to a point on the curve (DXF codes 10 and 15).
         case ImportedDimensionKind::Diameter:
+            // Two opposite points on the curve (DXF codes 15 and 10). Both are
+            // plain separations; what differs is what the two points MEAN, and
+            // that is carried by the kind so no caller has to infer it.
+            return std::sqrt(du * du + dv * dv);
         case ImportedDimensionKind::Angular:
             // No linear measurement to derive. Deliberately 0 rather than the
-            // point separation, which would be a plausible wrong answer: these
-            // kinds are not supported in M7.1 and a caller that reaches here
-            // has not checked the kind.
+            // point separation, which would be a plausible wrong answer: an
+            // angular dimension is not reconstructed and a caller that reaches
+            // here has not checked the kind.
             return 0.0;
     }
     return 0.0;
+}
+
+Vec2 DimensionCenter(const ImportedDimension2D& dimension) noexcept {
+    switch (dimension.kind) {
+        case ImportedDimensionKind::Radius:
+            // The centre IS the first point for a radial dimension.
+            return dimension.measureFrom;
+        case ImportedDimensionKind::Diameter:
+            // Halfway between two opposite points on the curve. A diametric
+            // dimension never states the centre, so it has to be derived --
+            // and taking measureFrom instead, which is a point ON the circle,
+            // would put the centre a full radius out and match either the
+            // wrong curve or none.
+            return Vec2{0.5 * (dimension.measureFrom.x + dimension.measureTo.x),
+                        0.5 * (dimension.measureFrom.y + dimension.measureTo.y)};
+        case ImportedDimensionKind::Linear:
+        case ImportedDimensionKind::Aligned:
+        case ImportedDimensionKind::Angular:
+            return Vec2{};
+    }
+    return Vec2{};
 }
 
 const char* ImportSkipReasonName(ImportSkipReason reason) noexcept {

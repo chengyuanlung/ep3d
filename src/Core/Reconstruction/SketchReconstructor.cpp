@@ -37,6 +37,30 @@ bool Near(Vec2 a, Vec2 b, double toleranceMm) noexcept {
     return SamePoint(a, b, toleranceMm);
 }
 
+// A circle or arc, with its identity. Radius and Diameter dimensions target
+// these, and both kinds drive the SAME underlying radius (spec 12): the model
+// has one geometric radius state and Diameter is a second view of it, not a
+// second quantity.
+struct CurveRef {
+    SketchEntityId id{kInvalidSketchEntityId};
+    Vec2 center{};
+    double radiusMm{0.0};
+};
+
+std::vector<CurveRef> CollectCurves(const Sketch& sketch) {
+    std::vector<CurveRef> curves;
+    for (const SketchEntity& entity : sketch.entities()) {
+        if (const auto* circle = std::get_if<SketchCircle>(&entity.geometry))
+            curves.push_back(CurveRef{entity.id, circle->center, circle->radiusMm});
+        // Arcs carry a radius too, and a radial dimension on a fillet is
+        // ordinary draughting. Leaving them out would reconstruct a drawing's
+        // holes and silently ignore its rounds.
+        else if (const auto* arc = std::get_if<SketchArc>(&entity.geometry))
+            curves.push_back(CurveRef{entity.id, arc->center, arc->radiusMm});
+    }
+    return curves;
+}
+
 double LengthOf(const LineRef& line) noexcept {
     const double du = line.end.x - line.start.x;
     const double dv = line.end.y - line.start.y;
@@ -202,6 +226,7 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
     plan.sketchId = sketchId;
 
     const std::vector<LineRef> lines = CollectLines(*sketch);
+    const std::vector<CurveRef> curves = CollectCurves(*sketch);
     const std::vector<EndpointCluster> clusters =
         ClusterEndpoints(CollectEndpoints(*sketch), options.coincidenceToleranceMm);
 
@@ -268,15 +293,32 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
                 ReconstructionOrigin::InferredGeometric, "within the axis tolerance of vertical"});
     }
 
-    if (options.placeFix && !clusters.empty()) {
+    if (options.placeFix) {
         // The lexicographically smallest endpoint, so the choice is a fact
         // about the geometry and not about the order it was read in
         // (ADR-M7-008). Without a Fix the sketch keeps its two global
         // translation freedoms and can never reach DOF 0, however many
         // dimensions are reconstructed.
-        plan.constraints.push_back(PlannedConstraint{
-            FixConstraint{clusters.front().members.front().ref}, kInvalidPlanParameterSlot,
-            ReconstructionOrigin::InferredPlacement, "deterministic placement"});
+        if (!clusters.empty()) {
+            plan.constraints.push_back(PlannedConstraint{
+                FixConstraint{clusters.front().members.front().ref}, kInvalidPlanParameterSlot,
+                ReconstructionOrigin::InferredPlacement, "deterministic placement"});
+        } else if (!curves.empty()) {
+            // A sketch of nothing but circles has no endpoints at all, and
+            // would otherwise never be placeable however many radii were
+            // reconstructed -- a hole pattern is exactly that drawing. Its
+            // centre is the only anchor a circle has.
+            //
+            // Endpoints are preferred whenever there are any, so adding this
+            // cannot move the Fix on any sketch that already had one.
+            const CurveRef* anchor = &curves.front();
+            for (const CurveRef& curve : curves)
+                if (Before(curve.center, anchor->center)) anchor = &curve;
+            plan.constraints.push_back(PlannedConstraint{
+                FixConstraint{SketchElementRef{anchor->id, SketchSubElement::CenterPoint}},
+                kInvalidPlanParameterSlot, ReconstructionOrigin::InferredPlacement,
+                "deterministic placement"});
+        }
     }
 
     if (!options.reconstructExplicitDimensions) return plan;
@@ -286,11 +328,16 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
     for (const ImportedDimension2D& dimension : dimensions) {
         const std::string what = Describe(dimension);
 
-        if (dimension.kind != ImportedDimensionKind::Linear &&
-            dimension.kind != ImportedDimensionKind::Aligned) {
-            plan.skipped.push_back(
-                ReconstructionSkip{ReconstructionSkipReason::UnsupportedKind,
-                                   what + " is not reconstructed in M7.1", dimension.sourceHandle});
+        const bool linearKind = dimension.kind == ImportedDimensionKind::Linear ||
+                                dimension.kind == ImportedDimensionKind::Aligned;
+        const bool curveKind = dimension.kind == ImportedDimensionKind::Radius ||
+                               dimension.kind == ImportedDimensionKind::Diameter;
+        if (!linearKind && !curveKind) {
+            plan.skipped.push_back(ReconstructionSkip{
+                ReconstructionSkipReason::UnsupportedKind,
+                what + " is not reconstructed; M7 supports linear, aligned, radius and "
+                       "diameter dimensions",
+                dimension.sourceHandle});
             continue;
         }
 
@@ -334,6 +381,75 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
                 what + " measures " + std::to_string(value) +
                     " mm, which is not a usable length",
                 dimension.sourceHandle});
+            continue;
+        }
+
+        // --- Curve dimensions: which circle or arc is this about? -----------
+        //
+        // Matched on the CENTRE and then cross-checked on the radius. Centre
+        // alone is not enough: concentric circles are ordinary (a counterbored
+        // hole is two), and every one of them would match. Radius alone is not
+        // enough either, since a drawing full of identical holes has many.
+        if (curveKind) {
+            const Vec2 center = DimensionCenter(dimension);
+            // The radius the dimension asserts. A Diameter states twice it --
+            // the model has ONE radius state and Diameter is a second view of
+            // it, never separate geometry (spec 12).
+            const double radius =
+                dimension.kind == ImportedDimensionKind::Diameter ? value * 0.5 : value;
+
+            std::vector<const CurveRef*> curveMatches;
+            for (const CurveRef& curve : curves) {
+                if (!Near(curve.center, center, options.coincidenceToleranceMm)) continue;
+                const double reference = std::max(radius, curve.radiusMm);
+                if (reference > 0.0 &&
+                    std::abs(radius - curve.radiusMm) / reference > options.valueAgreementFraction)
+                    continue;
+                curveMatches.push_back(&curve);
+            }
+
+            if (curveMatches.empty()) {
+                plan.skipped.push_back(ReconstructionSkip{
+                    ReconstructionSkipReason::NoTargetGeometry,
+                    what + " is centred where no imported circle or arc of that size is",
+                    dimension.sourceHandle});
+                continue;
+            }
+            if (curveMatches.size() > 1) {
+                plan.skipped.push_back(ReconstructionSkip{
+                    ReconstructionSkipReason::AmbiguousTarget,
+                    what + " could refer to " + std::to_string(curveMatches.size()) +
+                        " concentric curves of the same size, and nothing in the source "
+                        "chooses between them",
+                    dimension.sourceHandle});
+                continue;
+            }
+
+            const CurveRef& target = *curveMatches.front();
+            const bool diameter = dimension.kind == ImportedDimensionKind::Diameter;
+            const std::string preferred = diameter ? "Diameter" : "Radius";
+            const std::string name = FreeName(document, plan, preferred);
+            if (name.empty()) {
+                plan.skipped.push_back(ReconstructionSkip{
+                    ReconstructionSkipReason::NameCollision,
+                    "no free Parameter name could be formed from '" + preferred + "'",
+                    dimension.sourceHandle});
+                continue;
+            }
+
+            const auto slot = static_cast<PlanParameterSlot>(plan.parameters.size());
+            // The Parameter carries what the DIMENSION says, not the radius:
+            // a Diameter parameter reading 20 for a radius-10 hole is what the
+            // drawing shows and what the user will edit. The constraint kind is
+            // what tells the solver to halve it.
+            plan.parameters.push_back(PlannedParameter{name, value, UnitType::Millimeter,
+                                                       ReconstructionOrigin::ExplicitSource,
+                                                       dimension.sourceHandle});
+            SketchConstraintData data =
+                diameter ? SketchConstraintData{DiameterConstraint{target.id, kInvalidObjectId}}
+                         : SketchConstraintData{RadiusConstraint{target.id, kInvalidObjectId}};
+            plan.constraints.push_back(PlannedConstraint{std::move(data), slot,
+                                                        ReconstructionOrigin::ExplicitSource, what});
             continue;
         }
 

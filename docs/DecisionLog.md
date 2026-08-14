@@ -2509,3 +2509,71 @@ profile with a rounded corner, which is most bracket and sheet-metal geometry.
 They take no Horizontal or Vertical: those are line-only in the model and the
 solver rejects them on anything else, so proposing one would produce
 InvalidInput rather than a constraint.
+
+---
+
+## ADR-M7-014 — A curve dimension is matched on centre AND size (M7.3)
+Status: Accepted.
+
+A radius or diameter dimension names no entity, exactly as a linear one does
+not, so association is geometric. Neither half is sufficient alone:
+
+- **Centre alone** matches every concentric curve, and a counterbored hole is
+  two circles about one centre. Ordinary geometry would be reported ambiguous.
+- **Size alone** matches every identical hole in the drawing, and a hole pattern
+  is exactly that. Ordinary geometry would be reported ambiguous.
+
+Both together resolve both cases, and each has its own test — the concentric
+pair and the repeated-hole pair — because a rule that is right for one and
+wrong for the other looks correct from either side.
+
+The consequence, stated because it differs from the linear rule: a curve drawn
+at radius 7 and dimensioned 10 is **refused**, where a LINE drawn at 99.5 and
+dimensioned 100 is accepted (ADR-M7-009). The asymmetry is real and deliberate.
+A line's association evidence is its definition POINTS, which are independent of
+its length; a curve's is its centre, and size is the only thing separating it
+from its neighbours. Take size out of the curve rule and concentric circles
+become unresolvable; leave it in, and a badly drawn circle is a drawing that
+contradicts itself.
+
+So the circle release fixture is drawn 2% under its dimension, inside the
+agreement band, rather than 30% under like the rectangle. The proof that the
+solver actually drives circle geometry is Gate E's EDIT -- radius 10 to 20 for
+exactly 4x the volume -- which no implementation can satisfy by doing nothing.
+
+---
+
+## ADR-M7-015 — A Diameter parameter holds the diameter (M7.3)
+Status: Accepted.
+
+The model has ONE radius state. A `DiameterConstraint` drives it as
+radius = diameter / 2, which is spec 12's "must not create duplicated geometry
+state".
+
+The question that leaves is what the bound Parameter holds, and the answer is
+the DIAMETER -- 20 for a radius-10 hole. It is the number the drawing shows and
+the number the user will edit; storing the radius there would silently redraw a
+diameter callout as a radius, and the user editing "Diameter" to 40 would get a
+radius-40 hole.
+
+The constraint KIND carries the halving. Nothing else needs to know.
+
+Radius and Diameter on one curve are therefore a redundant-but-agreeing pair,
+not a conflict, and both target the same entity -- pinned by a test, because
+"one quantity, two views" is easy to say and easy to implement as two.
+
+---
+
+## ADR-M7-016 — A circle centre anchors a sketch that has no endpoints (M7.3)
+Status: Accepted. Extends ADR-M7-008.
+
+ADR-M7-008 places the Fix on the lexicographically smallest ENDPOINT. A sketch
+of nothing but circles has none, so it could never reach DOF 0 however many
+radii were reconstructed -- and a hole pattern is exactly that drawing.
+
+Endpoints are still preferred whenever there are any; circle centres are the
+fallback, not a competing candidate. That ordering is load-bearing and has its
+own test: a circle centred at (-50,-50) sorts before every corner of a rectangle
+at the origin, so a rule that simply took the smallest anchor of ANY kind would
+move the Fix -- relocating every previously imported part that later gains a
+hole.

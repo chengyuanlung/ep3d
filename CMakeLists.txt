@@ -371,6 +371,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/SerializationTests.cpp
         tests/ReconstructionTests.cpp
         tests/ReconstructionGeneralTests.cpp
+        tests/ReconstructionCurveTests.cpp
     )
     target_link_libraries(ParametricCADCoreTests
         PRIVATE ParametricCADCore ParametricCADViewerCore GTest::gtest_main)

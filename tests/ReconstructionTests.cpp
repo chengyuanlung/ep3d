@@ -220,15 +220,21 @@ TEST(M7Reconstruction, ASmallStatedDisagreementIsBelievedOverTheGeometry) {
 
 TEST(M7Reconstruction, UnsupportedDimensionKindsAreReportedNotReinterpreted) {
     RectangleFixture fx;
-    ImportedDimension2D radius = Linear(Vec2{0, 0}, Vec2{100, 0});
-    radius.kind = ImportedDimensionKind::Radius;
+    // Angular, which M7 does not reconstruct at all. This was Radius until
+    // M7.3 supported it -- and the test then failed, which is the behaviour a
+    // scope test should have: widening scope must force someone to look at it,
+    // not pass quietly because "skipped" was asserted loosely.
+    ImportedDimension2D angular = Linear(Vec2{0, 0}, Vec2{100, 0});
+    angular.kind = ImportedDimensionKind::Angular;
 
     const ReconstructionPlan plan =
-        AnalyzeForReconstruction(fx.document, fx.sketch->id(), {radius});
+        AnalyzeForReconstruction(fx.document, fx.sketch->id(), {angular});
 
-    // M7.1 does not do Radius (spec 37). It must say so, not quietly turn it
-    // into the Length its definition points would suggest.
+    // It must SAY so, not quietly turn into the Length its two points would
+    // suggest -- which is exactly what an angular dimension's points would give
+    // if the kind were ignored.
     EXPECT_EQ(CountKind(plan, "Length"), 0u);
+    EXPECT_TRUE(plan.parameters.empty());
     EXPECT_TRUE(HasSkip(plan, ReconstructionSkipReason::UnsupportedKind));
 }
 

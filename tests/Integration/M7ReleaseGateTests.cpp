@@ -537,6 +537,133 @@ TEST(M7ReleaseGate, GATE_F2_ASkewedRectangleIsStraightenedByTheSolverNotTheReade
     }
 }
 
+// --- Gate E: circle dimension drives real 3D volume (spec 23) ---------------
+
+struct GateCircleFixture {
+    PartDocument document{"M7GateCircle"};
+    OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver solver;
+    ObjectId sketchId{kInvalidObjectId};
+    ReconstructionResult reconstruction;
+
+    // `drawnRadius` is deliberately NOT the dimensioned one, so the first solve
+    // cannot be a no-op -- but only by 2%, inside the agreement band.
+    //
+    // A curve dimension is associated by CENTRE and cross-checked on SIZE
+    // (ADR-M7-014), which is what tells a hole from the counterbore around it.
+    // So unlike the rectangle, a circle drawn at 7 and dimensioned 10 is not a
+    // fixture that proves the solver works -- it is a drawing that contradicts
+    // itself, and reconstruction correctly refuses it. The real proof that the
+    // solver drives this geometry is Gate E's edit, which cannot be a no-op
+    // under any implementation.
+    explicit GateCircleFixture(ImportedDimensionKind kind, double statedValue,
+                               double drawnRadius = 9.8) {
+        document.setGeometryKernel(&kernel);
+        document.setSketchSolver(&solver);
+        document.addMaterial("Aluminium", 2700.0);
+
+        ImportedSketchGeometry geometry;
+        geometry.unit = ImportedLengthUnit::Millimeter;
+        geometry.millimetresPerUnit = 1.0;
+        geometry.circles.push_back(ImportedCircle2D{Vec2{25, 30}, drawnRadius});
+
+        ImportedDimension2D dimension;
+        dimension.kind = kind;
+        const double half = statedValue * 0.5 / std::sqrt(2.0);
+        const double leg = statedValue / std::sqrt(2.0);
+        if (kind == ImportedDimensionKind::Diameter) {
+            dimension.measureFrom = Vec2{25 - half, 30 - half};
+            dimension.measureTo = Vec2{25 + half, 30 + half};
+        } else {
+            dimension.measureFrom = Vec2{25, 30};
+            dimension.measureTo = Vec2{25 + leg, 30 + leg};
+        }
+        dimension.sourceHandle = "3C";
+        geometry.dimensions.push_back(dimension);
+
+        sketchId = ImportGeometryIntoNewSketch(document, "circle", geometry).sketchId;
+        reconstruction = ReconstructSketch(document, sketchId, geometry.dimensions);
+
+        Parameter& padLength = document.addParameter("PadLength", 30.0, UnitType::Millimeter);
+        Body& body = document.addBody("Body001");
+        document.addPadFeature(body, "Pad001", sketchId, padLength.id());
+    }
+
+    const Sketch& sketch() const { return *document.findSketch(sketchId); }
+
+    double solvedRadius() const {
+        for (const SketchEntity& entity : sketch().entities())
+            if (const auto* circle = std::get_if<SketchCircle>(&entity.geometry))
+                return circle->radiusMm;
+        return -1.0;
+    }
+};
+
+TEST(M7ReleaseGate, GATE_E_RadiusReconstructsSolvesAndDrivesVolume) {
+    GateCircleFixture fx(ImportedDimensionKind::Radius, 10.0);
+    ASSERT_TRUE(fx.reconstruction) << fx.reconstruction.message;
+    ASSERT_TRUE(fx.document.recompute().success);
+
+    EXPECT_EQ(fx.sketch().solveStatus(), SketchSolveStatus::Solved);
+    EXPECT_EQ(fx.sketch().degreesOfFreedom(), 0);
+
+    // Drawn at 7, dimensioned 10: the solver moved it.
+    EXPECT_NEAR(fx.solvedRadius(), 10.0, 1e-9);
+
+    // V = pi r^2 h = pi x 100 x 30, computed here from pi and the parameters,
+    // never read back from the kernel.
+    const MassProperties& mp = fx.document.massProperties();
+    ASSERT_TRUE(mp.valid);
+    ExpectRel(mp.volumeMm3, kPi * 100.0 * 30.0, 1e-6);
+}
+
+TEST(M7ReleaseGate, GATE_E_DoublingTheRadiusQuadruplesTheVolume) {
+    GateCircleFixture fx(ImportedDimensionKind::Radius, 10.0);
+    ASSERT_TRUE(fx.reconstruction) << fx.reconstruction.message;
+    ASSERT_TRUE(fx.document.recompute().success);
+    const double before = fx.document.massProperties().volumeMm3;
+
+    const Parameter* radius = fx.document.parameters().findByName("Radius");
+    ASSERT_NE(radius, nullptr);
+    ASSERT_TRUE(fx.document.setParameterValue(radius->id(), 20.0));
+    ASSERT_TRUE(fx.document.recomputeFrom(radius->id()).success);
+
+    EXPECT_NEAR(fx.solvedRadius(), 20.0, 1e-9);
+
+    // Spec 23 Gate E, stated as a RATIO: with the extrusion length unchanged,
+    // doubling the radius must give exactly 4x. A ratio cannot be satisfied by
+    // a scale error that an absolute value might hide -- a unit mistake would
+    // move both numbers and leave the ratio intact only if it were genuinely a
+    // scale, which is the point.
+    const double after = fx.document.massProperties().volumeMm3;
+    ExpectRel(after / before, 4.0, 1e-9);
+    ExpectRel(after, kPi * 400.0 * 30.0, 1e-6);
+}
+
+TEST(M7ReleaseGate, GATE_E_DiameterDrivesTheSameGeometryAsRadiusWould) {
+    // The same hole, dimensioned the other way: diameter 20 instead of
+    // radius 10. The Parameter reads 20, the geometry is radius 10, and the
+    // volume is identical to the radial fixture above.
+    GateCircleFixture fx(ImportedDimensionKind::Diameter, 20.0);
+    ASSERT_TRUE(fx.reconstruction) << fx.reconstruction.message;
+    ASSERT_TRUE(fx.document.recompute().success);
+
+    const Parameter* diameter = fx.document.parameters().findByName("Diameter");
+    ASSERT_NE(diameter, nullptr);
+    EXPECT_DOUBLE_EQ(diameter->value(), 20.0);
+
+    EXPECT_EQ(fx.sketch().degreesOfFreedom(), 0);
+    EXPECT_NEAR(fx.solvedRadius(), 10.0, 1e-9);
+    ExpectRel(fx.document.massProperties().volumeMm3, kPi * 100.0 * 30.0, 1e-6);
+
+    // Editing the DIAMETER halves into the radius, which is what "one quantity,
+    // two views" has to mean in practice (spec 12).
+    ASSERT_TRUE(fx.document.setParameterValue(diameter->id(), 40.0));
+    ASSERT_TRUE(fx.document.recomputeFrom(diameter->id()).success);
+    EXPECT_NEAR(fx.solvedRadius(), 20.0, 1e-9);
+    ExpectRel(fx.document.massProperties().volumeMm3, kPi * 400.0 * 30.0, 1e-6);
+}
+
 // --- Selective recompute (spec 21, Gate K) ----------------------------------
 
 TEST(M7ReleaseGate, GATE_K_DensityDoesNotResolveTheSketch) {

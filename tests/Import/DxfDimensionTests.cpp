@@ -123,6 +123,82 @@ TEST(M7DxfDimension, AnInchesFileScalesItsDimensionsAndItsGeometryTogether) {
     EXPECT_DOUBLE_EQ(*dimension.statedValueMm, 2540.0);
 }
 
+// --- M7.3: curve dimensions from a real file --------------------------------
+
+TEST(M7DxfDimension, RadialAndDiametricDimensionsAreReadWithTheirOwnGeometry) {
+    const DxfReadResult read = ReadDxfFile(Fixture("dimensioned_circle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    EXPECT_EQ(read.geometry.circles.size(), 2u);
+    ASSERT_EQ(read.geometry.dimensions.size(), 2u);
+
+    const ImportedDimension2D* radial = nullptr;
+    const ImportedDimension2D* diametric = nullptr;
+    for (const ImportedDimension2D& dimension : read.geometry.dimensions) {
+        if (dimension.kind == ImportedDimensionKind::Radius) radial = &dimension;
+        if (dimension.kind == ImportedDimensionKind::Diameter) diametric = &dimension;
+    }
+    ASSERT_NE(radial, nullptr) << "the radial dimension was not read as a Radius";
+    ASSERT_NE(diametric, nullptr) << "the diametric dimension was not read as a Diameter";
+
+    // The radial one states its centre outright.
+    EXPECT_NEAR(DimensionCenter(*radial).x, 25.0, 1e-6);
+    EXPECT_NEAR(DimensionCenter(*radial).y, 30.0, 1e-6);
+    EXPECT_NEAR(MeasuredValueMm(*radial), 10.0, 1e-6);
+
+    // The diametric one never does -- its centre is the midpoint of two rim
+    // points. Reading its first point as a centre would give (90.6, 40.6),
+    // which is 15 mm from the real centre and matches no circle in the file.
+    EXPECT_NEAR(DimensionCenter(*diametric).x, 80.0, 1e-6);
+    EXPECT_NEAR(DimensionCenter(*diametric).y, 30.0, 1e-6);
+    EXPECT_NEAR(MeasuredValueMm(*diametric), 30.0, 1e-6);
+}
+
+TEST(M7DxfDimension, M7_3_CHAIN_CircleFromFileDrivesVolumeAndScalesAsTheSquare) {
+    const DxfReadResult read = ReadDxfFile(Fixture("dimensioned_circle.dxf"));
+    ASSERT_TRUE(read) << read.message;
+
+    PartDocument document{"M7CircleChain"};
+    OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver solver;
+    document.setGeometryKernel(&kernel);
+    document.setSketchSolver(&solver);
+
+    // Only the first circle, so the Pad has one profile to extrude.
+    ImportedSketchGeometry single;
+    single.unit = read.geometry.unit;
+    single.millimetresPerUnit = read.geometry.millimetresPerUnit;
+    for (const ImportedCircle2D& circle : read.geometry.circles)
+        if (std::abs(circle.center.x - 25.0) < 1e-6) single.circles.push_back(circle);
+    for (const ImportedDimension2D& dimension : read.geometry.dimensions)
+        if (dimension.kind == ImportedDimensionKind::Radius) single.dimensions.push_back(dimension);
+    ASSERT_EQ(single.circles.size(), 1u);
+    ASSERT_EQ(single.dimensions.size(), 1u);
+
+    const ObjectId sketchId = ImportGeometryIntoNewSketch(document, "circle", single).sketchId;
+    ASSERT_TRUE(ReconstructSketch(document, sketchId, single.dimensions));
+
+    Parameter& padLength = document.addParameter("PadLength", 30.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body001");
+    document.addPadFeature(body, "Pad001", sketchId, padLength.id());
+    ASSERT_TRUE(document.recompute().success);
+
+    EXPECT_EQ(document.findSketch(sketchId)->solveStatus(), SketchSolveStatus::Solved);
+    EXPECT_EQ(document.findSketch(sketchId)->degreesOfFreedom(), 0);
+
+    constexpr double kPiLocal = 3.14159265358979323846;
+    const double before = document.massProperties().volumeMm3;
+    EXPECT_NEAR(before, kPiLocal * 100.0 * 30.0, 1e-3);
+
+    const Parameter* radius = document.parameters().findByName("Radius");
+    ASSERT_NE(radius, nullptr);
+    ASSERT_TRUE(document.setParameterValue(radius->id(), 20.0));
+    ASSERT_TRUE(document.recomputeFrom(radius->id()).success);
+
+    // Gate E as a ratio: exactly 4x for a doubled radius at unchanged length.
+    EXPECT_NEAR(document.massProperties().volumeMm3 / before, 4.0, 1e-9);
+}
+
 // --- The M7.1 release chain, from the file ----------------------------------
 
 TEST(M7DxfDimension, M7_1_RELEASE_CHAIN_FromFileToRebuiltVolume) {

@@ -156,10 +156,21 @@ struct ImportedDimension2D {
 // mandatory for the kinds M7 supports, so they are the authority and code 42 is
 // the cross-check (ADR-M7-009).
 //
-// Linear projects onto `directionRad`; Aligned takes the full separation.
-// Returns 0 for kinds with no linear measurement (Radius/Diameter/Angular),
-// which callers must not treat as a measurement -- check the kind first.
+// Linear projects onto `directionRad`; Aligned takes the full separation;
+// Radius and Diameter take the separation of their own two points, which mean
+// centre-to-rim and rim-to-rim respectively. Returns 0 for Angular, which has
+// no linear measurement and is not reconstructed.
 double MeasuredValueMm(const ImportedDimension2D& dimension) noexcept;
+
+// The centre of the curve a Radius or Diameter dimension measures.
+//
+// A radial dimension states the centre outright; a DIAMETRIC one never does,
+// so it is derived as the midpoint of the two opposite rim points. Using
+// `measureFrom` for both would put a diametric dimension's centre a full radius
+// off, where it matches the wrong curve or nothing at all.
+//
+// Returns the origin for the kinds that have no centre; check the kind first.
+Vec2 DimensionCenter(const ImportedDimension2D& dimension) noexcept;
 
 // Everything one file yielded. Ordering within each vector is the order the
 // reader encountered the entities, which is convenient for diagnostics and is

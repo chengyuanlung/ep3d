@@ -587,8 +587,20 @@ public:
     virtual void addDimLinear(const DRW_DimLinear *data) override {
         collectLinearDimension(data, ImportedDimensionKind::Linear);
     }
-    virtual void addDimRadial(const DRW_DimRadial *data) override { noteUnsupported("DIMENSION"); }
-    virtual void addDimDiametric(const DRW_DimDiametric *data) override { noteUnsupported("DIMENSION"); }
+    // RADIAL gives the centre (code 10) and a point on the curve (code 15).
+    // DIAMETRIC gives two OPPOSITE points on the curve (codes 15 and 10) and
+    // never states the centre at all -- which is why the two cannot share a
+    // reader and why the kind has to travel with the points. Reading a
+    // diametric dimension's first point as a centre would place it a full
+    // radius off the real one.
+    virtual void addDimRadial(const DRW_DimRadial *data) override {
+        collectCurveDimension(data, ImportedDimensionKind::Radius, data->getCenterPoint(),
+                              data->getDiameterPoint());
+    }
+    virtual void addDimDiametric(const DRW_DimDiametric *data) override {
+        collectCurveDimension(data, ImportedDimensionKind::Diameter, data->getDiameter1Point(),
+                              data->getDiameter2Point());
+    }
     virtual void addDimAngular(const DRW_DimAngular *data) override { noteUnsupported("DIMENSION"); }
     virtual void addDimAngular3P(const DRW_DimAngular3p *data) override { noteUnsupported("DIMENSION"); }
     virtual void addDimOrdinate(const DRW_DimOrdinate *data) override { noteUnsupported("DIMENSION"); }
@@ -711,6 +723,39 @@ private:
         // indistinguishable from a genuine zero. Zero is not a usable
         // measurement either way, so treating "absent" and "zero" alike loses
         // nothing and avoids inventing a stated value the file never carried.
+        const double measured = data->getMeasureValue();
+        if (std::isfinite(measured) && measured > 0.0) dimension.statedValueMm = measured;
+
+        geometry.dimensions.push_back(dimension);
+    }
+
+    // The shared body of addDimRadial and addDimDiametric (M7.3).
+    //
+    // The two points are passed IN rather than read here, because which group
+    // codes carry them differs between the two kinds and only the caller knows
+    // which it is holding.
+    void collectCurveDimension(const DRW_Dimension* data, ImportedDimensionKind kind,
+                               const DRW_Coord& from, const DRW_Coord& to) {
+        if (data == nullptr) return;
+        if (skipBlockContent("DIMENSION")) return;
+
+        if (!AllFinite({from.x, from.y, to.x, to.y})) {
+            note(ImportSkipReason::NonFiniteValue, "DIMENSION",
+                 "a definition point coordinate is not a finite number");
+            return;
+        }
+
+        ImportedDimension2D dimension;
+        dimension.kind = kind;
+        dimension.measureFrom = Vec2{from.x, from.y};
+        dimension.measureTo = Vec2{to.x, to.y};
+        // No direction: a radius is measured along whatever ray the leader was
+        // drawn on, and that ray carries no design intent. Left at zero, and
+        // MeasuredValueMm never projects for these kinds.
+        dimension.directionRad = 0.0;
+        dimension.textOverride = data->getText();
+        dimension.sourceHandle = data->handle == 0 ? std::string{} : ToHexHandle(data->handle);
+
         const double measured = data->getMeasureValue();
         if (std::isfinite(measured) && measured > 0.0) dimension.statedValueMm = measured;
 
