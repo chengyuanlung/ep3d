@@ -325,6 +325,17 @@ TEST(M7FreshProcessChild, LoadEditAndVerifyVolume) {
     // file, the parser, or the reconstruction code.
     ASSERT_TRUE(loaded.document->massProperties().valid);
     EXPECT_NEAR(loaded.document->massProperties().volumeMm3, 120000.0, 1e-6);
+
+    // PROOF OF WORK for the parent, and the reason it is a deletion rather than
+    // a flag file: the parent cannot fake it, and a child that skipped or
+    // crashed leaves the document exactly where it was.
+    //
+    // The previous guard -- the parent checking the document EXISTS -- was
+    // tautological: the parent wrote that file itself two statements earlier.
+    // Independent review forced the child to GTEST_SKIP and Gate J stayed
+    // green.
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
 }
 
 TEST(M7FreshProcess, GATE_J_EditWorksInASecondProcessWithTheDxfDeleted) {
@@ -374,11 +385,11 @@ TEST(M7FreshProcess, GATE_J_EditWorksInASecondProcessWithTheDxfDeleted) {
 
     EXPECT_EQ(status, 0) << "the child process failed; command was: " << command;
 
-    // A child that SKIPPED also exits 0, which would make this gate pass while
-    // proving nothing -- the exact shape of false evidence AGENTS.md warns
-    // about. So the document it needed must demonstrably have been there.
-    EXPECT_TRUE(std::filesystem::exists(path))
-        << "the document was not written, so the child can only have skipped";
+    // A child that SKIPPED also exits 0. The only evidence that separates
+    // "verified" from "did nothing" is something ONLY the child can do, so the
+    // child deletes the document after checking it.
+    EXPECT_FALSE(std::filesystem::exists(path))
+        << "the child left the document in place, so it never ran its checks";
 
     std::filesystem::remove(path, ec);
 }

@@ -695,6 +695,14 @@ TEST(M7ReleaseGate, GATE_H_ConflictIsExplicitCommitsNothingCorruptAndRecovers) {
     // Explicit conflict, not a quiet wrong answer.
     EXPECT_EQ(fx.sketch().solveStatus(), SketchSolveStatus::Conflicting)
         << SolveStatusName(fx.sketch().solveStatus()) << ": " << fx.sketch().solveMessage();
+
+    // DOWNSTREAM STALE STATE, which spec 23 Gate H names and this gate did not
+    // check. Mass properties must stop being current while the sketch is
+    // conflicting -- otherwise the status bar reports a volume for geometry the
+    // solver has refused, which is spec 34's "stale 3D geometry displayed as
+    // current".
+    EXPECT_FALSE(fx.document.massProperties().valid)
+        << "mass properties are still current while the sketch is Conflicting";
     // Spec 17: offending constraints identified where possible.
     EXPECT_FALSE(fx.sketch().offendingConstraints().empty());
 
@@ -709,6 +717,8 @@ TEST(M7ReleaseGate, GATE_H_ConflictIsExplicitCommitsNothingCorruptAndRecovers) {
     ASSERT_TRUE(fx.document.recompute().success);
     EXPECT_EQ(fx.sketch().solveStatus(), SketchSolveStatus::Solved);
     EXPECT_EQ(fx.sketch().degreesOfFreedom(), 0);
+    EXPECT_TRUE(fx.document.massProperties().valid)
+        << "mass properties did not become current again after recovery";
     ExpectRel(fx.document.massProperties().volumeMm3, goodVolume, kVolumeRelTol);
 
     // And a Parameter edit still drives geometry afterwards -- the part that
@@ -733,10 +743,15 @@ TEST(M7ReleaseGate, GATE_K_NoParameterEditEverReRunsReconstruction) {
     // Reconstruction is an EXPLICIT ONE-SHOT OPERATION, not a graph node. It is
     // not scheduled, cannot be dirtied, and no recompute can invoke it -- which
     // is the architectural reason spec 23's "PadLength does not re-run
-    // reconstruction" holds. Asserted by its observable consequence, because
-    // "cannot happen by construction" is exactly the kind of claim this project
-    // has repeatedly found to be false: if reconstruction ran again, Parameters
-    // and constraints would appear.
+    // reconstruction" holds.
+    //
+    // NOTE ON WHAT THIS PROVES, because independent review showed the earlier
+    // version proved less than it claimed. Counting Parameters and constraints
+    // cannot distinguish "reconstruction never ran" from "it ran and the
+    // idempotence guard refused it" -- a reviewer inserted a REAL second
+    // ReconstructSketch call here and the test still passed. The counts below
+    // are therefore a necessary check, not a sufficient one; the KERNEL and
+    // SOLVER counters added afterwards are what carry the selectivity claim.
     const ObjectId padLength = fx.parameterNamed("PadLength");
     ASSERT_NE(padLength, kInvalidObjectId);
     ASSERT_TRUE(fx.document.setParameterValue(padLength, 35.0));
@@ -755,6 +770,80 @@ TEST(M7ReleaseGate, GATE_K_NoParameterEditEverReRunsReconstruction) {
     EXPECT_EQ(fx.sketch().constraints().size(), constraintsAfterReconstruction);
     ExpectRel(fx.document.massProperties().volumeMm3, before, kVolumeRelTol);
     EXPECT_NEAR(fx.measuredWidth(), 100.0, kGeometryTolMm);
+}
+
+// Counting backends, so selectivity is measured rather than inferred from equal
+// final values -- which spec 21 says explicitly is not evidence.
+class CountingSolverBackend final : public ISketchSolver {
+public:
+    SketchSolveResult solve(const SketchSolveProblem& problem) override {
+        ++calls;
+        return inner.solve(problem);
+    }
+    int calls = 0;
+    GaussNewtonSketchSolver inner;
+};
+
+class CountingKernelBackend final : public IGeometryKernel {
+public:
+    ShapeResult createBox(const BoxDefinition& definition) override {
+        return inner.createBox(definition);
+    }
+    ShapeResult extrudeProfile(const PlanarProfileDefinition& profile, double distanceMm) override {
+        ++extrudes;
+        return inner.extrudeProfile(profile, distanceMm);
+    }
+    KernelMassPropertiesResult calculateMassProperties(const KernelShape& shape) override {
+        ++massCalls;
+        return inner.calculateMassProperties(shape);
+    }
+    int extrudes = 0;
+    int massCalls = 0;
+    OcctGeometryKernel inner;
+};
+
+TEST(M7ReleaseGate, GATE_K_CountersProveWhichStagesEachEditRuns) {
+    PartDocument document{"M7GateK"};
+    CountingKernelBackend kernel;
+    CountingSolverBackend solver;
+    document.setGeometryKernel(&kernel);
+    document.setSketchSolver(&solver);
+    document.addMaterial("Aluminium", 2700.0);
+
+    const ImportedSketchGeometry geometry = DimensionedRectangle();
+    const ObjectId sketchId = ImportGeometryIntoNewSketch(document, "rectangle", geometry).sketchId;
+    ASSERT_TRUE(ReconstructSketch(document, sketchId, geometry.dimensions));
+    Parameter& padLength = document.addParameter("PadLength", kPadLength, UnitType::Millimeter);
+    Parameter& unrelated = document.addParameter("Unrelated", 3.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body001");
+    document.addPadFeature(body, "Pad001", sketchId, padLength.id());
+    ASSERT_TRUE(document.recompute().success);
+
+    // WIDTH: solves the sketch AND rebuilds downstream.
+    int solves = solver.calls;
+    int extrudes = kernel.extrudes;
+    ASSERT_TRUE(document.setParameterValue(document.parameters().findByName("Width")->id(), 120.0));
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_GT(solver.calls, solves) << "a Width edit did not re-solve the sketch";
+    EXPECT_GT(kernel.extrudes, extrudes) << "a Width edit did not rebuild the Pad";
+
+    // PADLENGTH: rebuilds the Pad, does NOT re-solve the sketch.
+    solves = solver.calls;
+    extrudes = kernel.extrudes;
+    ASSERT_TRUE(document.setParameterValue(padLength.id(), 35.0));
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_EQ(solver.calls, solves) << "a PadLength edit re-solved the sketch";
+    EXPECT_GT(kernel.extrudes, extrudes) << "a PadLength edit did not rebuild the Pad";
+
+    // UNRELATED: touches neither.
+    solves = solver.calls;
+    extrudes = kernel.extrudes;
+    const int massCalls = kernel.massCalls;
+    ASSERT_TRUE(document.setParameterValue(unrelated.id(), 9.0));
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_EQ(solver.calls, solves) << "an unrelated Parameter re-solved the sketch";
+    EXPECT_EQ(kernel.extrudes, extrudes) << "an unrelated Parameter rebuilt the Pad";
+    EXPECT_EQ(kernel.massCalls, massCalls) << "an unrelated Parameter recomputed mass properties";
 }
 
 TEST(M7ReleaseGate, GATE_K_DensityDoesNotResolveTheSketch) {
