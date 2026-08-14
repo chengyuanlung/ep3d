@@ -61,37 +61,18 @@ Do not report either item as done because M6 is on `master`. See
 `docs/reviews/M6_CompletionReport.md`.
 
 Current target: **M7 — DXF Dimension and Constraint Reconstruction**
-(`docs/M7_SPEC.md`). Not started. Spec 37 requires the first slice to be
-**M7.1 — explicit rectangle Width/Height reconstruction** alone, on a branch
-`m7-wip` off the M6 master state.
+(`docs/M7_SPEC.md`), on branch `m7-wip`. **Functionally complete, NOT complete.**
 
-**The pattern is now the most reliable prediction this project makes.** Every
-review round since M5 has found defects introduced by the previous round's
-fixes, and in four of them the implementer's own claim that "every fix is
-mutation-verified" was false. A mutation suite written by the author of a fix
-measures the author's imagination; only a reviewer removing a line the author
-did not think to remove has ever found an unguarded fix here. Plan for a review
-round after every round of fixes, not after the implementation.
+All ten slices are delivered, Gates A-L pass, 668/668 in Debug and Release, nine
+mutations verified. What is missing is the half this project's history says
+matters most:
 
-**Two rules earned by that pattern, both mechanical enough to apply without
-judgement:**
+- **Independent review: ZERO ROUNDS.** M5 needed four and M6 needed three, and
+  every one of them found defects the previous round's fixes had introduced.
+- **M7 owner UI validation: NOT EXECUTED** (`docs/reviews/M7_UI_UserValidation.md`).
+- Plus the two inherited M6 items above, which merging M6 did not close.
 
-1. **Parallel kinds get parallel fixtures.** Every unguarded line M6 round 3
-   found was the third leg of a LINE / CIRCLE / ARC triple where only one or two
-   legs got a fixture — including in the test written for that very finding. A
-   guard added to `addLine` needs a sibling fixture exercising `addCircle` and
-   `addArc`, and the reverse. This one rule would have caught five of six
-   mechanically. It generalises past DXF: wherever the code enumerates kinds,
-   the fixtures must too.
-2. **A mutation run that cannot fail loudly proves nothing.** A killed process
-   keeps holding the test binary on Windows, the next build then fails
-   *silently*, and the stale binary is re-run — which once produced five
-   identical results and a confident "no unguarded fix". Delete the executable
-   before each rebuild, assert it exists afterward, require a completion summary
-   in the output, and keep **INCONCLUSIVE** separate from **guarded**. Never run
-   two mutating agents in one working tree; give each its own `git archive`
-   export and build directory.
-
-## Independent Review Role
-
-When acting as a reviewer rather than an implementer, read `docs/ReviewerGuide.md` and `docs/ReviewChecklist.md` first. Do not approve code only because it compiles. Verify architecture invariants, stable references, units, coordinate frames, dependency/recompute behavior, testability, and future Assembly/Robot/Physics compatibility. Use the exact review output format specified in `docs/ReviewerGuide.md`.
+Read `docs/reviews/M7_SelfValidationReport.md` as CLAIMS. It names what I am
+least confident about; start there. One entry is not hypothetical: a mutation
+disproved a claim I had written in the code, and the test I had written to prove
+that claim passed under the mutation.
