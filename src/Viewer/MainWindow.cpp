@@ -335,10 +335,6 @@ bool MainWindow::propertyPanelFitsItsPanel() const {
     // header()->length() is the sum of the section widths; the viewport is what
     // the user can actually see. Wider than that means a horizontal scrollbar
     // and content off the right edge.
-    std::fprintf(stderr, "PANELFIT header=%d viewport=%d c0=%d c1=%d c2=%d rows=%d\n",
-                 properties_->horizontalHeader()->length(), properties_->viewport()->width(),
-                 properties_->columnWidth(0), properties_->columnWidth(1),
-                 properties_->columnWidth(2), properties_->rowCount());
     return properties_->horizontalHeader()->length() <= properties_->viewport()->width();
 }
 

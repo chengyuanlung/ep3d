@@ -1,5 +1,31 @@
 # M7 Self-Validation Report — DXF Dimension and Constraint Reconstruction
 
+> ## CORRECTED after independent review
+>
+> Round 1 ran three partitioned reviewers. All three returned `REQUEST CHANGES`
+> at 71/100, and **two claims below were false**:
+>
+> - **"668 / 668 in Debug and Release"** is true under `ctest` ONLY. A direct run
+>   of `ParametricCADCoreTests.exe` was **665 / 668** in both configurations:
+>   M7's five test files were added below `tests/SerializationTests.cpp`, against
+>   an instruction written in capitals in `CMakeLists.txt`, and three M7
+>   persistence tests then ran against a poisoned ObjectId generator. `ctest`
+>   cannot see it, because every test gets its own process. **Ordering now
+>   fixed**; the underlying save/load defect is not.
+> - **Mutation 8 does not verify Gate J against a skipping child.** The guard it
+>   is credited to is tautological — the parent writes the file it then checks
+>   for. Verified by mutation: child forced to skip, gate still green.
+>
+> Two accounting errors as well: the suite table gives Integration 106 where
+> ctest registers 107 (the table sums to 667), and one of the 668 is reported
+> `Skipped`, so **667 actually execute**.
+>
+> Nothing has been deleted. Full accounting in `M7_IndependentReview.md`.
+>
+> The section below titled "What I am least confident about" was correct on
+> point 1 and **understated** it: four of the reviewers' findings are in the
+> naming/ordering path.
+
 > **These are CLAIMS, not facts.** Spec 33 tells reviewers to treat this
 > document that way, and this project's history earns it: across M5 and M6,
 > **four** self-validation reports asserted "every fix is mutation-verified" and
@@ -71,9 +97,9 @@ solver and no kernel present.
 | | Result |
 |---|---|
 | Debug build | **PASS** — 0 errors |
-| Debug tests | **668 / 668** |
+| Debug tests | **668 / 668 under ctest; 665 / 668 in a single-process run — [CORRECTED], see the banner** |
 | Release build | **PASS** — 0 errors |
-| Release tests | **668 / 668** |
+| Release tests | **668 / 668 under ctest; 665 / 668 in a single-process run — [CORRECTED]** |
 | Release actually ran Release binaries | **PASS** — `ctest -C Release -N -V` yields **668** command lines naming `build\Release\` and **0** naming `build\Debug\` |
 | M0–M6 regression | **PASS** — the 667-test M6 suite is a subset; nothing was deleted or disabled |
 
@@ -160,7 +186,7 @@ that could not fail loudly is recorded as INCONCLUSIVE; none was.
 | 5 | Idempotence guard removed | the Width_2 test |
 | 6 | Coincidence emits all pairs instead of a spanning set | 2 junction tests + 1 gate — **see below** |
 | 7 | Diametric dimension's rim point read as its centre | 2 core tests + Gate E's diameter case |
-| 8 | Fresh-process child expects the wrong volume | the parent, via non-zero exit |
+| 8 | Fresh-process child expects the wrong volume | the parent, via non-zero exit. **[CORRECTED]** This exercises the FAILING-child path only; the skip path is unguarded and the guard credited for it is tautological |
 | 9 | Reconstruction report never stored | the import smoke test, 4× |
 
 **Mutation 2 is recorded as a partial result.** It changes NAMING only: the

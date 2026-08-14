@@ -368,12 +368,19 @@ if(PARAMCAD_BUILD_TESTS)
         tests/M4ReviewFindingTests.cpp
         tests/DocumentOutlineTests.cpp
         tests/SerializationV5Tests.cpp
-        tests/SerializationTests.cpp
         tests/ReconstructionTests.cpp
         tests/ReconstructionGeneralTests.cpp
         tests/ReconstructionCurveTests.cpp
         tests/ReconstructionProvenanceTests.cpp
         tests/ReconstructionAdversarialTests.cpp
+        # LAST, and the comment above says why. M7 added its five files BELOW
+        # this line and broke the rule the comment states in capitals: three
+        # M7 persistence tests then ran against a generator already advanced to
+        # ~2^63 and could not save. `ctest` hid it completely, because
+        # gtest_discover_tests gives every test its own process -- 668/668 there
+        # and 665/668 in a single-process run of this binary. Independent review
+        # found it; no ctest-based check could have.
+        tests/SerializationTests.cpp
     )
     target_link_libraries(ParametricCADCoreTests
         PRIVATE ParametricCADCore ParametricCADViewerCore GTest::gtest_main)
