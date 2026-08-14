@@ -25,6 +25,7 @@ class BoxFeature;
 class ISketchSolver;
 class PadFeature;
 class PocketFeature;
+class RevolveFeature;
 
 // DEPENDENCY DIRECTION (single rule, ADR-007/ADR-012): an edge points
 // prerequisite -> dependent; "A -> B" means B depends on A and dirtiness
@@ -241,6 +242,16 @@ public:
                                         ObjectId sketchId, ObjectId depthParameterId,
                                         ObjectId materialId);
 
+    // --- Revolve feature (M8.2, ADR-M8-005) --------------------------------
+    // Base-capable like Pad: revolves `sketchId`'s profile about the sketch's
+    // own line `axisEntityId` by the Radian Parameter `angleParameterId`.
+    RevolveFeature& addRevolveFeature(Body& body, std::string name, ObjectId sketchId,
+                                      SketchEntityId axisEntityId, ObjectId angleParameterId);
+    RevolveFeature& restoreRevolveFeature(Body& body, ObjectId id, std::string name,
+                                          ComputeState state, ObjectId sketchId,
+                                          SketchEntityId axisEntityId,
+                                          ObjectId angleParameterId, ObjectId materialId);
+
     // Non-owning; the caller keeps the concrete kernel alive for every
     // subsequent recompute()/recomputeFrom() call (ADR-M3-003, mirrors
     // ADR-010's externally-owned IRecomputable lifetime pattern).
@@ -303,6 +314,8 @@ private:
     // (single registration path, spec 13).
     void wirePocketFeature(PocketFeature& feature, ObjectId baseFeatureId, ObjectId sketchId,
                            ObjectId depthParameterId, ObjectId materialId);
+    void wireRevolveFeature(RevolveFeature& feature, ObjectId sketchId,
+                            ObjectId angleParameterId, ObjectId materialId);
     void wirePadFeature(PadFeature& feature, ObjectId sketchId, ObjectId lengthParameterId,
                        ObjectId materialId);
 

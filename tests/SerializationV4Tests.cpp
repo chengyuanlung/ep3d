@@ -65,7 +65,7 @@ struct PadDoc {
 // rather than producing files an older loader silently mis-reads.
 TEST(SerializationV4Test, M4_SER_001_SaveWritesTheCurrentSchemaVersion) {
     PadDoc doc;
-    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 6"), std::string::npos); // v6: M8 Pocket
+    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 7"), std::string::npos); // v7: M8.2 Revolve
 }
 
 TEST(SerializationV4Test, M4_SER_002_SketchAndEntityIdsSurvive) {
@@ -267,12 +267,12 @@ TEST(SerializationV4Test, M4_SER_013_UnreservedPlaceholderTypesStillRoundTrip) {
     // genuinely unknown feature types.
     PartDocument document{"Doc"};
     Body& body = document.addBody("Body001");
-    body.addFeature<PlaceholderFeature>("Ghost", "Revolve");
+    body.addFeature<PlaceholderFeature>("Ghost", "Loft");
 
     const LoadResult loaded = LoadFromString(SaveToString(document));
     ASSERT_TRUE(loaded) << loaded.message;
     ASSERT_EQ(loaded.document->bodies().front()->features().size(), 1u);
-    EXPECT_EQ(loaded.document->bodies().front()->features().front()->typeName(), "Revolve");
+    EXPECT_EQ(loaded.document->bodies().front()->features().front()->typeName(), "Loft");
 }
 
 } // namespace

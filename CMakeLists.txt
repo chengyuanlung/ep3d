@@ -24,6 +24,7 @@ add_library(ParametricCADCore
     src/Core/Feature/Feature.cpp
     src/Core/Feature/PadFeature.cpp
     src/Core/Feature/PocketFeature.cpp
+    src/Core/Feature/RevolveFeature.cpp
     src/Core/Feature/PlaceholderFeature.cpp
     src/Core/Kernel/KernelShape.cpp
     src/Core/Kernel/ProfileDefinition.cpp
@@ -388,6 +389,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/ReconstructionAdversarialTests.cpp
         tests/ReconstructionReviewFindingTests.cpp
         tests/SerializationV6Tests.cpp
+        tests/SerializationV7Tests.cpp
         # LAST, and the comment above says why. M7 added its five files BELOW
         # this line and broke the rule the comment states in capitals: three
         # M7 persistence tests then ran against a generator already advanced to
@@ -469,6 +471,7 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Kernel/OcctGeometryKernelTests.cpp
             tests/Kernel/OcctExtrudeTests.cpp
             tests/Kernel/OcctBooleanTests.cpp
+            tests/Kernel/OcctRevolveTests.cpp
             tests/Kernel/M4ReleaseGateTests.cpp
             tests/Kernel/OcctRecomputeIntegrationTests.cpp
         )

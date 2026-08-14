@@ -17,6 +17,7 @@
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/RevolveFeature.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Core/Sketch/Sketch.h"
 #include "Viewer/DocumentPresenter.h"
@@ -32,6 +33,7 @@ namespace {
 
 using namespace paramcad;
 
+constexpr double kPi = 3.14159265358979323846;
 constexpr double kVolumeRelTol = 1e-9; // prismatic booleans: exact
 
 void ExpectRel(double actual, double expected, double relTol = kVolumeRelTol) {
@@ -55,8 +57,14 @@ public:
         ++subtracts;
         return inner_.subtractShape(base, tool);
     }
+    ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
+                               const Vec3& axisDirection, double angleRad) override {
+        ++revolveCallCount;
+        return inner_.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);
+    }
     int extrudes = 0;
     int subtracts = 0;
+    int revolveCallCount = 0;
 
 private:
     OcctGeometryKernel inner_;
@@ -386,6 +394,215 @@ TEST(M8ReleaseGate, TwoChainedPocketsCutInSequence) {
 
     // 100000 - 6000 - 20*30*5 = 91000 mm^3, with mass following the NEW tail.
     ExpectRel(fx.volume(), 91000.0);
+}
+
+
+
+// --- M8.2: Revolve gates -----------------------------------------------------
+//
+// The revolve fixture: rectangle u in [10,30], v in [0,40] on WorldXY, revolved
+// about the sketch's own AXIS LINE at u=0 (a separate line entity, NOT a loop
+// member). Full turn: annular cylinder, V = pi*(30^2-10^2)*50 = pi*40000.
+//
+// The axis line is added FIRST, before the profile, precisely so that any
+// implementation that grabbed "the first line in the sketch" as the axis would
+// pick... the axis, correctly, by accident. So the fixture ALSO builds a
+// variant with the axis added LAST, and the two must agree -- entity order is
+// not identity (ADR-M6-004), for features as much as for imports.
+
+namespace {
+
+// pi*(30^2-10^2)*50 = 40000*pi. The v extent is 50, NOT 40, and the reason is
+// a mutation that slipped a weak gate: with v=40, revolving about the axis
+// (annulus, pi*800*40) and revolving about the profile's own bottom edge --
+// what an axis-resolved-by-position bug produces -- give the SAME 32000*pi by
+// pure arithmetic coincidence (pi*1600*20). GATE_RB2 could not tell them
+// apart; only GATE_RG caught the mutation, one step removed. At v=50 the two
+// differ (40000*pi vs 50000*pi) and GATE_RB2 discriminates directly.
+constexpr double kAnnulusVolume = kPi * 40000.0;
+
+struct RevolveFixture {
+    PartDocument document{"M8Revolve"};
+    CountingKernel kernel;
+    CountingSolver solver;
+    Parameter* angle = nullptr;
+    Sketch* sketch = nullptr;
+    RevolveFeature* revolve = nullptr;
+    SketchEntityId axis{};
+
+    explicit RevolveFixture(bool axisFirst = true) {
+        document.setGeometryKernel(&kernel);
+        document.setSketchSolver(&solver);
+        document.addMaterial("Aluminium", 2700.0);
+        angle = &document.addParameter("RevolveAngle", 2.0 * kPi, UnitType::Radian);
+
+        Sketch& s = document.addSketch("RevolveSketch");
+        sketch = &s;
+        if (axisFirst) axis = s.addLine(Vec2{0, -5}, Vec2{0, 55});
+        s.addLine(Vec2{10, 0}, Vec2{30, 0});
+        s.addLine(Vec2{30, 0}, Vec2{30, 50});
+        s.addLine(Vec2{30, 50}, Vec2{10, 50});
+        s.addLine(Vec2{10, 50}, Vec2{10, 0});
+        if (!axisFirst) axis = s.addLine(Vec2{0, -5}, Vec2{0, 55});
+
+        Body& body = document.addBody("Body001");
+        revolve = &document.addRevolveFeature(body, "Revolve001", s.id(), axis, angle->id());
+    }
+
+    double volume() const { return document.massProperties().volumeMm3; }
+};
+
+} // namespace
+
+TEST(M8ReleaseGate, GATE_RB_FullRevolveMatchesTheAnnulusOracle) {
+    RevolveFixture fx;
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(fx.revolve->state(), ComputeState::Valid);
+    ASSERT_TRUE(fx.document.massProperties().valid);
+    ExpectRel(fx.volume(), kAnnulusVolume, 1e-6);
+}
+
+TEST(M8ReleaseGate, GATE_RB2_AxisEntityOrderIsNotIdentity) {
+    RevolveFixture first(true);
+    RevolveFixture last(false);
+    ASSERT_TRUE(first.document.recompute().success);
+    ASSERT_TRUE(last.document.recompute().success);
+
+    // Same drawing, axis line stored first vs last: identical solid. An
+    // implementation resolving the axis by position instead of by
+    // SketchEntityId would revolve about a profile edge in one of the two.
+    ExpectRel(first.volume(), last.volume(), 1e-9);
+    ExpectRel(first.volume(), kAnnulusVolume, 1e-6);
+}
+
+TEST(M8ReleaseGate, GATE_RC_HalfAngleHalvesTheVolumeSelectively) {
+    RevolveFixture fx;
+    ASSERT_TRUE(fx.document.recompute().success);
+    const double full = fx.volume();
+
+    const int solvesBefore = fx.solver.calls;
+    const int revolvesBefore = fx.kernel.revolveCallCount;
+
+    ASSERT_TRUE(fx.document.setParameterValue(fx.angle->id(), kPi));
+    ASSERT_TRUE(fx.document.recomputeFrom(fx.angle->id()).success);
+
+    // The ratio (a scale error cannot hide), and the counters (equal final
+    // values are not evidence -- spec 21).
+    ExpectRel(fx.volume() / full, 0.5, 1e-9);
+    EXPECT_EQ(fx.solver.calls, solvesBefore) << "an angle edit re-solved a sketch";
+    EXPECT_EQ(fx.kernel.revolveCallCount, revolvesBefore + 1);
+}
+
+TEST(M8ReleaseGate, GATE_RD_ARevolveIsALegalChainBase) {
+    RevolveFixture fx;
+    // A pocket cut into the revolved solid: prism u in [2,7], v in [5,15],
+    // depth 5 (+Z from the XY plane). The annulus about the world-Y axis spans
+    // x^2+z^2 in [100,900] for y in [0,40]; every prism point has
+    // x^2+z^2 <= 49+25 = 74 < 100 -- the prism sits INSIDE THE HOLE of the
+    // annulus, so the cut legally removes NOTHING and the volume is unchanged.
+    //
+    // A second pocket at u in [12,17] (x^2+z^2 up to 289+25, straddling the
+    // inner wall) would be a partial cut with no closed-form oracle -- which is
+    // exactly why THIS fixture uses the hole: the oracle stays analytical.
+    Sketch& ps = fx.document.addSketch("PocketSketch");
+    ps.addLine(Vec2{2, 5}, Vec2{7, 5});
+    ps.addLine(Vec2{7, 5}, Vec2{7, 15});
+    ps.addLine(Vec2{7, 15}, Vec2{2, 15});
+    ps.addLine(Vec2{2, 15}, Vec2{2, 5});
+    Parameter& depth = fx.document.addParameter("PocketDepth", 5.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    PocketFeature& pocket =
+        fx.document.addPocketFeature(body, "Pocket001", fx.revolve->id(), ps.id(), depth.id());
+
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(pocket.state(), ComputeState::Valid);
+
+    // The CAPABILITY claim, proved: PocketFeature consumes a Revolve with no
+    // change to either type, because bases resolve through ISolidFeature
+    // (ADR-M8-001). And the disjoint cut is LEGAL (ADR-M8-002): volume
+    // unchanged, not an error.
+    ExpectRel(fx.volume(), kAnnulusVolume, 1e-6);
+}
+
+TEST(M8ReleaseGate, GATE_RE_RevolveFailureModesAndRecovery) {
+    RevolveFixture fx;
+    ASSERT_TRUE(fx.document.recompute().success);
+
+    // Angle out of range -> Failed, mass not current.
+    ASSERT_TRUE(fx.document.setParameterValue(fx.angle->id(), 7.0)); // > 2*pi
+    fx.document.recompute();
+    EXPECT_EQ(fx.revolve->state(), ComputeState::Failed);
+    EXPECT_FALSE(fx.document.massProperties().valid);
+
+    // Recovery.
+    ASSERT_TRUE(fx.document.setParameterValue(fx.angle->id(), 2.0 * kPi));
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(fx.revolve->state(), ComputeState::Valid);
+    ExpectRel(fx.volume(), kAnnulusVolume, 1e-6);
+}
+
+TEST(M8ReleaseGate, GATE_RE2_AWrongUnitAngleParameterIsRefusedWithADiagnostic) {
+    RevolveFixture fx;
+    ASSERT_TRUE(fx.document.recompute().success);
+
+    // A MILLIMETRE parameter wired as the angle. 3.1 "millimetres" would read
+    // as a perfectly plausible 3.1-radian sweep -- the silent unit confusion
+    // the Radian check exists to refuse.
+    Parameter& wrong = fx.document.addParameter("NotAnAngle", 3.1, UnitType::Millimeter);
+    Sketch& s2 = fx.document.addSketch("Sketch2");
+    const SketchEntityId axis2 = s2.addLine(Vec2{0, 0}, Vec2{0, 40});
+    s2.addLine(Vec2{10, 0}, Vec2{30, 0});
+    s2.addLine(Vec2{30, 0}, Vec2{30, 40});
+    s2.addLine(Vec2{30, 40}, Vec2{10, 40});
+    s2.addLine(Vec2{10, 40}, Vec2{10, 0});
+    Body& body = *fx.document.bodies().front();
+    RevolveFeature& bad =
+        fx.document.addRevolveFeature(body, "Revolve002", s2.id(), axis2, wrong.id());
+
+    fx.document.recompute();
+    EXPECT_EQ(bad.state(), ComputeState::Failed);
+}
+
+TEST(M8ReleaseGate, GATE_RF_RevolveSurvivesSaveLoadAndStillRebuilds) {
+    std::string saved;
+    ObjectId angleId = kInvalidObjectId;
+    {
+        RevolveFixture fx;
+        ASSERT_TRUE(fx.document.recompute().success);
+        angleId = fx.angle->id();
+        std::ostringstream out;
+        ASSERT_TRUE(savePartDocument(fx.document, out));
+        saved = out.str();
+    }
+
+    OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver solver;
+    std::istringstream in(saved);
+    LoadResult loaded = loadPartDocument(in);
+    ASSERT_TRUE(loaded) << loaded.message;
+    loaded.document->setGeometryKernel(&kernel);
+    loaded.document->setSketchSolver(&solver);
+
+    ASSERT_TRUE(loaded.document->recompute().success);
+    ExpectRel(loaded.document->massProperties().volumeMm3, kAnnulusVolume, 1e-6);
+
+    // The axis reference survived SEMANTICALLY: the half-angle edit still
+    // produces exactly half, in a fresh document with fresh backends.
+    ASSERT_TRUE(loaded.document->setParameterValue(angleId, kPi));
+    ASSERT_TRUE(loaded.document->recomputeFrom(angleId).success);
+    ExpectRel(loaded.document->massProperties().volumeMm3, kAnnulusVolume / 2.0, 1e-6);
+}
+
+TEST(M8ReleaseGate, GATE_RG_DeletingTheAxisLineFailsTheRevolveLoudly) {
+    RevolveFixture fx;
+    ASSERT_TRUE(fx.document.recompute().success);
+
+    // The axis is an ordinary entity; deleting it must fail the revolve with a
+    // diagnostic, never crash, never fall back to some other line.
+    ASSERT_TRUE(fx.document.removeSketchEntity(fx.sketch->id(), fx.axis));
+    fx.document.recompute();
+    EXPECT_EQ(fx.revolve->state(), ComputeState::Failed);
+    EXPECT_FALSE(fx.document.massProperties().valid);
 }
 
 } // namespace

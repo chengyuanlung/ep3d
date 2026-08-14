@@ -2717,3 +2717,47 @@ makes explicit:
    NOT mutation-guarded at the check itself — recorded there in as many words,
    because M7's review found an ADR asserting a test that did not exist, and
    this project does not write that sentence twice.
+
+---
+
+## ADR-M8-005 — Revolve: the axis is a line of the sketch, treated as construction geometry (M8.2)
+Status: Accepted.
+
+A revolve axis is a fact about the DRAWING, so it is referenced the way every
+other fact about a drawing is: a `SketchEntityId`, resolved at recompute time,
+persisted semantically in schema v7 with a load-time check that the id names an
+entity OF the named sketch. The alternatives were a world axis (not what a
+drawing means) and a bare origin+direction pair (numbers with no identity that
+no later edit could reference). The axis line may be a profile member --
+revolving a rectangle about its own edge is the canonical cylinder -- or a
+separate line.
+
+**A separate axis line is CONSTRUCTION geometry for profile purposes.** The
+profile validator counts every curve, so a dangling axis line made every
+revolve sketch "unchainable" -- all eight M8.2 gates failed on their first run.
+`BuildProfile` gained an overload with one excluded entity, ignored exactly as
+Points are. EP3D has no general construction-geometry concept yet (the roadmap
+defers it); this is the one semantic case M8 needs, named rather than
+generalized.
+
+Two things this feature checks that its siblings do not, each with a reason:
+
+- **The angle Parameter must carry `UnitType::Radian`.** 180 stored in a
+  Millimeter parameter reads as 180 radians -- the kernel refuses > 2*pi, but
+  3.1 "millimetres" sails through as a plausible sweep. Length features never
+  had this trap: a misfiled length fails the solve long before a feature reads
+  it. Guarded by GATE_RE2 and mutation R5.
+- **Angles above 2*pi are refused, not wrapped.** A wrapped angle silently
+  produces angle-mod-2*pi -- a value error disguised as success.
+
+The axis gets NO dependency edge of its own: it is an entity of the sketch, so
+any edit that can move it arrives through editSketch, which already dirties the
+sketch node the feature depends on.
+
+**A fixture lesson worth keeping**: the axis-order gate originally revolved a
+20x40 rectangle, and the correct annulus (pi*800*40) EQUALS the
+wrong-axis-by-position cylinder (pi*1600*20) by pure arithmetic coincidence --
+the gate could not discriminate and mutation R2 slipped past it to be caught
+one step removed. The fixture is 20x50 now, and the comment on
+`kAnnulusVolume` records why. An oracle is only as good as the coincidences it
+avoids.

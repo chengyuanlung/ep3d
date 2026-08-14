@@ -16,6 +16,8 @@ public:
                                double distanceMm) override;
     KernelMassPropertiesResult calculateMassProperties(const KernelShape& shape) override;
     ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override;
+    ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
+                               const Vec3& axisDirection, double angleRad) override;
 };
 
 } // namespace paramcad

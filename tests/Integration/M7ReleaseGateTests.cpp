@@ -801,9 +801,15 @@ public:
         ++subtracts;
         return inner.subtractShape(base, tool);
     }
+    ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
+                               const Vec3& axisDirection, double angleRad) override {
+        ++revolveCallCount;
+        return inner.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);
+    }
     int extrudes = 0;
     int massCalls = 0;
     int subtracts = 0;
+    int revolveCallCount = 0;
     OcctGeometryKernel inner;
 };
 

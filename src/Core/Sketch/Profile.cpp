@@ -95,11 +95,18 @@ bool SegmentsProperlyIntersect(Vec2 p1, Vec2 p2, Vec2 q1, Vec2 q2) noexcept {
 } // namespace
 
 ProfileResult BuildProfile(const Sketch& sketch) {
+    return BuildProfile(sketch, kInvalidSketchEntityId);
+}
+
+ProfileResult BuildProfile(const Sketch& sketch, SketchEntityId excludedEntityId) {
     // 1. Partition entities. Points are reference geometry: they cannot
-    //    contribute an edge, so they are ignored rather than rejected.
+    //    contribute an edge, so they are ignored rather than rejected. The
+    //    excluded entity (a revolve axis) is construction geometry for the
+    //    same reason -- present in the drawing, contributing no edge.
     std::vector<Curve> curves;
     std::vector<SketchEntityId> closedCurves; // full circles
     for (const SketchEntity& entity : sketch.entities()) {
+        if (entity.id == excludedEntityId) continue;
         if (std::holds_alternative<SketchPoint>(entity.geometry)) continue;
 
         // Re-checked here even though Sketch::add* already rejects invalid

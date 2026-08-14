@@ -65,6 +65,16 @@ struct ProfileResult {
 // gap is how a real modelling error becomes a wrong solid.
 ProfileResult BuildProfile(const Sketch& sketch);
 
+// The same validation with ONE entity treated as construction geometry --
+// ignored exactly as Points are, contributing no edge (M8.2, ADR-M8-005).
+//
+// This exists for the revolve axis: a drawing that revolves a profile about a
+// line carries that line IN the sketch, and a validator that counted it as
+// profile geometry would reject every such sketch as unchainable. EP3D has no
+// general construction-geometry concept yet (roadmap defers it); this is the
+// one semantic case M8 needs, named rather than generalized.
+ProfileResult BuildProfile(const Sketch& sketch, SketchEntityId excludedEntityId);
+
 // Tolerance used to decide whether two endpoints are the same point, in mm
 // (ADR-M4-005). Shares kSketchToleranceMm's value so the project keeps one
 // length-scale story across M3 and M4.

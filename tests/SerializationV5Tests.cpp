@@ -130,7 +130,7 @@ const Sketch& OnlySketch(const PartDocument& document) {
 
 TEST(SerializationV5Test, M5_SER_001_SchemaVersionIsFive) {
     ConstrainedDoc doc;
-    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 6"), std::string::npos); // v6: M8 Pocket
+    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 7"), std::string::npos); // v7: M8.2 Revolve
 }
 
 TEST(SerializationV5Test, M5_SER_002_AllNineConstraintKindsSurviveRoundTrip) {
@@ -265,8 +265,8 @@ TEST(SerializationV5Test, M5_SER_008_V4FileWithoutConstraintsStillLoads) {
 
     // Strip every constraints array and claim v4 -- exactly the shape of a file
     // written before M5 existed.
-    const std::size_t versionPos = saved.find("\"schemaVersion\": 6");
-    ASSERT_NE(versionPos, std::string::npos); // v6: M8 Pocket -- update on every bump
+    const std::size_t versionPos = saved.find("\"schemaVersion\": 7");
+    ASSERT_NE(versionPos, std::string::npos); // v7: M8.2 Revolve -- update on every bump
     saved.replace(versionPos, 18, "\"schemaVersion\": 4");
     for (;;) {
         const std::size_t start = saved.find("\"constraints\": [");

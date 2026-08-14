@@ -35,9 +35,15 @@ public:
         ++subtractCallCount;
         return inner_.subtractShape(base, tool);
     }
+    ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
+                               const Vec3& axisDirection, double angleRad) override {
+        ++revolveCallCount;
+        return inner_.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);
+    }
 
     int createBoxCallCount = 0;
     int subtractCallCount = 0;
+    int revolveCallCount = 0;
     int extrudeProfileCallCount = 0;
     int calculateMassPropertiesCallCount = 0;
 

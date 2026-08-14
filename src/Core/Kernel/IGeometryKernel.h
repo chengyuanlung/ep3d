@@ -69,6 +69,19 @@ public:
     // Invalid or foreign handles return a controlled ShapeResult with
     // KernelError::GeometryConstructionFailed. Never throws.
     virtual ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) = 0;
+
+    // Revolves the profile about an axis lying in (or parallel to) its plane,
+    // counter-clockwise about axisDirection by angleRad (M8.2, ADR-M8-005).
+    // The axis arrives as WORLD origin+direction because Core has already done
+    // the (u,v)->world conversion through SketchFrame -- the kernel never
+    // re-derives a frame (ADR-M4-002's rule, unchanged).
+    //
+    // angleRad in (0, 2*pi]; exactly 2*pi is a full solid of revolution.
+    // Invalid input -- bad profile, degenerate axis direction, out-of-range
+    // angle -- returns a controlled InvalidDimension. Never throws.
+    virtual ShapeResult revolveProfile(const PlanarProfileDefinition& profile,
+                                       const Vec3& axisOriginMm, const Vec3& axisDirection,
+                                       double angleRad) = 0;
 };
 
 } // namespace paramcad

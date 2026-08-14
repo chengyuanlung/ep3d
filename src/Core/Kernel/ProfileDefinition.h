@@ -73,7 +73,17 @@ struct PlanarProfileDefinition {
 // values.
 inline constexpr double kMinExtrusionDistanceMm = 1e-6;
 
+// Smallest revolve sweep that is still a solid, and the largest one that is
+// still a single revolution (M8.2, ADR-M8-005). The floor matches the arc
+// model's own kMinSweepRad reasoning: below it the swept wedge is thinner than
+// anything the length tolerances can measure. Above 2*pi is REFUSED rather
+// than wrapped -- a wrapped angle silently produces the same solid as
+// angle mod 2*pi, which is a value error disguised as success.
+inline constexpr double kMinRevolveAngleRad = 1e-6;
+inline constexpr double kMaxRevolveAngleRad = 6.283185307179586476925286766559; // 2*pi
+
 bool IsValidProfileDefinition(const PlanarProfileDefinition& profile) noexcept;
 bool IsValidExtrusionDistance(double distanceMm) noexcept;
+bool IsValidRevolveAngle(double angleRad) noexcept;
 
 } // namespace paramcad

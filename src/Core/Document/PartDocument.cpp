@@ -3,6 +3,7 @@
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/RevolveFeature.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <algorithm>
 #include <cassert>
@@ -559,6 +560,43 @@ PocketFeature& PartDocument::restorePocketFeature(Body& body, ObjectId id, std::
     PocketFeature& feature = body.addFeature<PocketFeature>(
         id, std::move(name), state, baseFeatureId, sketchId, depthParameterId, materialId);
     wirePocketFeature(feature, baseFeatureId, sketchId, depthParameterId, materialId);
+    return feature;
+}
+
+
+void PartDocument::wireRevolveFeature(RevolveFeature& feature, ObjectId sketchId,
+                                      ObjectId angleParameterId, ObjectId materialId) {
+    addRecomputableNode(feature); // registry + graph node (IRecomputable*)
+    addDependency(feature.id(), sketchId);           // Sketch -> Revolve
+    addDependency(feature.id(), angleParameterId);   // Angle  -> Revolve
+    // The AXIS needs no edge of its own: it is an entity OF the sketch, so any
+    // edit that can move it arrives through editSketch, which already dirties
+    // the sketch node this feature depends on. A second edge would say the
+    // same thing twice.
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+RevolveFeature& PartDocument::addRevolveFeature(Body& body, std::string name, ObjectId sketchId,
+                                                SketchEntityId axisEntityId,
+                                                ObjectId angleParameterId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    RevolveFeature& feature = body.addFeature<RevolveFeature>(
+        std::move(name), sketchId, axisEntityId, angleParameterId, materialId);
+    wireRevolveFeature(feature, sketchId, angleParameterId, materialId);
+    return feature;
+}
+
+RevolveFeature& PartDocument::restoreRevolveFeature(Body& body, ObjectId id, std::string name,
+                                                    ComputeState state, ObjectId sketchId,
+                                                    SketchEntityId axisEntityId,
+                                                    ObjectId angleParameterId,
+                                                    ObjectId materialId) {
+    if (registry_.contains(id))
+        throw std::runtime_error("restoreRevolveFeature: id " + std::to_string(id) +
+                                 " is already registered in this document");
+    RevolveFeature& feature = body.addFeature<RevolveFeature>(
+        id, std::move(name), state, sketchId, axisEntityId, angleParameterId, materialId);
+    wireRevolveFeature(feature, sketchId, angleParameterId, materialId);
     return feature;
 }
 

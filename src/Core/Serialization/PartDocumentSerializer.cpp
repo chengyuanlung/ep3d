@@ -4,6 +4,7 @@
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/RevolveFeature.h"
 #include "Core/Sketch/Sketch.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Material/Material.h"
@@ -23,7 +24,7 @@ namespace paramcad {
 
 namespace {
 
-constexpr int kSchemaVersion = 6;           // v6 adds the Pocket feature (M8)
+constexpr int kSchemaVersion = 7;           // v7 adds the Revolve feature (M8.2)
 constexpr int kMinSupportedSchemaVersion = 1; // v1 (no edges) and v2 files still load
 constexpr std::string_view kFormatName = "ParametricCAD";
 
@@ -204,6 +205,19 @@ JsonValue toJson(const PartDocument& document) {
                 featureEntry.set("lengthParameterId",
                                  JsonValue::makeString(idToString(pad->lengthParameterId())));
                 featureEntry.set("materialId", JsonValue::makeString(idToString(pad->materialId())));
+            } else if (const auto* revolve = dynamic_cast<const RevolveFeature*>(feature.get())) {
+                // v7 (ADR-M8-005): the axis is a SketchEntityId in the named
+                // sketch, persisted as a decimal string exactly like every
+                // entity id -- semantic, never positional.
+                featureEntry.set("sketchId",
+                                 JsonValue::makeString(idToString(revolve->sketchId())));
+                featureEntry.set("axisEntityId",
+                                 JsonValue::makeString(
+                                     idToString(ToObjectId(revolve->axisEntityId()))));
+                featureEntry.set("angleParameterId",
+                                 JsonValue::makeString(idToString(revolve->angleParameterId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(revolve->materialId())));
             } else if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
                 // v6 (ADR-M8-001): the chain reference is the base feature's
                 // ObjectId -- semantic, like every other reference here. The
@@ -509,8 +523,11 @@ SaveResult validateSaveable(const PartDocument& document) {
             if (dynamic_cast<const BoxFeature*>(feature.get()) != nullptr) continue;
             if (dynamic_cast<const PadFeature*>(feature.get()) != nullptr) continue;
             if (dynamic_cast<const PocketFeature*>(feature.get()) != nullptr) continue;
+            if (dynamic_cast<const RevolveFeature*>(feature.get()) != nullptr) continue;
             const std::string_view typeName = feature->typeName();
-            if (typeName != "Box" && typeName != "Pad" && typeName != "Pocket") continue;
+            if (typeName != "Box" && typeName != "Pad" && typeName != "Pocket" &&
+                typeName != "Revolve")
+                continue;
             return SaveResult{SerializationError::InvalidFieldType,
                               "feature " + idToString(feature->id()) + " (" + feature->name() +
                                   ") is a placeholder carrying the reserved type name '" +
@@ -755,6 +772,9 @@ LoadResult loadPartDocument(std::istream& in) {
         // ever meaningful for the type the record declares, like every other
         // per-type field here.
         ObjectId baseFeatureId = kInvalidObjectId;
+        // Revolve-specific (v7, ADR-M8-005; only meaningful when type == "Revolve").
+        ObjectId axisEntityId = kInvalidObjectId;
+        ObjectId angleParameterId = kInvalidObjectId;
     };
     struct BodyData {
         ObjectId id;
@@ -1029,6 +1049,48 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.sketchId = *sketchRef;
                 featureData.depthParameterId = *depthRef;
                 featureData.materialId = *pocketMaterialId;
+            } else if (featureData.type == "Revolve") {
+                const JsonValue* sketchField = requireField(featureEntry, "sketchId",
+                                                            JsonType::String, featureContext, err);
+                if (sketchField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* axisField = requireField(featureEntry, "axisEntityId",
+                                                          JsonType::String, featureContext, err);
+                if (axisField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* angleField = requireField(
+                    featureEntry, "angleParameterId", JsonType::String, featureContext, err);
+                if (angleField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* revolveMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (revolveMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                const auto sketchRef = idFromString(sketchField->asString());
+                const auto axisRef = idFromString(axisField->asString());
+                const auto angleRef = idFromString(angleField->asString());
+                const auto revolveMaterialId = idFromString(revolveMaterialField->asString());
+                if (!sketchRef || !axisRef || !angleRef || !revolveMaterialId ||
+                    *sketchRef > kMaxObjectId || *axisRef > kMaxObjectId ||
+                    *angleRef > kMaxObjectId || *revolveMaterialId > kMaxObjectId) {
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext +
+                                           ": revolve sketch/axis/parameter/material id is not "
+                                           "a valid decimal ObjectId string");
+                }
+                if (parameterIds.count(*angleRef) == 0)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext + ": revolve angle parameter id " +
+                                           idToString(*angleRef) +
+                                           " is not a parameter in this document");
+                if (*revolveMaterialId != kInvalidObjectId &&
+                    (!materialData.has_value() || materialData->id != *revolveMaterialId)) {
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext + ": revolve materialId " +
+                                           idToString(*revolveMaterialId) +
+                                           " does not match this document's material");
+                }
+                featureData.sketchId = *sketchRef;
+                featureData.axisEntityId = *axisRef;
+                featureData.angleParameterId = *angleRef;
+                featureData.materialId = *revolveMaterialId;
             }
 
             body.features.push_back(std::move(featureData));
@@ -1398,6 +1460,36 @@ LoadResult loadPartDocument(std::istream& in) {
         }
     }
 
+    // Every Revolve must reference a Sketch in this file, and its axis must be
+    // an entity OF that sketch -- an axis id that resolves to nothing, or to an
+    // entity of a different sketch, is a file the saver could never have
+    // written (ADR-M3-008).
+    for (const auto& body : bodyData) {
+        for (const auto& feature : body.features) {
+            if (feature.type != "Revolve") continue;
+            const auto sketchIt =
+                std::find_if(sketchData.begin(), sketchData.end(),
+                             [&](const auto& sk) { return sk.id == feature.sketchId; });
+            if (sketchIt == sketchData.end())
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   "feature " + idToString(feature.id) +
+                                       ": revolve sketch id " + idToString(feature.sketchId) +
+                                       " is not a sketch in this document");
+            const bool axisInSketch =
+                std::any_of(sketchIt->entities.begin(), sketchIt->entities.end(),
+                            [&](const auto& entity) {
+                                return ToObjectId(entity.id) == feature.axisEntityId;
+                            });
+            if (!axisInSketch)
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   "feature " + idToString(feature.id) +
+                                       ": revolve axis entity id " +
+                                       idToString(feature.axisEntityId) +
+                                       " is not an entity of sketch " +
+                                       idToString(feature.sketchId));
+        }
+    }
+
     // Dependencies (Option A, ADR-012/ADR-M3-005; optional array). Validated
     // fully BEFORE any document construction on a scratch graph holding
     // exactly the node set the real document will have (parameter nodes --
@@ -1570,6 +1662,11 @@ LoadResult loadPartDocument(std::istream& in) {
                                                feature.state, feature.baseFeatureId,
                                                feature.sketchId, feature.depthParameterId,
                                                feature.materialId);
+            } else if (feature.type == "Revolve") {
+                document->restoreRevolveFeature(
+                    restored, feature.id, std::move(feature.name), feature.state,
+                    feature.sketchId, static_cast<SketchEntityId>(feature.axisEntityId),
+                    feature.angleParameterId, feature.materialId);
             } else {
                 restored.addFeature<PlaceholderFeature>(feature.id, std::move(feature.name),
                                                         feature.state, std::move(feature.type));

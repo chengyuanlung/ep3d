@@ -241,10 +241,102 @@ public:
                            KernelError::None, {}};
     }
 
+    // Axis-aligned rectangle detection shared by the revolve model: four line
+    // segments whose union of endpoints spans exactly two u and two v values.
+    static bool RectangleBounds(const PlanarProfileDefinition& profile, double& minU,
+                                double& maxU, double& minV, double& maxV) {
+        if (profile.segments.size() != 4) return false;
+        bool first = true;
+        for (const ProfileSegment& segment : profile.segments) {
+            const auto* line = std::get_if<ProfileLineSegment>(&segment);
+            if (line == nullptr) return false;
+            for (const Vec2& point : {line->start, line->end}) {
+                if (first) {
+                    minU = maxU = point.x;
+                    minV = maxV = point.y;
+                    first = false;
+                } else {
+                    minU = std::min(minU, point.x);
+                    maxU = std::max(maxU, point.x);
+                    minV = std::min(minV, point.y);
+                    maxV = std::max(maxV, point.y);
+                }
+            }
+            const bool horizontal = line->start.y == line->end.y;
+            const bool vertical = line->start.x == line->end.x;
+            if (!horizontal && !vertical) return false;
+        }
+        return maxU > minU && maxV > minV;
+    }
+
+    ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
+                               const Vec3& axisDirection, double angleRad) override {
+        ++revolveProfileCallCount;
+        if (!IsValidProfileDefinition(profile))
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "invalid profile definition"};
+        if (!IsValidRevolveAngle(angleRad))
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "invalid revolve angle: must be finite and in (0, 2*pi]"};
+
+        // NARROW ANALYTICAL MODEL, like the fake's other operations: an
+        // axis-aligned RECTANGLE of four line segments, revolved a FULL turn
+        // about a VERTICAL in-plane axis (direction == the plane's v axis)
+        // that does not cross the rectangle. Volume is Pappus, exact under
+        // those conditions: V = 2*pi * Rbar * A. Anything else -- partial
+        // sweeps, arcs, axis through the profile -- is real geometry and
+        // belongs in tests/Kernel with OCCT, so it returns a structured
+        // failure rather than a half-right number.
+        constexpr double kTwoPi = 6.283185307179586476925286766559;
+        if (std::abs(angleRad - kTwoPi) > 1e-12)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "FakeGeometryKernel models only full revolutions"};
+        const auto vAxis = profile.plane.vAxis;
+        const double dot = axisDirection.x * vAxis.x + axisDirection.y * vAxis.y +
+                           axisDirection.z * vAxis.z;
+        const double axisLen = std::sqrt(axisDirection.x * axisDirection.x +
+                                         axisDirection.y * axisDirection.y +
+                                         axisDirection.z * axisDirection.z);
+        if (axisLen <= 0.0 || std::abs(std::abs(dot) / axisLen - 1.0) > 1e-9)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "FakeGeometryKernel models only axes parallel to the plane's "
+                               "v axis"};
+
+        double minU = 0, maxU = 0, minV = 0, maxV = 0;
+        if (!RectangleBounds(profile, minU, maxU, minV, maxV))
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "FakeGeometryKernel revolves only axis-aligned rectangles"};
+
+        // The axis's u coordinate in the sketch plane: project (axisOrigin -
+        // planeOrigin) onto the u axis.
+        const double du = axisOriginMm.x - profile.plane.origin.x;
+        const double dv = axisOriginMm.y - profile.plane.origin.y;
+        const double dw = axisOriginMm.z - profile.plane.origin.z;
+        const double axisU = du * profile.plane.uAxis.x + dv * profile.plane.uAxis.y +
+                             dw * profile.plane.uAxis.z;
+        if (axisU > minU + 1e-12 && axisU < maxU - 1e-12)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "FakeGeometryKernel cannot revolve a profile crossing its axis"};
+
+        const double area = (maxU - minU) * (maxV - minV);
+        const double rbar = std::abs((minU + maxU) * 0.5 - axisU);
+        KernelMassProperties result;
+        result.volumeMm3 = kTwoPi * rbar * area;
+        // COM of a full solid of revolution lies ON the axis at mid-height.
+        const double midV = (minV + maxV) * 0.5;
+        result.centerOfMassMm =
+            Vec3{profile.plane.origin.x + axisU * profile.plane.uAxis.x + midV * vAxis.x,
+                 profile.plane.origin.y + axisU * profile.plane.uAxis.y + midV * vAxis.y,
+                 profile.plane.origin.z + axisU * profile.plane.uAxis.z + midV * vAxis.z};
+        return ShapeResult{KernelShape(std::make_shared<FakeShapeHandle>(result)),
+                           KernelError::None, {}};
+    }
+
     int createBoxCallCount = 0;
     int extrudeProfileCallCount = 0;
     int calculateMassPropertiesCallCount = 0;
     int subtractShapeCallCount = 0;
+    int revolveProfileCallCount = 0;
 
 private:
     static constexpr double kPi = 3.14159265358979323846;

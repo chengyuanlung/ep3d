@@ -46,6 +46,11 @@ bool IsValidExtrusionDistance(double distanceMm) noexcept {
     return std::isfinite(distanceMm) && distanceMm >= kMinExtrusionDistanceMm;
 }
 
+bool IsValidRevolveAngle(double angleRad) noexcept {
+    return std::isfinite(angleRad) && angleRad >= kMinRevolveAngleRad &&
+           angleRad <= kMaxRevolveAngleRad;
+}
+
 bool IsValidProfileDefinition(const PlanarProfileDefinition& profile) noexcept {
     if (profile.segments.empty()) return false;
 

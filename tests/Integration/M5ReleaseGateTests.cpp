@@ -65,10 +65,16 @@ public:
         ++subtractCallCount;
         return inner_.subtractShape(base, tool);
     }
+    ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
+                               const Vec3& axisDirection, double angleRad) override {
+        ++revolveCallCount;
+        return inner_.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);
+    }
 
     int extrudeCallCount = 0;
     int massCallCount = 0;
     int subtractCallCount = 0;
+    int revolveCallCount = 0;
 
 private:
     OcctGeometryKernel inner_;

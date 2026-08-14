@@ -8,6 +8,7 @@
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/RevolveFeature.h"
 #include "Core/Material/Material.h"
 #include "Core/Parameter/Parameter.h"
 #include "Core/Physics/MassProperties.h"
@@ -477,6 +478,16 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
                 rows.push_back(PropertyRow{"Chain", "Base feature",
                                            std::to_string(pocket->baseFeatureId()), "", false,
                                            kInvalidObjectId, 0.0});
+            }
+
+            // Revolve (M8.2): the editable Angle, in the parameter's own unit.
+            if (const auto* revolve = dynamic_cast<const RevolveFeature*>(feature.get())) {
+                for (const auto& parameter : document.parameters().items()) {
+                    if (parameter->id() != revolve->angleParameterId()) continue;
+                    rows.push_back(PropertyRow{"Geometry", "Angle", Number(parameter->value()),
+                                               UnitLabel(parameter->unit()), true,
+                                               parameter->id(), parameter->value()});
+                }
             }
 
             if (const auto* referencing =
