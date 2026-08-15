@@ -114,4 +114,43 @@ TEST(SerializationV7Test, M8_SER_103_AnAngleThatIsNotAParameterIsRefused) {
     EXPECT_NE(loaded.message.find("angle parameter"), std::string::npos) << loaded.message;
 }
 
+// --- Round-1 regression tests (M8 independent review, R2-C1 probes A3-A5) ----
+// Save/load symmetry for every reference the loader checks (ADR-M3-008). Each
+// was demonstrated in review as save-OK -> load-refused via the public facade.
+
+TEST(SerializationV7Test, M8_REV_311_RemovingTheAngleParameterMakesTheDocUnsavable) {
+    RevolveDoc doc;
+    ASSERT_TRUE(doc.document.removeObject(doc.angleId)); // probe A3
+
+    std::ostringstream out;
+    const SaveResult saved = savePartDocument(doc.document, out);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("revolve angle parameter id"), std::string::npos)
+        << saved.message;
+}
+
+TEST(SerializationV7Test, M8_REV_312_RemovingTheRevolveSketchMakesTheDocUnsavable) {
+    RevolveDoc doc;
+    ASSERT_TRUE(doc.document.removeObject(doc.document.sketches().front()->id())); // probe A4
+
+    std::ostringstream out;
+    const SaveResult saved = savePartDocument(doc.document, out);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("revolve sketch id"), std::string::npos) << saved.message;
+}
+
+TEST(SerializationV7Test, M8_REV_313_RemovingTheAxisLineMakesTheDocUnsavable) {
+    // The sharpest of review's six symmetry gaps (probe A5): deleting any
+    // sketch line that happens to be a revolve axis used to succeed AND save
+    // cleanly -- silently poisoning every future save of the document.
+    RevolveDoc doc;
+    ASSERT_TRUE(
+        doc.document.removeSketchEntity(doc.document.sketches().front()->id(), doc.axisId));
+
+    std::ostringstream out;
+    const SaveResult saved = savePartDocument(doc.document, out);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("revolve axis entity id"), std::string::npos) << saved.message;
+}
+
 } // namespace

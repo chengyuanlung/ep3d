@@ -113,6 +113,46 @@ entry red, per-test ctest green.
 
 ---
 
+## Fix record (author, after consolidation)
+
+Every CONFIRMED finding fixed on `m8-wip`; the register above carries per-item
+status. The shape of the fixes:
+
+- **ADR-M8-008** (new): a consumer's base must be a SOLID feature of the
+  consumer's OWN body, consumed at most once document-wide -- enforced at
+  creation (`requireConsumableBase`, by capability), save (`validateSaveable`,
+  now also carrying the six missing reference checks with loader-mirrored
+  wording), load (solid-type + uniqueness in the chain walk; `wire*` now
+  throws on a failed base-edge `GraphResult`), and display (document-wide
+  consumed set).
+- **Revolve axis-as-member implemented** (fallback rebuild with the axis when
+  the excluded profile does not close), making ADR-M8-005's claim true;
+  RevolveFeature.h and the ADR record that the sentence was false as shipped.
+- **Kernel analyzer unified** into one `AnalyzedDressResult` for both dress
+  verbs; the chamfer refusal has its own test.
+- **24 new tests**, one per finding: Core 406->419, Integration 131->141,
+  KernelOcct 59->60.
+- Docs corrected in place: ADR-M8-004 (two-half guard credit), ADR-M8-006
+  (kernel-duplication amendment), self-report (F5 attribution, 736-execute
+  qualifier, removeObject mass wording), M5_SER_001 rename, GATE_CB seam
+  comment, AGENTS.md rule 9 (timestamp-preserving-restore hazard).
+
+**Fix-verification mutation battery** (all binaries deleted before rebuild
+and asserted present; every file restored and `cmp`-verified; restores
+`touch`ed against the stale-object trap):
+
+| # | Round-1 mutation re-run | Verdict after fixes |
+|---|---|---|
+| V1 | base->dress chain edge deleted (R1 MUT1) | **guarded** -- GATE_FE |
+| V2 | Sketch->Pocket edge deleted (R1 MUT2) | **guarded** -- GATE_KC |
+| V3 | shared analyzer skipped (R1 MUT3) | **guarded** -- GATE_FC, GATE_FF, kernel refusal test |
+| V4 | dress `consumedSolidId()` -> invalid (R1 MUT4) | **guarded** -- GATE_FF, M8_SER_204 |
+| V5 | pocket save-side reference checks deleted (R2-C1) | **guarded** -- M8_REV_301/302 |
+| V6 | revolve axis save-side check deleted (R2-C1 A5) | **guarded** -- M8_REV_313 |
+| V7 | `requireConsumableBase` neutered (R1-C1) | **guarded** -- M8_REV_307/308 |
+| V8 | loader uniqueness check alone deleted | **masked by design** -- the restore-path helper still refuses the same file with the same diagnostic (defense in depth, stated here so it is never read as a guard) |
+| V8b | BOTH diamond layers deleted | **guarded** -- M8_REV_304 (+307/308) |
+
 ## Standing blocks (unchanged by this round)
 
 M8 close remains blocked on: **M7 round 2 review**, **M7 owner UI

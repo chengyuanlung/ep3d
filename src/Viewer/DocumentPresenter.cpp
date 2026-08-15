@@ -9,13 +9,16 @@ namespace paramcad {
 
 std::vector<ObjectId> DocumentPresenter::displayableSolids() const {
     std::vector<ObjectId> ids;
-    for (const auto& body : document_->bodies()) {
-        // The chain rule (M8, ADR-M8-003): a solid CONSUMED by a valid
-        // downstream feature is an intermediate result, not a part. Drawing the
-        // pad underneath its own pocketed successor would overlap two versions
-        // of the same material and visually erase the pocket. Collected per
-        // body, by capability -- consumedSolidId() -- never by concrete type.
-        std::set<ObjectId> consumed;
+    // The chain rule (M8, ADR-M8-003): a solid CONSUMED by a downstream
+    // feature is an intermediate result, not a part. Drawing the pad
+    // underneath its own pocketed successor would overlap two versions of the
+    // same material and visually erase the pocket. Collected DOCUMENT-wide,
+    // by capability -- consumedSolidId() -- never by concrete type. The set
+    // was originally per body; round 1 (R1-M2) reached a cross-body consumer
+    // through the facade and both base and consumer displayed. Creation now
+    // refuses cross-body bases, so the document-wide set is defense in depth.
+    std::set<ObjectId> consumed;
+    for (const auto& body : document_->bodies())
         for (const auto& feature : body->features()) {
             const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get());
             if (solid == nullptr) continue;
@@ -30,6 +33,7 @@ std::vector<ObjectId> DocumentPresenter::displayableSolids() const {
             if (solid->consumedSolidId() != kInvalidObjectId)
                 consumed.insert(solid->consumedSolidId());
         }
+    for (const auto& body : document_->bodies()) {
         for (const auto& feature : body->features()) {
             // Depend on the CAPABILITY, not on a concrete type: any feature
             // that produces a solid is displayable (ADR-M3-007's rule, the same

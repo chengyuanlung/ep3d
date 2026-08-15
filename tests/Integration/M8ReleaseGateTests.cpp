@@ -624,11 +624,13 @@ TEST(M8ReleaseGate, GATE_FB_PadThenFilletMatchesTheMinkowskiOracle) {
     ChainFixture fx; // 100 x 50 x 20 pad (constrained sketch)
     Parameter& radius = fx.document.addParameter("FilletRadius", 2.0, UnitType::Millimeter);
     Body& body = *fx.document.bodies().front();
+    // The ChainFixture already chains a pocket onto the pad, and consumption
+    // is UNIQUE (round 1's R1-C1): adding the fillet while the pocket still
+    // consumes the pad is a diamond and is refused. The pocket is removed
+    // FIRST -- the original order here was itself a transient diamond.
+    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
     FilletFeature& fillet =
         fx.document.addFilletFeature(body, "Fillet001", fx.pad->id(), radius.id());
-    // The ChainFixture already chains a pocket onto the pad; re-point this test
-    // at a clean pad->fillet chain by removing the pocket first.
-    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
 
     ASSERT_TRUE(fx.document.recompute().success);
     EXPECT_EQ(fillet.state(), ComputeState::Valid);
@@ -658,6 +660,13 @@ TEST(M8ReleaseGate, GATE_CB_RevolveThenChamferIsAThreeKindChain) {
     //   outer rims: 2 * 2*pi*(30 - 2/3)*2 = 8*pi*(88/3)
     //   inner rims: 2 * 2*pi*(10 + 2/3)*2 = 8*pi*(32/3)
     // total removed = 8*pi*40 = 320*pi.
+    //
+    // The oracle also RELIES on OCCT treating the full revolution's SEAM edges
+    // (the degenerate u=0 boundary the revolve leaves on each face) as
+    // un-chamferable no-ops when the dedup map hands them to Add -- if a
+    // future OCCT started beveling the seam, this gate would (correctly) go
+    // red with a volume below 320*pi. Stated because the reliance is implicit
+    // in the arithmetic (review round 1, R1 minor).
     Parameter& distance = fx.document.addParameter("ChamferDistance", 2.0, UnitType::Millimeter);
     Body& body = *fx.document.bodies().front();
     ChamferFeature& chamfer =
@@ -756,6 +765,260 @@ TEST(M8ReleaseGate, GATE_HOLE_AHoleIsExpressibleTodayAsACirclePocket) {
     ASSERT_TRUE(fx.document.recompute().success);
     EXPECT_EQ(pocket.state(), ComputeState::Valid);
     ExpectRel(fx.volume(), 100000.0 - kPi * 36.0 * 20.0, 1e-6);
+}
+
+// --- Round-1 regression gates (M8 independent review) ------------------------
+// One per finding. The review's own mutations name what each must kill.
+
+TEST(M8ReleaseGate, GATE_RH_RevolvingARectangleAboutItsOwnEdgeIsTheCanonicalCylinder) {
+    // R1-M1: ADR-M8-005 and RevolveFeature.h claimed the axis MAY be a member
+    // of the profile loop; the unconditional exclusion made that false (the
+    // loop broke and the revolve was refused). The fallback in
+    // RevolveFeature::recompute makes the claim true, and this gate is why
+    // the claim is allowed to stand: rectangle x in [10,30], y in [0,50],
+    // revolved about its OWN left edge -> solid cylinder r=20, h=50,
+    // V = pi*400*50 = 20000*pi.
+    PartDocument document{"M8AxisMember"};
+    CountingKernel kernel;
+    CountingSolver solver;
+    document.setGeometryKernel(&kernel);
+    document.setSketchSolver(&solver);
+    document.addMaterial("Aluminium", 2700.0);
+    Parameter& angle = document.addParameter("Angle", 2.0 * kPi, UnitType::Radian);
+
+    Sketch& s = document.addSketch("RectSketch");
+    const SketchEntityId leftEdge = s.addLine(Vec2{10, 0}, Vec2{10, 50});
+    s.addLine(Vec2{10, 50}, Vec2{30, 50});
+    s.addLine(Vec2{30, 50}, Vec2{30, 0});
+    s.addLine(Vec2{30, 0}, Vec2{10, 0});
+
+    Body& body = document.addBody("Body001");
+    RevolveFeature& revolve =
+        document.addRevolveFeature(body, "Revolve001", s.id(), leftEdge, angle.id());
+
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_EQ(revolve.state(), ComputeState::Valid);
+    ASSERT_TRUE(document.massProperties().valid);
+    ExpectRel(document.massProperties().volumeMm3, kPi * 400.0 * 50.0, 1e-6);
+}
+
+TEST(M8ReleaseGate, GATE_RC2_AnAngleEditTouchesNothingOutsideTheRevolve) {
+    // R3-M1: GATE_RC's fixture has no constraints and no second
+    // counter-bearing node, so "no sketch re-solved" could never fire and
+    // "one revolve call" was equally true of a global rebuild -- under an
+    // engine degraded to recompute-everything, GATE_RC stayed green while
+    // GATE_D and GATE_FB went red. This gate puts a CONSTRAINED pad+pocket
+    // chain in the same document (built first, so mass still follows the
+    // revolve, added last): now a degraded engine re-solves the pad sketch
+    // and re-runs extrudes/subtracts, and every counter below notices.
+    ChainFixture fx;
+    Parameter& angle = fx.document.addParameter("Angle", 2.0 * kPi, UnitType::Radian);
+    Sketch& rs = fx.document.addSketch("RevolveSketch");
+    const SketchEntityId axis = rs.addLine(Vec2{0, -5}, Vec2{0, 55});
+    rs.addLine(Vec2{10, 0}, Vec2{30, 0});
+    rs.addLine(Vec2{30, 0}, Vec2{30, 50});
+    rs.addLine(Vec2{30, 50}, Vec2{10, 50});
+    rs.addLine(Vec2{10, 50}, Vec2{10, 0});
+    Body& body2 = fx.document.addBody("Body002");
+    RevolveFeature& revolve =
+        fx.document.addRevolveFeature(body2, "Revolve001", rs.id(), axis, angle.id());
+
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(revolve.state(), ComputeState::Valid);
+    const double full = fx.document.massProperties().volumeMm3; // 40000*pi
+    ExpectRel(full, kPi * 40000.0, 1e-6);
+
+    const int solves = fx.solver.calls;
+    const int extrudes = fx.kernel.extrudes;
+    const int subtracts = fx.kernel.subtracts;
+    const int revolves = fx.kernel.revolveCallCount;
+
+    ASSERT_TRUE(fx.document.setParameterValue(angle.id(), kPi));
+    ASSERT_TRUE(fx.document.recomputeFrom(angle.id()).success);
+
+    ExpectRel(fx.document.massProperties().volumeMm3 / full, 0.5, 1e-9);
+    EXPECT_EQ(fx.solver.calls, solves) << "an angle edit re-solved a sketch";
+    EXPECT_EQ(fx.kernel.extrudes, extrudes) << "an angle edit re-ran an extrude";
+    EXPECT_EQ(fx.kernel.subtracts, subtracts) << "an angle edit re-ran a boolean";
+    EXPECT_EQ(fx.kernel.revolveCallCount, revolves + 1);
+}
+
+TEST(M8ReleaseGate, GATE_E3_APersistedFailureStillBlocksThePocketOnALaterEdit) {
+    // R3-m1: the persisted-Failed barrier (a base that failed in a PREVIOUS
+    // pass and is not dirty in this one) was pinned only by unit-level
+    // DependencyGraphTests while ADR-M8-004 credited GATE_E2, which covers
+    // the in-pass half. This is the integration pin, at the exact seam R3
+    // probed: pad already Failed, then a depth edit dirties ONLY the pocket.
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.recompute().success);
+    ASSERT_TRUE(fx.document.setParameterValue(fx.padLength->id(), -1.0));
+    EXPECT_FALSE(fx.document.recompute().success);
+    ASSERT_EQ(fx.pad->state(), ComputeState::Failed);
+
+    const int subtracts = fx.kernel.subtracts;
+    ASSERT_TRUE(fx.document.setParameterValue(fx.depth->id(), 12.0));
+    const DocumentRecomputeReport report = fx.document.recomputeFrom(fx.depth->id());
+    EXPECT_FALSE(report.success);
+    EXPECT_EQ(fx.document.dependencyGraph().state(fx.pocket->id()), ComputeState::Failed)
+        << "the pocket was not blocked by its persistently failed base";
+    EXPECT_EQ(fx.kernel.subtracts, subtracts)
+        << "a boolean ran against a base that failed in a previous pass";
+    EXPECT_FALSE(fx.document.massProperties().valid);
+}
+
+TEST(M8ReleaseGate, GATE_FE_AWidthEditRebuildsTheDressChain) {
+    // R1-M3: with the base->dress edge deleted, every test stayed green --
+    // no test drove an UPSTREAM edit through a dress feature. Width 100->120:
+    // the pad rebuilds and the fillet must follow, or mass reports the
+    // 100-wide Minkowski value while looking current.
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
+    Parameter& radius = fx.document.addParameter("FilletRadius", 2.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    FilletFeature& fillet =
+        fx.document.addFilletFeature(body, "Fillet001", fx.pad->id(), radius.id());
+
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(fillet.state(), ComputeState::Valid);
+
+    const int extrudes = fx.kernel.extrudes;
+    const int fillets = fx.kernel.filletCallCount;
+    ASSERT_TRUE(fx.document.setParameterValue(fx.width->id(), 120.0));
+    ASSERT_TRUE(fx.document.recomputeFrom(fx.width->id()).success);
+
+    // Minkowski rounded box for 120 x 50 x 20, r=2:
+    // 116*46*16 + 2*2*(116*46 + 46*16 + 116*16) + pi*4*(116+46+16) + (4/3)*pi*8.
+    const double expected =
+        85376.0 + 31712.0 + kPi * 712.0 + (4.0 / 3.0) * kPi * 8.0;
+    ASSERT_TRUE(fx.document.massProperties().valid);
+    ExpectRel(fx.document.massProperties().volumeMm3, expected, 1e-6);
+    EXPECT_EQ(fx.kernel.extrudes, extrudes + 1);
+    EXPECT_EQ(fx.kernel.filletCallCount, fillets + 1)
+        << "the width edit rebuilt the pad but not the fillet consuming it";
+}
+
+TEST(M8ReleaseGate, GATE_FF_PresenterShowsOnlyTheDressChainTail) {
+    // R1-M3's display half: Gate H covered Pocket only, so a dress feature
+    // whose consumedSolidId() regressed to invalid would resurrect the
+    // overlapping-solids defect with every test green.
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
+    Parameter& radius = fx.document.addParameter("FilletRadius", 2.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    FilletFeature& fillet =
+        fx.document.addFilletFeature(body, "Fillet001", fx.pad->id(), radius.id());
+    DocumentPresenter presenter(fx.document);
+
+    ASSERT_TRUE(fx.document.recompute().success);
+    const std::vector<ObjectId> solids = presenter.displayableSolids();
+    ASSERT_EQ(solids.size(), 1u) << "the dress chain must display exactly its tail";
+    EXPECT_EQ(solids.front(), fillet.id());
+
+    // And consumption is STRUCTURAL (Gate H's lesson, applied to the dress
+    // twin): an impossible radius fails the fillet, and NOTHING displays --
+    // never the bare pad underneath a broken successor.
+    ASSERT_TRUE(fx.document.setParameterValue(radius.id(), 15.0));
+    EXPECT_FALSE(fx.document.recompute().success);
+    EXPECT_TRUE(presenter.displayableSolids().empty())
+        << "a failed fillet un-consumed its base in the viewer";
+}
+
+TEST(M8ReleaseGate, GATE_KC_APocketSketchEditReachesThePocket) {
+    // R1-M5: the Sketch->Pocket edge was deleted and every test stayed green;
+    // no test edited a pocket's sketch. Removing one line of the pocket
+    // sketch opens its profile: the edit must REACH the pocket (loud failure)
+    // while the pad stays untouched.
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.recompute().success);
+    const int extrudes = fx.kernel.extrudes;
+    const int subtracts = fx.kernel.subtracts;
+
+    const SketchEntityId line = fx.pocketSketch->entities().front().id;
+    ASSERT_TRUE(fx.document.removeSketchEntity(fx.pocketSketch->id(), line));
+    EXPECT_FALSE(fx.document.recompute().success);
+
+    EXPECT_EQ(fx.pocket->state(), ComputeState::Failed)
+        << "the pocket-sketch edit never reached the pocket";
+    EXPECT_EQ(fx.pad->state(), ComputeState::Valid);
+    EXPECT_EQ(fx.kernel.extrudes, extrudes) << "the pad was rebuilt by a pocket-sketch edit";
+    EXPECT_EQ(fx.kernel.subtracts, subtracts) << "a cut ran with an open pocket profile";
+}
+
+// --- Spec 8 adversarial rows (R1-M6: correct by probe, previously untested) --
+
+TEST(M8ReleaseGate, ADV_A_ThePocketMayShareThePadsOwnSketch) {
+    // Same sketch drives base and tool: tool = the full 100x50 footprint,
+    // 10 deep -> 100000 - 50000 = 50000. Legal, exact, and previously only a
+    // reviewer's probe.
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
+    Parameter& depth = fx.document.addParameter("SharedDepth", 10.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    PocketFeature& pocket = fx.document.addPocketFeature(body, "Pocket002", fx.pad->id(),
+                                                         fx.padSketch->id(), depth.id());
+
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(pocket.state(), ComputeState::Valid);
+    ExpectRel(fx.volume(), 50000.0, 1e-6);
+}
+
+TEST(M8ReleaseGate, ADV_B_DepthAtTheFloorWorksAndBelowItFailsLoudly) {
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.recompute().success);
+
+    // AT the floor (kMinExtrusionDistanceMm = 1e-6): legal, and the removed
+    // sliver is 6e-4 mm^3 -- indistinguishable from 100000 at 1e-6 relative,
+    // which is exactly what the assertion states.
+    ASSERT_TRUE(fx.document.setParameterValue(fx.depth->id(), 1e-6));
+    ASSERT_TRUE(fx.document.recomputeFrom(fx.depth->id()).success);
+    EXPECT_EQ(fx.pocket->state(), ComputeState::Valid);
+    ExpectRel(fx.volume(), 100000.0, 1e-6);
+
+    // BELOW the floor: refused loudly, never a zero-thickness boolean.
+    ASSERT_TRUE(fx.document.setParameterValue(fx.depth->id(), 5e-7));
+    EXPECT_FALSE(fx.document.recomputeFrom(fx.depth->id()).success);
+    EXPECT_EQ(fx.pocket->state(), ComputeState::Failed);
+}
+
+TEST(M8ReleaseGate, ADV_C_AnOpenPocketProfileFailsThePocketNotThePad) {
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
+    Sketch& open = fx.document.addSketch("OpenSketch");
+    open.addLine(Vec2{10, 10}, Vec2{30, 10});
+    open.addLine(Vec2{30, 10}, Vec2{30, 40});
+    open.addLine(Vec2{30, 40}, Vec2{10, 40}); // no closing line
+    Parameter& depth = fx.document.addParameter("OpenDepth", 5.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    PocketFeature& pocket =
+        fx.document.addPocketFeature(body, "Pocket002", fx.pad->id(), open.id(), depth.id());
+
+    EXPECT_FALSE(fx.document.recompute().success);
+    EXPECT_EQ(pocket.state(), ComputeState::Failed);
+    EXPECT_EQ(fx.pad->state(), ComputeState::Valid);
+}
+
+TEST(M8ReleaseGate, ADV_D_ACutThatSwallowsTheBaseIsLegalAndPinned) {
+    // ADR-M8-002's empty-result rule, previously unpinned (R1 minor): a tool
+    // covering the whole pad yields volume zero, VALID mass, and one
+    // displayable (empty) solid -- a legal modeling state, not an error.
+    ChainFixture fx;
+    ASSERT_TRUE(fx.document.removeObject(fx.pocket->id()));
+    Sketch& big = fx.document.addSketch("SwallowSketch");
+    big.addLine(Vec2{-10, -10}, Vec2{110, -10});
+    big.addLine(Vec2{110, -10}, Vec2{110, 60});
+    big.addLine(Vec2{110, 60}, Vec2{-10, 60});
+    big.addLine(Vec2{-10, 60}, Vec2{-10, -10});
+    Parameter& depth = fx.document.addParameter("SwallowDepth", 20.0, UnitType::Millimeter);
+    Body& body = *fx.document.bodies().front();
+    PocketFeature& pocket =
+        fx.document.addPocketFeature(body, "Pocket002", fx.pad->id(), big.id(), depth.id());
+    DocumentPresenter presenter(fx.document);
+
+    ASSERT_TRUE(fx.document.recompute().success);
+    EXPECT_EQ(pocket.state(), ComputeState::Valid);
+    ASSERT_TRUE(fx.document.massProperties().valid);
+    EXPECT_NEAR(fx.document.massProperties().volumeMm3, 0.0, 1e-9);
+    EXPECT_EQ(presenter.displayableSolids().size(), 1u);
 }
 
 } // namespace

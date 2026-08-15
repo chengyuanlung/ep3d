@@ -1,6 +1,7 @@
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
+#include "Core/Feature/ISolidFeature.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Feature/RevolveFeature.h"
@@ -475,12 +476,23 @@ std::vector<SketchConstraintId> PartDocument::constraintsBindingParameter(
 }
 
 std::vector<ObjectId> PartDocument::featuresReferencingSketch(ObjectId sketchId) const {
+    // Covers every sketch-referencing feature kind: Pad, Pocket, Revolve.
+    // Fillet/Chamfer reference no sketch. Round 1 found this loop still
+    // enumerating only Pad, which made its header contract ("empty is exactly
+    // the condition under which the sketch can be deleted") false for a
+    // pocket's or revolve's sketch -- a loaded gun for the UI's delete path.
     std::vector<ObjectId> ids;
     if (sketchId == kInvalidObjectId) return ids;
     for (const std::unique_ptr<Body>& body : bodies_)
-        for (const std::unique_ptr<Feature>& feature : body->features())
-            if (const auto* pad = dynamic_cast<const PadFeature*>(feature.get()))
+        for (const std::unique_ptr<Feature>& feature : body->features()) {
+            if (const auto* pad = dynamic_cast<const PadFeature*>(feature.get())) {
                 if (pad->sketchId() == sketchId) ids.push_back(pad->id());
+            } else if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
+                if (pocket->sketchId() == sketchId) ids.push_back(pocket->id());
+            } else if (const auto* revolve = dynamic_cast<const RevolveFeature*>(feature.get())) {
+                if (revolve->sketchId() == sketchId) ids.push_back(revolve->id());
+            }
+        }
     return ids;
 }
 
@@ -523,6 +535,33 @@ PadFeature& PartDocument::restorePadFeature(Body& body, ObjectId id, std::string
 }
 
 
+void PartDocument::requireConsumableBase(const Body& body, ObjectId baseFeatureId,
+                                         const char* consumerNoun) const {
+    const ISolidFeature* baseInBody = nullptr;
+    for (const auto& feature : body.features())
+        if (feature->id() == baseFeatureId)
+            baseInBody = dynamic_cast<const ISolidFeature*>(feature.get());
+    if (baseInBody == nullptr)
+        throw std::runtime_error(std::string(consumerNoun) + ": base feature " +
+                                 std::to_string(baseFeatureId) +
+                                 " is not a solid feature of the same body");
+    // Consumption is document-wide and unique: once ANY consumer (in any
+    // body -- review probe R1-PROBE3 reached a cross-body consumer before the
+    // same-body check above existed) reports this base via consumedSolidId(),
+    // it is an intermediate value, never a base again. Capability, not
+    // concrete types (ADR-M3-007).
+    for (const auto& anyBody : bodies_)
+        for (const auto& feature : anyBody->features()) {
+            const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get());
+            if (solid != nullptr && solid->consumedSolidId() == baseFeatureId)
+                throw std::runtime_error(std::string(consumerNoun) + ": base feature " +
+                                         std::to_string(baseFeatureId) +
+                                         " is already consumed by feature " +
+                                         std::to_string(feature->id()) +
+                                         "; a solid may be consumed once (ADR-M8-001)");
+        }
+}
+
 void PartDocument::wirePocketFeature(PocketFeature& feature, ObjectId baseFeatureId,
                                      ObjectId sketchId, ObjectId depthParameterId,
                                      ObjectId materialId) {
@@ -531,7 +570,16 @@ void PartDocument::wirePocketFeature(PocketFeature& feature, ObjectId baseFeatur
     // dirties the pocket through the ordinary M2 machinery. Without it, a
     // Width edit would rebuild the pad and leave the pocket cutting yesterday's
     // solid -- current-looking, analytically wrong.
-    addDependency(feature.id(), baseFeatureId);     // Base   -> Pocket
+    //
+    // The GraphResult is CHECKED (round 1's R2-M2): a silently discarded
+    // failed edge is exactly the "consumer with no chain edge" state
+    // ADR-M8-001 promises is unrepresentable. Reachable only by calling the
+    // restore facade directly with a base the loader would have refused.
+    const GraphResult baseEdge = addDependency(feature.id(), baseFeatureId); // Base -> Pocket
+    if (!baseEdge)
+        throw std::runtime_error("wirePocketFeature: base feature " +
+                                 std::to_string(baseFeatureId) +
+                                 " has no graph node; the chain edge cannot be wired");
     addDependency(feature.id(), sketchId);          // Sketch -> Pocket
     addDependency(feature.id(), depthParameterId);  // Depth  -> Pocket
     // Physics follows the chain TAIL (ADR-M8-003): the pocketed result is the
@@ -542,6 +590,7 @@ void PartDocument::wirePocketFeature(PocketFeature& feature, ObjectId baseFeatur
 PocketFeature& PartDocument::addPocketFeature(Body& body, std::string name,
                                               ObjectId baseFeatureId, ObjectId sketchId,
                                               ObjectId depthParameterId) {
+    requireConsumableBase(body, baseFeatureId, "addPocketFeature");
     const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
     PocketFeature& feature = body.addFeature<PocketFeature>(
         std::move(name), baseFeatureId, sketchId, depthParameterId, materialId);
@@ -558,6 +607,7 @@ PocketFeature& PartDocument::restorePocketFeature(Body& body, ObjectId id, std::
     if (registry_.contains(id))
         throw std::runtime_error("restorePocketFeature: id " + std::to_string(id) +
                                  " is already registered in this document");
+    requireConsumableBase(body, baseFeatureId, "restorePocketFeature");
     PocketFeature& feature = body.addFeature<PocketFeature>(
         id, std::move(name), state, baseFeatureId, sketchId, depthParameterId, materialId);
     wirePocketFeature(feature, baseFeatureId, sketchId, depthParameterId, materialId);
@@ -605,7 +655,12 @@ RevolveFeature& PartDocument::restoreRevolveFeature(Body& body, ObjectId id, std
 void PartDocument::wireEdgeDressFeature(EdgeDressFeature& feature, ObjectId baseFeatureId,
                                         ObjectId sizeParameterId, ObjectId materialId) {
     addRecomputableNode(feature);
-    addDependency(feature.id(), baseFeatureId);    // Base -> Fillet/Chamfer
+    // Checked for the same reason as wirePocketFeature's base edge (R2-M2).
+    const GraphResult baseEdge = addDependency(feature.id(), baseFeatureId); // Base -> dress
+    if (!baseEdge)
+        throw std::runtime_error("wireEdgeDressFeature: base feature " +
+                                 std::to_string(baseFeatureId) +
+                                 " has no graph node; the chain edge cannot be wired");
     addDependency(feature.id(), sizeParameterId);  // Size -> Fillet/Chamfer
     rewireMassPropertiesSource(feature.id(), materialId); // chain tail
 }
@@ -613,6 +668,7 @@ void PartDocument::wireEdgeDressFeature(EdgeDressFeature& feature, ObjectId base
 FilletFeature& PartDocument::addFilletFeature(Body& body, std::string name,
                                               ObjectId baseFeatureId,
                                               ObjectId radiusParameterId) {
+    requireConsumableBase(body, baseFeatureId, "addFilletFeature");
     const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
     FilletFeature& feature = body.addFeature<FilletFeature>(std::move(name), baseFeatureId,
                                                             radiusParameterId, materialId);
@@ -627,6 +683,7 @@ FilletFeature& PartDocument::restoreFilletFeature(Body& body, ObjectId id, std::
     if (registry_.contains(id))
         throw std::runtime_error("restoreFilletFeature: id " + std::to_string(id) +
                                  " is already registered in this document");
+    requireConsumableBase(body, baseFeatureId, "restoreFilletFeature");
     FilletFeature& feature = body.addFeature<FilletFeature>(
         id, std::move(name), state, baseFeatureId, radiusParameterId, materialId);
     wireEdgeDressFeature(feature, baseFeatureId, radiusParameterId, materialId);
@@ -636,6 +693,7 @@ FilletFeature& PartDocument::restoreFilletFeature(Body& body, ObjectId id, std::
 ChamferFeature& PartDocument::addChamferFeature(Body& body, std::string name,
                                                 ObjectId baseFeatureId,
                                                 ObjectId distanceParameterId) {
+    requireConsumableBase(body, baseFeatureId, "addChamferFeature");
     const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
     ChamferFeature& feature = body.addFeature<ChamferFeature>(std::move(name), baseFeatureId,
                                                               distanceParameterId, materialId);
@@ -650,6 +708,7 @@ ChamferFeature& PartDocument::restoreChamferFeature(Body& body, ObjectId id, std
     if (registry_.contains(id))
         throw std::runtime_error("restoreChamferFeature: id " + std::to_string(id) +
                                  " is already registered in this document");
+    requireConsumableBase(body, baseFeatureId, "restoreChamferFeature");
     ChamferFeature& feature = body.addFeature<ChamferFeature>(
         id, std::move(name), state, baseFeatureId, distanceParameterId, materialId);
     wireEdgeDressFeature(feature, baseFeatureId, distanceParameterId, materialId);

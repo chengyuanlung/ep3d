@@ -75,8 +75,13 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
     // from public API to reach it directly. It is therefore NOT mutation-
     // guarded, and no test claims otherwise -- M7's review found an ADR
     // asserting a test that did not exist, and this comment exists so this
-    // check can never grow that sentence. What IS guarded, by GATE_E2's
-    // subtract counter, is the engine-level contract this check backs up.
+    // check can never grow that sentence. The engine contract this check
+    // backs up is guarded in two halves (round 1's R3 corrected the original
+    // single-credit to GATE_E2): in-pass blocking by GATE_E2's subtract
+    // counter, and the persisted-Failed barrier (a base that failed in a
+    // PREVIOUS pass, not dirty in this one) by
+    // DependencyGraphTests.StaleFailureGates* at unit level and GATE_E3's
+    // counter at integration level.
     const ISolidFeature* base = resolveSolidFeature(context.registry, baseFeatureId_);
     if (base == nullptr)
         return fail("pocket base feature not found or does not produce a solid");

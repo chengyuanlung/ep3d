@@ -577,10 +577,17 @@ int main(int argc, char** argv) {
             // WIDGET (M6.14's lesson).
             if (!presenter.displayableSolids().empty()) {
                 window.selectObject(presenter.displayableSolids().front());
-                if (window.displayedPropertyValue("Depth").empty())
-                    fail("the pocket's Depth is not shown in the panel");
-                if (window.displayedPropertyValue("Base feature").empty())
-                    fail("the pocket's chain base is not shown in the panel");
+                // EXACT values, not merely non-empty (round 1's R3-M2: a
+                // displayedPropertyValue hard-coded to "42" sailed through the
+                // non-empty version of these checks; the import counts above
+                // learned the same lesson in M7). The depth is the sample's
+                // known 10 mm in the panel's fixed 3-decimal format; the base
+                // must be THE pad, by id.
+                if (window.displayedPropertyValue("Depth") != "10.000")
+                    fail("the pocket's Depth row does not show the sample's 10.000");
+                if (window.displayedPropertyValue("Base feature") !=
+                    std::to_string(model->pad->id()))
+                    fail("the pocket's Base feature row does not name the pad");
             }
         }
 

@@ -2711,7 +2711,13 @@ makes explicit:
    the GRAPH is authoritative (ADR-M3-004). GATE_E2's first draft read the
    cache and learned the difference; the gate now asserts the graph state and,
    by kernel counter, that **no boolean ran against the failed base's retained
-   shape**.
+   shape**. *Correction (review round 1, R3-m1)*: this ADR originally credited
+   GATE_E2 with the whole contract. GATE_E2 covers the IN-PASS half (base
+   fails and its dependents are blocked in the same pass); the PERSISTED half
+   (base already Failed from a previous pass, only the consumer dirtied now)
+   was pinned solely by unit-level `DependencyGraphTests.StaleFailureGates*` --
+   R3 deleted the barrier and every integration test stayed green. GATE_E3 is
+   the integration pin at that exact seam.
 2. `PocketFeature::recompute`'s own base-state check is therefore DEFENSE IN
    DEPTH that the engine makes unreachable, and it is documented as
    NOT mutation-guarded at the check itself — recorded there in as many words,
@@ -2731,6 +2737,15 @@ drawing means) and a bare origin+direction pair (numbers with no identity that
 no later edit could reference). The axis line may be a profile member --
 revolving a rectangle about its own edge is the canonical cylinder -- or a
 separate line.
+
+*Amendment (review round 1, R1-M1)*: the sentence above was FALSE as shipped.
+The unconditional exclusion broke the loop whenever the axis WAS a member, and
+the canonical cylinder was refused with a misleading "profile is not closed"
+diagnostic -- an ADR asserting an untested capability, the defect class M7's
+review penalized, recurring in the very next milestone. The fix is a fallback
+in `RevolveFeature::recompute`: if the axis-excluded profile does not close,
+the profile is rebuilt WITH the axis, and if that closes, the axis is a member
+edge. GATE_RH pins the member case; the claim stands because the gate does.
 
 **A separate axis line is CONSTRUCTION geometry for profile purposes.** The
 profile validator counts every curve, so a dangling axis line made every
@@ -2790,6 +2805,12 @@ Implementation decisions that carry weight:
   OCCT's ChFi3d reports done for a radius wider than half the part's thickness
   while producing self-intersecting geometry. `BRepCheck_Analyzer` runs on
   every dress result; F6's mutation removes it and two tests go red.
+  *Amendment (review round 1, R1-M4)*: "one place to add a guard" was true of
+  the Core base class but NOT of the kernel, which duplicated the analyzer per
+  verb -- R1 deleted the chamfer's copy and every test stayed green, because
+  F6 and the refusal test pinned only the fillet's. The kernel now runs one
+  shared `AnalyzedDressResult` for both verbs, and the chamfer has its own
+  refusal test (M8_REV_331).
 - **The dedup map, not a raw explorer**: an explorer visits a shared edge once
   per owning face, and Add-ing an edge twice is undefined in ChFi3d.
 - Volume oracles avoid corner arithmetic by construction: the fillet oracle is
@@ -2820,3 +2841,41 @@ Status: Accepted. This is the explicit deferral record M8's spec requires.
 Each deferral leaves a capability demonstrated or a successor milestone named.
 None is silent -- silence reads as coverage, which M7's review already
 penalized once.
+
+---
+
+## ADR-M8-008 — A solid may be consumed once, by its own body (M8.7, from review round 1)
+Status: Accepted.
+
+Round 1's two Criticals were both holes in the chain rule's ENFORCEMENT, not
+its statement:
+
+- **R1-C1**: two pockets consuming the same pad -- a diamond -- was silently
+  accepted. Both cut the ORIGINAL pad, the viewer drew two overlapping solids,
+  mass followed whichever consumer wired last, and the file round-tripped.
+  ADR-M8-001 said "chain"; nothing enforced "tree-with-single-consumption".
+- **R2-C1**: `validateSaveable` missed every new M8 reference the loader
+  checks (pocket depth/sketch, revolve angle/sketch/axis, dress size) -- six
+  demonstrated ways to write a file the loader refuses (ADR-M3-008's named
+  worst class, fourth recurrence).
+
+The rule, now enforced at every door with one shape: **a consumer's base must
+be a SOLID feature of the consumer's OWN body, and a solid is consumed at most
+once, document-wide.**
+
+- Creation: `requireConsumableBase` in every consuming `add*`/`restore*` path,
+  by the `consumedSolidId()` capability, never concrete types (ADR-M3-007).
+  Throws, exactly as the restore duplicate-id guards do.
+- Save: `validateSaveable` walks the same capability, plus the six missing
+  reference checks, wordings mirroring the loader.
+- Load: the chain walk refuses non-solid bases (R2-M2's Placeholder base, whose
+  failed `addDependency` was silently discarded -- the `GraphResult` is now
+  checked and throwing in `wire*`) and doubly-consumed bases.
+- Display: the presenter's consumed-set is document-wide (defense in depth;
+  creation now refuses the cross-body consumer R1-M2 reached).
+
+Multiple consumers of one base is a real CAD concept (branching bodies,
+boolean trees); when a milestone wants it, it arrives as an explicit merge/
+branch feature with its own display and mass semantics -- not as an accident
+of unchecked wiring. Guarded by M8_REV_304/307/308/309 and the V-battery
+mutations recorded in `docs/reviews/M8_IndependentReview.md`.

@@ -29,6 +29,14 @@ Hard rules:
 6. Add or update tests for Core behavior.
 7. Build and run tests before reporting completion.
 8. If an architectural conflict is discovered, document it instead of silently redesigning the project.
+9. Mutation testing: DELETE the test binaries before each rebuild and assert
+   they exist afterwards -- a stale binary once produced five identical false
+   verdicts. **Second flavor, found independently by two M8 reviewers**:
+   timestamp-preserving restores (`Copy-Item`, `cp -p`) make MSBuild skip the
+   recompile, so the SOURCE is restored while the object file still carries
+   the mutation (or a probe survives in a linked test binary). Restore with a
+   plain copy and `touch` the file; treat two mutations with byte-identical
+   failure lists as a harness alarm, not a coincidence.
 
 M3 — Geometry Kernel Adapter & First Parametric Solid — is COMPLETE
 (independent review APPROVE 97/100; see `docs/reviews/M3_CompletionReport.md`).
@@ -65,12 +73,19 @@ Current target: **M8 — Core Feature Modeling** (`docs/M8_SPEC.md`), on branch
 
 M8 is implemented through all its slices (M8.1 Pocket+chain, M8.2 Revolve,
 M8.3 Fillet/Chamfer, M8.4 deferral ADRs with demonstrations, M8.5 m8-chain
-sample, M8.6 self-validation): 737/737 in Debug and Release, 406/406
-single-process, 17 mutations (16 guarded + 1 documented-unreachable).
-M8.7's REVIEW round is launched; M8 CANNOT CLOSE until it returns clean AND
-M7 closes. Schema is at v8; the "unreserved type name" examples in old tests
-have been renamed three times now (Radius->, Revolve->Loft, Fillet->Sweep) --
-when adding a feature type, grep tests for its name as a placeholder first.
+sample, M8.6 self-validation). M8.7's independent review ROUND 1 is COMPLETE:
+REQUEST CHANGES (R1 73, R2 70, R3 88) -- 2 Criticals (a silently accepted
+consumption diamond; six save/load-symmetry gaps across all four new types)
+and 10 Majors, ALL FIXED with one regression test per finding (M8_REV_*,
+GATE_RH/RC2/E3/FE/FF/KC, ADV_A-D) and an 8+1-mutation verification battery
+(record in `docs/reviews/M8_IndependentReview.md` -- read it before trusting
+any M8 claim). The chain rule is now ADR-M8-008: a base must be a solid
+feature of its own body, consumed at most once, enforced at creation, save,
+load, and display. **M8 still CANNOT CLOSE**: round 2 has not run, and M7's
+round 2 + owner UI validation remain open. Schema is at v8; the "unreserved
+type name" examples in old tests have been renamed three times now
+(Radius->, Revolve->Loft, Fillet->Sweep) -- when adding a feature type, grep
+tests for its name as a placeholder first.
 
 M7 state: functionally complete PLUS review round 1's fixes (all 4 Criticals,
 14 Majors closed). **Still open, and M8 cannot close before they do:**

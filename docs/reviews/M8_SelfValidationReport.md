@@ -37,8 +37,8 @@ with dress-on-dress (Fillet→Chamfer) round-tripping in v8.
 | | Result |
 |---|---|
 | Debug / Release builds | 0 errors |
-| ctest Debug | **737 / 737** |
-| ctest Release | **737 / 737** |
+| ctest Debug | **737 / 737** registered; 736 execute (1 registered-Skipped fresh-process child) |
+| ctest Release | **737 / 737** registered; 736 execute (same child) |
 | Single-process Core binary | **406 / 406 in BOTH configs** (the check M7's review forced) |
 | Release actually ran Release binaries | 737 command lines name `build\Release\`, 0 name Debug |
 | Whole-suite ctest entries | present and passing (the net that catches registration-order poisoning) |
@@ -72,7 +72,7 @@ occurrences of the pattern M7.3 started with "Radius".
 |---|---|
 | M8.1 (6) | 5 guarded; MUT6 (base-state check) **unreachable through the engine** — documented as unguarded defense-in-depth ON THE CHECK ITSELF, engine contract carried by GATE_E2's counter |
 | M8.2 (5) | all guarded — after the fixture was de-coincided (below) |
-| M8.3 (6) | all guarded, including F5 (restore dispatch swapping the twin types) and F6 (analyzer removed) |
+| M8.3 (6) | all guarded, including F5 (restore dispatch swapping the twin types) and F6 (analyzer removed). *Corrected after round 1 (R2-m1/R3-m2)*: F5's kill was misattributed to M8_SER_202 -- 202 was swap-blind (a symmetric swap keeps the type counts 1/1) and the actual killers were M8_SER_201's per-id casts and GATE_FD. 202 now pins the id->type mapping per record. |
 
 **Findings against my own work made during M8, kept on the record:**
 
@@ -106,10 +106,13 @@ occurrences of the pattern M7.3 started with "Radius".
   or a named successor milestone.
 - Feature creation dialogs deferred to M9's edit-transaction workflow; M8.5's
   sample is how the chain is reached today.
-- `removeObject` on a chain member re-points nothing automatically: deleting a
-  pocket leaves mass properties on the removed id until the caller (the UI's
-  removal command, or the next feature add) re-points them. GATE_G pins the
-  no-crash behavior; a friendlier re-point is M9 material.
+- `removeObject` on a chain member re-points nothing automatically. *Corrected
+  after round 1 (R2-m5, by execution)*: the original wording here -- "leaves
+  mass properties on the removed id" -- overstated the defect. Removing the
+  tail DETACHES the mass source, removes the mass node from the graph, and
+  invalidates `massProperties_`; nothing dangles. The real limitation is that
+  mass is not re-pointed at the NEW tail until the next feature add. GATE_G
+  pins the no-crash behavior; the friendlier re-point is M9 material.
 - Pocket/dress features do not unit-check their mm parameters (consistent with
   Pad); only Revolve checks Radian, for the reason documented on the check.
 

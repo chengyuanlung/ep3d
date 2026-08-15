@@ -136,4 +136,21 @@ TEST(M8OcctFilletChamfer, AnImpossibleSizeIsRefusedNotCorrupted) {
     }
 }
 
+TEST(M8OcctFilletChamfer, M8_REV_331_AnImpossibleChamferDistanceIsRefusedNotCorrupted) {
+    // The CHAMFER twin of the fillet refusal above -- round 1 (R1-M4) deleted
+    // the chamfer's analyzer with every test green, because only the fillet's
+    // copy of the geometric refusal was pinned. The kernel now runs one shared
+    // post-check (AnalyzedDressResult) for both verbs, and this test is the
+    // chamfer's half of its guard.
+    OcctGeometryKernel kernel;
+    ShapeResult box = kernel.extrudeProfile(RectangleProfile(0, 0, 100, 50), 20.0);
+    ASSERT_TRUE(box) << box.message;
+
+    // Distance 15 at 45 degrees from both faces of a 20mm slab: the bevels
+    // collide. Refused cleanly, input intact.
+    ShapeResult refused = kernel.chamferAllEdges(box.shape, 15.0);
+    EXPECT_FALSE(refused);
+    EXPECT_NEAR(VolumeOf(kernel, box.shape), 100000.0, 1e-6);
+}
+
 } // namespace

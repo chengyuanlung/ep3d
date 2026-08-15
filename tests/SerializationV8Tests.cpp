@@ -97,7 +97,11 @@ TEST(SerializationV8Test, M8_SER_201_FilletAndChamferRoundTripWithTheirChain) {
 TEST(SerializationV8Test, M8_SER_202_TheTwoTypesDoNotSwapOnRoundTrip) {
     // Fillet and Chamfer share one record shape, discriminated only by the
     // type string -- exactly the situation where a dispatch typo turns every
-    // round into a bevel and no id-level assertion notices. Pinned by TYPE.
+    // round into a bevel and no id-level assertion notices. Pinned PER ID:
+    // review (R2-m1/R3-m2) showed the original count-only version was
+    // swap-blind -- a SYMMETRIC dispatch swap keeps one Fillet and one
+    // Chamfer in the document and the counts pass. The id->type mapping is
+    // what a swap cannot preserve.
     DressDoc doc;
     const LoadResult loaded = LoadFromString(SaveToString(doc.document));
     ASSERT_TRUE(loaded) << loaded.message;
@@ -106,8 +110,14 @@ TEST(SerializationV8Test, M8_SER_202_TheTwoTypesDoNotSwapOnRoundTrip) {
     int chamfers = 0;
     for (const auto& body : loaded.document->bodies())
         for (const auto& feature : body->features()) {
-            if (feature->typeName() == "Fillet") ++fillets;
-            if (feature->typeName() == "Chamfer") ++chamfers;
+            if (feature->typeName() == "Fillet") {
+                ++fillets;
+                EXPECT_EQ(feature->id(), doc.filletId) << "the Fillet id belongs to the chamfer";
+            }
+            if (feature->typeName() == "Chamfer") {
+                ++chamfers;
+                EXPECT_EQ(feature->id(), doc.chamferId) << "the Chamfer id belongs to the fillet";
+            }
         }
     EXPECT_EQ(fillets, 1);
     EXPECT_EQ(chamfers, 1);
@@ -134,7 +144,7 @@ TEST(SerializationV8Test, M8_SER_203_ADressBaseListedLaterIsRefusedOnLoad) {
 
     const LoadResult loaded = LoadFromString(saved);
     EXPECT_FALSE(loaded);
-    EXPECT_NE(loaded.message.find("earlier feature"), std::string::npos) << loaded.message;
+    EXPECT_NE(loaded.message.find("earlier solid feature"), std::string::npos) << loaded.message;
 }
 
 TEST(SerializationV8Test, M8_SER_204_SavingADressWhoseBaseIsGoneIsRefused) {
@@ -148,6 +158,20 @@ TEST(SerializationV8Test, M8_SER_204_SavingADressWhoseBaseIsGoneIsRefused) {
     const SaveResult saved = savePartDocument(doc.document, out);
     EXPECT_FALSE(saved);
     EXPECT_NE(saved.message.find("base feature"), std::string::npos) << saved.message;
+}
+
+TEST(SerializationV8Test, M8_REV_321_RemovingTheSizeParameterMakesTheDocUnsavable) {
+    // Round-1 R2-C1, probe A6: the last of the six save/load symmetry gaps
+    // (ADR-M3-008) -- removing a dress feature's size parameter saved cleanly
+    // and the loader refused the just-written bytes.
+    DressDoc doc;
+    ASSERT_TRUE(doc.document.removeObject(doc.radiusId));
+
+    std::ostringstream out;
+    const SaveResult saved = savePartDocument(doc.document, out);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("fillet/chamfer size parameter id"), std::string::npos)
+        << saved.message;
 }
 
 } // namespace

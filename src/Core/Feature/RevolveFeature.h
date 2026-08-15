@@ -28,7 +28,11 @@ namespace paramcad {
 // The axis line MAY be a member of the profile loop -- revolving a rectangle
 // about its own left edge is the canonical first cylinder -- or any other line
 // in the same sketch. What it must be is a LINE in THIS sketch; anything else
-// fails with a diagnostic, never a guess.
+// fails with a diagnostic, never a guess. This sentence was FALSE as first
+// shipped (round 1's R1-M1: the unconditional exclusion broke the loop and the
+// canonical cylinder was refused); the member case now works via the fallback
+// in recompute() and is pinned by GATE_RH -- the claim exists because the gate
+// does, not the other way around.
 //
 // Like Pad and unlike Pocket, Revolve builds from nothing: consumedSolidId()
 // stays invalid, and it is a legal chain BASE -- a Pocket can cut a revolved

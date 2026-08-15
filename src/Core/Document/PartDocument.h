@@ -337,6 +337,18 @@ private:
     void wirePadFeature(PadFeature& feature, ObjectId sketchId, ObjectId lengthParameterId,
                        ObjectId materialId);
 
+    // The chain rule at the door (ADR-M8-001, amended by review round 1's
+    // R1-C1/R1-M2): a consumer's base must be a SOLID feature of the SAME
+    // body, and a solid may be consumed ONCE. Without this, two pockets on
+    // one pad were silently accepted -- both cut the original pad, the viewer
+    // drew two overlapping solids, mass followed whichever consumer wired
+    // last, and the file round-tripped. Throws std::runtime_error, exactly as
+    // the restore paths' duplicate-id guards do; the loader's chain walk
+    // refuses the same shapes before any restore call, so via loadPartDocument
+    // this surfaces as a LoadResult failure, never an exception.
+    void requireConsumableBase(const Body& body, ObjectId baseFeatureId,
+                               const char* consumerNoun) const;
+
     // Detaches the MassPropertiesNode from whatever solid feature and material
     // it currently reads, then attaches it to this one. Shared by the Box and
     // Pad wiring paths so the graph can never accumulate stale prerequisites

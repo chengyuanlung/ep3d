@@ -128,7 +128,10 @@ const Sketch& OnlySketch(const PartDocument& document) {
 
 // --- Round trip --------------------------------------------------------------
 
-TEST(SerializationV5Test, M5_SER_001_SchemaVersionIsFive) {
+// Renamed from ...SchemaVersionIsFive (review round 1: name rot -- the pin has
+// moved 5->6->7->8 with each schema bump, which is the pin doing its job; the
+// NAME must not keep asserting the value the body no longer does).
+TEST(SerializationV5Test, M5_SER_001_SchemaVersionIsPinned) {
     ConstrainedDoc doc;
     EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 8"), std::string::npos); // v8: M8.3 Fillet/Chamfer
 }

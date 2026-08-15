@@ -2,6 +2,7 @@
 #include "Core/Dependency/DependencyGraph.h"
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
+#include "Core/Feature/ISolidFeature.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Feature/RevolveFeature.h"
@@ -550,30 +551,41 @@ SaveResult validateSaveable(const PartDocument& document) {
     std::unordered_set<ObjectId> sketchIds;
     for (const Sketch* sketch : document.sketches()) sketchIds.insert(sketch->id());
 
-    // A Pocket must reference a base feature that exists EARLIER in the same
-    // body (ADR-M3-008 again: a file the loader would reject must never be
-    // savable). "Earlier" matters because restore replays features in array
-    // order, and a consumer restored before its base would wire an edge to a
-    // node that does not exist yet. Creation order makes this naturally true;
-    // deleting a pocket's base is how it becomes false.
+    // A consuming feature must reference a base that is an earlier SOLID
+    // feature of the same body, and no base may be consumed twice (ADR-M3-008:
+    // a file the loader would reject must never be savable; ADR-M8-001's chain
+    // rule, which round 1 found silently violated by a diamond -- two pockets
+    // consuming one pad saved, loaded, displayed two overlapping solids, and
+    // weighed only one). "Earlier" matters because restore replays features in
+    // array order, so a consumer restored before its base would wire an edge
+    // to a node that does not exist yet. The consumed base is asked for
+    // through the consumedSolidId() capability, never a concrete-type
+    // enumeration (ADR-M3-007) -- the enumeration is what let the material
+    // rule lapse when Pad was added.
     for (const auto& body : document.bodies()) {
-        std::unordered_set<ObjectId> earlier;
+        std::unordered_set<ObjectId> earlierSolids;
+        std::unordered_set<ObjectId> consumedBases;
         for (const auto& feature : body->features()) {
-            ObjectId consumedBase = kInvalidObjectId;
-            if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get()))
-                consumedBase = pocket->baseFeatureId();
-            else if (const auto* dress = dynamic_cast<const EdgeDressFeature*>(feature.get()))
-                consumedBase = dress->baseFeatureId();
+            const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get());
+            const ObjectId consumedBase =
+                solid != nullptr ? solid->consumedSolidId() : kInvalidObjectId;
             if (consumedBase != kInvalidObjectId) {
-                if (earlier.count(consumedBase) == 0)
+                if (earlierSolids.count(consumedBase) == 0)
                     return SaveResult{SerializationError::UnknownDependencyId,
                                       "feature " + idToString(feature->id()) + " (" +
                                           feature->name() +
                                           "): its base feature " + idToString(consumedBase) +
-                                          " is not an earlier feature of the same body; the "
-                                          "resulting file could never be loaded back"};
+                                          " is not an earlier solid feature of the same body; "
+                                          "the resulting file could never be loaded back"};
+                if (!consumedBases.insert(consumedBase).second)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(feature->id()) + " (" +
+                                          feature->name() +
+                                          "): its base feature " + idToString(consumedBase) +
+                                          " is already consumed by an earlier feature; a solid "
+                                          "may be consumed once (ADR-M8-001)"};
             }
-            earlier.insert(feature->id());
+            if (solid != nullptr) earlierSolids.insert(feature->id());
         }
     }
 
@@ -624,6 +636,58 @@ SaveResult validateSaveable(const PartDocument& document) {
                                       "feature " + idToString(pad->id()) + " (" + pad->name() +
                                           "): pad sketch id " + idToString(pad->sketchId()) +
                                           " is not a sketch in this document"};
+            } else if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
+                // The M8 types below repeat Pad's lesson verbatim: every
+                // reference the LOADER rejects, checked at save time. Round 1
+                // (R2-C1) demonstrated all six gaps as save-OK -> load-refused
+                // through the public facade -- ADR-M3-008's named worst class,
+                // fourth recurrence. The messages mirror the loader's wording.
+                if (parameterIds.count(pocket->depthParameterId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(pocket->id()) + " (" +
+                                          pocket->name() + "): pocket depth parameter id " +
+                                          idToString(pocket->depthParameterId()) +
+                                          " is not a parameter in this document"};
+                if (sketchIds.count(pocket->sketchId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(pocket->id()) + " (" +
+                                          pocket->name() + "): pocket sketch id " +
+                                          idToString(pocket->sketchId()) +
+                                          " is not a sketch in this document"};
+            } else if (const auto* revolve = dynamic_cast<const RevolveFeature*>(feature.get())) {
+                if (parameterIds.count(revolve->angleParameterId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(revolve->id()) + " (" +
+                                          revolve->name() + "): revolve angle parameter id " +
+                                          idToString(revolve->angleParameterId()) +
+                                          " is not a parameter in this document"};
+                const Sketch* revolveSketch = nullptr;
+                for (const Sketch* sketch : document.sketches())
+                    if (sketch->id() == revolve->sketchId()) revolveSketch = sketch;
+                if (revolveSketch == nullptr)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(revolve->id()) + " (" +
+                                          revolve->name() + "): revolve sketch id " +
+                                          idToString(revolve->sketchId()) +
+                                          " is not a sketch in this document"};
+                // The sharpest of the six (R2's probe A5): deleting any sketch
+                // line that happens to be a revolve axis used to poison every
+                // future save silently.
+                if (revolveSketch->findEntity(revolve->axisEntityId()) == nullptr)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(revolve->id()) + " (" +
+                                          revolve->name() + "): revolve axis entity id " +
+                                          idToString(ToObjectId(revolve->axisEntityId())) +
+                                          " is not an entity of sketch " +
+                                          idToString(revolve->sketchId())};
+            } else if (const auto* dress = dynamic_cast<const EdgeDressFeature*>(feature.get())) {
+                if (parameterIds.count(dress->sizeParameterId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(dress->id()) + " (" +
+                                          dress->name() +
+                                          "): fillet/chamfer size parameter id " +
+                                          idToString(dress->sizeParameterId()) +
+                                          " is not a parameter in this document"};
             }
         }
     }
@@ -712,6 +776,13 @@ LoadResult loadPartDocument(std::istream& in) {
         return loadFailure(SerializationError::WrongFormat,
                            "unrecognized format '" + format->asString() + "'");
 
+    // The version is a CEILING, not a content gate (review round 1, R2-m2,
+    // stating a choice that was previously implicit): a file stamped v6 that
+    // carries a v8-only record type still loads, because every record is
+    // validated by CONTENT below regardless of the stamp. Refusing "newer
+    // records than the stamp admits" would add a second source of truth about
+    // what the file contains, and the two could disagree; the stamp's one job
+    // is to refuse files newer than this LOADER (the > kSchemaVersion check).
     const JsonValue* schemaVersion =
         requireField(root, "schemaVersion", JsonType::Number, documentContext, err);
     if (schemaVersion == nullptr) return loadFailure(err.error, err.message);
@@ -1487,37 +1558,46 @@ LoadResult loadPartDocument(std::istream& in) {
         }
     }
 
-    // Every Pocket must reference a Sketch in this file and a base feature that
-    // appears EARLIER in the same body -- restore replays features in array
-    // order, so a base that follows its consumer (or lives in another body)
-    // would be an edge to a node that does not exist yet. validateSaveable
-    // enforces the same rule at save time; both halves exist so neither can
-    // drift alone.
+    // Every consumer (Pocket/Fillet/Chamfer) must reference a base that is an
+    // earlier SOLID feature of the same body, and no base may be consumed
+    // twice -- restore replays features in array order, so a base that follows
+    // its consumer (or lives in another body) would be an edge to a node that
+    // does not exist yet, and a base that is not a solid type (round 1's
+    // R2-M2: a Placeholder) is a node that will NEVER exist, its failed edge
+    // silently discarded. A doubly-consumed base is round 1's R1-C1 diamond.
+    // validateSaveable enforces the same rules at save time; both halves exist
+    // so neither can drift alone.
+    static const std::unordered_set<std::string> kSolidFeatureTypes{
+        "Box", "Pad", "Pocket", "Revolve", "Fillet", "Chamfer"};
     for (const auto& body : bodyData) {
-        std::unordered_set<ObjectId> earlierFeatures;
+        std::unordered_set<ObjectId> earlierSolids;
+        std::unordered_set<ObjectId> consumedBases;
         for (const auto& feature : body.features) {
-            if (feature.type == "Fillet" || feature.type == "Chamfer") {
-                if (earlierFeatures.count(feature.baseFeatureId) == 0)
+            const bool consumes = feature.type == "Pocket" || feature.type == "Fillet" ||
+                                  feature.type == "Chamfer";
+            if (feature.type == "Pocket" && sketchIds.count(feature.sketchId) == 0)
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   "feature " + idToString(feature.id) +
+                                       ": pocket sketch id " + idToString(feature.sketchId) +
+                                       " is not a sketch in this document");
+            if (consumes) {
+                const std::string noun =
+                    feature.type == "Pocket" ? "pocket" : "fillet/chamfer";
+                if (earlierSolids.count(feature.baseFeatureId) == 0)
                     return loadFailure(SerializationError::UnknownDependencyId,
-                                       "feature " + idToString(feature.id) +
-                                           ": fillet/chamfer base feature id " +
+                                       "feature " + idToString(feature.id) + ": " + noun +
+                                           " base feature id " +
                                            idToString(feature.baseFeatureId) +
-                                           " is not an earlier feature of the same body");
-            }
-            if (feature.type == "Pocket") {
-                if (sketchIds.count(feature.sketchId) == 0)
+                                           " is not an earlier solid feature of the same body");
+                if (!consumedBases.insert(feature.baseFeatureId).second)
                     return loadFailure(SerializationError::UnknownDependencyId,
-                                       "feature " + idToString(feature.id) +
-                                           ": pocket sketch id " + idToString(feature.sketchId) +
-                                           " is not a sketch in this document");
-                if (earlierFeatures.count(feature.baseFeatureId) == 0)
-                    return loadFailure(SerializationError::UnknownDependencyId,
-                                       "feature " + idToString(feature.id) +
-                                           ": pocket base feature id " +
+                                       "feature " + idToString(feature.id) + ": " + noun +
+                                           " base feature id " +
                                            idToString(feature.baseFeatureId) +
-                                           " is not an earlier feature of the same body");
+                                           " is already consumed by an earlier feature; a "
+                                           "solid may be consumed once (ADR-M8-001)");
             }
-            earlierFeatures.insert(feature.id);
+            if (kSolidFeatureTypes.count(feature.type) != 0) earlierSolids.insert(feature.id);
         }
     }
 

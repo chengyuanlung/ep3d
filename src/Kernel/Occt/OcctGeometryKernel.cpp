@@ -305,6 +305,28 @@ ShapeResult OcctGeometryKernel::subtractShape(const KernelShape& base, const Ker
 }
 
 
+namespace {
+
+// The ONE post-check site for both dress verbs. IsDone() is NOT sufficient,
+// and a test had to fail to prove it: a fillet radius wider than half the
+// part's thickness (15 on a 20mm slab) reported done while producing
+// self-intersecting geometry. The analyzer is the check ChFi3d itself does
+// not make. It used to be duplicated per verb -- and round 1 (R1-M4) deleted
+// the chamfer's copy with every test staying green, exactly the divergence
+// ADR-M8-006's shared Core base exists to prevent. One shared site means a
+// guard added here cannot be forgotten on either twin.
+ShapeResult AnalyzedDressResult(const TopoDS_Shape& shape, const char* noun,
+                                const char* sizeNoun) {
+    if (!BRepCheck_Analyzer(shape).IsValid())
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("the ") + noun + " result is not a valid solid; the " +
+                               sizeNoun + " exceeds what the geometry accommodates"};
+    auto handle = std::make_shared<OcctShape>(shape);
+    return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+}
+
+} // namespace
+
 ShapeResult OcctGeometryKernel::filletAllEdges(const KernelShape& shape, double radiusMm) {
     const auto* occtShape = dynamic_cast<const OcctShape*>(shape.handle());
     if (occtShape == nullptr)
@@ -333,16 +355,7 @@ ShapeResult OcctGeometryKernel::filletAllEdges(const KernelShape& shape, double 
             return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                                "OCCT could not fillet every edge at this radius; the radius "
                                "may exceed what the geometry accommodates"};
-        // IsDone() is NOT sufficient, and a test had to fail to prove it: a
-        // radius wider than half the part's thickness (15 on a 20mm slab)
-        // reported done while producing self-intersecting geometry. The
-        // analyzer is the check ChFi3d itself does not make.
-        if (!BRepCheck_Analyzer(fillet.Shape()).IsValid())
-            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
-                               "the filleted result is not a valid solid; the radius exceeds "
-                               "what the geometry accommodates"};
-        auto handle = std::make_shared<OcctShape>(fillet.Shape());
-        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+        return AnalyzedDressResult(fillet.Shape(), "filleted", "radius");
     } catch (const Standard_Failure& failure) {
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            std::string("OCCT raised while filleting: ") + describe(failure)};
@@ -375,13 +388,7 @@ ShapeResult OcctGeometryKernel::chamferAllEdges(const KernelShape& shape, double
             return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                                "OCCT could not chamfer every edge at this distance; the "
                                "distance may exceed what the geometry accommodates"};
-        // Same analyzer as the fillet, same reason (see above).
-        if (!BRepCheck_Analyzer(chamfer.Shape()).IsValid())
-            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
-                               "the chamfered result is not a valid solid; the distance "
-                               "exceeds what the geometry accommodates"};
-        auto handle = std::make_shared<OcctShape>(chamfer.Shape());
-        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+        return AnalyzedDressResult(chamfer.Shape(), "chamfered", "distance");
     } catch (const Standard_Failure& failure) {
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            std::string("OCCT raised while chamfering: ") + describe(failure)};

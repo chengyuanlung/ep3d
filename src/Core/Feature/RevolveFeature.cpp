@@ -79,8 +79,20 @@ RecomputeResult RevolveFeature::recompute(const RecomputeContext& context) {
     // sketch but contributes no edge, so validation runs with it excluded.
     // Without this, every revolve-with-axis-line sketch was rejected as
     // unchainable -- which is how the first run of every M8.2 gate failed.
-    const ProfileResult profile = BuildProfile(*sketch, axisEntityId_);
-    if (!profile) return fail("invalid revolve profile: " + profile.message);
+    ProfileResult profile = BuildProfile(*sketch, axisEntityId_);
+    if (!profile) {
+        // The axis MAY instead be a MEMBER of the profile loop (ADR-M8-005):
+        // revolving a rectangle about its own edge is the canonical first
+        // cylinder. Excluding a member axis breaks the loop -- which is what
+        // just failed -- so the profile is rebuilt WITH the axis; if that
+        // closes, the axis is a member edge, participating as boundary and
+        // axis at once. Round 1 (R1-M1) found the shipped code refusing this
+        // case while the ADR claimed it; the fallback is what makes the claim
+        // true, and GATE_RH pins it.
+        ProfileResult withAxis = BuildProfile(*sketch);
+        if (!withAxis) return fail("invalid revolve profile: " + profile.message);
+        profile = std::move(withAxis);
+    }
 
     PlanarProfileDefinition definition;
     if (!BuildKernelProfile(*sketch, profile.profile, definition))
