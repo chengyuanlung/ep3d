@@ -186,7 +186,7 @@ TEST(ViewerPresenterTest, M4_VIEW_007_NonSolidFeaturesAreNotDisplayable) {
     // produces no solid is simply absent, not a special case.
     PartDocument document{"Doc"};
     Body& body = document.addBody("Body001");
-    body.addFeature<PlaceholderFeature>("Ghost", "Revolve");
+    document.addPlaceholderFeature(body, "Ghost", "Revolve");
 
     DocumentPresenter presenter(document);
     EXPECT_TRUE(presenter.displayableSolids().empty());

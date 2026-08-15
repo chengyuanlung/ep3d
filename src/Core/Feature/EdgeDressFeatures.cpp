@@ -56,8 +56,8 @@ RecomputeResult EdgeDressFeature::recompute(const RecomputeContext& context) {
     // The base, exactly as Pocket resolves and checks it -- including the
     // state check, which is the same documented defense-in-depth behind the
     // engine's blocking of failed prerequisites (see PocketFeature::recompute
-    // for the two-half guard record: GATE_E2 in-pass, StaleFailureGates*/
-    // GATE_E3 for the persisted-Failed barrier).
+    // for the two-half guard record: GATE_E2 in-pass; the persisted-Failed
+    // barrier unit-level only, with GATE_E3 pinning the two-layer system).
     const ISolidFeature* base = resolveSolidFeature(context.registry, baseFeatureId_);
     if (base == nullptr)
         return fail(noun + " base feature not found or does not produce a solid");

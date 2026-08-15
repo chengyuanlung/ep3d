@@ -254,7 +254,7 @@ TEST(SerializationV4Test, M4_SER_012_SaveRejectsPlaceholderUsingAReservedTypeNam
     // regression suite when M4 introduced PadFeature.
     PartDocument document{"Doc"};
     Body& body = document.addBody("Body001");
-    body.addFeature<PlaceholderFeature>("Ghost", "Pad");
+    document.addPlaceholderFeature(body, "Ghost", "Pad");
 
     std::ostringstream out;
     const SaveResult result = savePartDocument(document, out);
@@ -267,7 +267,7 @@ TEST(SerializationV4Test, M4_SER_013_UnreservedPlaceholderTypesStillRoundTrip) {
     // genuinely unknown feature types.
     PartDocument document{"Doc"};
     Body& body = document.addBody("Body001");
-    body.addFeature<PlaceholderFeature>("Ghost", "Loft");
+    document.addPlaceholderFeature(body, "Ghost", "Loft");
 
     const LoadResult loaded = LoadFromString(SaveToString(document));
     ASSERT_TRUE(loaded) << loaded.message;

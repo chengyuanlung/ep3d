@@ -73,19 +73,31 @@ Current target: **M8 — Core Feature Modeling** (`docs/M8_SPEC.md`), on branch
 
 M8 is implemented through all its slices (M8.1 Pocket+chain, M8.2 Revolve,
 M8.3 Fillet/Chamfer, M8.4 deferral ADRs with demonstrations, M8.5 m8-chain
-sample, M8.6 self-validation). M8.7's independent review ROUND 1 is COMPLETE:
-REQUEST CHANGES (R1 73, R2 70, R3 88) -- 2 Criticals (a silently accepted
-consumption diamond; six save/load-symmetry gaps across all four new types)
-and 10 Majors, ALL FIXED with one regression test per finding (M8_REV_*,
-GATE_RH/RC2/E3/FE/FF/KC, ADV_A-D) and an 8+1-mutation verification battery
-(record in `docs/reviews/M8_IndependentReview.md` -- read it before trusting
-any M8 claim). The chain rule is now ADR-M8-008: a base must be a solid
-feature of its own body, consumed at most once, enforced at creation, save,
-load, and display. **M8 still CANNOT CLOSE**: round 2 has not run, and M7's
-round 2 + owner UI validation remain open. Schema is at v8; the "unreserved
-type name" examples in old tests have been renamed three times now
-(Radius->, Revolve->Loft, Fillet->Sweep) -- when adding a feature type, grep
-tests for its name as a placeholder first.
+sample, M8.6 self-validation). M8.7 has run TWO independent review rounds
+(record: `docs/reviews/M8_IndependentReview.md` -- read it before trusting
+any M8 claim):
+
+- Round 1 on `880e6cc`: REQUEST CHANGES (73/70/88) -- 2 Criticals (silently
+  accepted consumption diamond; six save/load-symmetry gaps) + 10 Majors,
+  all fixed (`ab8513a`): ADR-M8-008 consumption rule, 24 regression tests,
+  V-battery.
+- Round 2 on `ab8513a`: REQUEST CHANGES (89/78/81), 0 Criticals -- every
+  round-1 finding confirmed closed; 4 new Majors, ALL in the fixes'
+  enforcement machinery/evidence: the `bodies()` accessor bypass (now
+  compile-time closed: Body mutators private, friend PartDocument,
+  placeholder facade), the solid-type-frontier drift (now one shared
+  `kSolidFeatureTypeNames` table + M8_REV_322 + GATE_BB), a vacuous
+  M8_REV_308 (amended), and GATE_E3 miscredited a second time (doc retreat:
+  it pins the two-layer system; the barrier's only direct pins are unit
+  tests). W-battery re-killed round 2's surviving mutations.
+
+**M8 still CANNOT CLOSE**: round 2's fixes are themselves unreviewed (round
+3 is the owner's call -- they are small), and M7's round 2 + owner UI
+validation remain open. Schema is at v8; the "unreserved type name" examples
+in old tests have been renamed three times now (Radius->, Revolve->Loft,
+Fillet->Sweep) -- when adding a feature type, grep tests for its name as a
+placeholder first. When adding an ISolidFeature type, its name ALSO goes in
+`kSolidFeatureTypeNames` (serializer) -- M8_REV_322 will remind you.
 
 M7 state: functionally complete PLUS review round 1's fixes (all 4 Criticals,
 14 Majors closed). **Still open, and M8 cannot close before they do:**

@@ -3,6 +3,7 @@
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Feature/PadFeature.h"
+#include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Feature/RevolveFeature.h"
 #include "Core/Feature/EdgeDressFeatures.h"
@@ -535,6 +536,19 @@ PadFeature& PartDocument::restorePadFeature(Body& body, ObjectId id, std::string
 }
 
 
+PlaceholderFeature& PartDocument::addPlaceholderFeature(Body& body, std::string name,
+                                                        std::string typeName) {
+    return body.addFeature<PlaceholderFeature>(std::move(name), std::move(typeName));
+}
+
+PlaceholderFeature& PartDocument::restorePlaceholderFeature(Body& body, ObjectId id,
+                                                            std::string name,
+                                                            ComputeState state,
+                                                            std::string typeName) {
+    return body.addFeature<PlaceholderFeature>(id, std::move(name), state,
+                                               std::move(typeName));
+}
+
 void PartDocument::requireConsumableBase(const Body& body, ObjectId baseFeatureId,
                                          const char* consumerNoun) const {
     const ISolidFeature* baseInBody = nullptr;
@@ -558,7 +572,7 @@ void PartDocument::requireConsumableBase(const Body& body, ObjectId baseFeatureI
                                          std::to_string(baseFeatureId) +
                                          " is already consumed by feature " +
                                          std::to_string(feature->id()) +
-                                         "; a solid may be consumed once (ADR-M8-001)");
+                                         "; a solid may be consumed once (ADR-M8-008)");
         }
 }
 

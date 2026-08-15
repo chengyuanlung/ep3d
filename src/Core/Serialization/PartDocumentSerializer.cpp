@@ -458,6 +458,26 @@ LoadResult loadFailure(SerializationError error, std::string message) {
     return LoadResult{nullptr, error, std::move(message)};
 }
 
+// The ONE table of solid-feature type names (M8 round 2, R2R2-M2/R2-R1-M1).
+// The save side decides "is this a solid" by the ISolidFeature CAPABILITY;
+// the load side has only type strings, so it needs a name list -- and when
+// that list lived inline in the chain walk, adding a name to it (or omitting
+// the next milestone's solid type) drifted silently past all 761 tests: the
+// refusal just moved to a later layer, past the id-generator advance. Both
+// the loader's chain walk and the reserved-typename save check now consult
+// THIS table and nothing else; M8_REV_322 pins that every name here
+// round-trips as a concrete chain base, so dropping one fails a test the day
+// it happens. When a milestone adds an ISolidFeature type, its name goes
+// here, and only here.
+constexpr std::string_view kSolidFeatureTypeNames[] = {"Box",     "Pad",    "Pocket",
+                                                       "Revolve", "Fillet", "Chamfer"};
+
+bool IsSolidFeatureTypeName(std::string_view name) {
+    for (const std::string_view solid : kSolidFeatureTypeNames)
+        if (name == solid) return true;
+    return false;
+}
+
 // Save/load symmetry guard: anything savePartDocument accepts must be
 // loadable. The load path rejects a BoxFeature whose widthParameterId /
 // heightParameterId / depthParameterId is not a parameter in the file, but the
@@ -537,9 +557,7 @@ SaveResult validateSaveable(const PartDocument& document) {
             if (dynamic_cast<const RevolveFeature*>(feature.get()) != nullptr) continue;
             if (dynamic_cast<const EdgeDressFeature*>(feature.get()) != nullptr) continue;
             const std::string_view typeName = feature->typeName();
-            if (typeName != "Box" && typeName != "Pad" && typeName != "Pocket" &&
-                typeName != "Revolve" && typeName != "Fillet" && typeName != "Chamfer")
-                continue;
+            if (!IsSolidFeatureTypeName(typeName)) continue;
             return SaveResult{SerializationError::InvalidFieldType,
                               "feature " + idToString(feature->id()) + " (" + feature->name() +
                                   ") is a placeholder carrying the reserved type name '" +
@@ -583,7 +601,7 @@ SaveResult validateSaveable(const PartDocument& document) {
                                           feature->name() +
                                           "): its base feature " + idToString(consumedBase) +
                                           " is already consumed by an earlier feature; a solid "
-                                          "may be consumed once (ADR-M8-001)"};
+                                          "may be consumed once (ADR-M8-008)"};
             }
             if (solid != nullptr) earlierSolids.insert(feature->id());
         }
@@ -1565,10 +1583,9 @@ LoadResult loadPartDocument(std::istream& in) {
     // does not exist yet, and a base that is not a solid type (round 1's
     // R2-M2: a Placeholder) is a node that will NEVER exist, its failed edge
     // silently discarded. A doubly-consumed base is round 1's R1-C1 diamond.
-    // validateSaveable enforces the same rules at save time; both halves exist
-    // so neither can drift alone.
-    static const std::unordered_set<std::string> kSolidFeatureTypes{
-        "Box", "Pad", "Pocket", "Revolve", "Fillet", "Chamfer"};
+    // validateSaveable enforces the same rules at save time; the solid-type
+    // decision comes from the ONE shared table (kSolidFeatureTypeNames, top of
+    // file) so the two doors cannot drift apart silently.
     for (const auto& body : bodyData) {
         std::unordered_set<ObjectId> earlierSolids;
         std::unordered_set<ObjectId> consumedBases;
@@ -1595,9 +1612,9 @@ LoadResult loadPartDocument(std::istream& in) {
                                            " base feature id " +
                                            idToString(feature.baseFeatureId) +
                                            " is already consumed by an earlier feature; a "
-                                           "solid may be consumed once (ADR-M8-001)");
+                                           "solid may be consumed once (ADR-M8-008)");
             }
-            if (kSolidFeatureTypes.count(feature.type) != 0) earlierSolids.insert(feature.id);
+            if (IsSolidFeatureTypeName(feature.type)) earlierSolids.insert(feature.id);
         }
     }
 
@@ -1817,8 +1834,9 @@ LoadResult loadPartDocument(std::istream& in) {
                                                 feature.state, feature.baseFeatureId,
                                                 feature.sizeParameterId, feature.materialId);
             } else {
-                restored.addFeature<PlaceholderFeature>(feature.id, std::move(feature.name),
-                                                        feature.state, std::move(feature.type));
+                document->restorePlaceholderFeature(restored, feature.id,
+                                                    std::move(feature.name), feature.state,
+                                                    std::move(feature.type));
             }
         }
     }

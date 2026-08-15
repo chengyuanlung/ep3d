@@ -232,6 +232,18 @@ public:
                                   ObjectId sketchId, ObjectId lengthParameterId,
                                   ObjectId materialId);
 
+    // --- Placeholder feature (facade since M8 round 2) ----------------------
+    // Placeholders keep their original semantics -- no registry entry, no
+    // graph node, inert (ADR-009 D4) -- but arrive through the facade like
+    // every other feature, because Body::addFeature going public was the
+    // bypass R2R2-M1 drove a rogue consumer through. The loader's
+    // unknown-type branch and the tests are the only callers.
+    class PlaceholderFeature& addPlaceholderFeature(Body& body, std::string name,
+                                                    std::string typeName);
+    class PlaceholderFeature& restorePlaceholderFeature(Body& body, ObjectId id,
+                                                        std::string name, ComputeState state,
+                                                        std::string typeName);
+
     // --- Pocket feature (M8, ADR-M8-001) -----------------------------------
     // The first CONSUMING feature: removes material from `baseFeatureId`'s
     // result. Wires the chain edge base -> pocket alongside the Sketch and

@@ -20,6 +20,17 @@ public:
     const std::string& name() const noexcept { return name_; }
     const std::vector<std::unique_ptr<Feature>>& features() const noexcept { return features_; }
 
+private:
+    // BOTH mutators are private with PartDocument as the only caller (M8
+    // round 2, R2R2-M1): `bodies()` returns const unique_ptrs whose constness
+    // stops at the pointer, so a public addFeature let one line build a
+    // feature BEHIND every facade door -- no requireConsumableBase, no
+    // registry entry, no graph node -- leaving a document that could neither
+    // be saved nor repaired (removeObject cannot see an unregistered id).
+    // The same accessor hazard was found and fixed for sketches() in M5; this
+    // is its Body twin. Every creation path now goes through the facade.
+    friend class PartDocument;
+
     template <typename T, typename... Args>
     T& addFeature(Args&&... args) {
         auto item = std::make_unique<T>(std::forward<Args>(args)...);
@@ -34,7 +45,6 @@ public:
     // still reachable from either of those must never be destroyed here.
     bool removeFeature(ObjectId id);
 
-private:
     ObjectId id_;
     std::string name_;
     std::vector<std::unique_ptr<Feature>> features_;

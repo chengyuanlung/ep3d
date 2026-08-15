@@ -15,6 +15,7 @@
 // contained in the base and the analytical volumes are exact.
 
 #include "Core/Document/PartDocument.h"
+#include "Core/Feature/BoxFeature.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Feature/RevolveFeature.h"
@@ -844,11 +845,13 @@ TEST(M8ReleaseGate, GATE_RC2_AnAngleEditTouchesNothingOutsideTheRevolve) {
 }
 
 TEST(M8ReleaseGate, GATE_E3_APersistedFailureStillBlocksThePocketOnALaterEdit) {
-    // R3-m1: the persisted-Failed barrier (a base that failed in a PREVIOUS
-    // pass and is not dirty in this one) was pinned only by unit-level
-    // DependencyGraphTests while ADR-M8-004 credited GATE_E2, which covers
-    // the in-pass half. This is the integration pin, at the exact seam R3
-    // probed: pad already Failed, then a depth edit dirties ONLY the pocket.
+    // R3-m1, wording corrected by round 2 (R3R2-M2): this gate exercises the
+    // persisted-Failed seam -- pad already Failed in a previous pass, then a
+    // depth edit dirties ONLY the pocket -- but it pins the TWO-LAYER SYSTEM
+    // (engine barrier + PocketFeature's own base-state check), not the
+    // barrier alone. Delete only the barrier and this stays green (the
+    // feature-level check masks it); delete both layers and it goes red. The
+    // barrier's only direct pins are DependencyGraphTests.StaleFailureGates*.
     ChainFixture fx;
     ASSERT_TRUE(fx.document.recompute().success);
     ASSERT_TRUE(fx.document.setParameterValue(fx.padLength->id(), -1.0));
@@ -942,6 +945,57 @@ TEST(M8ReleaseGate, GATE_KC_APocketSketchEditReachesThePocket) {
     EXPECT_EQ(fx.pad->state(), ComputeState::Valid);
     EXPECT_EQ(fx.kernel.extrudes, extrudes) << "the pad was rebuilt by a pocket-sketch edit";
     EXPECT_EQ(fx.kernel.subtracts, subtracts) << "a cut ran with an open pocket profile";
+}
+
+TEST(M8ReleaseGate, GATE_BB_ABoxIsALegalChainBaseEndToEnd) {
+    // Round 2 (R2-R1-M1): Box is the one member of the solid-type frontier no
+    // test exercised as a chain base -- correct by reviewer probe, gated
+    // nowhere. Box 100x50x20 minus pocket 20x30x10 = 94000; width edit 120
+    // -> 114000; the viewer shows the tail only; the chain survives a save/
+    // load round trip.
+    PartDocument document{"M8BoxBase"};
+    CountingKernel kernel;
+    CountingSolver solver;
+    document.setGeometryKernel(&kernel);
+    document.setSketchSolver(&solver);
+    document.addMaterial("Aluminium", 2700.0);
+    Parameter& w = document.addParameter("W", 100.0, UnitType::Millimeter);
+    Parameter& h = document.addParameter("H", 50.0, UnitType::Millimeter);
+    Parameter& d = document.addParameter("D", 20.0, UnitType::Millimeter);
+    Parameter& depth = document.addParameter("Depth", 10.0, UnitType::Millimeter);
+    Sketch& ks = document.addSketch("PocketSketch");
+    ks.addLine(Vec2{10, 10}, Vec2{30, 10});
+    ks.addLine(Vec2{30, 10}, Vec2{30, 40});
+    ks.addLine(Vec2{30, 40}, Vec2{10, 40});
+    ks.addLine(Vec2{10, 40}, Vec2{10, 10});
+    Body& body = document.addBody("Body001");
+    BoxFeature& box = document.addBoxFeature(body, "Box001", w.id(), h.id(), d.id());
+    PocketFeature& pocket =
+        document.addPocketFeature(body, "Pocket001", box.id(), ks.id(), depth.id());
+
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_EQ(pocket.state(), ComputeState::Valid);
+    ASSERT_TRUE(document.massProperties().valid);
+    ExpectRel(document.massProperties().volumeMm3, 94000.0, 1e-6);
+
+    DocumentPresenter presenter(document);
+    const std::vector<ObjectId> solids = presenter.displayableSolids();
+    ASSERT_EQ(solids.size(), 1u);
+    EXPECT_EQ(solids.front(), pocket.id());
+
+    std::ostringstream out;
+    ASSERT_TRUE(savePartDocument(document, out));
+    std::istringstream in(out.str());
+    const LoadResult loaded = loadPartDocument(in);
+    ASSERT_TRUE(loaded) << loaded.message;
+    OcctGeometryKernel freshKernel;
+    loaded.document->setGeometryKernel(&freshKernel);
+    ASSERT_TRUE(loaded.document->recompute().success);
+    ExpectRel(loaded.document->massProperties().volumeMm3, 94000.0, 1e-6);
+
+    ASSERT_TRUE(loaded.document->setParameterValue(w.id(), 120.0));
+    ASSERT_TRUE(loaded.document->recomputeFrom(w.id()).success);
+    ExpectRel(loaded.document->massProperties().volumeMm3, 114000.0, 1e-6);
 }
 
 // --- Spec 8 adversarial rows (R1-M6: correct by probe, previously untested) --

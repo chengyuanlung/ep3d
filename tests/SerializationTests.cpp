@@ -50,8 +50,9 @@ TEST(SerializationTests, RoundTripPreservesAllFields) {
     ASSERT_EQ(depth.state(), ParameterState::Dirty);
 
     Body& body = original.addBody("Body001");
-    PlaceholderFeature& pad = body.addFeature<PlaceholderFeature>("Pad001", "Placeholder");
-    PlaceholderFeature& pocket = body.addFeature<PlaceholderFeature>("Pocket001", "Placeholder");
+    PlaceholderFeature& pad = original.addPlaceholderFeature(body, "Pad001", "Placeholder");
+    PlaceholderFeature& pocket =
+        original.addPlaceholderFeature(body, "Pocket001", "Placeholder");
     ASSERT_TRUE(pad.recompute()); // pad Valid, pocket stays Dirty
     ASSERT_EQ(pad.state(), ComputeState::Valid);
     ASSERT_EQ(pocket.state(), ComputeState::Dirty);
@@ -227,7 +228,7 @@ TEST(SerializationTests, LoadedIdsNeverCollideWithNewObjects) {
     PartDocument original("Collision");
     original.addParameter("Width", 10.0, UnitType::Millimeter);
     Body& body = original.addBody("Body001");
-    body.addFeature<PlaceholderFeature>("Pad001", "Placeholder");
+    original.addPlaceholderFeature(body, "Pad001", "Placeholder");
 
     const std::string saved = saveToString(original);
     const LoadResult loaded = loadFromString(saved);
@@ -247,7 +248,7 @@ TEST(SerializationTests, LoadedIdsNeverCollideWithNewObjects) {
     // anything in the file.
     Parameter& newParameter = copy.addParameter("Depth", 5.0, UnitType::Millimeter);
     Body& newBody = copy.addBody("Body002");
-    Feature& newFeature = newBody.addFeature<PlaceholderFeature>("Pad002", "Placeholder");
+    Feature& newFeature = copy.addPlaceholderFeature(newBody, "Pad002", "Placeholder");
     EXPECT_GT(newParameter.id(), maxLoadedId);
     EXPECT_GT(newBody.id(), maxLoadedId);
     EXPECT_GT(newFeature.id(), maxLoadedId);
@@ -291,7 +292,7 @@ TEST(SerializationTests, LargeIdRoundTripsExactly) {
 TEST(SerializationTests, SuppressedFeatureStateRoundTrips) {
     PartDocument original("Suppress");
     Body& body = original.addBody("Body001");
-    PlaceholderFeature& pad = body.addFeature<PlaceholderFeature>("Pad001", "Placeholder");
+    PlaceholderFeature& pad = original.addPlaceholderFeature(body, "Pad001", "Placeholder");
     pad.setSuppressed(true);
     ASSERT_EQ(pad.state(), ComputeState::Suppressed);
 
@@ -513,7 +514,7 @@ TEST(SerializationTests, SpecialCharacterStringsRoundTrip) {
     PartDocument original("Name \"with\" \\backslash\\ and\nnewline\ttab");
     original.addParameter("\xE5\xAF\xAC\xE5\xBA\xA6 (width)", 12.5, UnitType::Millimeter);
     Body& body = original.addBody(""); // empty body name is preserved
-    body.addFeature<PlaceholderFeature>("Pad \"1\"\\", "Placeholder");
+    original.addPlaceholderFeature(body, "Pad \"1\"\\", "Placeholder");
 
     const std::string firstSave = saveToString(original);
     const LoadResult loaded = loadFromString(firstSave);

@@ -1,4 +1,9 @@
-# M8 Independent Review — Round 1 (Consolidated)
+# M8 Independent Review (Rounds 1 and 2, Consolidated)
+
+> Round 1 reviewed `880e6cc`; round 2 reviewed `ab8513a` (round 1's fixes).
+> Round 2's section is appended after round 1's, with its own fix record.
+
+# Round 1
 
 **Reviewed commit:** `880e6cc` (m8-wip head at review time).
 **Method:** three reviewers, disjoint partitions (spec 33's protocol, as in M7),
@@ -153,8 +158,65 @@ and asserted present; every file restored and `cmp`-verified; restores
 | V8 | loader uniqueness check alone deleted | **masked by design** -- the restore-path helper still refuses the same file with the same diagnostic (defense in depth, stated here so it is never read as a guard) |
 | V8b | BOTH diamond layers deleted | **guarded** -- M8_REV_304 (+307/308) |
 
-## Standing blocks (unchanged by this round)
+---
+
+# Round 2
+
+**Reviewed commit:** `ab8513a`. Fresh exports at
+`D:/Program2/EP3D/m8review2/{r1,r2,r3}`, same partitions, same discipline
+(now including the rule-9 touch-restores both round-1 reviewers' incidents
+forced).
+
+| Reviewer | Partition | Decision | Score |
+|---|---|---|---|
+| R1 | chain semantics / geometry | APPROVE WITH MINOR CHANGES | 89/100 |
+| R2 | identity / persistence / transactions | **REQUEST CHANGES** | 78/100 |
+| R3 | evidence quality / fix-verification audit | APPROVE WITH MINOR CHANGES | 81/100 |
+
+**Round verdict: REQUEST CHANGES** (0 Criticals). Every round-1 finding was
+independently confirmed CLOSED (all probes re-run: the diamond, all six
+A1–A6 symmetry gaps, GATE_RH's cylinder, the Minkowski/Pappus oracles
+re-derived again). What round 2 found is the project's round-N pattern:
+defects in the FIXES' enforcement machinery and evidence, not in geometry or
+data. The V-battery was audited by re-execution: 8 of 9 rows exact, V8's
+"masked by design" claim CONFIRMED honest, one kill-list overstated (V8b
+credited 308, which did not fire).
+
+## Round-2 findings register
+
+| ID | Finding | Status |
+|---|---|---|
+| R2R2-M1 | **`bodies()` bypass**: constness stops at the `unique_ptr`, `Body::addFeature` was public → one line builds a rogue consumer behind every door (no `requireConsumableBase`, no registry entry, `removeObject` blind to it, document permanently unsavable). Same accessor hazard fixed for `sketches()` in M5, unapplied to `Body`. | FIXED — `addFeature`/`removeFeature` private, `friend PartDocument`; placeholders get a facade path (`addPlaceholderFeature`/`restorePlaceholderFeature`); the 12 direct test call sites migrated |
+| R2R2-M2 / R2-R1-M1 | **Solid-type frontier drift** (found independently by two reviewers): save side decides "solid" by capability, load side by an inline name list; adding "Placeholder" to the list survived 779 tests (refusal silently moved past the id-generator advance), and the next milestone's solid type would recreate save-OK→load-refused with zero signal. Box-as-base: fully supported, zero coverage. | FIXED — ONE shared `kSolidFeatureTypeNames` table feeds the chain walk AND the reserved-typename check; M8_REV_322 (all six types round-trip as chain bases) pins the table; GATE_BB pins Box-as-base end-to-end |
+| R3R2-M1 | **M8_REV_308 was vacuous** for its finding: the fixture's pad was still consumed, so the throw came from the uniqueness half — a mutant with the same-body restriction deleted PASSED 308. | FIXED — 308 removes the pocket first; mutation W1 re-run: killed |
+| R3R2-M2 | **GATE_E3 miscredited again**: it pins the two-layer system (engine barrier + feature base-state check), not the barrier alone — barrier-only deletion keeps all integration green. The round-1 "correction" recommitted the exact miscrediting defect it fixed. | FIXED — doc retreat in PocketFeature.cpp, EdgeDressFeatures.cpp, ADR-M8-004, and the GATE_E3 comment; barrier's only direct pins are the unit tests, stated everywhere |
+| R2-m (304) | M8_REV_304's "already consumed" substring matched BOTH layers → loader deletion invisible. | FIXED — asserts the loader's exact "already consumed by an earlier feature"; W4 re-run: killed |
+| R2-m / R1-m (citations) | Consumed-once diagnostics cited ADR-M8-001; the rule is ADR-M8-008. | FIXED ×3 sites |
+| R3-m (V8 layer) | The V8 masking layer (restore-path refusal) was permanently untested dead code. | PINNED — M8_REV_310 calls the restore facade directly, asserts the throw and that nothing was half-restored |
+| R2-m (204) | M8_SER_204's comment claimed the chamfer consumes the pad (it consumes the fillet). | FIXED |
+| R3-m (309) | M8_REV_309's kill belongs to the wire-layer GraphResult check, not requireConsumableBase. | NOTED in the test |
+| R1-m (equivalences) | Three defense-in-depth layers are equivalent-under-invariant and survive mutation BY DESIGN: document-wide scan in `requireConsumableBase` (vs own-body), the presenter's document-wide consumed set, and the save-side uniqueness branch (unreachable now that the bypass is closed). | RECORDED here, V8-style, so future audits read them as masked-by-design, not coverage holes |
+| R1-m (diagnostic) | Interior/straddling-axis revolve refusal is loud but passes through raw OCCT text. | DEFERRED to the UI milestone (ADR-M8-002 policy) |
+
+## Round-2 fix verification (W-battery)
+
+Same discipline as the V-battery (binaries deleted/asserted, touch-restores,
+`cmp`-verified):
+
+| # | Mutation | Verdict |
+|---|---|---|
+| W1 | same-body half of `requireConsumableBase` deleted (round 2's surviving XBODY) | **guarded** — amended M8_REV_308 |
+| W2 | "Box" dropped from the shared type table | **guarded** — M8_REV_322 |
+| W3 | "Placeholder" added to the table (round 2's surviving MUT-3) | **guarded** — reserved-typename check now shares the table, placeholder saves refuse |
+| W4 | loader uniqueness deleted (round 2's surviving MUT-4) | **guarded** — word-pinned M8_REV_304 |
+
+The `bodies()` bypass itself is closed at compile time (private + friend);
+its regression "test" is the type system.
+
+## Standing blocks (unchanged by both rounds)
 
 M8 close remains blocked on: **M7 round 2 review**, **M7 owner UI
-validation**, and the two inherited M6 items (M8 spec §2). Fixing this
-round's findings does not close M8; it makes M8 eligible for round 2.
+validation**, and the two inherited M6 items (M8 spec §2). Round 2's fixes
+above have themselves not been independently reviewed; whether that requires
+a round 3 (the fixes are one accessor change, one shared table, one test
+amendment, and doc retreats) is the owner's call.

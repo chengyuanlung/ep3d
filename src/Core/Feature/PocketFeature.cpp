@@ -76,12 +76,17 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
     // guarded, and no test claims otherwise -- M7's review found an ADR
     // asserting a test that did not exist, and this comment exists so this
     // check can never grow that sentence. The engine contract this check
-    // backs up is guarded in two halves (round 1's R3 corrected the original
-    // single-credit to GATE_E2): in-pass blocking by GATE_E2's subtract
-    // counter, and the persisted-Failed barrier (a base that failed in a
-    // PREVIOUS pass, not dirty in this one) by
-    // DependencyGraphTests.StaleFailureGates* at unit level and GATE_E3's
-    // counter at integration level.
+    // backs up is guarded in two halves (corrected TWICE by review: round 1
+    // moved the credit off GATE_E2; round 2 caught the correction crediting
+    // GATE_E3 with more than it kills): in-pass blocking by GATE_E2's
+    // subtract counter; the persisted-Failed barrier (a base that failed in
+    // a PREVIOUS pass, not dirty in this one) by
+    // DependencyGraphTests.StaleFailureGates* -- UNIT LEVEL ONLY. GATE_E3
+    // pins the TWO-LAYER SYSTEM (barrier + this very check) and goes red
+    // only if both regress; deleting the barrier alone keeps every
+    // integration test green because this check masks it. That is defense
+    // in depth working, and it is stated here so no one reads GATE_E3 as a
+    // barrier pin.
     const ISolidFeature* base = resolveSolidFeature(context.registry, baseFeatureId_);
     if (base == nullptr)
         return fail("pocket base feature not found or does not produce a solid");

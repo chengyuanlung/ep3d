@@ -2716,8 +2716,15 @@ makes explicit:
    fails and its dependents are blocked in the same pass); the PERSISTED half
    (base already Failed from a previous pass, only the consumer dirtied now)
    was pinned solely by unit-level `DependencyGraphTests.StaleFailureGates*` --
-   R3 deleted the barrier and every integration test stayed green. GATE_E3 is
-   the integration pin at that exact seam.
+   R3 deleted the barrier and every integration test stayed green. *Round-2
+   correction of the correction (R3R2-M2)*: GATE_E3 exercises that exact seam
+   but pins the TWO-LAYER SYSTEM (engine barrier + the feature's own
+   base-state check), not the barrier alone -- delete only the barrier and
+   GATE_E3 stays green because the feature-level check masks it; delete both
+   and it goes red. The barrier alone remains integration-invisible BY DESIGN
+   of the defense-in-depth check; its only direct pins are the unit tests.
+   Stated after round 2 demonstrated the round-1 wording repeating the exact
+   miscrediting defect it was written to fix.
 2. `PocketFeature::recompute`'s own base-state check is therefore DEFENSE IN
    DEPTH that the engine makes unreachable, and it is documented as
    NOT mutation-guarded at the check itself — recorded there in as many words,
@@ -2879,3 +2886,24 @@ boolean trees); when a milestone wants it, it arrives as an explicit merge/
 branch feature with its own display and mass semantics -- not as an accident
 of unchecked wiring. Guarded by M8_REV_304/307/308/309 and the V-battery
 mutations recorded in `docs/reviews/M8_IndependentReview.md`.
+
+*Round-2 amendments (R2R2-M1, R2R2-M2/R2-R1-M1):*
+
+- **The doors are only as good as the walls.** `Body::addFeature` was public
+  and `bodies()`' constness stops at the `unique_ptr`, so one line built a
+  consumer behind every door above -- no check, no registry entry, no way to
+  remove it, document permanently unsavable. `addFeature`/`removeFeature` are
+  now private with `PartDocument` as friend (the same fix `sketches()` got in
+  M5); placeholders, the one legitimate non-facade creation, got a facade
+  path.
+- **One table for the solid-type frontier.** The save side asks the
+  ISolidFeature capability; the load side has only type strings and asked an
+  inline list -- which drifted invisibly (a poisoned list survived 779
+  tests). `kSolidFeatureTypeNames` in the serializer is now the single list,
+  consulted by the chain walk and the reserved-typename check; M8_REV_322
+  round-trips every member as a chain base so the table cannot lose a name
+  silently, and GATE_BB gates Box -- the member no test had ever consumed.
+- Three defense-in-depth layers here are EQUIVALENT under the invariants and
+  survive single-layer mutation by design (document-wide creation scan, the
+  presenter's document-wide set, the save-side uniqueness branch); the review
+  doc records them as masked-by-design so audits do not read them as holes.

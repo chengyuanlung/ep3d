@@ -221,7 +221,12 @@ TEST(SerializationV6Test, M8_REV_304_AFileWithTwoConsumersOfOneBaseIsRefused) {
 
     const LoadResult loaded = LoadFromString(saved);
     EXPECT_FALSE(loaded);
-    EXPECT_NE(loaded.message.find("already consumed"), std::string::npos) << loaded.message;
+    // The LOADER layer's exact wording ("by an earlier feature"), not just
+    // "already consumed" -- round 2 (R2 minor) showed the loose substring was
+    // also satisfied by the restore-path throw ("by feature N"), so a deleted
+    // loader check was invisible. One word pins the layer.
+    EXPECT_NE(loaded.message.find("already consumed by an earlier feature"), std::string::npos)
+        << loaded.message;
 }
 
 TEST(SerializationV6Test, M8_REV_305_ABaseThatIsNotASolidFeatureIsRefused) {
@@ -279,7 +284,13 @@ TEST(SerializationV6Test, M8_REV_308_ACrossBodyBaseIsRefusedAtCreation) {
     // runtime and displayed base AND consumer. The base must be a solid
     // feature of the consumer's OWN body -- the same rule the loader has
     // always enforced.
+    //
+    // The pocket is removed FIRST so the pad is UNCONSUMED: round 2 (R3R2-M1)
+    // proved the original version vacuous -- with the pad still consumed, the
+    // EXPECT_THROW was satisfied by the uniqueness half of the check, and a
+    // mutant with the same-body restriction deleted passed this very test.
     PocketDoc doc;
+    ASSERT_TRUE(doc.document.removeObject(doc.pocketId));
     Parameter& depth2 = doc.document.addParameter("Depth2", 5.0, UnitType::Millimeter);
     Body& other = doc.document.addBody("Body002");
     EXPECT_THROW(doc.document.addPocketFeature(other, "Pocket002", doc.padId,
@@ -288,12 +299,34 @@ TEST(SerializationV6Test, M8_REV_308_ACrossBodyBaseIsRefusedAtCreation) {
 }
 
 TEST(SerializationV6Test, M8_REV_309_AGarbageBaseIdIsRefusedAtCreation) {
+    // NOTE (round 2, R3 minor): with requireConsumableBase fully neutered,
+    // this still throws -- the wire-layer GraphResult check catches the
+    // garbage id. The kill credit belongs to that layer; 307/308 are the
+    // tests that pin requireConsumableBase itself.
     PocketDoc doc;
     Parameter& depth2 = doc.document.addParameter("Depth2", 5.0, UnitType::Millimeter);
     Body& body = *doc.document.bodies().front();
     EXPECT_THROW(doc.document.addPocketFeature(body, "Pocket002", ObjectId{999999},
                                                doc.pocketSketchId, depth2.id()),
                  std::runtime_error);
+}
+
+TEST(SerializationV6Test, M8_REV_310_TheRestoreFacadeRefusesADiamondDirectly) {
+    // Round 2 (R3 minor 2): the restore-path requireConsumableBase is the
+    // layer that MASKS a deleted loader uniqueness check (the V8 record), and
+    // it had no standing test -- defense in depth as permanently dead code.
+    // This is its pin: a direct facade call restoring a second consumer of
+    // the already-consumed pad must throw, with the document left intact.
+    PocketDoc doc;
+    Body& body = *doc.document.bodies().front();
+    const ObjectId materialId = doc.document.material()->id();
+    EXPECT_THROW(doc.document.restorePocketFeature(body, ObjectId{999000}, "Rogue",
+                                                   ComputeState::Valid, doc.padId,
+                                                   doc.pocketSketchId, doc.depthId, materialId),
+                 std::runtime_error);
+    // Check-before-mutate held: nothing was half-restored, the doc still saves.
+    std::ostringstream out;
+    EXPECT_TRUE(savePartDocument(doc.document, out));
 }
 
 } // namespace
