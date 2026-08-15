@@ -275,4 +275,37 @@ TEST(SerializationV4Test, M4_SER_013_UnreservedPlaceholderTypesStillRoundTrip) {
     EXPECT_EQ(loaded.document->bodies().front()->features().front()->typeName(), "Loft");
 }
 
+TEST(SerializationV4Test, M8_REV_341_RestorePlaceholderRefusesARegisteredId) {
+    // Round 3, three reviewers independently: the round-2 placeholder facade
+    // was the SEVENTH restore path and the only one without a duplicate-id
+    // guard -- restoring a placeholder with an existing object's id saved
+    // cleanly and the loader refused the just-written bytes (ADR-M3-008's
+    // class, introduced by a fix). Both collision flavors are pinned; this is
+    // the registered-object flavor.
+    PartDocument document{"Doc"};
+    Parameter& width = document.addParameter("Width", 100.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body001");
+    EXPECT_THROW(document.restorePlaceholderFeature(body, width.id(), "Ghost",
+                                                    ComputeState::Dirty, "Widget"),
+                 std::runtime_error);
+    // No residue: the throw happened before construction, the doc still saves.
+    std::ostringstream out;
+    EXPECT_TRUE(savePartDocument(document, out));
+}
+
+TEST(SerializationV4Test, M8_REV_342_RestorePlaceholderRefusesAnotherPlaceholdersId) {
+    // The unregistered flavor: placeholders never enter the registry, so a
+    // registry-only guard is blind to a placeholder-vs-placeholder collision
+    // (the same blindness round 3 used to defeat the sibling guards). The
+    // feature scan is the half that catches this.
+    PartDocument document{"Doc"};
+    Body& body = document.addBody("Body001");
+    PlaceholderFeature& first = document.addPlaceholderFeature(body, "Ghost1", "Widget");
+    EXPECT_THROW(document.restorePlaceholderFeature(body, first.id(), "Ghost2",
+                                                    ComputeState::Dirty, "Widget"),
+                 std::runtime_error);
+    std::ostringstream out;
+    EXPECT_TRUE(savePartDocument(document, out));
+}
+
 } // namespace

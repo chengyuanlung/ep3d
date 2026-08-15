@@ -2722,7 +2722,9 @@ makes explicit:
    base-state check), not the barrier alone -- delete only the barrier and
    GATE_E3 stays green because the feature-level check masks it; delete both
    and it goes red. The barrier alone remains integration-invisible BY DESIGN
-   of the defense-in-depth check; its only direct pins are the unit tests.
+   of the defense-in-depth check; its only direct pins are the unit tests
+   (`StaleFailureGates*` and `EdgeRewireAcrossFailedPrerequisite` -- round 3
+   completed the list).
    Stated after round 2 demonstrated the round-1 wording repeating the exact
    miscrediting defect it was written to fix.
 2. `PocketFeature::recompute`'s own base-state check is therefore DEFENSE IN
@@ -2898,11 +2900,12 @@ mutations recorded in `docs/reviews/M8_IndependentReview.md`.
   path.
 - **One table for the solid-type frontier.** The save side asks the
   ISolidFeature capability; the load side has only type strings and asked an
-  inline list -- which drifted invisibly (a poisoned list survived 779
-  tests). `kSolidFeatureTypeNames` in the serializer is now the single list,
+  inline list -- which drifted invisibly (a poisoned list survived all 761
+  shipped tests; the round-2 reviewer's "779" counted their 18 probes too). `kSolidFeatureTypeNames` in the serializer is now the single list,
   consulted by the chain walk and the reserved-typename check; M8_REV_322
   round-trips every member as a chain base so the table cannot lose a name
-  silently, and GATE_BB gates Box -- the member no test had ever consumed.
+  silently (TRUE ONLY SINCE ROUND 3: the first fixture consumed just half the
+  table as bases and a dropped "Chamfer" survived every test -- R3R3-M1), and GATE_BB gates Box -- the member no test had ever consumed.
 - Three defense-in-depth layers here are EQUIVALENT under the invariants and
   survive single-layer mutation by design (document-wide creation scan, the
   presenter's document-wide set, the save-side uniqueness branch); the review

@@ -1,7 +1,8 @@
-# M8 Independent Review (Rounds 1 and 2, Consolidated)
+# M8 Independent Review (Rounds 1–3, Consolidated)
 
-> Round 1 reviewed `880e6cc`; round 2 reviewed `ab8513a` (round 1's fixes).
-> Round 2's section is appended after round 1's, with its own fix record.
+> Round 1 reviewed `880e6cc`; round 2 reviewed `ab8513a` (round 1's fixes);
+> round 3 reviewed `c555269` (round 2's fixes). Each round's section is
+> appended in order, with its own fix record.
 
 # Round 1
 
@@ -155,7 +156,7 @@ and asserted present; every file restored and `cmp`-verified; restores
 | V5 | pocket save-side reference checks deleted (R2-C1) | **guarded** -- M8_REV_301/302 |
 | V6 | revolve axis save-side check deleted (R2-C1 A5) | **guarded** -- M8_REV_313 |
 | V7 | `requireConsumableBase` neutered (R1-C1) | **guarded** -- M8_REV_307/308 |
-| V8 | loader uniqueness check alone deleted | **masked by design** -- the restore-path helper still refuses the same file with the same diagnostic (defense in depth, stated here so it is never read as a guard) |
+| V8 | loader uniqueness check alone deleted | **masked by design** -- the restore-path helper still refuses the same file, though with DIFFERENT wording ("by feature N" vs the loader's "by an earlier feature" -- round 3 corrected this row, and round 2's 304 word-pin exploits exactly that difference; defense in depth, stated here so it is never read as a guard) |
 | V8b | BOTH diamond layers deleted | **guarded** -- M8_REV_304 (+307/308) |
 
 ---
@@ -187,7 +188,7 @@ credited 308, which did not fire).
 | ID | Finding | Status |
 |---|---|---|
 | R2R2-M1 | **`bodies()` bypass**: constness stops at the `unique_ptr`, `Body::addFeature` was public → one line builds a rogue consumer behind every door (no `requireConsumableBase`, no registry entry, `removeObject` blind to it, document permanently unsavable). Same accessor hazard fixed for `sketches()` in M5, unapplied to `Body`. | FIXED — `addFeature`/`removeFeature` private, `friend PartDocument`; placeholders get a facade path (`addPlaceholderFeature`/`restorePlaceholderFeature`); the 12 direct test call sites migrated |
-| R2R2-M2 / R2-R1-M1 | **Solid-type frontier drift** (found independently by two reviewers): save side decides "solid" by capability, load side by an inline name list; adding "Placeholder" to the list survived 779 tests (refusal silently moved past the id-generator advance), and the next milestone's solid type would recreate save-OK→load-refused with zero signal. Box-as-base: fully supported, zero coverage. | FIXED — ONE shared `kSolidFeatureTypeNames` table feeds the chain walk AND the reserved-typename check; M8_REV_322 (all six types round-trip as chain bases) pins the table; GATE_BB pins Box-as-base end-to-end |
+| R2R2-M2 / R2-R1-M1 | **Solid-type frontier drift** (found independently by two reviewers): save side decides "solid" by capability, load side by an inline name list; adding "Placeholder" to the list survived all 761 shipped tests (779 counting the reviewer's own probes) (refusal silently moved past the id-generator advance), and the next milestone's solid type would recreate save-OK→load-refused with zero signal. Box-as-base: fully supported, zero coverage. | FIXED — ONE shared `kSolidFeatureTypeNames` table feeds the chain walk AND the reserved-typename check; M8_REV_322 pins the table -- FULLY only since round 3: R3R3-M1 proved the first fixture covered half of it (consumer types never appeared as bases; dropping "Chamfer" survived everything), and the fixture now consumes every name as a base; GATE_BB pins Box-as-base end-to-end |
 | R3R2-M1 | **M8_REV_308 was vacuous** for its finding: the fixture's pad was still consumed, so the throw came from the uniqueness half — a mutant with the same-body restriction deleted PASSED 308. | FIXED — 308 removes the pocket first; mutation W1 re-run: killed |
 | R3R2-M2 | **GATE_E3 miscredited again**: it pins the two-layer system (engine barrier + feature base-state check), not the barrier alone — barrier-only deletion keeps all integration green. The round-1 "correction" recommitted the exact miscrediting defect it fixed. | FIXED — doc retreat in PocketFeature.cpp, EdgeDressFeatures.cpp, ADR-M8-004, and the GATE_E3 comment; barrier's only direct pins are the unit tests, stated everywhere |
 | R2-m (304) | M8_REV_304's "already consumed" substring matched BOTH layers → loader deletion invisible. | FIXED — asserts the loader's exact "already consumed by an earlier feature"; W4 re-run: killed |
@@ -213,10 +214,63 @@ Same discipline as the V-battery (binaries deleted/asserted, touch-restores,
 The `bodies()` bypass itself is closed at compile time (private + friend);
 its regression "test" is the type system.
 
-## Standing blocks (unchanged by both rounds)
+---
+
+# Round 3
+
+**Reviewed commit:** `c555269`. Fresh exports at
+`D:/Program2/EP3D/m8review3/{r1,r2,r3}`; the mandate was the round-2 change
+set line by line plus its blast radius, with unchanged code explicitly out of
+scope (each report states that scope choice).
+
+| Reviewer | Partition | Decision | Score |
+|---|---|---|---|
+| R1 | chain semantics / round-2 fixes as code | **REQUEST CHANGES** | 77/100 |
+| R2 | identity / persistence / round-2 serializer changes | **REQUEST CHANGES** | 84/100 |
+| R3 | evidence quality / W-battery audit / the record itself | **REQUEST CHANGES** | 78/100 |
+
+**Round verdict: REQUEST CHANGES** (0 Criticals). Round 2's fixes were
+confirmed sound in what they claim — all four round-2 Majors independently
+re-verified closed, the W-battery re-run row by row (W1–W4 all CONFIRMED,
+W3's "5 tests" exact), the compile-time closure of the `bodies()` bypass
+proven real (C2248 with a compiling control), and GATE_E3's twice-corrected
+wording finally matching demonstrated reality in both directions. The round-N
+pattern held anyway, in the fixes' own new code and the record's own
+generalizations.
+
+## Round-3 findings register
+
+| ID | Finding | Status |
+|---|---|---|
+| R1R3-M1 / R2R3-M1 / R3R3-M2 | **All three reviewers independently: `restorePlaceholderFeature` — round 2's own new facade — was the seventh restore path and the only one without a duplicate-id guard.** Save-OK→load-refused demonstrated multiple ways (ADR-M3-008's class, fifth recurrence, introduced by a fix); sharpest variant: placeholders are unregistered, so a placeholder-held id silently defeats the six sibling guards' `registry_.contains` checks, and `removeObject` cannot see the ghost. | FIXED — the guard has BOTH halves (registry check + all-bodies feature scan, since the registry is blind to placeholders), checked before construction; M8_REV_341/342 pin both collision flavors |
+| R1R3-M1 (2nd half) | `validateSaveable` had no id-uniqueness net at all — the loader has enforced document-wide id uniqueness since M2, the save side never did. | FIXED — the loader's net mirrored in `validateSaveable` (document/parameters/material/bodies/features/sketches, loader-worded); with the facade guards in place no current route reaches it, recorded masked-by-design below |
+| R3R3-M1 | **"M8_REV_322 pins the table" was refuted by execution**: the fixture consumed only Box/Pad/Revolve as bases — dropping "Chamfer" from the table survived all 763 executing tests (a legal Pad←Chamfer←Fillet file then saved and refused to load). Four doc sites overstated the pin. | FIXED — fixture expanded so every table name is consumed as a base (9 solids: Box←Pocket←Fillet←Chamfer; Pad←Chamfer←Fillet; Revolve←Pocket); X-battery re-kills both surviving drops; all four doc sites corrected to the round-3 truth |
+| R1R3-M2 | The const-stops-at-the-pointer accessor class is NOT unique to `bodies()`: `parameters().items()` (mutable `Parameter*`, public `setValue` → stale-as-current demonstrated), `material()` (shared_ptr, public `setDensity` → stale mass demonstrated), `frames()` (same shape, inert today). | FIXED for the two live doors — Parameter mutators private (friends: PartDocument, DocumentRecomputeEngine; new `setParameterExpression` facade fills the gap that had NO facade path), `material()` returns `const Material*`; `frames()`/connectors recorded as a known-open-inert door in the header |
+| R2R3-m1 | The shared table conflates "legal chain base" and "reserved concrete name" — correct today, a trap the day a concrete NON-solid type ships. | DOCUMENTED (future-divergence note at the table: introduce `kConcreteTypeNames` then) |
+| R1/R2-m | The consumer frontier ("Pocket"/"Fillet"/"Chamfer") was still an inline `\|\|` chain — the drift shape the solid table fixed. | FIXED — `kConsumingFeatureTypeNames` table beside the solid table; members pinned by M8_SER_003/203 + M8_REV_304 (X5 verifies) |
+| R3R3-m1 | "779 tests" appears in two docs, underivable from any shipped total (761); source was 761 shipped + the reviewer's 18 probes. | CORRECTED at both sites |
+| R3R3-m2 | Round-1 V8 row still claimed the masking layer refuses "with the same diagnostic" — false, and round 2's own 304 word-pin exploits the difference. | CORRECTED |
+| R3R3-m3 | The barrier's unit-pin list was incomplete: `EdgeRewireAcrossFailedPrerequisite` also pins it. | CORRECTED at all three sites |
+| R1-m | `friend class PartDocument` is wider than its use (reaches Body's fields; verified unused). | RECORDED as a decision in Body.h |
+
+## Round-3 fix verification (X-battery)
+
+Same discipline (binaries deleted/asserted, touch-restores, `cmp`-verified):
+
+| # | Mutation | Verdict |
+|---|---|---|
+| X1 | placeholder restore guard deleted | **guarded** — M8_REV_341 + M8_REV_342 |
+| X2 | save-side id-uniqueness net deleted | **masked by design** — the facade guard refuses every current route first (stated, like V8; the net is the backstop for future unregistered types) |
+| X3 | "Chamfer" dropped from the solid table (round 3's survivor) | **guarded** — expanded M8_REV_322 |
+| X4 | "Pocket" dropped from the solid table (round 3's survivor) | **guarded** — expanded M8_REV_322 |
+| X5 | "Pocket" dropped from the consumer table | **guarded** — M8_SER_003 + M8_REV_304/305 |
+| X6 | direct `Parameter::setValue` outside the facade | **guarded at compile time** — C2248, binary not produced |
+
+## Standing blocks (unchanged by all rounds)
 
 M8 close remains blocked on: **M7 round 2 review**, **M7 owner UI
-validation**, and the two inherited M6 items (M8 spec §2). Round 2's fixes
-above have themselves not been independently reviewed; whether that requires
-a round 3 (the fixes are one accessor change, one shared table, one test
-amendment, and doc retreats) is the owner's call.
+validation**, and the two inherited M6 items (M8 spec §2). Round 3's fixes
+above are themselves unreviewed — the same question as after round 2, one
+level up; the change set is again small (one guard, one net, one fixture
+expansion, two accessor closures, doc corrections). The owner decides whether
+a round 4 runs or the remaining risk is accepted and recorded.

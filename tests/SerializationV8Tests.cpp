@@ -166,14 +166,20 @@ TEST(SerializationV8Test, M8_SER_204_SavingADressWhoseBaseIsGoneIsRefused) {
 }
 
 TEST(SerializationV8Test, M8_REV_322_EverySolidTypeRoundTripsAsAChainBase) {
-    // Round 2's converging Major (R2R2-M2 and R2-R1-M1 found it
-    // independently): the save door decides "solid" by ISolidFeature
-    // capability, the load door by the kSolidFeatureTypeNames table -- and a
-    // drifted table was invisible to every test. This is the drift guard:
-    // one document in which EVERY solid type is consumed as a chain base
-    // (Box<-Pocket, Pad<-Fillet, Revolve<-Chamfer). The day a name drops off
-    // the loader's table -- or a new ISolidFeature type ships without a table
-    // entry and a row here -- the load below refuses and this goes red.
+    // Round 2's converging Major (R2R2-M2 and R2-R1-M1): the save door decides
+    // "solid" by ISolidFeature capability, the load door by the
+    // kSolidFeatureTypeNames table -- and a drifted table was invisible to
+    // every test. This is the drift guard, and it must cover the WHOLE table:
+    // round 3 (R3R3-M1) proved the first version pinned only half of it --
+    // Pocket/Fillet/Chamfer appeared only as consumers, so dropping "Chamfer"
+    // from the table survived all 763 executing tests. Now EVERY name is
+    // consumed as a base at least once:
+    //   b1: Box <- Pocket1 <- Fillet1 <- Chamfer1   (pins Box, Pocket, Fillet)
+    //   b2: Pad <- Chamfer2 <- Fillet2              (pins Pad, Chamfer)
+    //   b3: Revolve <- Pocket2                      (pins Revolve)
+    // The day ANY name drops off the loader's table -- or a new ISolidFeature
+    // type ships without a table entry and a row here -- the load refuses and
+    // this goes red.
     PartDocument document{"AllSolidBases"};
     document.addMaterial("Aluminium", 2700.0);
     Parameter& w = document.addParameter("W", 100.0, UnitType::Millimeter);
@@ -203,14 +209,22 @@ TEST(SerializationV8Test, M8_REV_322_EverySolidTypeRoundTripsAsAChainBase) {
 
     Body& b1 = document.addBody("BoxBody");
     BoxFeature& box = document.addBoxFeature(b1, "Box001", w.id(), h.id(), d.id());
-    document.addPocketFeature(b1, "Pocket001", box.id(), pocketSketch.id(), depth.id());
+    PocketFeature& pocket1 =
+        document.addPocketFeature(b1, "Pocket001", box.id(), pocketSketch.id(), depth.id());
+    FilletFeature& fillet1 =
+        document.addFilletFeature(b1, "Fillet001", pocket1.id(), radius.id());
+    document.addChamferFeature(b1, "Chamfer001", fillet1.id(), distance.id());
+
     Body& b2 = document.addBody("PadBody");
     PadFeature& pad = document.addPadFeature(b2, "Pad001", padSketch.id(), d.id());
-    document.addFilletFeature(b2, "Fillet001", pad.id(), radius.id());
+    ChamferFeature& chamfer2 =
+        document.addChamferFeature(b2, "Chamfer002", pad.id(), distance.id());
+    document.addFilletFeature(b2, "Fillet002", chamfer2.id(), radius.id());
+
     Body& b3 = document.addBody("RevolveBody");
     RevolveFeature& revolve =
         document.addRevolveFeature(b3, "Revolve001", revolveSketch.id(), axis, angle.id());
-    document.addChamferFeature(b3, "Chamfer001", revolve.id(), distance.id());
+    document.addPocketFeature(b3, "Pocket002", revolve.id(), pocketSketch.id(), depth.id());
 
     const LoadResult loaded = LoadFromString(SaveToString(document));
     ASSERT_TRUE(loaded) << loaded.message;
@@ -219,7 +233,7 @@ TEST(SerializationV8Test, M8_REV_322_EverySolidTypeRoundTripsAsAChainBase) {
     for (const auto& body : loaded.document->bodies())
         for (const auto& feature : body->features())
             if (dynamic_cast<const ISolidFeature*>(feature.get()) != nullptr) ++concreteSolids;
-    EXPECT_EQ(concreteSolids, 6) << "a solid type came back as something else (placeholder?)";
+    EXPECT_EQ(concreteSolids, 9) << "a solid type came back as something else (placeholder?)";
 }
 
 TEST(SerializationV8Test, M8_REV_321_RemovingTheSizeParameterMakesTheDocUnsavable) {

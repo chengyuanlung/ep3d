@@ -11,7 +11,7 @@ TEST(CoreSmokeTests, ParameterAndBodyCreation) {
     EXPECT_NE(width.id(), kInvalidObjectId);
     EXPECT_EQ(part.parameters().findByName("Width"), &width);
 
-    width.setValue(120.0);
+    ASSERT_TRUE(part.setParameterValue(width.id(), 120.0)); // facade (mutators private since round 3)
     EXPECT_EQ(width.value(), 120.0);
     EXPECT_EQ(width.state(), ParameterState::Dirty);
 

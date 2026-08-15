@@ -478,6 +478,27 @@ bool IsSolidFeatureTypeName(std::string_view name) {
     return false;
 }
 
+// FUTURE-DIVERGENCE note (round 3, R2R3-m1): today every concrete type is a
+// solid, so this one table serves both "is a legal chain base" (chain walk)
+// and "is a reserved concrete name" (placeholder save check). The day a
+// concrete NON-solid type ships (a datum, a reference feature), the two roles
+// split: its name belongs in the reserved check but NOT the chain walk --
+// introduce a separate kConcreteTypeNames then, rather than putting it here.
+
+// The CONSUMER frontier, same discipline (round 3, R1/R2 minors): the loader
+// decides "does this type consume a base" by name; the save side asks the
+// consumedSolidId() capability. An inline || chain here was the same drift
+// shape the solid table fixed. Each member's loader checks are pinned:
+// Pocket by M8_SER_003, Fillet/Chamfer by M8_SER_203, uniqueness by
+// M8_REV_304. When a milestone adds a consuming type, its name goes here.
+constexpr std::string_view kConsumingFeatureTypeNames[] = {"Pocket", "Fillet", "Chamfer"};
+
+bool IsConsumingFeatureTypeName(std::string_view name) {
+    for (const std::string_view consumer : kConsumingFeatureTypeNames)
+        if (name == consumer) return true;
+    return false;
+}
+
 // Save/load symmetry guard: anything savePartDocument accepts must be
 // loadable. The load path rejects a BoxFeature whose widthParameterId /
 // heightParameterId / depthParameterId is not a parameter in the file, but the
@@ -513,16 +534,41 @@ SaveResult validateSaveable(const PartDocument& document) {
                               ", above the maximum this format can load (2^63 - 1); the "
                               "resulting file could never be loaded back"};
     };
+    // The LOADER's stable-identity net, mirrored (M8 round 3, R1R3-M1's
+    // second half): every persistent id unique across document / parameters /
+    // material / bodies / features / sketches. The loader has enforced this
+    // since M2; the save side never did, so any path that constructs an
+    // in-memory duplicate -- the unguarded placeholder restore was the
+    // demonstrated one -- saved cleanly and produced a file the loader
+    // refuses. The facade guards make duplicates unconstructible today; this
+    // net is the ADR-M3-008 backstop for every FUTURE unregistered type, and
+    // is recorded as masked-by-design in the review doc (no current route
+    // reaches it).
+    std::unordered_set<ObjectId> seenIds;
+    const auto uniqueCheck = [&seenIds](ObjectId id, const char* what) -> SaveResult {
+        if (seenIds.insert(id).second) return SaveResult{};
+        return SaveResult{SerializationError::DuplicateId,
+                          std::string(what) + ": duplicate ObjectId " + idToString(id) +
+                              " already used elsewhere in this document; the resulting "
+                              "file could never be loaded back"};
+    };
     if (const SaveResult bad = capCheck(document.id(), "the document"); !bad) return bad;
-    for (const auto& parameter : document.parameters().items())
+    if (const SaveResult bad = uniqueCheck(document.id(), "the document"); !bad) return bad;
+    for (const auto& parameter : document.parameters().items()) {
         if (const SaveResult bad = capCheck(parameter->id(), "a parameter"); !bad) return bad;
+        if (const SaveResult bad = uniqueCheck(parameter->id(), "a parameter"); !bad) return bad;
+    }
     for (const auto& body : document.bodies()) {
         if (const SaveResult bad = capCheck(body->id(), "a body"); !bad) return bad;
-        for (const auto& feature : body->features())
+        if (const SaveResult bad = uniqueCheck(body->id(), "a body"); !bad) return bad;
+        for (const auto& feature : body->features()) {
             if (const SaveResult bad = capCheck(feature->id(), "a feature"); !bad) return bad;
+            if (const SaveResult bad = uniqueCheck(feature->id(), "a feature"); !bad) return bad;
+        }
     }
     for (const Sketch* sketch : document.sketches()) {
         if (const SaveResult bad = capCheck(sketch->id(), "a sketch"); !bad) return bad;
+        if (const SaveResult bad = uniqueCheck(sketch->id(), "a sketch"); !bad) return bad;
         for (const SketchEntity& entity : sketch->entities())
             if (const SaveResult bad = capCheck(ToObjectId(entity.id), "a sketch entity"); !bad)
                 return bad;
@@ -531,9 +577,12 @@ SaveResult validateSaveable(const PartDocument& document) {
                 !bad)
                 return bad;
     }
-    if (document.material() != nullptr)
+    if (document.material() != nullptr) {
         if (const SaveResult bad = capCheck(document.material()->id(), "the material"); !bad)
             return bad;
+        if (const SaveResult bad = uniqueCheck(document.material()->id(), "the material"); !bad)
+            return bad;
+    }
 
     std::unordered_set<ObjectId> parameterIds;
     for (const auto& parameter : document.parameters().items())
@@ -1590,8 +1639,7 @@ LoadResult loadPartDocument(std::istream& in) {
         std::unordered_set<ObjectId> earlierSolids;
         std::unordered_set<ObjectId> consumedBases;
         for (const auto& feature : body.features) {
-            const bool consumes = feature.type == "Pocket" || feature.type == "Fillet" ||
-                                  feature.type == "Chamfer";
+            const bool consumes = IsConsumingFeatureTypeName(feature.type);
             if (feature.type == "Pocket" && sketchIds.count(feature.sketchId) == 0)
                 return loadFailure(SerializationError::UnknownDependencyId,
                                    "feature " + idToString(feature.id) +

@@ -598,14 +598,14 @@ TEST(SerializationV5Test, M5_REV3_011_RestoringADuplicateMaterialIdDoesNotFreeTh
     // original, so these three lines are what separate "refused" from
     // "half-applied, and the old object freed".
     ASSERT_TRUE(document.material());
-    EXPECT_EQ(document.material().get(), &original);
+    EXPECT_EQ(document.material(), &original);
     EXPECT_EQ(document.material()->name(), "Steel");
     EXPECT_DOUBLE_EQ(document.material()->density(), 7850.0);
     const ObjectRegistry::ObjectRef* ref = document.objectRegistry().find(id);
     ASSERT_NE(ref, nullptr);
     ASSERT_TRUE(std::holds_alternative<Material*>(*ref));
     // The registered handle is the LIVE material, not a freed address.
-    EXPECT_EQ(*std::get_if<Material*>(ref), document.material().get());
+    EXPECT_EQ(*std::get_if<Material*>(ref), document.material());
     EXPECT_DOUBLE_EQ((*std::get_if<Material*>(ref))->density(), 7850.0);
 }
 

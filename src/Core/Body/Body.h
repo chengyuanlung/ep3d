@@ -29,6 +29,13 @@ private:
     // be saved nor repaired (removeObject cannot see an unregistered id).
     // The same accessor hazard was found and fixed for sketches() in M5; this
     // is its Body twin. Every creation path now goes through the facade.
+    //
+    // The friendship is WIDER than its use -- it also grants access to
+    // features_ itself -- and that width is a recorded decision, not an
+    // accident (round 3, R1 minor): PartDocument touches only addFeature/
+    // removeFeature (verified by review grep), and a passkey idiom to narrow
+    // it further was judged churn without behavioral gain. Revisit if
+    // PartDocument ever starts reaching into Body's fields.
     friend class PartDocument;
 
     template <typename T, typename... Args>

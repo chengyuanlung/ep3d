@@ -31,6 +31,18 @@ public:
     const std::string& expression() const noexcept { return expression_; }
     ParameterState state() const noexcept { return state_; }
 
+private:
+    // ALL mutators are private with the document facade and the recompute
+    // engine as the only callers (M8 round 3, R1R3-M2): `parameters().items()`
+    // leaks mutable Parameter* through a const PartDocument, and a public
+    // setValue let a "const" document be edited past the dirty-propagation
+    // machinery -- recompute then reported success while mass read yesterday's
+    // volume as current. Same accessor-hazard class as sketches() (M5) and
+    // Body::addFeature (M8 round 2); mutation now enters through
+    // PartDocument::setParameterValue / setParameterExpression only.
+    friend class PartDocument;
+    friend class DocumentRecomputeEngine;
+
     void setValue(double value) noexcept;
     void setExpression(std::string expression);
 
@@ -40,7 +52,6 @@ public:
     void markEvaluationDirty() noexcept { state_ = ParameterState::Dirty; }
     void markEvaluated() noexcept { state_ = ParameterState::Valid; }
 
-private:
     ObjectId id_;
     std::string name_;
     double value_;

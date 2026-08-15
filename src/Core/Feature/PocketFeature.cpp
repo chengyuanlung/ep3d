@@ -81,7 +81,8 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
     // GATE_E3 with more than it kills): in-pass blocking by GATE_E2's
     // subtract counter; the persisted-Failed barrier (a base that failed in
     // a PREVIOUS pass, not dirty in this one) by
-    // DependencyGraphTests.StaleFailureGates* -- UNIT LEVEL ONLY. GATE_E3
+    // DependencyGraphTests.StaleFailureGates* and
+    // EdgeRewireAcrossFailedPrerequisite -- UNIT LEVEL ONLY. GATE_E3
     // pins the TWO-LAYER SYSTEM (barrier + this very check) and goes red
     // only if both regress; deleting the barrier alone keeps every
     // integration test green because this check masks it. That is defense

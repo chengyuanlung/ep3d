@@ -73,7 +73,7 @@ Current target: **M8 — Core Feature Modeling** (`docs/M8_SPEC.md`), on branch
 
 M8 is implemented through all its slices (M8.1 Pocket+chain, M8.2 Revolve,
 M8.3 Fillet/Chamfer, M8.4 deferral ADRs with demonstrations, M8.5 m8-chain
-sample, M8.6 self-validation). M8.7 has run TWO independent review rounds
+sample, M8.6 self-validation). M8.7 has run THREE independent review rounds
 (record: `docs/reviews/M8_IndependentReview.md` -- read it before trusting
 any M8 claim):
 
@@ -90,14 +90,29 @@ any M8 claim):
   M8_REV_308 (amended), and GATE_E3 miscredited a second time (doc retreat:
   it pins the two-layer system; the barrier's only direct pins are unit
   tests). W-battery re-killed round 2's surviving mutations.
+- Round 3 on `c555269`: REQUEST CHANGES (77/84/78), 0 Criticals -- all four
+  round-2 Majors confirmed closed and the W-battery audit came back clean,
+  but the round-N pattern held: round 2's OWN placeholder facade was the
+  seventh restore path with no duplicate-id guard (all three reviewers
+  independently; save-OK->load-refused, fifth recurrence), M8_REV_322 pinned
+  only HALF the type table (dropping "Chamfer" survived everything), and the
+  const-accessor class had three more open doors (parameters/material/
+  frames). All fixed: guard with a registry-blindness-aware feature scan +
+  M8_REV_341/342, save-side id-uniqueness net, 322 fixture consumes every
+  table name as a base, Parameter mutators private + setParameterExpression
+  facade, material() returns const Material*, consumer-frontier table
+  kConsumingFeatureTypeNames. X-battery re-killed round 3's survivors.
 
-**M8 still CANNOT CLOSE**: round 2's fixes are themselves unreviewed (round
-3 is the owner's call -- they are small), and M7's round 2 + owner UI
-validation remain open. Schema is at v8; the "unreserved type name" examples
+**M8 still CANNOT CLOSE**: round 3's fixes are themselves unreviewed (round
+4 or accepted-risk is the owner's call -- the change set shrinks each round),
+and M7's round 2 + owner UI validation remain open. Schema is at v8; the "unreserved type name" examples
 in old tests have been renamed three times now (Radius->, Revolve->Loft,
 Fillet->Sweep) -- when adding a feature type, grep tests for its name as a
-placeholder first. When adding an ISolidFeature type, its name ALSO goes in
-`kSolidFeatureTypeNames` (serializer) -- M8_REV_322 will remind you.
+placeholder first. When adding an ISolidFeature type, its name goes in
+`kSolidFeatureTypeNames` (serializer) AND a consumed-as-base row goes in
+M8_REV_322 -- the test only reminds you about names it consumes (round 3
+proved a name absent from BOTH drifts silently). A consuming type also goes
+in `kConsumingFeatureTypeNames`.
 
 M7 state: functionally complete PLUS review round 1's fixes (all 4 Criticals,
 14 Majors closed). **Still open, and M8 cannot close before they do:**

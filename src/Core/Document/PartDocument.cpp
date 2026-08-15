@@ -76,6 +76,17 @@ bool PartDocument::setParameterValue(ObjectId id, double value) {
     return true;
 }
 
+bool PartDocument::setParameterExpression(ObjectId id, std::string expression) {
+    const ObjectRegistry::ObjectRef* ref = registry_.find(id);
+    if (ref == nullptr) return false;
+    auto* const* parameter = std::get_if<Parameter*>(ref);
+    if (parameter == nullptr) return false;
+    (*parameter)->setExpression(std::move(expression)); // ParameterState -> Dirty
+    graph_.markDirty(id);                               // propagate to dependents
+    syncFeatureStatesFromGraph();
+    return true;
+}
+
 Body& PartDocument::addBody(std::string name) {
     auto item = std::make_unique<Body>(std::move(name));
     auto& ref = *item;
@@ -545,6 +556,24 @@ PlaceholderFeature& PartDocument::restorePlaceholderFeature(Body& body, ObjectId
                                                             std::string name,
                                                             ComputeState state,
                                                             std::string typeName) {
+    // The SEVENTH restore path gets the same duplicate-id guard as the other
+    // six (ADR-M5-018) -- it shipped without one in round 2 and all three
+    // round-3 reviewers independently demonstrated the consequence: a
+    // colliding placeholder saved cleanly and the loader refused the bytes
+    // (ADR-M3-008's class, fifth recurrence, introduced by a fix). TWO checks,
+    // because placeholders are never registered: the registry catches a
+    // collision with any registered object, and the feature scan catches a
+    // collision with another placeholder -- which the registry cannot see,
+    // the same blindness that let a placeholder-held id defeat the sibling
+    // guards. Checked BEFORE addFeature, so a throw leaves no residue.
+    if (registry_.contains(id))
+        throw std::runtime_error("restorePlaceholderFeature: id " + std::to_string(id) +
+                                 " is already registered in this document");
+    for (const auto& anyBody : bodies_)
+        for (const auto& feature : anyBody->features())
+            if (feature->id() == id)
+                throw std::runtime_error("restorePlaceholderFeature: id " + std::to_string(id) +
+                                         " is already used by a feature in this document");
     return body.addFeature<PlaceholderFeature>(id, std::move(name), state,
                                                std::move(typeName));
 }

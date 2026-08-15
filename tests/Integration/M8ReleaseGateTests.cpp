@@ -851,7 +851,8 @@ TEST(M8ReleaseGate, GATE_E3_APersistedFailureStillBlocksThePocketOnALaterEdit) {
     // (engine barrier + PocketFeature's own base-state check), not the
     // barrier alone. Delete only the barrier and this stays green (the
     // feature-level check masks it); delete both layers and it goes red. The
-    // barrier's only direct pins are DependencyGraphTests.StaleFailureGates*.
+    // barrier's only direct pins are DependencyGraphTests.StaleFailureGates*
+    // and EdgeRewireAcrossFailedPrerequisite (list completed in round 3).
     ChainFixture fx;
     ASSERT_TRUE(fx.document.recompute().success);
     ASSERT_TRUE(fx.document.setParameterValue(fx.padLength->id(), -1.0));

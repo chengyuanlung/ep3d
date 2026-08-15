@@ -46,7 +46,7 @@ TEST(SerializationTests, RoundTripPreservesAllFields) {
     PartDocument original("RoundTrip");
     Parameter& width = original.addParameter("Width", 120.0, UnitType::Millimeter);
     Parameter& depth = original.addParameter("Depth", 60.5, UnitType::Millimeter);
-    depth.setExpression("Width / 2"); // round-trips as data; also sets state Dirty
+    ASSERT_TRUE(original.setParameterExpression(depth.id(), "Width / 2")); // as data; state -> Dirty
     ASSERT_EQ(depth.state(), ParameterState::Dirty);
 
     Body& body = original.addBody("Body001");
@@ -446,7 +446,7 @@ TEST(SerializationTests, NanParameterValueSavesAsZeroValidJson) {
     // silent value change is flagged in the TEST report as an observation.
     PartDocument document("NanDoc");
     Parameter& p = document.addParameter("W", 1.0, UnitType::Millimeter);
-    p.setValue(std::numeric_limits<double>::quiet_NaN());
+    ASSERT_TRUE(document.setParameterValue(p.id(), std::numeric_limits<double>::quiet_NaN()));
 
     const std::string saved = saveToString(document);
     EXPECT_EQ(saved.find("nan"), std::string::npos);

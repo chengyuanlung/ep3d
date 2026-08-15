@@ -69,8 +69,16 @@ public:
     // (propagates to dependents). False if the id is unknown or not a
     // Parameter.
     bool setParameterValue(ObjectId id, double value);
+    // Sets the expression (ParameterState -> Dirty) AND marks the graph node
+    // dirty, mirroring setParameterValue exactly. Added in M8 round 3 when
+    // Parameter's mutators went private (R1R3-M2): expression edits previously
+    // had no facade path at all -- callers reached through parameters().items()
+    // and bypassed dirty propagation.
+    bool setParameterExpression(ObjectId id, std::string expression);
     // BREAKING vs M1: const-only. Use addParameter/setParameterValue/
-    // removeObject for mutation (single registration path).
+    // removeObject for mutation (single registration path). Parameter's own
+    // mutators are private since M8 round 3, so the Parameter* this hands out
+    // can no longer edit past the facade.
     const ParameterManager& parameters() const noexcept { return parameters_; }
 
     // --- Bodies (registered; NO graph node in M2 -- nothing recomputes them)
@@ -80,6 +88,11 @@ public:
     const std::vector<std::unique_ptr<Body>>& bodies() const noexcept { return bodies_; }
 
     ReferenceFrame& addFrame(std::string name, ObjectId parentFrameId = kInvalidObjectId);
+    // KNOWN OPEN DOOR (M8 round 3, R1R3-M2, recorded not fixed): constness
+    // stops at the unique_ptr, so this leaks mutable ReferenceFrame* with a
+    // public setLocalTransform. Inert today -- no derived state reads frames,
+    // so nothing can go stale -- and closed the sketches()/bodies()/Parameter
+    // way the day a consumer appears. Connectors are the same shape.
     const std::vector<std::unique_ptr<ReferenceFrame>>& frames() const noexcept { return frames_; }
     Connector& addConnector(std::string name, ConnectorRole role, ObjectId frameId);
 
@@ -110,7 +123,11 @@ public:
     // graph node dirty, mirroring setParameterValue exactly. False if no
     // material is assigned.
     bool setMaterialDensity(double densityKgPerM3);
-    const std::shared_ptr<Material>& material() const noexcept { return material_; }
+    // const Material*, NOT the shared_ptr (M8 round 3, R1R3-M2): constness
+    // stopped at the shared_ptr, and setDensity through a const document
+    // left mass reading the old density as current. Ownership never leaves
+    // the document; readers get a pointer they cannot mutate through.
+    const Material* material() const noexcept { return material_.get(); }
 
     // NOTE: the non-const overload lets any caller overwrite derived state,
     // which sits awkwardly with "mutation goes through the facade" below.
@@ -236,8 +253,9 @@ public:
     // Placeholders keep their original semantics -- no registry entry, no
     // graph node, inert (ADR-009 D4) -- but arrive through the facade like
     // every other feature, because Body::addFeature going public was the
-    // bypass R2R2-M1 drove a rogue consumer through. The loader's
-    // unknown-type branch and the tests are the only callers.
+    // bypass R2R2-M1 drove a rogue consumer through. The restore path is
+    // guarded like its six siblings (duplicate-id refusal, round 3): a
+    // caller inventory in a comment enforces nothing, so the guard does.
     class PlaceholderFeature& addPlaceholderFeature(Body& body, std::string name,
                                                     std::string typeName);
     class PlaceholderFeature& restorePlaceholderFeature(Body& body, ObjectId id,
