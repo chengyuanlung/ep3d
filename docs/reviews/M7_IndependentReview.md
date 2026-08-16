@@ -265,3 +265,88 @@ Reviewers 1 and 2 both reported that their harness working directory did not
 match their assigned export. Both confirmed they worked exclusively in their
 assigned directory via absolute paths and never touched another, so the results
 stand — but the mapping should be fixed before round 2.
+
+---
+
+# Round 2
+
+**Reviewed commit:** `9e0c399` (M7's Core is byte-identical to `m7-wip`; the
+viewer carries M8's additions, so round 2 reviewed the state that would ship).
+Exports at `D:/Program2/EP3D/m7review2/{r1,r2,r3}`.
+
+| Reviewer | Partition | Decision | Score |
+|---|---|---|---|
+| R1 | reconstruction semantics / geometry | **REQUEST CHANGES** | 72/100 |
+| R2 | identity / persistence / transactions | **REQUEST CHANGES** | 73/100 |
+| R3 | recompute / UI evidence / test quality | **REQUEST CHANGES** | 73/100 |
+
+**Round verdict: REQUEST CHANGES.** Round 1's own two Critical fixes did not
+close their findings, and one of them silently voided another round-1 fix.
+The headline is not a new feature defect — it is that **a fix can close the
+test written for it while leaving the defect open**, twice over.
+
+## Findings register
+
+### Critical
+
+| ID | Finding | Status |
+|---|---|---|
+| R2-C1 | **C3 is not closed.** `documentId` is a process-local counter starting at 1, so two parts saved in two SESSIONS are identity-indistinguishable; the only remaining separator was the 5% agreement band, which exists to ask "does this dimension describe this line". Demonstrated: a 100x50 plate's plan applied to a 103x80 bracket, `ok=1`, no diagnostic, the bracket's edge driven by the plate's `Width=100`. Round 1's `M7_REV_C3` diverges by 150% and passes on the band alone — deleting the identity branch failed nothing. | FIXED — `ReconstructionPlan::fingerprint`, an FNV-1a hash of every entity id and coordinate, stamped at analysis and checked first; pinned by `M7_REV2_C1.APlanFromADifferentDocumentWithTheSameIdsIsRefused`, whose id collision is forged the way two sessions produce it (one file, loaded twice, one copy edited 3% — inside the band) |
+| R1-C1 | **A length-preserving edit is accepted and the solver then rewrites the user's geometry.** Validation re-checked only DIMENSIONAL magnitudes; every inferred rule was checked for entity existence only. Rotate a dimensioned edge 90 degrees about its start point — same id, same 100 mm — and the plan validates, `recompute.success=1`, and the user's deliberately vertical line comes back horizontal, silently. | FIXED — every inferred constraint is re-asserted against current geometry with the predicate that produced it, at the caller's own tolerances; pinned by `ALengthPreservingEditIsRefused` (fingerprint path) and `AHandBuiltPlanWithNoFingerprintIsStillCheckedAgainstGeometry` (the re-assertion itself — mutation Y2c shows it is the only test that dies when the re-check is neutered) |
+
+### Major
+
+| ID | Finding | Status |
+|---|---|---|
+| **All three reviewers, independently** | **The transactional rollback is unreachable dead code and its four tests are vacuous.** Round 1's C3 fix moved the entity-existence check into validation, which now refuses these plans before any object is created. Deleting the entire unwind — including round 1's own M12 fix `report.entries.clear()` — leaves all 633 tests green. The fix table's "M12 mutation-verified" was **false**. | FIXED BY TELLING THE TRUTH — the four tests are renamed to what they test (pre-apply refusal), the unwind is documented as defense in depth with no reachable failure through the public API and explicitly NOT mutation-guarded (ADR-M8-004's honesty pattern), and the self-validation claim table now reads NOT COVERED where it claimed coverage |
+| R3-M1 | **`--expect-from-source` / `--expect-skipped` were never parsed.** Declared, never assigned, guarded by `>= 0` — so `--expect-from-source 999` returned SELFTEST OK and both ctest registrations handed numbers to a loop that discarded them. Fourth appearance of a class this file warns about three times in capitals. | FIXED — both parsed; plus the CLASS: any unrecognised `--flag` now fails the selftest. Three WILL_FAIL ctest entries (wrong from-source, wrong skipped, unknown flag) are the negative controls that make the positive ones mean something |
+| R3-M5 | **A failed reconstruction is invisible in the running application** — no report stored, no panel rows, a status bar word-for-word identical to a drawing carrying no dimensions, while the sketch is still extruded and the volume still updates. | FIXED — the failure message is appended to the status bar |
+| R1-M6 | A Parameter name taken between analyze and apply produced **two Parameters of one name** driving different geometry. | FIXED — re-checked in validation; pinned by `M7_REV2_M6` |
+| R1-M4 | Analyze used `options.valueAgreementFraction`; validation hard-coded the global — so a widened band made reconstruction reject the plan it had just produced, blaming an edit that never happened. | FIXED — validation takes the caller's options; pinned by `M7_REV2_M4` |
+| R1-M5 | The C1 refusal tolerance is correct but **pinned by nothing**: replacing it with 0.6 rad (600x wider, accepting a 30-degree line as a Length) failed no test, because all three C1 tests sit at 67 degrees. | FIXED — `M7_REV2_M5` pins the constant from both sides (0.9x accepted, 1.1x refused) |
+| R1-M2 | Parameter naming still depends on file order when two dimensions resolve to one target (round 1's M7/M8 closed only for distinct targets). | OPEN |
+| R1-M3 | With `placeFix=false`, repeated reconstruction accumulates again (8→16→24); round 1's M1 keyed idempotence on `FixConstraint`, and a public option removes the proxy. | OPEN |
+| R2-M1 / R2-M2 | The save-side cap check's breadth is unpinned (only the document-id branch fires in its test), and `validateSaveable`'s id-uniqueness net stops short of sketch entities and constraints. | OPEN |
+| R2-M3 | `reconstructionReports_` has no erase path; bounded today only because the shell has no File-Open and no delete-sketch command. | OPEN |
+| R3-M2 | Gate J's failure is reported by ctest as **Skipped, not Failed** — the child's `[ SKIPPED ]` line reaches the parent's stdout and `gtest_discover_tests` stamps a SKIP regex on it. The assertion is sound; the registration hides it. | OPEN |
+| R3-M4 | No registered viewer test renders a skip-diagnostic row (both fixtures produce zero skips); deleting the loop leaves 15/15 green. | OPEN |
+| R3-M6 | `WholeSuite_*` pins one link order; `--gtest_shuffle` still fails 71/11/16 tests at seeds 1/7/42 because `GeneratorLimitTest` permanently poisons the process counter. | OPEN |
+
+## Fix-verification battery (Y)
+
+Binaries deleted before each rebuild and asserted present; restores plain-copy
+plus `touch`, `cmp`-verified.
+
+| # | Mutation | Verdict |
+|---|---|---|
+| Y1 | fingerprint check deleted | **guarded** — `M7_REV2_C1.APlanFromADifferentDocument…` |
+| Y2c | all three inferred re-assertions neutered | **guarded** — `AHandBuiltPlanWithNoFingerprint…` |
+| Y3 | name-taken check deleted | **guarded** — `M7_REV2_M6` |
+| Y4 | agreement band reverted to the global constant | **guarded** — `M7_REV2_M4` |
+
+*(Y2 as first written was a no-op — `if (false) {} else if (…)` left the branch
+live, producing a false UNGUARDED verdict. Recorded because a mutation that
+does not mutate is a harness defect, and this project has been burned by that
+class before.)*
+
+## What round 2 confirmed sound (honest negatives)
+
+Round 1's C2 fix (registration-order poisoning) is **closed and
+discriminating** — reintroducing the violation with an M8-added file turns
+`WholeSuite_ParametricCADCoreTests` red while per-test ctest stays 6/6 green.
+C4 is closed. ADR-M7-013's and ADR-M7-016's post-round-1 corrections are both
+**true**, re-derived algebraically and confirmed by mutation. Core independence
+holds at the binary level — a reviewer linked a Core-only executable that drove
+import-shaped reconstruction, save and load with no Qt, OCCT or libdxfrw
+present. Every hand-edited JSON attack was refused with a correctly classified
+error. 11 of 14 removed guards were killed by existing tests. Gate K is
+genuinely counter-based; Gate H asserts invalid mass properties; the panel's
+exact-value assertions and the `panelFitGuardCanFail` negative control both
+discriminate.
+
+## Standing blocks
+
+M7 does not close on this round: **six Majors remain OPEN** (listed above), and
+**M7 owner UI validation has still never been run** — `M7_UI_UserValidation.md`
+is blank, and no agent may fill it (ADR-M4-016). Agent-executed mechanical
+checks are recorded separately in `M7_UI_AgentExecutedChecks.md`.

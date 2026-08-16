@@ -230,8 +230,8 @@ masking lives.
 | repeated reconstruction | `ReconstructingTwiceDoesNotDuplicateParameters` |
 | reconstruction after save/load | `ASketchLoadedFromDiskCanStillBeReconstructed` |
 | reconstruction after entity deletion | `ATargetDeletedBeforeReconstruction…` |
-| failure halfway through plan application | `AFailedApplyLeavesNoParameterBehind` |
-| rollback then successful reconstruction | `RollbackIsFollowedByASuccessfulReconstruction` |
+| failure halfway through plan application | **NOT COVERED.** Corrected after round 2: `AFailedApplyLeavesNoParameterBehind` was credited with this and does not reach it — round 1's C3 fix refuses these plans before any object is created, and three reviewers independently deleted the entire unwind with all 633 tests staying green. The test (renamed `…WhenThePlanIsRefused`) covers pre-apply refusal; the unwind is defense in depth with no reachable failure through the public API, recorded as such at the code |
+| refusal then successful reconstruction | `ARefusedApplyIsFollowedByASuccessfulReconstruction` (renamed for the same reason) |
 | fresh-process load, and edit after it | `GATE_J_*` + `M7FreshProcessChild` |
 | unknown reconstruction flag / mode | `EveryRecognizerDisabledProducesAnEmptyPlan…`, `ANonsenseToleranceDoesNotCrashOrInventGeometry` |
 

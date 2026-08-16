@@ -114,13 +114,40 @@ M8_REV_322 -- the test only reminds you about names it consumes (round 3
 proved a name absent from BOTH drifts silently). A consuming type also goes
 in `kConsumingFeatureTypeNames`.
 
-M7 state: functionally complete PLUS review round 1's fixes (all 4 Criticals,
-14 Majors closed). **Still open, and M8 cannot close before they do:**
+M7 state: round 2 HAS NOW RUN (three reviewers on `9e0c399`, all REQUEST
+CHANGES, 72/73/73) and it proved the project's own maxim on itself -- **round
+1's two Critical fixes did not close their findings, and one of them silently
+voided another round-1 fix**:
 
-- M7 round 2 independent review -- this project has never had a review round
-  that did not find defects introduced by the previous round's fixes.
+- C3 was still open: `documentId` is a process-local counter, so two parts
+  saved in two sessions are identity-indistinguishable and a 100x50 plate's
+  plan applied cleanly to a 103x80 bracket. FIXED with a content fingerprint.
+- A length-preserving edit (a dimensioned edge rotated 90 degrees about its
+  own start point) validated, and the solver then silently rewrote the user's
+  geometry. FIXED by re-asserting every inferred constraint.
+- **All three reviewers independently**: the transactional rollback is
+  unreachable dead code, its four tests are vacuous, and the fix table's
+  "M12 mutation-verified" was FALSE. Fixed by telling the truth -- tests
+  renamed to what they test, the claim table corrected to NOT COVERED.
+- `--expect-from-source`/`--expect-skipped` were never parsed (declared only),
+  so both ctest entries proved nothing. Fixed, plus the class: unknown flags
+  now fail, with three WILL_FAIL negative controls.
+
+**Six Majors remain OPEN** (naming order-dependence with two dimensions on one
+target; `placeFix=false` re-opens accumulation; cap-check breadth and the
+id-uniqueness net stopping short of entities/constraints; no erase path for
+`reconstructionReports_`; Gate J reported Skipped not Failed; no CI fixture
+renders a skip row; `--gtest_shuffle` still fails on generator poisoning).
+Read `docs/reviews/M7_IndependentReview.md` round 2 before trusting any M7
+claim.
+
+**Also still open, and M8 cannot close before they do:**
+
 - M7 owner UI validation (`docs/reviews/M7_UI_UserValidation.md`, every row
-  blank; Test B is runnable now).
+  blank). Agent-executed mechanical checks live in
+  `docs/reviews/M7_UI_AgentExecutedChecks.md` and are NOT owner validation
+  (ADR-M4-016) -- they cannot fill a judgement row and must never be cited
+  as if they had.
 - The two inherited M6 items (M6.11-M6.14 unreviewed; M6 owner UI validation
   not run).
 

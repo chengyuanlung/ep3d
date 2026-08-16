@@ -262,6 +262,41 @@ int main(int argc, char** argv) {
             if (value == nullptr || value[0] == '\0') gUnknownSample = true;
             else sampleName = value;
         }
+        // The two reconstruction-count expectations. These were DECLARED and
+        // never parsed: `--expect-from-source 999 --expect-skipped 777`
+        // returned SELFTEST OK, and both ctest registrations handed their
+        // numbers to a loop that discarded them -- so the "counts must be
+        // RIGHT, not merely self-consistent" half of the evidence never ran.
+        // Found by independent review round 2; this file already warns about
+        // exactly this class three times in capitals.
+        if (const char* value = valueFor(i, "--expect-from-source", present); present) {
+            if (value == nullptr || value[0] == '\0') gUnknownSample = true;
+            else gExpectFromSource = std::atoi(value);
+        }
+        if (const char* value = valueFor(i, "--expect-skipped", present); present) {
+            if (value == nullptr || value[0] == '\0') gUnknownSample = true;
+            else gExpectSkipped = std::atoi(value);
+        }
+    }
+
+    // A `--flag` this build does not understand is an ERROR, not something to
+    // step over. The reason two dead flags went unnoticed for a milestone is
+    // that from the outside an unknown flag looked exactly like a known one.
+    // Closing the CLASS, not the instance.
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (arg[0] != '-' || arg[1] != '-') continue;
+        static const char* const kKnownFlags[] = {
+            "--scenario", "--import", "--sample", "--expect-from-source",
+            "--expect-skipped", "--dark", "--selftest"};
+        bool known = false;
+        for (const char* flag : kKnownFlags) {
+            const std::size_t length = std::strlen(flag);
+            if (std::strncmp(arg, flag, length) == 0 &&
+                (arg[length] == '\0' || arg[length] == '='))
+                known = true;
+        }
+        if (!known) gUnknownSample = true;
     }
 
     // --dark: apply a dark palette so the alternate-theme smoke test

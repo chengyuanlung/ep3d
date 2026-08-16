@@ -663,6 +663,16 @@ QString MainWindow::importDxfFile(const QString& path) {
                        .arg(reconstruction.createdParameters.size());
     if (reconstruction.skippedCount > 0)
         message += QStringLiteral(" [%1 not reconstructed]").arg(reconstruction.skippedCount);
+    // A reconstruction that FAILED outright said nothing at all until round 2
+    // found it: no report was stored, so the panel showed no Reconstruction
+    // rows, and the status bar was word-for-word what a drawing carrying no
+    // dimensions produces. The user could not tell "this drawing had no
+    // dimensions" from "I could not use the dimensions it had" -- while the
+    // sketch was still extruded and the volume readout still updated. Spec 18
+    // requires the failure be reported; this is the report.
+    if (!reconstruction)
+        message += QStringLiteral(" [dimensions NOT reconstructed: %1]")
+                       .arg(QString::fromStdString(reconstruction.message));
     // The IMPORT's own skip count is deliberately NOT appended here.
     //
     // Skipped entities must be visible -- a user who cannot see that something

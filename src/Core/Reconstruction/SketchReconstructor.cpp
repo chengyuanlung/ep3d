@@ -5,6 +5,7 @@
 #include "Core/Sketch/Sketch.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <optional>
 #include <string>
 
@@ -237,6 +238,9 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
     if (sketch == nullptr) return plan;
     plan.documentId = document.id();
     plan.sketchId = sketchId;
+    // Content identity, stamped at analysis time (round 2's C1): the ids above
+    // are a process-local counter and cannot separate two documents.
+    plan.fingerprint = FingerprintSketch(*sketch);
 
     const std::vector<LineRef> lines = CollectLines(*sketch);
     const std::vector<CurveRef> curves = CollectCurves(*sketch);
@@ -611,11 +615,79 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
     return plan;
 }
 
+std::uint64_t FingerprintSketch(const Sketch& sketch) {
+    // FNV-1a over every entity id and every coordinate. Not cryptographic and
+    // does not need to be: it separates documents, and an adversary who can
+    // hand-craft a colliding sketch can equally well hand-craft the plan.
+    // Doubles are hashed by their exact bit pattern, so "the same drawing"
+    // means bit-identical geometry -- which is what a plan built moments ago
+    // from that geometry should see.
+    std::uint64_t hash = 1469598103934665603ULL;
+    const auto mix = [&hash](std::uint64_t value) {
+        for (int byte = 0; byte < 8; ++byte) {
+            hash ^= (value >> (byte * 8)) & 0xFFULL;
+            hash *= 1099511628211ULL;
+        }
+    };
+    const auto mixDouble = [&mix](double value) {
+        std::uint64_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(value), "double is not 64 bits");
+        std::memcpy(&bits, &value, sizeof(bits));
+        mix(bits);
+    };
+    for (const SketchEntity& entity : sketch.entities()) {
+        mix(static_cast<std::uint64_t>(ToObjectId(entity.id)));
+        if (const auto* line = std::get_if<SketchLine>(&entity.geometry)) {
+            mix(1);
+            mixDouble(line->start.x);
+            mixDouble(line->start.y);
+            mixDouble(line->end.x);
+            mixDouble(line->end.y);
+        } else if (const auto* circle = std::get_if<SketchCircle>(&entity.geometry)) {
+            mix(2);
+            mixDouble(circle->center.x);
+            mixDouble(circle->center.y);
+            mixDouble(circle->radiusMm);
+        } else if (const auto* arc = std::get_if<SketchArc>(&entity.geometry)) {
+            mix(3);
+            mixDouble(arc->center.x);
+            mixDouble(arc->center.y);
+            mixDouble(arc->radiusMm);
+            mixDouble(arc->startAngleRad);
+            mixDouble(arc->endAngleRad);
+        } else if (const auto* point = std::get_if<SketchPoint>(&entity.geometry)) {
+            mix(4);
+            mixDouble(point->position.x);
+            mixDouble(point->position.y);
+        }
+    }
+    return hash;
+}
+
 PlanValidation ValidatePlanAgainstDocument(const PartDocument& document,
-                                           const ReconstructionPlan& plan) {
+                                           const ReconstructionPlan& plan,
+                                           const ReconstructionOptions& options) {
     const Sketch* sketch = document.findSketch(plan.sketchId);
     if (sketch == nullptr)
         return {false, "reconstruction plan names a sketch this document does not have"};
+
+    // IDENTITY first, and by content (round 2's C1). Two parts saved in two
+    // sessions share documentId 1 and sketchId 2 by construction, so the ids
+    // cannot separate them; the fingerprint can. A plan built before an edit
+    // also fails here, which is correct: it no longer describes this sketch.
+    if (plan.fingerprint != 0 && plan.fingerprint != FingerprintSketch(*sketch))
+        return {false, "this plan was built for different geometry than the sketch now holds; "
+                       "re-analyze before applying"};
+
+    // Every planned Parameter NAME must still be free. Checked at plan-build
+    // time too, but a name taken in between produced two Parameters called
+    // Width driving different geometry -- "every UI that lists them by name
+    // would show two identical rows" is this file's own words (round 2's M6).
+    for (const PlannedParameter& parameter : plan.parameters)
+        if (document.parameters().findByName(parameter.name) != nullptr)
+            return {false, "a Parameter named '" + parameter.name +
+                               "' already exists in this document; the plan cannot create a "
+                               "second one"};
 
     for (const PlannedConstraint& planned : plan.constraints) {
         for (SketchEntityId target : ReferencedEntities(planned.data)) {
@@ -623,6 +695,52 @@ PlanValidation ValidatePlanAgainstDocument(const PartDocument& document,
                 return {false, std::string("the plan names a ") +
                                    ConstraintKindName(planned.data) +
                                    " on geometry this sketch does not have"};
+        }
+
+        // INFERRED constraints are re-asserted against current geometry with
+        // the predicate that produced them (round 2's C1(R2)). Without this,
+        // rotating a dimensioned edge 90 degrees about its start point left
+        // every magnitude unchanged, the plan validated, and the solver
+        // silently rewrote the user's vertical line back to horizontal.
+        const auto lineFor = [&](SketchEntityId id) -> std::optional<LineRef> {
+            const SketchEntity* entity = sketch->findEntity(id);
+            if (entity == nullptr) return std::nullopt;
+            const auto* line = std::get_if<SketchLine>(&entity->geometry);
+            if (line == nullptr) return std::nullopt;
+            return LineRef{id, line->start, line->end};
+        };
+        const auto pointFor = [&](const SketchElementRef& ref) -> std::optional<Vec2> {
+            const SketchEntity* entity = sketch->findEntity(ref.entityId);
+            if (entity == nullptr) return std::nullopt;
+            switch (ref.subElement) {
+                case SketchSubElement::StartPoint: return StartPointOf(entity->geometry);
+                case SketchSubElement::EndPoint: return EndPointOf(entity->geometry);
+                case SketchSubElement::CenterPoint: return MidPointOf(entity->geometry);
+                default: return std::nullopt;
+            }
+        };
+
+        if (const auto* horizontal = std::get_if<HorizontalConstraint>(&planned.data)) {
+            const std::optional<LineRef> line = lineFor(horizontal->line);
+            if (!line || !IsHorizontal(*line, options.axisAngleToleranceRad))
+                return {false, "the plan calls a line horizontal that is no longer horizontal; "
+                               "this plan no longer describes this document"};
+            continue;
+        }
+        if (const auto* vertical = std::get_if<VerticalConstraint>(&planned.data)) {
+            const std::optional<LineRef> line = lineFor(vertical->line);
+            if (!line || !IsVertical(*line, options.axisAngleToleranceRad))
+                return {false, "the plan calls a line vertical that is no longer vertical; "
+                               "this plan no longer describes this document"};
+            continue;
+        }
+        if (const auto* coincident = std::get_if<CoincidentConstraint>(&planned.data)) {
+            const std::optional<Vec2> a = pointFor(coincident->a);
+            const std::optional<Vec2> b = pointFor(coincident->b);
+            if (!a || !b || !Near(*a, *b, options.coincidenceToleranceMm))
+                return {false, "the plan calls two points coincident that have since moved "
+                               "apart; this plan no longer describes this document"};
+            continue;
         }
 
         if (!IsDimensional(planned.data)) continue;
@@ -658,9 +776,13 @@ PlanValidation ValidatePlanAgainstDocument(const PartDocument& document,
         // The SAME band the analysis believed the source over the drawing with
         // (ADR-M7-009). A plan measured from geometry that has since moved
         // further than that no longer describes this document.
+        // The CALLER's band, not the global default (round 2's M4): analysis
+        // used options.valueAgreementFraction, so validating with a different
+        // constant made a widened tolerance reject the plan it had just
+        // produced, blaming an edit that never happened.
         const double reference = std::max(std::abs(bound->value), std::abs(measured));
         if (reference > 0.0 &&
-            std::abs(bound->value - measured) / reference > kReconstructionValueAgreementFraction)
+            std::abs(bound->value - measured) / reference > options.valueAgreementFraction)
             return {false, "Parameter '" + bound->name + "' was measured as " +
                                std::to_string(bound->value) +
                                " mm but the geometry it names now measures " +
@@ -670,7 +792,8 @@ PlanValidation ValidatePlanAgainstDocument(const PartDocument& document,
     return {true, {}};
 }
 
-ReconstructionResult ApplyReconstruction(PartDocument& document, const ReconstructionPlan& plan) {
+ReconstructionResult ApplyReconstruction(PartDocument& document, const ReconstructionPlan& plan,
+                                        const ReconstructionOptions& options) {
     ReconstructionResult result;
     result.sketchId = plan.sketchId;
     result.skippedCount = plan.skipped.size();
@@ -693,7 +816,7 @@ ReconstructionResult ApplyReconstruction(PartDocument& document, const Reconstru
         result.message = "reconstruction plan was built for a different document";
         return result;
     }
-    const PlanValidation describes = ValidatePlanAgainstDocument(document, plan);
+    const PlanValidation describes = ValidatePlanAgainstDocument(document, plan, options);
     if (!describes) {
         result.message = "reconstruction plan rejected: " + describes.message;
         return result;
@@ -878,7 +1001,7 @@ ReconstructionResult ReconstructSketch(PartDocument& document, ObjectId sketchId
     }
 
     const ReconstructionPlan plan = AnalyzeForReconstruction(document, sketchId, dimensions, options);
-    return ApplyReconstruction(document, plan);
+    return ApplyReconstruction(document, plan, options);
 }
 
 } // namespace paramcad

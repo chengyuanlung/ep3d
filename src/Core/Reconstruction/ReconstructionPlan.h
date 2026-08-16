@@ -5,6 +5,7 @@
 #include "Core/Sketch/SketchConstraint.h"
 #include "Core/Sketch/SketchTypes.h"
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -127,8 +128,24 @@ struct ReconstructionPlan {
     // and driving B's 250 mm edge with A's Width=100, with no diagnostic. An
     // earlier revision of this comment claimed the case was covered; it was
     // checking an id space that is not unique across documents.
+    // ROUND 2 correction: the comment above was still describing an id space
+    // that cannot do this job. `ObjectId` starts at 1 in EVERY process, so two
+    // parts saved in two sessions BOTH carry documentId 1 and sketchId 2 --
+    // review demonstrated a plan for a 100x50 plate applying cleanly to a
+    // 103x80 bracket, ok=1, no diagnostic, the bracket's edge now driven by
+    // the plate's Width. The ids remain as a cheap first pass; what actually
+    // separates two documents is the FINGERPRINT below.
     ObjectId documentId{kInvalidObjectId};
     ObjectId sketchId{kInvalidObjectId};
+
+    // A hash of the sketch's entity ids AND their geometry at analysis time.
+    // Two different drawings collide only if every entity id and every
+    // coordinate matches, which is the definition of "the same sketch".
+    // Deliberately NOT a tolerance: this answers "is this the same document",
+    // and the 5% agreement band answers "does this dimension describe this
+    // line" -- round 2 found the second standing in for the first, which is
+    // how two parts 3% apart passed as identical.
+    std::uint64_t fingerprint{0};
 
     std::vector<PlannedParameter> parameters;
     std::vector<PlannedConstraint> constraints;

@@ -3,12 +3,14 @@
 #include "Core/Import/ImportedGeometry.h"
 #include "Core/Reconstruction/ReconstructionPlan.h"
 #include "Core/Sketch/SketchTypes.h"
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace paramcad {
 
 class PartDocument;
+class Sketch;
 
 // M7 reconstruction: imported geometry plus imported dimensions become native
 // Parameters and SketchConstraints (spec 5).
@@ -225,12 +227,32 @@ struct ReconstructionResult {
 // separates them is not their identity but their geometry, so that is what is
 // checked.
 //
+// ROUND 2 rewrote what "geometry" means here, because the first version checked
+// only DIMENSIONAL magnitudes and two separate Criticals walked through the
+// gap:
+//   * two different parts within the 5% agreement band were mutually
+//     acceptable (100x50 plate vs 103x80 bracket, ok=1, no diagnostic), so
+//     the fingerprint below carries identity and the band no longer doubles
+//     as an identity test; and
+//   * a LENGTH-PRESERVING edit -- a dimensioned edge rotated 90 degrees about
+//     its own start point -- passed, and the solver then silently restored the
+//     shape the stale plan described, overwriting the user's deliberate edit.
+// Every INFERRED constraint is therefore re-asserted against current geometry
+// with the same predicate that produced it, at the caller's own tolerances.
+//
 // It also covers the narrower cases for free: an entity deleted between analyze
-// and apply, and geometry edited in between.
+// and apply, and a Parameter name taken in between.
 PlanValidation ValidatePlanAgainstDocument(const PartDocument& document,
-                                           const ReconstructionPlan& plan);
+                                           const ReconstructionPlan& plan,
+                                           const ReconstructionOptions& options = {});
 
-ReconstructionResult ApplyReconstruction(PartDocument& document, const ReconstructionPlan& plan);
+// The plan's identity half, exposed so callers can compare without applying.
+// Hashes every entity id and every coordinate of the sketch; two drawings
+// collide only by being the same drawing.
+std::uint64_t FingerprintSketch(const Sketch& sketch);
+
+ReconstructionResult ApplyReconstruction(PartDocument& document, const ReconstructionPlan& plan,
+                                        const ReconstructionOptions& options = {});
 
 // Analyze, validate and apply in one call, for callers with nothing to inspect.
 // Exactly equivalent to the three steps; it exists so the common path does not

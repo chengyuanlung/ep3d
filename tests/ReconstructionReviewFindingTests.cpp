@@ -16,6 +16,7 @@
 #include <cmath>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -364,7 +365,7 @@ TEST(M7_REV_M10, ANearlyClosedArcIsNotMadeCoincidentWithItself) {
 
 // --- M12: a rolled-back apply must not claim it did the work ----------------
 
-TEST(M7_REV_M12, ARolledBackApplyReportsNothingReconstructed) {
+TEST(M7_REV_M12, ARefusedApplyReportsNothingReconstructed) {
     PartDocument document{"revM12"};
     Sketch& sketch = document.addSketch("s");
     sketch.addLine(Vec2{0, 0}, Vec2{100, 0});
@@ -423,6 +424,235 @@ TEST(M7_REV_M13, ALineJustOutsideTheVerticalToleranceIsNot) {
     // skewed right side is refused. Spec 24 asks for this pair and only the
     // horizontal one existed.
     EXPECT_EQ(CountKind(plan, "Vertical"), 1u);
+}
+
+// --- Round 2 regression tests -----------------------------------------------
+// One per finding. Round 2 proved round 1's two Critical fixes did not close
+// their findings: ObjectId is a per-process counter, so two documents were
+// identity-indistinguishable and a 100x50 plate's plan applied cleanly to a
+// 103x80 bracket; and the geometric check looked only at DIMENSIONAL
+// magnitudes, so a length-preserving edit validated and the solver then
+// silently rewrote the user's geometry back to the stale plan's shape.
+
+namespace {
+
+ObjectId BuildDimensionedRectangle(PartDocument& document, double width, double height,
+                                   const char* sketchName = "s") {
+    Sketch& sketch = document.addSketch(sketchName);
+    sketch.addLine(Vec2{0, 0}, Vec2{width, 0});
+    sketch.addLine(Vec2{width, 0}, Vec2{width, height});
+    sketch.addLine(Vec2{width, height}, Vec2{0, height});
+    sketch.addLine(Vec2{0, height}, Vec2{0, 0});
+    return sketch.id();
+}
+
+std::vector<ImportedDimension2D> WidthDimension(double width) {
+    ImportedDimension2D dimension;
+    dimension.kind = ImportedDimensionKind::Linear;
+    dimension.measureFrom = Vec2{0, 0};
+    dimension.measureTo = Vec2{width, 0};
+    dimension.statedValueMm = width;
+    dimension.directionRad = 0.0;
+    dimension.sourceHandle = "W1";
+    return {dimension};
+}
+
+} // namespace
+
+TEST(M7_REV2_C1, APlanFromADifferentDocumentWithTheSameIdsIsRefused) {
+    // Demonstrated in review as ok=1 with NO diagnostic. The id collision is
+    // forged the way two sessions produce it -- one file, loaded twice, so
+    // both documents carry identical ids -- and then one copy is edited to a
+    // DIFFERENT part whose width sits inside the 5% agreement band. That band
+    // answers "does this dimension describe this line", never "is this the
+    // same document"; round 1's test diverged by 150% and so was satisfied by
+    // the band alone. Only the content fingerprint separates these two.
+    std::string saved;
+    ObjectId sketchId = kInvalidObjectId;
+    {
+        PartDocument source{"plate-A"};
+        sketchId = BuildDimensionedRectangle(source, 100.0, 50.0);
+        std::ostringstream out;
+        ASSERT_TRUE(savePartDocument(source, out));
+        saved = out.str();
+    }
+    std::istringstream inA(saved);
+    LoadResult a = loadPartDocument(inA);
+    ASSERT_TRUE(a) << a.message;
+    std::istringstream inB(saved);
+    LoadResult b = loadPartDocument(inB);
+    ASSERT_TRUE(b) << b.message;
+
+    const ReconstructionPlan plan =
+        AnalyzeForReconstruction(*a.document, sketchId, WidthDimension(100.0));
+    ASSERT_FALSE(plan.empty());
+
+    // B becomes a different part: 103 x 80. 100 vs 103 is 3% -- inside the band.
+    ASSERT_TRUE(b.document->editSketch(sketchId, [](Sketch& sketch) {
+        const auto ids = sketch.entities();
+        sketch.replaceGeometry(ids[0].id, SketchLine{Vec2{0, 0}, Vec2{103, 0}});
+        sketch.replaceGeometry(ids[1].id, SketchLine{Vec2{103, 0}, Vec2{103, 80}});
+        sketch.replaceGeometry(ids[2].id, SketchLine{Vec2{103, 80}, Vec2{0, 80}});
+        sketch.replaceGeometry(ids[3].id, SketchLine{Vec2{0, 80}, Vec2{0, 0}});
+    }));
+
+    const PlanValidation describes = ValidatePlanAgainstDocument(*b.document, plan);
+    EXPECT_FALSE(describes) << "a different part accepted a plan built elsewhere";
+    EXPECT_NE(describes.message.find("different geometry"), std::string::npos)
+        << describes.message;
+
+    const ReconstructionResult applied = ApplyReconstruction(*b.document, plan);
+    EXPECT_FALSE(applied);
+    EXPECT_EQ(b.document->parameters().items().size(), 0u)
+        << "the foreign plan created a Parameter in a document it does not describe";
+}
+
+TEST(M7_REV2_C1, ALengthPreservingEditIsRefused) {
+    // Rotate the dimensioned edge 90 degrees about its own start point: same
+    // entity id, same 100 mm length, every magnitude the old check looked at
+    // unchanged. The Horizontal the plan carries is re-asserted now.
+    PartDocument document{"rev2c1b"};
+    const ObjectId sketchId = BuildDimensionedRectangle(document, 100.0, 50.0);
+    const ReconstructionPlan plan =
+        AnalyzeForReconstruction(document, sketchId, WidthDimension(100.0));
+    ASSERT_FALSE(plan.empty());
+
+    SketchEntityId bottom = kInvalidSketchEntityId;
+    ASSERT_TRUE(document.editSketch(sketchId, [&bottom](Sketch& sketch) {
+        bottom = sketch.entities().front().id;
+        sketch.replaceGeometry(bottom, SketchLine{Vec2{0, 0}, Vec2{0, -100}});
+    }));
+
+    const PlanValidation describes = ValidatePlanAgainstDocument(document, plan);
+    EXPECT_FALSE(describes) << "a plan that no longer describes this geometry was accepted";
+
+    const ReconstructionResult applied = ApplyReconstruction(document, plan);
+    EXPECT_FALSE(applied);
+
+    // And the user's edit survives untouched -- the whole point of refusing.
+    const SketchEntity* edited = document.findSketch(sketchId)->findEntity(bottom);
+    ASSERT_NE(edited, nullptr);
+    const auto* line = std::get_if<SketchLine>(&edited->geometry);
+    ASSERT_NE(line, nullptr);
+    EXPECT_DOUBLE_EQ(line->end.x, 0.0) << "the refused plan still moved the user's line";
+    EXPECT_DOUBLE_EQ(line->end.y, -100.0);
+}
+
+TEST(M7_REV2_C1, AHandBuiltPlanWithNoFingerprintIsStillCheckedAgainstGeometry) {
+    // The fingerprint catches every edit for plans that CARRY one, which is
+    // every plan analysis produces. A hand-built plan -- legal, because the
+    // staged analyze/validate/apply separation is this milestone's headline
+    // design (ADR-M7-005) -- carries no fingerprint, and for it the inferred
+    // re-assertion is the only thing left. Verified by mutation: neutering the
+    // Horizontal/Vertical re-check fails exactly this test and nothing else,
+    // so it is guarded rather than merely present.
+    PartDocument document{"rev2c1d"};
+    const ObjectId sketchId = BuildDimensionedRectangle(document, 100.0, 50.0);
+    ReconstructionPlan plan =
+        AnalyzeForReconstruction(document, sketchId, WidthDimension(100.0));
+    ASSERT_FALSE(plan.empty());
+    plan.fingerprint = 0; // as a caller assembling a plan by hand would leave it
+
+    SketchEntityId bottom = kInvalidSketchEntityId;
+    ASSERT_TRUE(document.editSketch(sketchId, [&bottom](Sketch& sketch) {
+        bottom = sketch.entities().front().id;
+        sketch.replaceGeometry(bottom, SketchLine{Vec2{0, 0}, Vec2{0, -100}});
+    }));
+
+    const PlanValidation describes = ValidatePlanAgainstDocument(document, plan);
+    EXPECT_FALSE(describes) << "an unfingerprinted plan skipped the geometry re-check";
+    // Whichever inferred rule notices first -- here the Coincident, because
+    // the rotated edge's endpoint no longer meets its neighbour -- the refusal
+    // must name the plan, not blame the document for a magnitude change that
+    // did not happen.
+    EXPECT_NE(describes.message.find("no longer describes this document"), std::string::npos)
+        << describes.message;
+    EXPECT_FALSE(ApplyReconstruction(document, plan));
+}
+
+TEST(M7_REV2_C1, AnUnchangedDocumentStillApplies) {
+    // The straddling half, without which both tests above would be satisfied
+    // by a validator that simply refuses everything.
+    PartDocument document{"rev2c1c"};
+    const ObjectId sketchId = BuildDimensionedRectangle(document, 100.0, 50.0);
+    const ReconstructionPlan plan =
+        AnalyzeForReconstruction(document, sketchId, WidthDimension(100.0));
+    ASSERT_FALSE(plan.empty());
+
+    EXPECT_TRUE(ValidatePlanAgainstDocument(document, plan));
+    const ReconstructionResult applied = ApplyReconstruction(document, plan);
+    EXPECT_TRUE(applied) << applied.message;
+}
+
+TEST(M7_REV2_M6, ANameTakenBetweenAnalyzeAndApplyIsRefused) {
+    // The plan promises its names are free "checked at build time" -- and
+    // nothing rechecked at apply, so a name taken in between produced TWO
+    // Parameters of one name driving different geometry.
+    PartDocument document{"rev2m6"};
+    const ObjectId sketchId = BuildDimensionedRectangle(document, 100.0, 50.0);
+    const ReconstructionPlan plan =
+        AnalyzeForReconstruction(document, sketchId, WidthDimension(100.0));
+    ASSERT_EQ(plan.parameters.size(), 1u);
+    const std::string planned = plan.parameters.front().name;
+
+    document.addParameter(planned, 7.0, UnitType::Millimeter);
+    const ReconstructionResult applied = ApplyReconstruction(document, plan);
+    EXPECT_FALSE(applied) << "the plan created a second Parameter of the same name";
+
+    int named = 0;
+    for (const auto& parameter : document.parameters().items())
+        if (parameter->name() == planned) ++named;
+    EXPECT_EQ(named, 1);
+}
+
+TEST(M7_REV2_M4, AWidenedAgreementBandIsHonouredByValidationToo) {
+    // Analysis used options.valueAgreementFraction; validation hard-coded the
+    // global. A caller who widened the band had reconstruction reject the plan
+    // it had just produced, blaming an edit that never happened.
+    ReconstructionOptions options;
+    options.valueAgreementFraction = 0.20;
+
+    PartDocument document{"rev2m4"};
+    const ObjectId sketchId = BuildDimensionedRectangle(document, 100.0, 50.0);
+    // Stated 115 against 100 mm of geometry: outside the default 5%, inside 20%.
+    // The dimension measures the REAL 100 mm edge but STATES 115: a 15%
+    // disagreement, outside the default 5% band and inside the caller's 20%.
+    std::vector<ImportedDimension2D> dimensions = WidthDimension(100.0);
+    dimensions.front().statedValueMm = 115.0;
+    const ReconstructionPlan plan =
+        AnalyzeForReconstruction(document, sketchId, dimensions, options);
+    ASSERT_EQ(plan.parameters.size(), 1u) << "analysis refused a value its own band accepts";
+
+    EXPECT_TRUE(ValidatePlanAgainstDocument(document, plan, options))
+        << "validation used a different band than analysis";
+    EXPECT_TRUE(ApplyReconstruction(document, plan, options));
+}
+
+TEST(M7_REV2_M5, TheAxisToleranceItselfIsPinnedAtItsBoundary) {
+    // Round 2 replaced axisAngleToleranceRad with 0.6 rad -- a 600x widening
+    // that would accept a 30-degree line as a Length -- and NO test failed:
+    // all three C1 tests sit at 67 degrees, far outside any plausible band.
+    // This pins the constant itself, from both sides.
+    const double tolerance = kReconstructionAxisAngleToleranceRad;
+    const auto refusedAt = [](double angleRad) {
+        PartDocument document{"rev2m5"};
+        Sketch& sketch = document.addSketch("s");
+        const double length = 100.0;
+        sketch.addLine(Vec2{0, 0}, Vec2{length * std::cos(angleRad), length * std::sin(angleRad)});
+        ImportedDimension2D dimension;
+        dimension.kind = ImportedDimensionKind::Linear;
+        dimension.measureFrom = Vec2{0, 0};
+        dimension.measureTo =
+            Vec2{length * std::cos(angleRad), length * std::sin(angleRad)};
+        dimension.statedValueMm = length;
+        dimension.directionRad = 0.0; // stated along +u
+        dimension.sourceHandle = "W1";
+        const ReconstructionPlan plan =
+            AnalyzeForReconstruction(document, sketch.id(), {dimension});
+        return plan.parameters.empty();
+    };
+    EXPECT_FALSE(refusedAt(0.9 * tolerance)) << "a line inside the band was refused";
+    EXPECT_TRUE(refusedAt(1.1 * tolerance)) << "a line outside the band was accepted as a Length";
 }
 
 } // namespace

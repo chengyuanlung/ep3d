@@ -320,6 +320,29 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
                              --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/dimensioned_rectangle.dxf"
                              --expect-from-source 2 --expect-skipped 0)
             set_tests_properties(ViewerSmokeTest_ImportsDimensionedDxf PROPERTIES TIMEOUT 60)
+            # NEGATIVE CONTROLS for the two expectation flags. Independent
+            # review round 2 found both flags DECLARED and never parsed, so
+            # `--expect-from-source 999` returned SELFTEST OK and the entries
+            # above proved nothing but their own self-consistency. An
+            # expectation that cannot fail is not an expectation; these two
+            # entries are what make the ones above mean something.
+            add_test(NAME ViewerSmokeTest_WrongFromSourceExpectationFails
+                     COMMAND ParametricCADViewer --selftest
+                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/dimensioned_rectangle.dxf"
+                             --expect-from-source 999 --expect-skipped 0)
+            add_test(NAME ViewerSmokeTest_WrongSkippedExpectationFails
+                     COMMAND ParametricCADViewer --selftest
+                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/dimensioned_rectangle.dxf"
+                             --expect-from-source 2 --expect-skipped 777)
+            # And the CLASS the two dead flags belonged to: an unrecognised
+            # --flag must be refused, not stepped over.
+            add_test(NAME ViewerSmokeTest_RejectsAnUnknownFlag
+                     COMMAND ParametricCADViewer --selftest --sample m5-rectangle
+                             --no-such-flag)
+            set_tests_properties(ViewerSmokeTest_WrongFromSourceExpectationFails
+                                 ViewerSmokeTest_WrongSkippedExpectationFails
+                                 ViewerSmokeTest_RejectsAnUnknownFlag
+                                 PROPERTIES WILL_FAIL TRUE TIMEOUT 60)
             # A failed import must FAIL the selftest, so a broken import cannot
             # pass CI by producing an empty document quietly.
             add_test(NAME ViewerSmokeTest_ReportsFailedImport

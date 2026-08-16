@@ -307,8 +307,24 @@ TEST(M7Reconstruction, TwoPlannedParametersMayNotShareAName) {
 }
 
 // --- Transaction and rollback (spec 16) -------------------------------------
+//
+// HONEST SCOPE, corrected in round 2. These tests are named for rollback and
+// were credited with covering it; they do not reach it. Round 1's C3 fix moved
+// the entity-existence check into ValidatePlanAgainstDocument, which now
+// refuses these plans BEFORE a single Parameter is created -- three reviewers
+// independently deleted the entire unwind and watched all 633 tests stay
+// green. What they genuinely cover is the PRE-APPLY REFUSAL: a plan naming
+// geometry the sketch does not have is rejected, and the document is
+// untouched. That is worth testing and these tests test it well.
+//
+// The unwind itself is now defense in depth with no reachable failure through
+// the public API (every cause addSketchConstraint can refuse for is
+// pre-checked), and it is recorded as NOT mutation-guarded rather than left to
+// look covered -- the same honesty ADR-M8-004 applies to PocketFeature's
+// base-state check. If a future kind of mid-apply failure appears, this is the
+// comment that has to change with it.
 
-TEST(M7Reconstruction, AFailedApplyLeavesNoParameterBehind) {
+TEST(M7Reconstruction, AFailedApplyLeavesNoParameterBehindWhenThePlanIsRefused) {
     RectangleFixture fx;
     const std::size_t parametersBefore = fx.document.parameters().items().size();
     const std::size_t constraintsBefore = fx.sketch->constraints().size();
@@ -334,7 +350,7 @@ TEST(M7Reconstruction, AFailedApplyLeavesNoParameterBehind) {
     EXPECT_EQ(fx.document.parameters().findByName("Width"), nullptr);
 }
 
-TEST(M7Reconstruction, RollbackIsFollowedByASuccessfulReconstruction) {
+TEST(M7Reconstruction, ARefusedApplyIsFollowedByASuccessfulReconstruction) {
     RectangleFixture fx;
     ReconstructionPlan doomed = AnalyzeForReconstruction(
         fx.document, fx.sketch->id(), {Linear(Vec2{0, 0}, Vec2{100, 0})});
@@ -343,8 +359,8 @@ TEST(M7Reconstruction, RollbackIsFollowedByASuccessfulReconstruction) {
         ReconstructionOrigin::InferredGeometric, {}});
     ASSERT_FALSE(ApplyReconstruction(fx.document, doomed));
 
-    // The document must be usable afterwards, not merely unchanged. A rollback
-    // that leaves the name "Width" taken would make this fail with Width_2.
+    // The document must be usable afterwards, not merely unchanged. A refusal
+    // that leaked the name "Width" would make this fail with Width_2.
     const ReconstructionResult second = ReconstructSketch(
         fx.document, fx.sketch->id(), {Linear(Vec2{0, 0}, Vec2{100, 0})});
     ASSERT_TRUE(second);
