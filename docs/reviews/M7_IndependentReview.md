@@ -304,13 +304,13 @@ test written for it while leaving the defect open**, twice over.
 | R1-M6 | A Parameter name taken between analyze and apply produced **two Parameters of one name** driving different geometry. | FIXED — re-checked in validation; pinned by `M7_REV2_M6` |
 | R1-M4 | Analyze used `options.valueAgreementFraction`; validation hard-coded the global — so a widened band made reconstruction reject the plan it had just produced, blaming an edit that never happened. | FIXED — validation takes the caller's options; pinned by `M7_REV2_M4` |
 | R1-M5 | The C1 refusal tolerance is correct but **pinned by nothing**: replacing it with 0.6 rad (600x wider, accepting a 30-degree line as a Length) failed no test, because all three C1 tests sit at 67 degrees. | FIXED — `M7_REV2_M5` pins the constant from both sides (0.9x accepted, 1.1x refused) |
-| R1-M2 | Parameter naming still depends on file order when two dimensions resolve to one target (round 1's M7/M8 closed only for distinct targets). | OPEN |
-| R1-M3 | With `placeFix=false`, repeated reconstruction accumulates again (8→16→24); round 1's M1 keyed idempotence on `FixConstraint`, and a public option removes the proxy. | OPEN |
-| R2-M1 / R2-M2 | The save-side cap check's breadth is unpinned (only the document-id branch fires in its test), and `validateSaveable`'s id-uniqueness net stops short of sketch entities and constraints. | OPEN |
-| R2-M3 | `reconstructionReports_` has no erase path; bounded today only because the shell has no File-Open and no delete-sketch command. | OPEN |
-| R3-M2 | Gate J's failure is reported by ctest as **Skipped, not Failed** — the child's `[ SKIPPED ]` line reaches the parent's stdout and `gtest_discover_tests` stamps a SKIP regex on it. The assertion is sound; the registration hides it. | OPEN |
-| R3-M4 | No registered viewer test renders a skip-diagnostic row (both fixtures produce zero skips); deleting the loop leaves 15/15 green. | OPEN |
-| R3-M6 | `WholeSuite_*` pins one link order; `--gtest_shuffle` still fails 71/11/16 tests at seeds 1/7/42 because `GeneratorLimitTest` permanently poisons the process counter. | OPEN |
+| R1-M2 | Parameter naming still depends on file order when two dimensions resolve to one target (round 1's M7/M8 closed only for distinct targets). | FIXED — both sort keys are now TOTAL, with tiebreaks taken from the dimension itself (value, then kind, then source handle as a last resort only); pinned for lines and curves by `M7_REV2_M2` in both file orders |
+| R1-M3 | With `placeFix=false`, repeated reconstruction accumulates again (8→16→24); round 1's M1 keyed idempotence on `FixConstraint`, and a public option removes the proxy. | FIXED — idempotence now asks whether the sketch carries ANY constraint, because every proxy for "M7 has run here" can be switched off by a supported option; pinned by `M7_REV2_M3` across three option combinations. Cost stated at the code: a hand-constrained sketch can no longer be reconstructed from a drawing, which is M7.1's refuse-not-merge contract rather than a regression |
+| R2-M1 / R2-M2 | The save-side cap check's breadth is unpinned (only the document-id branch fires in its test), and `validateSaveable`'s id-uniqueness net stops short of sketch entities and constraints. | FIXED — `GeneratorLimitChild.EveryIdClassIsRefusedAtSaveOnceItPassesTheCap` reaches all seven branches (each in a document created before the poisoning, and each child test in its OWN process so the poisoning does not cascade); entity and constraint ids get per-sketch uniqueness checks, scoped exactly as the loader scopes them |
+| R2-M3 | `reconstructionReports_` has no erase path; bounded today only because the shell has no File-Open and no delete-sketch command. | FIXED — `forgetProvenanceFor`/`forgetAllProvenance` are the explicit erase paths, and `pruneProvenance` runs after every recompute as the backstop, so no future removal command can leave the map wrong by forgetting to say so |
+| R3-M2 | Gate J's failure is reported by ctest as **Skipped, not Failed** — the child's `[ SKIPPED ]` line reaches the parent's stdout and `gtest_discover_tests` stamps a SKIP regex on it. The assertion is sound; the registration hides it. | FIXED — the child's output is redirected; the parent asserts on the exit status and the deleted document, which is all the information it ever needed |
+| R3-M4 | No registered viewer test renders a skip-diagnostic row (both fixtures produce zero skips); deleting the loop leaves 15/15 green. | FIXED — new fixture `dimensioned_rectangle_one_skipped.dxf` (width states 250 against 99.5 mm drawn, a 150% disagreement) registered as `ViewerSmokeTest_ImportsWithASkippedDimension`; mutation Z1 neutering the skip-row loop now fails it |
+| R3-M6 | `WholeSuite_*` pins one link order; `--gtest_shuffle` still fails 71/11/16 tests at seeds 1/7/42 because `GeneratorLimitTest` permanently poisons the process counter. | FIXED — the poisoning moved into child processes, so nothing mutates the shared counter in an ordinary run: shuffled seeds 1/7/42 went from 71/11/16 failures to **0**, and `Shuffled_<suite>_seed{1,7,42}` ctest entries make order-independence a checked property rather than a convention |
 
 ## Fix-verification battery (Y)
 
@@ -346,7 +346,12 @@ discriminate.
 
 ## Standing blocks
 
-M7 does not close on this round: **six Majors remain OPEN** (listed above), and
-**M7 owner UI validation has still never been run** — `M7_UI_UserValidation.md`
+**Round-2 follow-up (all six remaining Majors now closed).** The register above
+carries per-item status; the fixes are pinned by `M7_REV2_M2`/`M7_REV2_M3`,
+`GeneratorLimitChild.EveryIdClassIsRefusedAtSaveOnceItPassesTheCap`, the
+`Shuffled_*` ctest entries, `ViewerSmokeTest_ImportsWithASkippedDimension`, and
+mutation Z1. **These follow-up fixes are themselves unreviewed.**
+
+M7 still does not close: **M7 owner UI validation has still never been run** — `M7_UI_UserValidation.md`
 is blank, and no agent may fill it (ADR-M4-016). Agent-executed mechanical
 checks are recorded separately in `M7_UI_AgentExecutedChecks.md`.

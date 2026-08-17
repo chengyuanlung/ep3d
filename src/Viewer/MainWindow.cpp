@@ -333,6 +333,29 @@ const ReconstructionReport* MainWindow::reconstructionReportFor(ObjectId sketchI
     return it == reconstructionReports_.end() ? nullptr : &it->second;
 }
 
+void MainWindow::forgetProvenanceFor(ObjectId sketchId) {
+    reconstructionReports_.erase(sketchId);
+}
+
+void MainWindow::forgetAllProvenance() { reconstructionReports_.clear(); }
+
+void MainWindow::pruneProvenance() {
+    // Provenance describes a sketch that is IN this document. An entry whose
+    // sketch has gone is not merely stale -- ObjectIds are handed out by a
+    // process counter and a loaded document's ids come from its file, so the
+    // entry could later be read as belonging to an unrelated sketch that
+    // happens to reuse the number. Cheap, and it runs after every recompute,
+    // so no future removal path can leave the map wrong by forgetting to say
+    // so (round 2's M3).
+    if (document_ == nullptr) {
+        forgetAllProvenance();
+        return;
+    }
+    for (auto it = reconstructionReports_.begin(); it != reconstructionReports_.end();)
+        it = document_->findSketch(it->first) == nullptr ? reconstructionReports_.erase(it)
+                                                         : std::next(it);
+}
+
 std::string MainWindow::displayedPropertyValue(const std::string& label) const {
     for (int row = 0; row < properties_->rowCount(); ++row) {
         const QTableWidgetItem* name = properties_->item(row, 0);
@@ -550,6 +573,7 @@ void MainWindow::onPropertyCommitted(int row, int column) {
 
 void MainWindow::onRecomputeRequested() {
     const bool ok = presenter_->recomputeForDisplay();
+    pruneProvenance(); // no entry may outlive the sketch it describes
     const ObjectId keep = selectedId_;
     refreshAll();
     selectObject(keep); // an edit must not silently change the selection

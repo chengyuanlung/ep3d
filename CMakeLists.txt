@@ -320,6 +320,18 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
                              --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/dimensioned_rectangle.dxf"
                              --expect-from-source 2 --expect-skipped 0)
             set_tests_properties(ViewerSmokeTest_ImportsDimensionedDxf PROPERTIES TIMEOUT 60)
+            # A fixture that SKIPS. Until round 2 no registered test produced
+            # one: mixed.dxf carries no dimensions and dimensioned_rectangle
+            # reconstructs both, so the skip-diagnostic row never rendered once
+            # in CI and deleting the loop that draws it left all 15 viewer
+            # smoke tests green. This file's width dimension states 250 against
+            # 99.5 mm of geometry, so it is refused and the height is kept.
+            add_test(NAME ViewerSmokeTest_ImportsWithASkippedDimension
+                     COMMAND ParametricCADViewer --selftest
+                             --import "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dxf/dimensioned_rectangle_one_skipped.dxf"
+                             --expect-from-source 1 --expect-skipped 1)
+            set_tests_properties(ViewerSmokeTest_ImportsWithASkippedDimension
+                                 PROPERTIES TIMEOUT 60)
             # NEGATIVE CONTROLS for the two expectation flags. Independent
             # review round 2 found both flags DECLARED and never parsed, so
             # `--expect-from-source 999` returned SELFTEST OK and the entries
@@ -426,6 +438,13 @@ if(PARAMCAD_BUILD_TESTS)
     )
     target_link_libraries(ParametricCADCoreTests
         PRIVATE ParametricCADCore ParametricCADViewerCore GTest::gtest_main)
+    # The id-ceiling tests re-invoke THIS binary as a child process, so the
+    # process-global generator mutation they need cannot poison anything else.
+    # Generator expressions, because the path differs per configuration --
+    # hard-coding one would make the Release run drive the Debug binary.
+    target_compile_definitions(ParametricCADCoreTests PRIVATE
+        PARAMCAD_CORE_TEST_EXE="$<TARGET_FILE:ParametricCADCoreTests>"
+        PARAMCAD_CORE_SCRATCH_DIR="$<TARGET_FILE_DIR:ParametricCADCoreTests>")
     if(MSVC)
         target_compile_options(ParametricCADCoreTests PRIVATE /utf-8)
     endif()
@@ -462,6 +481,19 @@ if(PARAMCAD_BUILD_TESTS)
     function(paramcad_add_whole_suite_test target)
         add_test(NAME WholeSuite_${target} COMMAND ${target})
         set_tests_properties(WholeSuite_${target} PROPERTIES TIMEOUT 600)
+        # ORDER-INDEPENDENCE, as a property rather than a convention.
+        # WholeSuite_* runs one order -- the one the linker produced -- and
+        # round 2 measured what that was worth: shuffled, the Core suite failed
+        # 71, 11 and 16 tests at seeds 1, 7 and 42, every one of them poisoned
+        # by a single test that advanced the process-global id counter. That
+        # test now runs in a child process, and these entries are what stop the
+        # hazard coming back through some other global. Fixed seeds, so a
+        # failure is reproducible rather than a coin toss in CI.
+        foreach(seed 1 7 42)
+            add_test(NAME Shuffled_${target}_seed${seed}
+                     COMMAND ${target} --gtest_shuffle --gtest_random_seed=${seed})
+            set_tests_properties(Shuffled_${target}_seed${seed} PROPERTIES TIMEOUT 600)
+        endforeach()
     endfunction()
 
     gtest_discover_tests(ParametricCADCoreTests DISCOVERY_MODE PRE_TEST)

@@ -379,8 +379,18 @@ TEST(M7FreshProcess, GATE_J_EditWorksInASecondProcessWithTheDxfDeleted) {
 
     // A real second process. Quoted, because the build path contains a drive
     // letter and may contain spaces.
+    //
+    // Its output is REDIRECTED, and that is not tidiness (round 2's R3-M2).
+    // The child prints gtest's own "[  SKIPPED ]" line -- it is registered as
+    // a skipped test so it does not run standalone -- and that line reached
+    // this process's stdout. `gtest_discover_tests` stamps
+    // SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]" on every discovered test, so
+    // ctest read the child's line as THIS test's verdict: when the guard below
+    // was deliberately broken, ctest reported the gate *** Skipped and counted
+    // it as passing. The parent asserts on the exit status and on the deleted
+    // document, so the child's text carries nothing this test needs.
     const std::string command = "\"\"" + std::string(PARAMCAD_IMPORT_TEST_EXE) +
-                                "\" --gtest_filter=M7FreshProcessChild.*\"";
+                                "\" --gtest_filter=M7FreshProcessChild.* > NUL 2>&1\"";
     const int status = std::system(command.c_str());
 
     EXPECT_EQ(status, 0) << "the child process failed; command was: " << command;

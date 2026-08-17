@@ -535,9 +535,24 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
     // then by location. Naming must not depend on the order dimensions appeared
     // in the file, or the same drawing exported twice would produce Width and
     // Height the other way round.
+    // TOTAL, not merely deterministic (round 2's M2). Both keys above describe
+    // the TARGET, so two dimensions resolving to one line tie -- and std::sort
+    // is unstable, so the file order leaked straight through into which value
+    // got called Width. Two callouts on one edge is ordinary draughting, and
+    // the suite already treats it as such.
+    //
+    // The tiebreaks are properties of the DIMENSION, ordered so correctness
+    // never rests on the last one: value, then kind, then the source handle.
+    // The handle is a last resort only -- if two dimensions agree on target,
+    // value AND kind they are interchangeable, and a stable order among
+    // interchangeable things is all that is left to want (spec 7).
     std::sort(resolved.begin(), resolved.end(), [](const Candidate& a, const Candidate& b) {
         if (a.targetIsHorizontal != b.targetIsHorizontal) return a.targetIsHorizontal;
-        return Before(a.sortKey, b.sortKey);
+        if (a.sortKey.x != b.sortKey.x || a.sortKey.y != b.sortKey.y)
+            return Before(a.sortKey, b.sortKey);
+        if (a.valueMm != b.valueMm) return a.valueMm < b.valueMm;
+        if (a.dimension->kind != b.dimension->kind) return a.dimension->kind < b.dimension->kind;
+        return a.dimension->sourceHandle < b.dimension->sourceHandle;
     });
 
     bool usedWidth = false;
@@ -577,11 +592,17 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
     // Curve dimensions, ordered by the geometry they name -- centre first, then
     // radius to separate concentric curves. Never by the order they appeared in
     // the file (ADR-M7-002).
+    // Total for the same reason as the linear sort above: centre and radius
+    // describe the TARGET, so two callouts on one circle tie and the file
+    // order decided which one became Radius.
     std::sort(resolvedCurves.begin(), resolvedCurves.end(),
               [](const CurveCandidate& a, const CurveCandidate& b) {
                   if (a.center.x != b.center.x || a.center.y != b.center.y)
                       return Before(a.center, b.center);
-                  return a.radiusMm < b.radiusMm;
+                  if (a.radiusMm != b.radiusMm) return a.radiusMm < b.radiusMm;
+                  if (a.valueMm != b.valueMm) return a.valueMm < b.valueMm;
+                  if (a.diameter != b.diameter) return !a.diameter; // Radius before Diameter
+                  return a.dimension->sourceHandle < b.dimension->sourceHandle;
               });
 
     for (const CurveCandidate& candidate : resolvedCurves) {
@@ -982,7 +1003,21 @@ bool SketchAlreadyReconstructed(const PartDocument& document, ObjectId sketchId)
         // the dimension they just added rather than at the double import.
         if (std::holds_alternative<FixConstraint>(constraint.data)) return true;
     }
-    return false;
+    // ANY constraint at all, as the final answer (round 2's M3). The two
+    // clauses above are proxies for "M7 has run here", and every proxy this
+    // predicate has used could be removed by a public ReconstructionOptions
+    // flag: with `placeFix = false` there is no Fix to find, and a drawing
+    // with no dimensions has nothing dimensional either, so 8 constraints
+    // became 16 became 24 with each run reporting success -- ADR-M7-012's
+    // deferred damage, restored through a supported option.
+    //
+    // The widened rule costs one thing and it is worth naming: a sketch a
+    // USER constrained by hand can no longer be reconstructed from an
+    // imported drawing. That is the correct trade today -- M7.1's contract is
+    // refuse-not-merge, and merging into hand-authored constraints is exactly
+    // the decision a later slice has to make deliberately rather than
+    // inherit. The diagnostic says so.
+    return !sketch->constraints().empty();
 }
 
 ReconstructionResult ReconstructSketch(PartDocument& document, ObjectId sketchId,
@@ -995,8 +1030,9 @@ ReconstructionResult ReconstructSketch(PartDocument& document, ObjectId sketchId
     // contract -- a replacement mode is a later slice's decision, and the one
     // thing that must not happen meanwhile is Width, Width_2, Width_3.
     if (SketchAlreadyReconstructed(document, sketchId)) {
-        result.message = "this sketch already carries reconstructed dimensional constraints; "
-                         "remove them first to reconstruct again";
+        result.message = "this sketch already carries constraints; remove them first to "
+                         "reconstruct again (M7 refuses rather than merges, so nothing "
+                         "already in the sketch can be duplicated or contradicted)";
         return result;
     }
 

@@ -86,7 +86,24 @@ public:
     bool panelFitGuardCanFail();
 
 private:
+    // Session-scoped provenance (ADR-M7-017): never persisted, so a document
+    // reopened later simply has no entry.
+    //
+    // That sentence is only true while every entry's sketch is still in the
+    // document. The map had ONLY an insert path (round 2's M3), bounded purely
+    // by the shell having no File-Open and no delete-sketch command -- and a
+    // LOADED document's sketch ids come from the file, not the generator, so a
+    // collision with a live entry is not exotic. `forgetProvenanceFor` and
+    // `forgetAllProvenance` are the two erase paths, called from wherever a
+    // sketch or a document leaves; keeping them here means the next command
+    // added to the shell has an obvious thing to call rather than an
+    // invariant to rediscover.
     std::map<ObjectId, ReconstructionReport> reconstructionReports_;
+    void forgetProvenanceFor(ObjectId sketchId);
+    void forgetAllProvenance();
+    // Drops entries whose sketch is no longer in the document. The backstop
+    // for any future path that removes a sketch without telling this class.
+    void pruneProvenance();
 
 private slots:
     void onTreeSelectionChanged();

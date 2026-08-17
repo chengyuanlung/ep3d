@@ -428,6 +428,16 @@ int main(int argc, char** argv) {
             if (mp.valid) fail("a failing sample still reports current mass properties");
             if (!presenter.displayableSolids().empty())
                 fail("a failing sample still offers a solid to draw");
+        } else if (gExpectSkipped > 0) {
+            // An import that SKIPPED a dimension has no analytical volume, and
+            // that is not a gap in the oracle -- the skipped dimension is
+            // precisely what would have pinned the size, so the geometry keeps
+            // whatever the drawing happened to carry. Asserting a number here
+            // would be asserting the fixture's draughting error to six
+            // figures. What must hold is that a partial reconstruction still
+            // produces a real solid; the skip-row checks below carry the rest.
+            if (!mp.valid) fail("a partly reconstructed import produced no mass properties");
+            if (mp.volumeMm3 <= 0.0) fail("a partly reconstructed import produced no volume");
         } else if (built == Sample::M5UnderConstrained) {
             // Deliberately NO volume oracle. Nothing pins this sketch's size,
             // so its solved dimensions are whatever least-change answer the

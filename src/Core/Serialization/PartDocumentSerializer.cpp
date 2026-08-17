@@ -569,13 +569,33 @@ SaveResult validateSaveable(const PartDocument& document) {
     for (const Sketch* sketch : document.sketches()) {
         if (const SaveResult bad = capCheck(sketch->id(), "a sketch"); !bad) return bad;
         if (const SaveResult bad = uniqueCheck(sketch->id(), "a sketch"); !bad) return bad;
-        for (const SketchEntity& entity : sketch->entities())
+        // Entity and constraint ids are SKETCH-SCOPED, so they get their own
+        // per-sketch sets rather than joining the document-wide one (M7 round
+        // 2, R2-M2): the loader enforces exactly this scope, and folding them
+        // into the document set would refuse files the loader accepts --
+        // asymmetry in the other direction, which is no better.
+        std::unordered_set<ObjectId> sketchEntityIds;
+        std::unordered_set<ObjectId> sketchConstraintIds;
+        for (const SketchEntity& entity : sketch->entities()) {
             if (const SaveResult bad = capCheck(ToObjectId(entity.id), "a sketch entity"); !bad)
                 return bad;
-        for (const SketchConstraint& constraint : sketch->constraints())
+            if (!sketchEntityIds.insert(ToObjectId(entity.id)).second)
+                return SaveResult{SerializationError::DuplicateId,
+                                  "sketch " + idToString(sketch->id()) +
+                                      ": duplicate entity id " + idToString(ToObjectId(entity.id)) +
+                                      "; the resulting file could never be loaded back"};
+        }
+        for (const SketchConstraint& constraint : sketch->constraints()) {
             if (const SaveResult bad = capCheck(ToObjectId(constraint.id), "a sketch constraint");
                 !bad)
                 return bad;
+            if (!sketchConstraintIds.insert(ToObjectId(constraint.id)).second)
+                return SaveResult{SerializationError::DuplicateId,
+                                  "sketch " + idToString(sketch->id()) +
+                                      ": duplicate constraint id " +
+                                      idToString(ToObjectId(constraint.id)) +
+                                      "; the resulting file could never be loaded back"};
+        }
     }
     if (document.material() != nullptr) {
         if (const SaveResult bad = capCheck(document.material()->id(), "the material"); !bad)

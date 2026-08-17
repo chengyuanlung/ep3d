@@ -1,6 +1,9 @@
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Recompute/IRecomputable.h"
+#include "Core/Sketch/Sketch.h"
+#include "Core/Feature/PadFeature.h"
+#include "Core/Body/Body.h"
 #include "Core/Serialization/JsonValue.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include <gtest/gtest.h>
@@ -9,6 +12,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -899,15 +905,46 @@ TEST(SerializationV2Test, M2_SER_007_InvalidDependencyRejected) {
     EXPECT_EQ(result.document->dependencyGraph().dependentsOf(a), std::vector<ObjectId>{b});
 }
 
+// --- The id-generator ceiling, in a process of its own ----------------------
+//
+// These two tests must leave the process counter past 2^63 to mean anything,
+// and that is a PROCESS-GLOBAL, one-way mutation: every id issued afterwards
+// is above what the loader accepts, so every later test in the same process
+// saves documents it can never load. The old containment was a registration
+// ORDER -- this suite last, in the last translation unit -- held up by a
+// comment in CMakeLists and the WholeSuite_* entries as a consequence
+// detector. Round 2 measured what that was worth: `--gtest_shuffle` failed
+// 71, 11 and 16 tests at seeds 1, 7 and 42, all with "the document has id
+// 9223372036854775827". Containment by convention is not containment.
+//
+// So the mutation now happens in a CHILD PROCESS, exactly as Gate J's
+// fresh-process test does. The child skips unless its parent asks for it by
+// environment variable, so an ordinary run never poisons anything, and the
+// order of registration stops mattering at all.
+
+namespace {
+
+const char* const kGeneratorChildEnv = "PARAMCAD_GENERATOR_LIMIT_CHILD";
+
+// Proof of work. A child that SKIPPED also exits 0, so the parent needs
+// something only a child that actually RAN could have done -- the same
+// reasoning that made Gate J's child delete its document (round 1's M11).
+std::string GeneratorProofPath() {
+    return std::string(PARAMCAD_CORE_SCRATCH_DIR) + "/generator_limit_ran.txt";
+}
+
+bool DrivenByParent() {
+    const char* value = std::getenv(kGeneratorChildEnv);
+    return value != nullptr && value[0] != 0;
+}
+
+} // namespace
+
 // Defense-in-depth layer under the serializer cap: even a direct
 // AdvancePast(max uint64) clamps to kMaxObjectId and never wraps the counter.
-// NOTE: this permanently advances the shared generator to 2^63, so it lives
-// in its own suite whose first (and only) registration is the LAST test in
-// the last translation unit -- gtest runs whole suites in first-registration
-// order, so every other test precedes it in a single-process run; assertions
-// use monotonicity (not exact equality) so the test also passes under
-// gtest_discover_tests (one process per test).
-TEST(GeneratorLimitTest, AdvancePastMaxUint64DoesNotWrapGenerator) {
+TEST(GeneratorLimitChild, AdvancePastMaxUint64DoesNotWrapGenerator) {
+    if (!DrivenByParent()) GTEST_SKIP() << "driven by GeneratorLimit.RunsInItsOwnProcess";
+
     const ObjectId sane = ObjectIdGenerator::Next();
     ObjectIdGenerator::AdvancePast(std::numeric_limits<ObjectId>::max());
     const ObjectId next1 = ObjectIdGenerator::Next();
@@ -922,18 +959,16 @@ TEST(GeneratorLimitTest, AdvancePastMaxUint64DoesNotWrapGenerator) {
     EXPECT_GT(next2, next1) << "ids stopped increasing after AdvancePast(max)";
 }
 
-// The other half of the same hazard, and it belongs in THIS suite for the same
-// reason: it must leave the generator past the cap to mean anything.
-//
-// The counter surviving is only half the contract. Every id issued after that
-// point is ABOVE what the loader accepts, so a save that succeeds produces a
-// file that can never be opened -- independent review found
-// `ASSERT_TRUE(savePartDocument(...))` passing and the very next
-// `loadPartDocument` refusing the bytes it had just written. ObjectId.h claimed
-// "2^63 organic allocations of headroom"; the SAVABLE headroom is zero.
-//
-// validateSaveable now refuses, turning silent data loss into a reported error.
-TEST(GeneratorLimitTest, SavingIsRefusedOnceTheGeneratorHasPassedTheCap) {
+// The other half of the same hazard. The counter surviving is only half the
+// contract: every id issued past the cap is above what the loader accepts, so
+// a save that succeeds produces a file that can never be opened -- independent
+// review found `ASSERT_TRUE(savePartDocument(...))` passing and the very next
+// `loadPartDocument` refusing the bytes it had just written. ObjectId.h
+// claimed "2^63 organic allocations of headroom"; the SAVABLE headroom is
+// zero. validateSaveable refuses, turning silent data loss into a report.
+TEST(GeneratorLimitChild, SavingIsRefusedOnceTheGeneratorHasPassedTheCap) {
+    if (!DrivenByParent()) GTEST_SKIP() << "driven by GeneratorLimit.RunsInItsOwnProcess";
+
     ObjectIdGenerator::AdvancePast(kMaxObjectId);
 
     PartDocument document{"beyondTheCap"};
@@ -947,6 +982,131 @@ TEST(GeneratorLimitTest, SavingIsRefusedOnceTheGeneratorHasPassedTheCap) {
     EXPECT_FALSE(saved);
     EXPECT_NE(saved.message.find("could never be loaded back"), std::string::npos)
         << saved.message;
+
+    // Proof of work, written last so it cannot appear if the assertions above
+    // aborted the test.
+    std::ofstream proof(GeneratorProofPath());
+    proof << "ran";
+}
+
+// The cap check applies to SEVEN id classes and only one of them was ever
+// exercised (M7 round 2, R2-M1): the existing test poisons the generator before
+// constructing its document, so `document.id()` is over the cap and the FIRST
+// branch trips every time. Every other branch -- parameter, body, feature,
+// sketch, entity, constraint -- is a save-OK-then-load-refused path of its own
+// (ADR-M3-008, at its sixth recurrence), and none had a failing test.
+//
+// Each class needs a document created BEFORE the poisoning (so the document's
+// own id stays legal) and its offending sub-object added after.
+TEST(GeneratorLimitChild, EveryIdClassIsRefusedAtSaveOnceItPassesTheCap) {
+    if (!DrivenByParent()) GTEST_SKIP() << "driven by GeneratorLimit.RunsInItsOwnProcess";
+
+    // All five documents, and everything whose id must stay legal, first.
+    PartDocument forParameter{"capParameter"};
+    PartDocument forFeature{"capFeature"};
+    PartDocument forSketch{"capSketch"};
+    PartDocument forEntity{"capEntity"};
+    PartDocument forConstraint{"capConstraint"};
+
+    Sketch& entitySketch = forEntity.addSketch("s");
+    Sketch& constraintSketch = forConstraint.addSketch("s");
+    const SketchEntityId constrained = constraintSketch.addLine(Vec2{0, 0}, Vec2{100, 0});
+    Parameter& length = forConstraint.addParameter("L", 100.0, UnitType::Millimeter);
+    Body& featureBody = forFeature.addBody("Body001");
+    Parameter& padLength = forFeature.addParameter("PadLength", 20.0, UnitType::Millimeter);
+    Sketch& padSketch = forFeature.addSketch("PadSketch");
+    padSketch.addLine(Vec2{0, 0}, Vec2{100, 0});
+    padSketch.addLine(Vec2{100, 0}, Vec2{100, 50});
+    padSketch.addLine(Vec2{100, 50}, Vec2{0, 50});
+    padSketch.addLine(Vec2{0, 50}, Vec2{0, 0});
+
+    // Everything issued from here on is above what the loader accepts.
+    ObjectIdGenerator::AdvancePast(kMaxObjectId);
+
+    const auto refusalFor = [](const PartDocument& document) {
+        std::ostringstream out;
+        return savePartDocument(document, out);
+    };
+
+    forParameter.addParameter("W", 100.0, UnitType::Millimeter);
+    SaveResult saved = refusalFor(forParameter);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("a parameter"), std::string::npos) << saved.message;
+
+    forFeature.addPadFeature(featureBody, "Pad001", padSketch.id(), padLength.id());
+    saved = refusalFor(forFeature);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("a feature"), std::string::npos) << saved.message;
+
+    forSketch.addSketch("late");
+    saved = refusalFor(forSketch);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("a sketch"), std::string::npos) << saved.message;
+
+    entitySketch.addLine(Vec2{0, 0}, Vec2{10, 0});
+    saved = refusalFor(forEntity);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("a sketch entity"), std::string::npos) << saved.message;
+
+    forConstraint.addSketchConstraint(constraintSketch.id(),
+                                      LengthConstraint{constrained, length.id()});
+    saved = refusalFor(forConstraint);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("a sketch constraint"), std::string::npos) << saved.message;
+
+    // Written last: the parent reads it as proof the child ran rather than
+    // skipped, and it must not appear if any assertion above aborted.
+    std::ofstream proof(GeneratorProofPath() + ".breadth");
+    proof << "ran";
+}
+
+TEST(GeneratorLimit, RunsInItsOwnProcess) {
+    // ONE PROCESS PER CHILD TEST, not one process for all of them. Each child
+    // permanently advances the shared counter, so a second test in the same
+    // process finds every id it creates already over the cap -- which is how
+    // the per-id-class test first "failed": its documents were born above the
+    // ceiling and the document branch tripped before any of the branches it
+    // exists to check. Independent processes make each child's poisoning its
+    // own business, which is the whole point of moving them out here.
+    const char* const kChildTests[] = {
+        "GeneratorLimitChild.AdvancePastMaxUint64DoesNotWrapGenerator",
+        "GeneratorLimitChild.SavingIsRefusedOnceTheGeneratorHasPassedTheCap",
+        "GeneratorLimitChild.EveryIdClassIsRefusedAtSaveOnceItPassesTheCap"};
+
+    std::error_code ec;
+    const std::string proof = GeneratorProofPath();
+    const std::string breadthProof = proof + ".breadth";
+    std::filesystem::remove(proof, ec);
+    std::filesystem::remove(breadthProof, ec);
+
+    for (const char* test : kChildTests) {
+        // Output redirected for the reason Gate J's is: the child prints
+        // gtest's own "[  SKIPPED ]" lines for the tests its filter did not
+        // select, and gtest_discover_tests stamps a SKIP regex on every
+        // discovered test -- so the child's text would be read as THIS test's
+        // verdict, and a broken guard would report *** Skipped and count as
+        // passing.
+        const std::string command = "\"set " + std::string(kGeneratorChildEnv) + "=1 && \"" +
+                                    std::string(PARAMCAD_CORE_TEST_EXE) +
+                                    "\" --gtest_filter=" + test + " > NUL 2>&1\"";
+        EXPECT_EQ(std::system(command.c_str()), 0)
+            << "the child process failed; command was: " << command;
+    }
+
+    // A child that SKIPPED also exits 0, so the parent needs something only a
+    // child that actually RAN could have done (round 1's M11, same reasoning
+    // as Gate J's deleted document).
+    EXPECT_TRUE(std::filesystem::exists(proof))
+        << "the id-ceiling child skipped instead of running, so nothing was checked";
+    EXPECT_TRUE(std::filesystem::exists(breadthProof))
+        << "the per-id-class child skipped, so six of the seven branches went unchecked";
+    std::filesystem::remove(proof, ec);
+    std::filesystem::remove(breadthProof, ec);
+
+    // And THIS process is untouched: the whole point of the children.
+    PartDocument document{"afterTheChildren"};
+    EXPECT_LE(document.id(), kMaxObjectId)
+        << "a child's generator mutation leaked into the parent process";
 }
 
 } // namespace

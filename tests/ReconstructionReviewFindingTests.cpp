@@ -14,6 +14,8 @@
 #include "Core/Sketch/Sketch.h"
 #include <gtest/gtest.h>
 #include <cmath>
+#include <utility>
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -653,6 +655,95 @@ TEST(M7_REV2_M5, TheAxisToleranceItselfIsPinnedAtItsBoundary) {
     };
     EXPECT_FALSE(refusedAt(0.9 * tolerance)) << "a line inside the band was refused";
     EXPECT_TRUE(refusedAt(1.1 * tolerance)) << "a line outside the band was accepted as a Length";
+}
+
+TEST(M7_REV2_M2, TwoDimensionsOnOneLineAreNamedTheSameWayInBothFileOrders) {
+    // Round 2's M2: both sort keys described the TARGET, so two callouts on one
+    // edge tied and std::sort's instability let the file order decide which
+    // value became Width. Two dimensions on one line is ordinary draughting --
+    // the suite already had a test for it, which could not see this because
+    // both its dimensions carried the SAME value.
+    const auto named = [](bool reversed) {
+        PartDocument document{"rev2m2"};
+        const ObjectId sketchId = BuildDimensionedRectangle(document, 100.0, 50.0);
+        std::vector<ImportedDimension2D> dimensions = WidthDimension(100.0);
+        dimensions.front().sourceHandle = "AAA";
+        ImportedDimension2D second = dimensions.front();
+        second.statedValueMm = 103.0; // inside the agreement band, different value
+        second.sourceHandle = "BBB";
+        dimensions.push_back(second);
+        if (reversed) std::reverse(dimensions.begin(), dimensions.end());
+
+        const ReconstructionPlan plan =
+            AnalyzeForReconstruction(document, sketchId, dimensions);
+        std::vector<std::pair<std::string, double>> result;
+        for (const PlannedParameter& parameter : plan.parameters)
+            result.push_back({parameter.name, parameter.value});
+        std::sort(result.begin(), result.end());
+        return result;
+    };
+    EXPECT_EQ(named(false), named(true))
+        << "which value got which name depended on the order the file listed them";
+}
+
+TEST(M7_REV2_M2, TwoDimensionsOnOneCircleAreNamedTheSameWayInBothFileOrders) {
+    const auto named = [](bool reversed) {
+        PartDocument document{"rev2m2b"};
+        Sketch& sketch = document.addSketch("s");
+        sketch.addCircle(Vec2{50, 50}, 10.0);
+
+        ImportedDimension2D radial = Radial(Vec2{50, 50}, 10.0);
+        radial.statedValueMm = 10.0;
+        radial.sourceHandle = "AAA";
+        ImportedDimension2D second = radial;
+        second.statedValueMm = 10.4; // inside the band, different value
+        second.sourceHandle = "BBB";
+        std::vector<ImportedDimension2D> dimensions{radial, second};
+        if (reversed) std::reverse(dimensions.begin(), dimensions.end());
+
+        const ReconstructionPlan plan =
+            AnalyzeForReconstruction(document, sketch.id(), dimensions);
+        std::vector<std::pair<std::string, double>> result;
+        for (const PlannedParameter& parameter : plan.parameters)
+            result.push_back({parameter.name, parameter.value});
+        std::sort(result.begin(), result.end());
+        return result;
+    };
+    EXPECT_EQ(named(false), named(true))
+        << "which radius got which name depended on the order the file listed them";
+}
+
+TEST(M7_REV2_M3, RepeatedReconstructionDoesNotAccumulateWithAnyRecogniserDisabled) {
+    // Round 2's M3: idempotence keyed on FixConstraint, and `placeFix = false`
+    // -- a SUPPORTED option, present so Gate F can prove each recogniser
+    // load-bearing without editing the source -- removed the proxy. 8
+    // constraints became 16 became 24, each run reporting success: ADR-M7-012's
+    // deferred damage, where the redundancy hides until the USER finishes
+    // dimensioning and is then blamed on the dimension they just added.
+    const auto runThreeTimes = [](const ReconstructionOptions& options) {
+        PartDocument document{"rev2m3"};
+        const ObjectId sketchId = BuildDimensionedRectangle(document, 100.0, 50.0);
+        const std::vector<ImportedDimension2D> dimensions = WidthDimension(100.0);
+        ASSERT_TRUE(ReconstructSketch(document, sketchId, dimensions, options));
+        const std::size_t afterFirst = document.findSketch(sketchId)->constraints().size();
+        EXPECT_FALSE(ReconstructSketch(document, sketchId, dimensions, options));
+        EXPECT_FALSE(ReconstructSketch(document, sketchId, dimensions, options));
+        EXPECT_EQ(document.findSketch(sketchId)->constraints().size(), afterFirst)
+            << "re-running reconstruction accumulated constraints";
+    };
+
+    ReconstructionOptions noFix;
+    noFix.placeFix = false;
+    runThreeTimes(noFix);
+
+    ReconstructionOptions noDimensions;
+    noDimensions.reconstructExplicitDimensions = false;
+    runThreeTimes(noDimensions);
+
+    ReconstructionOptions bare;
+    bare.placeFix = false;
+    bare.reconstructExplicitDimensions = false;
+    runThreeTimes(bare);
 }
 
 } // namespace
