@@ -1,6 +1,13 @@
 # M7 Completion Report — DXF Dimension and Constraint Reconstruction
 
-> **STATUS: REQUEST CHANGES — round 1 complete, round 2 required.**
+> **STATUS: rounds 1 and 2 complete; owner UI validation still open.**
+>
+> **Everything below the next paragraph was written after ROUND 1 and is kept
+> as the round-1 record. Round 2 then ran and refuted this report's central
+> claim** — see `M7_IndependentReview.md` round 2, and the correction inline
+> below. Round 4 (of the M8 review, whose scope included M7's round-2 fixes)
+> found this file still asserting the refuted sentence and required this
+> header (R3R4-M5).
 >
 > Independent review round 1 ran three partitioned reviewers per spec 33. All
 > three returned `REQUEST CHANGES` at **71/100**, and two reached the same
@@ -16,12 +23,24 @@
 > mutation 8 was credited with guarding Gate J against a skipping child, which
 > it does not. Both corrected in place.
 >
-> **All four Criticals and all fourteen Majors are now fixed and
-> mutation-verified**, in five commits. What remains before M7 can close:
+> ~~**All four Criticals and all fourteen Majors are now fixed and
+> mutation-verified**, in five commits.~~
 >
-> - **Round 2 review: NOT EXECUTED.** This project has never had a review round
->   that did not find defects introduced by the previous round's fixes. Round 1
->   changed a great deal.
+> **THAT SENTENCE WAS FALSE, and round 2 proved it by execution.** Two of round
+> 1's Critical fixes did not close their findings — C3's identity check passed
+> on the agreement band alone, and a length-preserving edit still let the solver
+> rewrite the user's geometry — and one of them silently voided another round-1
+> fix, leaving the transactional rollback unreachable with four vacuous tests
+> whose "M12 mutation-verified" credit was itself false. Round 2's two Criticals
+> and eight Majors are fixed on `ebf2f16`; its remaining six Majors on
+> `7a60b6b`. Round 4 re-executed round 2's Y-battery: 4/4 CONFIRMED exact.
+>
+> What remains before M7 can close:
+>
+> - **Round 2 review: EXECUTED** (three reviewers on `9e0c399`, all REQUEST
+>   CHANGES, 72/73/73). Its fixes were reviewed in turn as part of the M8
+>   review's round 4, which found two of the seven claimed pins overstated
+>   (the cap-check breadth and the provenance erase path) — both since fixed.
 > - **Owner manual UI validation: NOT EXECUTED.** `M7_UI_UserValidation.md`,
 >   every row blank. Its Test B is now actually runnable — see below.
 > - Two items inherited from M6: `M6.11`–`M6.14` were never reviewed, and M6's

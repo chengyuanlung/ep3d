@@ -37,14 +37,24 @@ with dress-on-dress (Fillet→Chamfer) round-tripping in v8.
 | | Result |
 |---|---|
 | Debug / Release builds | 0 errors |
-| ctest Debug | **737 / 737** registered; 736 execute (1 registered-Skipped fresh-process child) |
-| ctest Release | **737 / 737** registered; 736 execute (same child) |
-| Single-process Core binary | **406 / 406 in BOTH configs** (the check M7's review forced) |
-| Release actually ran Release binaries | 737 command lines name `build\Release\`, 0 name Debug |
+| ctest Debug | **808 registered / 804 executing**; 808/808 pass (4 registered-Skipped children, spawned by their parents) |
+| ctest Release | **808 registered / 804 executing**; 808/808 pass (same four) |
+| Single-process Core binary | **444 registered / 441 pass / 3 child-Skipped, IDENTICAL in both configs** (the check M7's review forced) |
+| Release actually ran Release binaries | every command line names `build\Release\`, none name Debug |
 | Whole-suite ctest entries | present and passing (the net that catches registration-order poisoning) |
 
-Baseline at M8 start: 690. **47 tests added across M8.** Schema pins moved
-5→6→7→8; each bump forced its updates, which is those tests working.
+Baseline at M8 start: 690. **118 tests added across M8**, of which 107 by the end
+of M8.6 and 11 more in review rounds 3 and 4. Schema pins moved 5→6→7→8; each
+bump forced its updates, which is those tests working.
+
+> **These figures were 737/736 and 406/406 until round 4.** They were true when
+> M8.6 was written and went stale as the review rounds added tests; three
+> separate rounds have now had to correct a count in this project's record, so
+> the counts here are stated as **registered / executing** and dated to the head
+> they were measured on. Round 4's totals above are measured on its fix head,
+> both configurations, with nothing else running -- a count taken while a second
+> test run was in flight reads one lower, because the two contend for the
+> generator-limit proof file.
 
 **Forced renames, each recorded where it happened:** placeholder-type examples
 "Revolve" → "Loft" (M8.2) and "Fillet" → "Sweep" (M8.3) — the third and fourth

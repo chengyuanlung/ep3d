@@ -243,7 +243,7 @@ generalizations.
 | ID | Finding | Status |
 |---|---|---|
 | R1R3-M1 / R2R3-M1 / R3R3-M2 | **All three reviewers independently: `restorePlaceholderFeature` — round 2's own new facade — was the seventh restore path and the only one without a duplicate-id guard.** Save-OK→load-refused demonstrated multiple ways (ADR-M3-008's class, fifth recurrence, introduced by a fix); sharpest variant: placeholders are unregistered, so a placeholder-held id silently defeats the six sibling guards' `registry_.contains` checks, and `removeObject` cannot see the ghost. | FIXED — the guard has BOTH halves (registry check + all-bodies feature scan, since the registry is blind to placeholders), checked before construction; M8_REV_341/342 pin both collision flavors |
-| R1R3-M1 (2nd half) | `validateSaveable` had no id-uniqueness net at all — the loader has enforced document-wide id uniqueness since M2, the save side never did. | FIXED — the loader's net mirrored in `validateSaveable` (document/parameters/material/bodies/features/sketches, loader-worded); with the facade guards in place no current route reaches it, recorded masked-by-design below |
+| R1R3-M1 (2nd half) | `validateSaveable` had no id-uniqueness net at all — the loader has enforced document-wide id uniqueness since M2, the save side never did. | FIXED — the loader's net mirrored in `validateSaveable` (document/parameters/material/bodies/features/sketches, loader-worded); **round 4 refuted the "no current route reaches it" half of this sentence** — see R1R4-C2 and the corrected X2 row |
 | R3R3-M1 | **"M8_REV_322 pins the table" was refuted by execution**: the fixture consumed only Box/Pad/Revolve as bases — dropping "Chamfer" from the table survived all 763 executing tests (a legal Pad←Chamfer←Fillet file then saved and refused to load). Four doc sites overstated the pin. | FIXED — fixture expanded so every table name is consumed as a base (9 solids: Box←Pocket←Fillet←Chamfer; Pad←Chamfer←Fillet; Revolve←Pocket); X-battery re-kills both surviving drops; all four doc sites corrected to the round-3 truth |
 | R1R3-M2 | The const-stops-at-the-pointer accessor class is NOT unique to `bodies()`: `parameters().items()` (mutable `Parameter*`, public `setValue` → stale-as-current demonstrated), `material()` (shared_ptr, public `setDensity` → stale mass demonstrated), `frames()` (same shape, inert today). | FIXED for the two live doors — Parameter mutators private (friends: PartDocument, DocumentRecomputeEngine; new `setParameterExpression` facade fills the gap that had NO facade path), `material()` returns `const Material*`; `frames()`/connectors recorded as a known-open-inert door in the header |
 | R2R3-m1 | The shared table conflates "legal chain base" and "reserved concrete name" — correct today, a trap the day a concrete NON-solid type ships. | DOCUMENTED (future-divergence note at the table: introduce `kConcreteTypeNames` then) |
@@ -260,7 +260,7 @@ Same discipline (binaries deleted/asserted, touch-restores, `cmp`-verified):
 | # | Mutation | Verdict |
 |---|---|---|
 | X1 | placeholder restore guard deleted | **guarded** — M8_REV_341 + M8_REV_342 |
-| X2 | save-side id-uniqueness net deleted | **masked by design** — the facade guard refuses every current route first (stated, like V8; the net is the backstop for future unregistered types) |
+| X2 | save-side id-uniqueness net deleted | ~~**masked by design** — the facade guard refuses every current route first~~ **REFUTED BY ROUND 4 (R1R4-C2).** Two current routes reached it, both through the public facade: a placeholder-held id defeated every sibling restore guard (R1R4-C1), and the document's own id defeated all of them (R2R4-m1). The net was load-bearing while recorded as dead, and therefore untested. Both routes are now closed at the guard, which puts the net back in backstop position — but it is not being re-recorded as unreachable-by-inspection, because that inspection was wrong. |
 | X3 | "Chamfer" dropped from the solid table (round 3's survivor) | **guarded** — expanded M8_REV_322 |
 | X4 | "Pocket" dropped from the solid table (round 3's survivor) | **guarded** — expanded M8_REV_322 |
 | X5 | "Pocket" dropped from the consumer table | **guarded** — M8_SER_003 + M8_REV_304/305 |
@@ -274,3 +274,149 @@ above are themselves unreviewed — the same question as after round 2, one
 level up; the change set is again small (one guard, one net, one fixture
 expansion, two accessor closures, doc corrections). The owner decides whether
 a round 4 runs or the remaining risk is accepted and recorded.
+
+---
+
+# Round 4
+
+**Reviewed commit:** `7a60b6b`. Fresh exports at
+`D:/Program2/EP3D/m8review4/{r1,r2,r3}`, same protocol and discipline. The
+mandate covered **two** unreviewed change sets rather than one: `9e0c399`
+(M8 round-3 fixes) **and** `ebf2f16` + `7a60b6b` (M7 round-2 fixes and
+follow-up), because both were work nobody but their author had read, and M8
+cannot close while M7's review is open.
+
+| Reviewer | Partition | Decision | Score |
+|---|---|---|---|
+| R1 | chain semantics / round-3 fixes as code | **REQUEST CHANGES** | 71/100 |
+| R2 | identity / persistence / serializer | **REQUEST CHANGES** | 68/100 |
+| R3 | evidence quality / M7 round-2 follow-up / the record | **REQUEST CHANGES** | 76/100 |
+
+**Round verdict: REQUEST CHANGES -- 3 Criticals.** The round-N pattern held for
+the fourth time, and twice in its sharpest form: **a fix that named a hole in
+neighbouring code and did not close it**, and **a table that reproduced the
+table-drift defect inside the commit that fixed table drift**.
+
+Two findings were reached independently by two reviewers each -- the
+const-accessor class and the consumer-table drift -- which is the strongest
+signal this protocol produces.
+
+## Round-4 findings register
+
+### Critical
+
+| ID | Finding | Status |
+|---|---|---|
+| R1R4-C1 | **The round-3 duplicate-id guard is one-directional.** `restorePlaceholderFeature` got a two-half check and its own comment stated the general fact -- placeholders are unregistered, so a placeholder-held id defeated the sibling guards -- but **no sibling was changed**. All ten other restore paths still checked only `registry_.contains`. Restoring a Pad onto a placeholder's id left two features carrying one ObjectId in one Body; the repair was worse than the disease -- `removeObject` resolved the Pad through the registry, unregistered it, dropped its graph node, then `Body::removeFeature` erased the FIRST match (the placeholder), leaving the Pad an unregistered, graph-less, unremovable orphan **that then saved and loaded cleanly as a healthy Pad**. Silent divergence between memory and file; ADR-M8-008's unconstructible state constructed through public calls alone. Demonstrated by execution. | FIXED |
+| R2R4-C1 | **`savePartDocument` writes a `dependencies` edge its own loader refuses** -- ADR-M3-008's named worst class, **sixth recurrence**, a different route from round 3's. The writer persists any edge whose endpoints are persisted ids and whose DEPENDENT is not a feature; the loader accepts an endpoint only if it is a PARAMETER. So `addDependency(parameterId, featureId)` -- four public facade calls -- saved OK and load-refused. `validateSaveable`, extended in round 3 precisely as this net, never walked the graph at all. Demonstrated by execution. | FIXED |
+| R1R4-C2 | **The X2 masked-by-design row is refuted.** Round 3 recorded the save-side id-uniqueness net as unreachable ("the facade guard refuses every current route first"). R1R4-C1 was a current route that landed on it, and R2R4-m1 found a second (the document's own id). The net was load-bearing while documented as dead -- and therefore untested. | FIXED (both routes closed at the guard; the record corrected below) |
+
+### Major
+
+| ID | Finding | Status |
+|---|---|---|
+| R1R4-M1 / R2R4-M1 | **The const-accessor class was declared closed with its largest doors open** (two reviewers, two different doors). `bodies()` then `Body::features()` stops constness at the pointer twice, so `Feature::setSuppressed`, `markDirty`, `setMaterialReference` and `clearMaterialReference` were reachable from a `const PartDocument&` -- state changed and a document made unsavable, in code that compiles, with no C2248 counterpart to round 3's X6. Separately `ObjectRegistry::find` was const but its variant held NON-const pointees, handing out mutable `Material*`, `Sketch*` and `Feature*` -- reopening two of the three doors round 3 had just shut (a density doubled through a const document, cached mass still valid). | FIXED -- Feature's mutators and `IMaterialReferencing`'s are private with `friend PartDocument`; `ObjectRegistry` grew a `ConstObjectRef` projection so the const overload yields const pointees; `Material::setDensity` private, closing the last non-const door (`addMaterial` returns `Material&`) |
+| R1R4-M2 / R2R4-M2 | **`kConsumingFeatureTypeNames` pins only some of its members while its comment claims all of them** (two reviewers). "Fillet/Chamfer by M8_SER_203" -- 203 swaps Pad and FILLET; nothing swapped Fillet and CHAMFER, so dropping "Chamfer" survived every shipped test. R3R3-M1 reproduced **inside the commit that fixed R3R3-M1, in the table that commit added.** | FIXED -- `M8_SER_205` moves a Chamfer ahead of the Fillet it consumes and word-pins the chain-walk diagnostic; the comment credits each member separately and states the rule for future types |
+| R2R4-M3 / R3R4-M1 | **"reaches all seven branches" is false** (two reviewers): `validateSaveable` has EIGHT `capCheck` sites and the child test reached FIVE. The document, body and material branches were reached by nothing -- deleting body and material left everything green while an over-cap Body and an over-cap Material each saved OK and then load-refused. | FIXED -- the child test drives all eight, each in its own document, with the document's own id constructed after the advance |
+| R2R4-M4 | **The reconstruction fingerprint's CONTENT is unpinned, and it omitted `SketchArc::counterClockwise`** while its comment claimed bit-identical geometry. Four separate field-contribution drops survived every test. The direction flag selects WHICH ARC the entity is, and the flip is reachable (`removeEntity` then `restoreEntity` reuses the id). | FIXED -- the flag is mixed; `M7_REV4_M4` pins every field by building twins with FIXED entity ids. *The first version of that test was itself non-discriminating* -- fresh documents gave fresh ids, so every row passed on the id contribution alone and dropping the circle radius still passed. Caught by mutating the line the test claims to pin, and recorded because it is the very class the test exists to close |
+| R3R4-M2 | **The `reconstructionReports_` erase path was unreachable and its comment false**: `forgetProvenanceFor` had zero callers, and replacing `pruneProvenance`'s whole body with `return;` failed nothing anywhere. A Major closed by a fix no test could see. | FIXED -- `pruneProvenance` moved into `refreshAll`, so every path that rebuilds the shell prunes; the viewer selftest removes an imported sketch and asserts its report is gone (mutation ZA4 re-run: killed). The header states which of the three paths is actually wired |
+| R3R4-M3 | **The skip-diagnostic row is pinned for EXISTENCE only** -- non-emptiness, directly under a comment condemning non-emptiness. Hard-coding every skip detail to the literal "42" left all viewer smokes and all ctest entries green. Third appearance of a twice-penalised class, reintroduced by the fix written to close it. | FIXED -- the row is asserted EXACT against the report's own composed string (mutation ZC1 re-run: killed) |
+| R3R4-M4 | **`SketchAlreadyReconstructed`'s public header contract is false**: round 2's fix widened the predicate to "any constraint at all" and documented that in the .cpp, leaving the header -- the thing a caller reads -- describing the old "dimensional constraints bound to Parameters" rule. | FIXED -- the header states the real predicate, its cost, and why the name is wider than it looks |
+| R3R4-M5 | **The record asserts, in three documents, things `7a60b6b` made false**: `AGENTS.md` still said "Six Majors remain OPEN" and contradicted itself twenty lines apart; `M7_CompletionReport.md` still read "round 2 required", "Round 2 review: NOT EXECUTED", and "All four Criticals and all fourteen Majors are now fixed and mutation-verified" -- the exact sentence round 2 refuted. | FIXED -- all three corrected, with the refuted sentence struck through rather than deleted |
+
+### Minor
+
+| ID | Finding | Status |
+|---|---|---|
+| R1R4-m1 | `PartDocument::setSuppressed` set the GRAPH node only, so `ComputeState::Suppressed` was unobservable through the facade -- the graph said Suppressed while the feature said Dirty, and no UI could report suppression at all. | FIXED -- the facade writes both. The deeper half (M2's rule that dirtiness propagates THROUGH a suppressed node, wrong for an M8 chain) is a semantics change with an ADR attached and belongs to M9.3; recorded at the code and in `M9_SPEC.md` section 3.1 |
+| R2R4-m1 | The duplicate-id guard had a THIRD blind spot: the document's own id (a `PartDocument` does not register itself). Build-OK, then save-refused for ever. | FIXED -- checked first, pinned by `M8_REV_355` |
+| R1R4-m2 | `requireConsumableBase` took the LAST id match instead of the first (no `break`). | FIXED |
+| R2R4-m2 / R3R4-m1 | The per-sketch entity/constraint uniqueness checks added for R2-M2 are unreachable (`restoreEntity`/`restoreConstraint` already refuse duplicates) and were recorded as a Major closed rather than as masked-by-design. | RECORDED below, V8/X2-style |
+| R2R4-m3 | An edge with a non-persisted endpoint (e.g. Sketch to Parameter) is silently DROPPED at save: save OK, load OK, different document. | **OPEN -- recorded, not fixed.** It is the inverse of R2R4-C1 and the honest fix has the same shape (refuse rather than diverge), but it changes what existing documents can save, so it is named here for the owner rather than decided inside a review-fix round |
+| R3R4-m2 / R3R4-m3 | "797/797" and "432/432" repeat the registered-vs-executing nit, and the current totals appeared in no shipped document. | CORRECTED -- counts are stated as registered/executing below |
+
+## Masked by design (stated, never counted as coverage)
+
+- The per-sketch entity and constraint uniqueness checks in `validateSaveable`
+  (R2-M2's fix): unreachable through the public API, because
+  `Sketch::restoreEntity` and `restoreConstraint` refuse a duplicate id first.
+  Deleting both fails nothing, by design.
+- `Body::removeFeature` erasing by POINTER IDENTITY rather than by id: with
+  `requireUnusedId` on every restore path a duplicate-id body is
+  unconstructible, so reverting to first-id-match fails nothing (round-4
+  mutation F, verified UNGUARDED). Defense in depth with no reachable failure.
+- The save-side id-uniqueness net is **no longer** listed here -- see R1R4-C2.
+  Both routes that reached it are now closed at the guard, which puts it back in
+  backstop position, but it is not recorded as unreachable-by-inspection again:
+  two rounds running, an inspection-only "unreachable" claim turned out wrong.
+
+## Round-4 fix verification (Z-battery)
+
+Same discipline throughout: binaries deleted before each rebuild and asserted
+present afterwards, plain-copy plus `touch` restores, every mutation
+`cmp`-verified as landed before any verdict was believed.
+
+| # | Mutation | Verdict |
+|---|---|---|
+| A | dress "Base feature" panel row deleted | **guarded** -- `m8-dress` only |
+| B | revolve "Angle" panel row deleted | **guarded** -- `m8-revolve` only |
+| C | the fillet never created in the m8-dress sample | **guarded** -- four assertions, including the volume oracle |
+| D | revolve sample angle 2pi to pi | **guarded** -- volume oracle and Angle row |
+| E | the feature-scan half of `requireUnusedId` removed | **guarded** -- M8_REV_342, 351, 352, 353 |
+| F | `Body::removeFeature` back to first-id-match | **UNGUARDED -- masked by design**, stated above |
+| G | "Chamfer" dropped from `kConsumingFeatureTypeNames` | **guarded** -- M8_SER_205, and by nothing else, which was the finding |
+| H | `mixDouble(circle->radiusMm)` dropped from the fingerprint | **guarded** -- M7_REV4_M4 *(and UNGUARDED against that test's first version, which is why it was rewritten)* |
+| H2 | the arc direction contribution dropped | **guarded** -- M7_REV4_M4 |
+| H3 | the entity id contribution dropped | **guarded** -- M7_REV4_M4 |
+| ZA4 | `pruneProvenance` body replaced with `return;` | **guarded** -- viewer selftest |
+| ZC1 | every skip row's detail hard-coded to "42" | **guarded** -- viewer selftest |
+
+## What round 4 confirmed sound (honest negatives)
+
+Both prior batteries survived row-by-row re-execution by an independent
+reviewer: the **X-battery 6/6 CONFIRMED** and the **Y-battery 4/4 CONFIRMED**,
+every kill list matching the record test for test -- the first batteries in this
+project a reviewer could not overstate. `M8_REV_322` genuinely pins all six
+solid type names (reviewers dropped names the X-battery never touched and it
+died every time). Both halves of the round-3 placeholder guard are real and
+independently pinned. The GATE_E3 two-layer credit round 3 rewrote is exactly
+right in both directions. Every geometry oracle was re-derived independently and
+confirmed again (94000, 40000pi, the four-term Minkowski rounded box, the 320pi
+Pappus chamfer). `DocumentRecomputeEngine`'s friendship is not abusable; the
+`Parameter*` door is genuinely shut; `setParameterExpression` covers everything
+the private mutators served; save and load uniqueness scopes are exactly
+equivalent in both directions; Gate J's redirect is load-bearing in both
+directions, proven with a negative control; `Shuffled_*` entries exist for all
+five suites and discriminate; X6's compile-time closure is real; Release matches
+Debug exactly.
+
+## Totals, stated as registered / executing
+
+Measured on the round-4 fix head, both configurations, with nothing else
+running (a count taken while a second test run was in flight read one test
+lower -- the two contend for the generator-limit proof file, which is a
+measurement hazard, not a product defect, and is recorded so the next reader
+does not chase it):
+
+| | Debug | Release |
+|---|---|---|
+| ctest entries registered | **808** | **808** |
+| of those, executing | **804** | **804** |
+| registered-Skipped children (spawned by their parents) | 4 | 4 |
+| ctest result | 808/808 pass | 808/808 pass |
+| Single-process `ParametricCADCoreTests.exe` | 444 registered / **441 pass** / 3 child-Skipped | 444 registered / **441 pass** / 3 child-Skipped |
+
+Round-4 baseline was 797 registered / 793 executing and 435 / 432, so the round
+added 11 ctest entries and 9 Core tests.
+
+## Standing blocks after round 4
+
+Round 4's own fixes are **unreviewed**, as every round's have been. The change
+set is again smaller than the last. Round 5, or accepted-and-recorded risk, is
+the owner's call.
+
+Owner UI validation remains open for **M6, M7 and M8**. M8's checklist now
+exists (`M8_UI_UserValidation.md`) and covers all four required features,
+because the shell gained `--sample m8-revolve` and `--sample m8-dress`; before
+those, Revolve, Fillet and Chamfer were unreachable from the running
+application and this validation could only ever have covered the pocket.

@@ -2910,3 +2910,743 @@ mutations recorded in `docs/reviews/M8_IndependentReview.md`.
   survive single-layer mutation by design (document-wide creation scan, the
   presenter's document-wide set, the save-side uniqueness branch); the review
   doc records them as masked-by-design so audits do not read them as holes.
+
+## ADR-M9-001 — An undo record is a semantic delta, never a snapshot (M9.1)
+Status: Accepted.
+
+The undo history stores **ObjectIds, parameter values and feature snapshots**,
+and re-executes them through the ordinary document facade. It stores no
+`KernelShape`, no OCCT handle, and no copy of the document.
+
+Two things go wrong with the snapshot design that this rules out. A stack of
+document copies pins kernel memory for the length of a session, which is the
+boring reason. The sharp reason is that a redo would then RESURRECT geometry
+rather than re-derive it, so an undo/redo pair could put a shape on screen that
+the document's current parameters no longer produce -- a stale result presented
+as current, which is the failure ADR-M3-004 exists to prevent, arrived at from
+a direction no recompute would ever check.
+
+Consequences, each of which is a test:
+
+- Undo restores VALUES; the geometry is whatever the next recompute builds.
+  GATE_A asserts the volume returns to exactly 94000, and it returns there
+  through the kernel, not through the history.
+- Undo does NOT recompute, exactly as `setParameterValue` does not. The caller
+  decides when to rebuild, which is what lets GATE_D prove selectivity by
+  counters -- undoing a Depth edit runs one extrude and one subtract and does
+  not re-solve the sketch.
+- An undone deletion is rebuilt through `restore*`, so it comes back with its
+  ORIGINAL ObjectId, its chain reference and its position in the feature array.
+  A lookalike with a fresh id would leave every other reference in the document
+  pointing at nothing, and no volume check would notice (GATE_C).
+- The history is **session state, not document state**, like M7's provenance
+  (ADR-M7-017). It is not serialized, and a loaded document starts empty rather
+  than offering to undo into someone else's session (M9_UNDO_402).
+
+### What M9.1 will not replay, and why it says so out loud
+
+Removing a Body, a Parameter, a Sketch or a Material -- or removing a feature
+that another feature CONSUMES -- cannot be replayed by a feature snapshot
+alone. The consumer's chain edge dies with the removed node, so restoring the
+feature by itself would give back an object without giving back the model.
+
+These operations therefore **clear both stacks** rather than leave a history
+that would silently do the wrong thing. The clearing is observable --
+`undoDepth()` falls to zero -- so a UI can tell the user the history ended
+instead of offering an undo that lies. GATE_C3 asserts it, because a limitation
+recorded only in a comment is a limitation nobody will notice has changed.
+
+Restoring these is M9.2/M9.3 work: it needs the edge set, not just the node.
+
+### One dispatch, not three
+
+`FeatureSnapshot` is shared with the serializer, which was rewritten to restore
+through it. Two places already knew how to turn a feature into semantic fields
+and back; a third copy for undo would have reproduced this project's second
+recurring defect class -- a table pinned for some of its members with a comment
+claiming all of them, found in `kSolidFeatureTypeNames` in review round 3 and
+again in `kConsumingFeatureTypeNames` in round 4, inside the very commit that
+fixed the first. Adopting the shared unit takes the count of per-type
+enumerations DOWN.
+
+`SnapshotFeature` is pinned by `M9_UNDO_401`, which asserts each type's fields
+against the ids the document was built with. Comparing two snapshots instead
+would pass happily with the same field dropped from both -- the exact mistake
+made and caught inside round 4's own fingerprint test.
+
+## ADR-M9-002 — Suppression closes the chain by RESOLUTION, not by rewriting (M9.3)
+Status: Accepted.
+
+A suppressed feature is not evaluated, not displayed, and not a candidate for
+the chain tail. Its consumer keeps the base reference it has always had, and
+resolution walks past inactive links at recompute time:
+`PartDocument::activeChainBase` returns the nearest ACTIVE solid at or above a
+given base.
+
+Suppress the Pocket in `Sketch -> Pad -> Pocket -> Fillet` and the Fillet
+dresses the Pad. Unsuppress it and the Fillet dresses the Pocket again. Neither
+feature was edited, and `FilletFeature::baseFeatureId()` names the Pocket
+throughout — **suppression is a state, not an edit, and the model still says
+what the user built.** Rewriting the stored reference would have been simpler
+and would have destroyed the information needed to put it back.
+
+### The distinction that makes this safe
+
+M8's review round 1 found that counting only VALID consumers as "consuming" let
+a failed pocket un-consume its base, so the viewer fell back to the bare pad —
+a healthy-looking solid shown exactly when the part is broken. Consumption
+became structural because of it.
+
+Suppression flips that back, deliberately, and only for the deliberate case:
+
+- A **failed** consumer's result is missing or wrong. The part IS broken, and
+  falling back to its base would hide that.
+- A **suppressed** consumer is switched off because the user switched it off.
+  Showing what the model produces without it is precisely what they asked for.
+
+The two are one predicate apart and the difference is not cosmetic, so both
+directions are pinned: GATE_F/F2 for the suppressed case, and M8's own gates
+still hold the failed case.
+
+### When the chain runs out
+
+Suppress the only base — the Pad under a Pocket — and the walk reaches
+kInvalidObjectId. The consumer then FAILS with a diagnostic. It must: the pad
+still holds its retained shape (ADR-M3-001 keeps it byte-for-byte), so
+resolving to it anyway would cut against geometry the user has just switched
+off and produce a healthy-looking wrong solid. GATE_F3.
+
+Suppression is undoable (`SuppressionEdit`) and round-trips through the file
+with no new format, because `ComputeState` has been persisted since M3.
+
+## ADR-M9-003 — Preview state is not document state (M9.2)
+Status: Accepted.
+
+`FeatureEditSession` previews an edit on a **semantic copy** of the document,
+made by saving and loading it. While a session is open, nothing in the real
+document, its registry, its graph or its undo history has changed, and Cancel is
+indistinguishable from never having started.
+
+The rejected alternative was apply-compute-revert. It mutates the thing the user
+is looking at, and every observer — the viewer, the mass properties, an
+autosave, a second session — would see a state the user never asked for.
+"Nobody looks in between" is an assumption this project has been wrong about
+before.
+
+Costs, stated rather than discovered later:
+
+- A save/load per session open, proportional to document size. That is why a
+  session is opened per EDIT, not per keystroke, and why staged edits to one
+  parameter COLLAPSE — the session holds the destination, not the route.
+- The copy borrows the real document's kernel and solver (ADR-M3-003's
+  arrangement); a session never outlives the document it was opened on.
+
+Accept applies every staged edit inside ONE transaction, so an edit that moved
+three values is one undo step, and an edit that moved none records nothing at
+all. Accept does not recompute, for the same reason undo does not (ADR-M9-001):
+the caller decides when to rebuild. An abandoned session CANCELS in its
+destructor — a destructor that committed would turn every early return in a UI
+slot into an accidental edit.
+
+## ADR-M9-004 — Rollback is a position, and it is document state (M9.4)
+Status: Accepted.
+
+A Body carries a rollback position: a COUNT of features evaluated. Features at
+or after it are not computed and not displayed. They are not removed, not
+modified, and not reordered.
+
+**A count, not a feature id**, because a position before the first feature and a
+position after the last one both have to be expressible and neither names a
+feature. This is not the ADR-M4-004 violation it resembles: the count is not an
+identity, nothing references it, and the features it hides keep their own ids
+and their own order. Out-of-range values clamp to the feature count, so a
+position can never silently hide a feature a later edit appended.
+
+**Persisted (schema v9)**, because where the user is looking is part of the
+document: reopening a part that was saved rolled back to step three at step
+three is what a user expects. Written only when it hides something, so a
+document nobody has rolled back is byte-identical to its v8 self apart from the
+version number. A file whose position has drifted past its own feature list
+evaluates everything rather than being refused — a view that has drifted is not
+a corrupt document.
+
+**Not written into ComputeState.** Rolled-back nodes are skipped through a
+per-pass predicate the document supplies to `DependencyGraph::recompute`, and
+their state is left alone. Marking them Suppressed instead would have reused
+existing machinery and would have persisted, into the file, a suppression the
+user never asked for.
+
+Rollback shares one predicate with suppression — `isFeatureActive` — because
+the document treats them identically: an INACTIVE feature is not evaluated, not
+displayed, not a tail, and not a link the chain resolves through. Only the
+reason differs, and only the user cares about the reason.
+
+Gate G pins that a save at a rolled-back position round-trips the FULL history
+and reopens at the same step: a rollback implemented as truncation passes a
+volume check and fails on the feature count.
+
+## ADR-M9-005 — Feature creation is COMMANDS, not dialogs (M9.5)
+Status: Accepted.
+
+ADR-M8-007 deferred "feature creation dialogs" to M9's edit-transaction work.
+M9 ships creation as menu **commands** — Insert > Pad from Selected Sketch,
+Pocket, Fillet, Chamfer — and no modal dialog. The deferral is closed, not
+re-deferred, and the shape changed on purpose.
+
+The inputs a Pad needs are a sketch and a length. The tree already selects the
+sketch. The property panel already edits the length, in place, with the solid
+on screen next to it. A modal dialog would add a SECOND place to type the same
+number, and the number typed there would be less informative than the one typed
+in the panel, because the panel is beside the result.
+
+So each command creates the feature with a sensible default and selects it, and
+the user tunes it where every other value in this application is tuned. The
+status bar says so ("Pad created; edit its Length in the panel") rather than
+leaving them to discover it.
+
+**Each command is ONE transaction**, covering the Parameter and the Feature
+together. That is not a detail: without it, undoing a creation removed the
+feature and left an orphan Parameter behind — visible in the tree, written to
+the file, and impossible to explain. Making it right is why `addParameter`
+became an undo delta at all (`ParameterExistenceEdit`).
+
+Menu items are enabled FROM THE MODEL: Pad needs a selected sketch, Pocket needs
+a sketch AND a solid to cut into, the dress features need a solid. An item that
+is always enabled and silently does nothing is a lie the user can click.
+
+What this does NOT provide, and what would justify a dialog later: choosing the
+extent (Blind / Through All / Up To Face, roadmap section 12), choosing an
+operation (New / Add / Remove / Intersect), or picking a plane for a sketch that
+does not exist yet. Each needs inputs no existing surface can express. When one
+of those arrives, a dialog arrives with it.
+
+## ADR-M9-006 — Mirror and Pattern are deferred to M10, with ReferenceFrame (M9.6)
+Status: Accepted. **Deferral, stated with its reason and its successor.**
+
+M9's slice list offered "Mirror / Pattern, or explicit deferral ADRs". This is
+the deferral, and unlike ADR-M8-007's Hole entry it comes with **no
+demonstration**, because there is nothing to demonstrate with: EP3D has no
+transform capability at any layer today. That is stated plainly rather than
+dressed up.
+
+**Why not now.** Both features are a transform plus a boolean. The boolean
+exists (`subtractShape`, and a fuse is its sibling). The transform does not, and
+a transform needs something to be defined AGAINST:
+
+- a Mirror needs a PLANE;
+- a Pattern needs an AXIS or a direction, and a spacing.
+
+Adding them now means hard-coding "the YZ plane" or "the X direction" into the
+feature record. That is exactly the reference this project forbids as
+persistent identity (alignment roadmap A03, ADR-M4-004): a plane named by
+convention is not a plane the user can move, rename, or re-point, and every
+document written with one would have to be migrated the day real planes arrive.
+
+**Real planes arrive in M10** — ReferenceFrame and Connectors, roadmap section
+10 of the milestone list. A Mirror whose plane is a `ReferenceFrame` ObjectId is
+the same kind of reference a Pocket's sketch already is, and it costs nothing to
+wait; a Mirror whose plane is the string "YZ" costs a schema migration.
+
+This is the same shape as ADR-M8-006, which deferred per-edge fillet selection
+"with the selection architecture" rather than shipping an index-based selection
+that would have had to be thrown away.
+
+**What M10 inherits**, so this is a plan and not a shrug:
+
+1. `IGeometryKernel::transformShape(shape, transform)` and `fuseShapes(a, b)`.
+2. `MirrorFeature` consuming a base solid and referencing a ReferenceFrame by
+   ObjectId; `PatternFeature` referencing a ReferenceFrame axis, a count and a
+   spacing Parameter.
+3. Their names in `kSolidFeatureTypeNames` AND `kConsumingFeatureTypeNames`,
+   a consumed-as-base row each in `M8_REV_322`, fields in `SnapshotFeature` and
+   `RestoreFeatureFromSnapshot`, and a row each in `M9_UNDO_401`. The four
+   places are listed because round 3 and round 4 each found a table updated in
+   some of them and not the others.
+4. Analytic oracles that do not need new arithmetic: a 100 x 50 x 20 pad
+   mirrored about a plane 200 mm away is 200000 mm^3 of disjoint material; the
+   same pad patterned three times at 200 mm spacing is 300000.
+
+Until then, Mirror and Pattern are NOT available and no document claims
+otherwise.
+
+## ADR-M10-001 — A reference frame is a first-class document object (M10.1)
+Status: Accepted. **Supersedes ADR-009 D6 for frames and connectors.**
+
+ADR-009 D6 excluded frames and connectors from the schema and had the document
+constructor re-create the Origin fresh on load. That was right while nothing
+read a frame. M10 makes a sketch read one, so it is no longer right: a frame the
+user moved would be lost on save, and a sketch built on it would silently
+relocate.
+
+A frame is now registered, resolvable by id, a dependency-graph node, persisted
+(v10), undoable, and reachable only through the facade — `setLocalTransform` and
+`setParentFrameId` are private with `PartDocument` as the only caller. That last
+part closes the door review round 3 recorded as *"inert today -- and closed the
+sketches()/bodies()/Parameter way THE DAY A CONSUMER APPEARS"*. M10 is that day,
+so it was closed in the same milestone rather than left for the next review to
+find.
+
+**A parent chain is refused if it would CYCLE**, at creation and at re-parenting,
+by walking up from the proposed parent. The walk is bounded by the frame count:
+refusing to create a cycle is worth nothing if the check itself can hang, which
+M9.1 paid to learn on its own test.
+
+**Who owns the Origin on load**: the file, when it has frames; the constructor,
+when it does not. Restoring naively gave a loaded document TWO frames named
+"Origin", the second carrying an id nothing in the file referenced — caught by
+the byte-identical round-trip tests, which is what they are for. A pre-v10 file
+keeps the constructor's Origin and behaves exactly as it always did.
+
+## ADR-M10-002 — The world transform is composed, never stored (M10.1)
+Status: Accepted.
+
+`worldTransform(frameId)` walks to the root and composes on the way back down.
+Nothing caches it. Storing a local AND a world transform is two truths that
+disagree the moment a parent moves and something forgets to update — the same
+reasoning ADR-M3-006 applied to mass properties.
+
+The composition itself lives in `Core/Geometry/Transform.h`, and **that file is
+where ADR-M4-002's single conversion site moved**. M4 put `RotateByQuaternion`
+file-local in `SketchFrame.cpp` and said why: a second conversion path is how
+frames silently disagree. M10 needed the same arithmetic for the hierarchy, so
+the choice was to duplicate it or to move it. It moved, and `SketchFrame.cpp`
+now calls it. The count of places that know how to turn a quaternion into
+geometry stayed at ONE, which is what the ADR asked for — not that the one place
+be that particular file.
+
+The term worth naming: `Compose` rotates the child's translation by the parent's
+rotation before adding it. Leaving that out is invisible until a parent is
+rotated AND a child is offset, which is why gate B and gate F both do exactly
+that.
+
+## ADR-M10-003 — Sketch support: an optional frame, with the embedded plane as fallback (M10.2)
+Status: Accepted.
+
+A Sketch gains an optional `supportFrameId`. When set, its plane is the frame's
+WORLD transform; when not, its own embedded `SketchFrame`, unchanged. This is the
+route `SketchFrame`'s own header laid out in M4 — *"a Sketch can gain an optional
+supportFrameId with this transform as the fallback"* — taken rather than
+replaced, so world-XY stays a CASE of the general path and every pre-M10 document
+is unaffected (gate D2 is that contract).
+
+The frame→sketch edge is an ordinary dependency-graph edge, so moving a frame
+dirties the sketch and everything built on it through the M2 machinery. Nothing
+walks a tree at recompute time; a grandparent move reaches a grandchild's pad the
+same way a Parameter edit reaches a Pad.
+
+**A missing support frame FAILS; it does not fall back.** `worldTransform`
+returns identity for an unknown id, so the naive version silently moved the
+geometry back to world XY when the frame was deleted — mass still current, save
+still succeeding. `sketchSupportFrameIsMissing` exists because a function
+returning a value cannot say "there is no answer", and the three solid features
+ask it before building. Save refuses a dangling support reference for the same
+reason every other dangling reference is refused (ADR-M3-008). Gate I.
+
+## ADR-M10-004 — A connector is a frame plus meaning (M10.3)
+Status: Accepted.
+
+A `Connector` holds no geometry: it references a `ReferenceFrame` by ObjectId and
+carries a role and an owner. `connectorWorldTransform` is the frame's world
+transform, so a connector on a moved frame moves with nothing to keep in step.
+
+Roadmap §18 lists the content as "Origin / X-Y-Z axes / Owner ObjectId /
+Attachment semantic reference": the origin and axes ARE the frame, and the owner
+is here. `ConnectorOwner` (PartDefinition / Assembly) exists now although EP3D
+has no Assembly, because adding an owner later would mean migrating every file
+that already has connectors, and because §21's reuse rule is stated in terms of
+it.
+
+**One kind of connector, not two.** Roadmap §18.1 describes an explicit and an
+implicit creation route; they differ in when they are made and where they are
+listed, never in whether they can be re-resolved, because a mate built on
+something without stable identity violates A03 outright. EP3D therefore has no
+weaker "implicit" variant — a UI that creates one mid-dialog creates this.
+
+**Visibility is NOT here.** It is per-context presentation state (§18.3 — the
+same connector hidden in the part and shown in the assembly), and A02 keeps
+presentation out of Core.
+
+## ADR-M10-005 — Mass properties are summed PER SOLID (M10.6, from a gate failure)
+Status: Accepted. **This is a Core kernel contract, not an M10 feature.**
+
+`BRepGProp::VolumeProperties` on a COMPOUND of disjoint solids returns the right
+VOLUME and a wrong CENTRE OF MASS — measured at 2% on two 100 × 50 × 20 prisms
+200 mm apart. `calculateMassProperties` now explores solids, measures each, and
+combines them with `GProp_GProps::Add`. Each solid alone is exact, and `Add` is
+OCCT's documented way to combine systems.
+
+**The defect predates M10** and would have survived indefinitely, because
+*every analytic oracle in this project is a volume*: M8's subtract, the Minkowski
+rounded box, the Pappus chamfer, M9's whole gate set. A wrong centroid with an
+exactly right volume is the one shape none of them can see.
+
+What found it: M10 GATE_P, whose expected centroid deliberately does **not** sit
+at the midpoint of the two lumps. M10's own GATE_M and GATE_N fuse disjoint
+solids too, and both passed throughout — their expected values are at the
+symmetric centre, where the error cancels exactly. That is M8 GATE_RB2's
+coincidence lesson for the third time in this project, and the first time the
+author walked into it while writing the gates meant to prevent it.
+
+Two things tried on the way that were NOT the cause, recorded so nobody re-tries
+them as fixes: adaptive integration (`VolumeProperties` with an `Eps`), and
+re-orienting the mirrored solid (`BRepLib::OrientClosedSolid`, on the theory that
+a mirror reverses handedness). Both are kept — the first is a genuine accuracy
+improvement and the second is correct hygiene — but neither moved the number.
+The decisive step was a CONTROL: fusing a *translated* copy instead of a mirrored
+one produced the identical wrong value, which refuted the mirror hypothesis in
+one run. Without that control the fix would have been aimed at a problem that
+did not exist, and would have been reported as solved.
+
+## ADR-M10-006 — A test that needs an explicit id ALLOCATES one (M10.7, from a shuffle failure)
+Status: Accepted. **This is a test-suite contract, not a product change.**
+
+`ObjectIdGenerator` is process-global and monotonic, and every restore path
+calls `AdvancePast`. A test that hands a restore facade a LITERAL id therefore
+does two things at once: it names an id, and it shoves the counter into that
+literal's neighbourhood **for every test that runs after it in the same
+process**. The two effects meet when a later test's own `add*` calls are handed
+the very constant a third test invented.
+
+That is not hypothetical. `M4_PROFILE_022_IdenticalArcsAreDuplicates` restored
+the constant `999010`, and M4_PROFILE_016/017/018 restore `999001`..`999004`.
+Whenever the shuffled order put exactly four allocations between them, 022's own
+`Sketch`, `addArc` and `addLine` were handed 999008, 999009 and **999010** — so
+its `restoreEntity(999010)` collided with the line it had just created,
+`ASSERT_TRUE` failed, and the suite went red for a reason that had nothing to do
+with duplicate arcs.
+
+**Rule: allocate the id (`NextSketchEntityId()`, `ObjectIdGenerator::Next()`).
+Never write a numeric id literal in a test.** A freshly allocated id is the only
+id *guaranteed* absent from a document; a constant is merely absent today. This
+applies equally to ids chosen to be "obviously invalid" — `SketchEntityId{987654}`
+as an unknown entity, `ObjectId{999999}` as a garbage base — because "unknown"
+is a property of the counter's position, not of the number.
+
+Fixed at seven sites: `ProfileTests` (5), `SketchTests`, `ReconstructionReviewFindingTests`, `Solver/SketchConstraintTests`, `SerializationV6Tests` (2). The
+V6 pair matters beyond flakiness: `restorePocketFeature` was being handed
+`ObjectId{999000}` while the test claims to pin `requireConsumableBase`, so a
+collision would have made `requireUnusedId` throw instead and the test would
+have credited **the wrong guard** while still passing.
+
+Two notes on how this was found and confirmed, because both are reusable:
+
+- It surfaced ONLY under `--gtest_shuffle`, at roughly one run in a hundred.
+  `ctest` alone — 856/856 in both configurations, repeatedly — never saw it. The
+  definition-of-done clause requiring shuffled seeds earned its place here.
+- It was confirmed by CONSTRUCTION, not by re-rolling seeds: counting the
+  allocations each test makes predicted an exact `--gtest_filter` set
+  (016, 017, 018, 020, 022) that fails every time, and 80 further shuffled runs
+  had failed to reproduce it. **A deterministic reproduction derived from the
+  mechanism beats a seed that happens to fail**, and it is what proves the fix
+  rather than merely failing to contradict it.
+
+`ObjectId.h` already warned about this bug class in its own comment — *"a
+private counter would reintroduce exactly the restore-collision bug class that
+machinery exists to prevent"*. The machinery held. The tests were the ones
+reintroducing it.
+
+## ADR-M11-001 — The expression dimension model is three states, enforced at the operation (M11.1)
+Status: Accepted.
+
+`Dimension` is `{Unitless, Length, Angle}` — not an exponent vector. That is a
+consequence of the rule the reference model states plainly: an expression must
+reduce to a unit value *to the first power* (roadmap §42.2). Every operation
+that WOULD produce a compound unit (`3mm * 3mm`) or an inverse unit (`1 / 2mm`)
+is refused **at that operation**, so no intermediate value can ever hold an
+exponent outside `{0, 1}`, and three states are sufficient.
+
+An exponent vector was the obvious alternative and is worse here: it is three
+states wearing a heavier coat, and it would silently ACCEPT `mm²` — the exact
+thing the rule forbids.
+
+Angle is tracked separately although it is mathematically dimensionless.
+Without that separation `3mm + 2deg` is arithmetic rather than an error, and
+that is one of the two worked examples the reference gives.
+
+Canonical units are mm and radians (CodingRules 11). Conversion happens once,
+where the literal is read; nothing downstream needs to know the user typed
+inches. The source text is kept verbatim beside the converted value (roadmap
+§42.3.2) — a user who typed `1 inch` must not reopen the field to find `25.4`.
+
+## ADR-M11-002 — Unit promotion happens at the FIELD boundary, never inside an expression (M11.1)
+Status: Accepted. **This is an intentional difference from the reference model
+(roadmap §32).**
+
+`5` typed into a length field means 5 mm — so a plain number must be acceptable
+where a length is wanted. The question is WHERE that promotion happens.
+
+Decision: in exactly one function, `EvaluateExpressionForField`, which knows the
+target dimension. Inside an expression there is NO promotion, so `3mm + 2` is a
+`DimensionMismatch` rather than 5 mm.
+
+The reason is angles. A promoting arithmetic rule reads `#angle > 90` as *90
+radians* — a wrong answer delivered silently, which is worse than an error
+message. A rule that promotes lengths but not angles is two rules. So: one rule,
+one site.
+
+The cost is real and is recorded rather than hidden: the reference model's own
+documented ternary example, `#width>5?7:4`, needs `5mm` in EP3D when `#width` is
+a length. Pinned by `M11_EXPR_144`.
+
+The radian default for a unitless value in an angle field is a placeholder for
+the display-unit layer EP3D does not have yet. When display units arrive,
+`EvaluateExpressionForField` is the one function that changes.
+
+## ADR-M11-003 — A node budget, not the depth guard, is what bounds the evaluator (M11.1, from the review pass)
+Status: Accepted.
+
+The parser has a nesting-depth guard (`kExpressionMaxDepth`) so that `((((…`
+answers with an error instead of a stack overflow. **That guard does not bound
+the evaluator**, and the review pass found the gap:
+
+`1 + 1 + 1 + …` is folded in a `while` LOOP. Parser recursion stays constant
+while the tree gains one level per term — and the evaluator walks that tree
+recursively. A thousand-term sum therefore parses happily and overflows the
+stack during EVALUATION, reporting nothing a user can act on.
+
+`kExpressionMaxNodes` (512) caps the node count, which caps tree depth, which
+caps evaluator recursion. 512 nodes is a ~250-term expression: far past anything
+a dimension field legitimately holds, far short of the stack. Pinned from both
+sides by `M11_EXPR_129` (over the cap → `TooManyTerms`) and `M11_EXPR_130`
+(100 terms still evaluates to 100).
+
+Second finding from the same pass, same shape — *a value that never meets the
+guard*: `1e999` converts CLEANLY to infinity, so the "did `strtod` consume it
+all?" check passes it, and a Literal is the one node the evaluator returns
+WITHOUT arithmetic, so it never meets the finiteness guard either. The infinity
+reached the model. Rejected at lex time now (`M11_EXPR_131`).
+
+Both defects share a lesson worth keeping: **a guard bounds the path it sits on,
+not the property it is named after.** "Depth limit" did not bound depth; the
+finiteness guard did not cover every value.
+
+## ADR-M11-004 — Comma is not a decimal separator (M11.1)
+Status: Accepted. **Intentional difference (roadmap §32).**
+
+The reference model accepts a comma as a decimal separator. EP3D does not,
+because `max(1,2)` would then be genuinely ambiguous between one argument and
+two. `1,5` parses as a number followed by trailing input, never as 1.5. Pinned
+by `M11_EXPR_125`, which also asserts `max(1,5)` still yields 5.
+
+Related smaller decisions, recorded so they are visible rather than discovered:
+
+- **`log` is the natural logarithm**, following the FeatureScript convention;
+  the reference help lists `log` without naming its base. `log10` is provided
+  explicitly rather than leaving a caller to find the base by experiment.
+  Pinned by `M11_EXPR_081`, so a change is visible in review.
+- **`ceil` / `floor` / `round` refuse a dimensioned value.** Rounding in the
+  canonical unit would round an angle to the nearest RADIAN. The error names the
+  explicit form, `round(#x / 1mm)`.
+- **Comparisons cannot be chained.** `1 < x < 10` reads as a range to a human
+  and evaluates as `(1 < x) < 10` in C. Refusal is the only reading that cannot
+  mislead.
+- **Both branches of a conditional are evaluated**, so a malformed untaken
+  branch is reported now rather than on the day a parameter change selects it.
+- **`==` is exact.** A tolerance here would be a THIRD tolerance story
+  (`kSketchToleranceMm`, the solver residual), invisible in the expression text.
+  Anyone who needs one writes `abs(#a - #b) < 0.001mm`.
+
+## ADR-M11-005 — `setParameterExpression` is a VALIDATING facade, not a setter (M11.2)
+Status: Accepted. **This changes an accepted contract — see the note at the end.**
+
+The facade parses the text, checks the names, evaluates it once against the
+document's current values, and turns its `#name` references into
+dependency-graph edges. Any failure leaves the document byte-for-byte unchanged
+and returns false with a POSITIONED `ExpressionError`. Refused: text that does
+not parse; a name no parameter has, or one that TWO share; a self-reference; a
+result of the wrong dimension for the parameter's unit; a unit with no
+expression dimension at all; and edges that would close a cycle.
+
+**Why a trial evaluation at edit time.** An expression that cannot be evaluated
+today would leave its parameter `Failed` on the very next recompute, and the
+user would meet that failure somewhere other than the edit that caused it.
+Refusing at the edit is the only point where the cause and the message are in
+the same place.
+
+**Why refuse rather than store-and-mark-failed.** A stored expression that
+cannot resolve is a document that cannot be recomputed, and — before the
+save-side net below — one that could be written to disk and never opened again.
+
+**THE CONTRACT THIS CHANGES.** Before M11.2 the expression field was opaque:
+`setParameterExpression` stored any string because nothing read it. Two accepted
+tests relied on that and were updated, deliberately and visibly rather than
+quietly:
+
+* `SerializationTests.RoundTripPreservesAllFields` stored `"Width / 2"` with the
+  comment *"as data"*. `Width` without a `#` is a function name, not a
+  reference. Now `"#Width / 2"`, which makes the test STRONGER: the text must
+  also survive as a working reference.
+* `SerializationTests.FailedStatesRoundTrip` used `"bad / 0"` purely to obtain a
+  `Failed` parameter. That file is no longer representable. The SUBJECT is
+  unchanged and still holds — `Failed` and *loadable* are not in tension,
+  because an expression that parses and resolves can still fail at EVALUATION
+  time. The fixture now parses, and `M11_WIRE_147` round-trips exactly that
+  document so the replaced case is covered rather than dropped.
+
+## ADR-M11-006 — A typed number REPLACES a formula (M11.2)
+Status: Accepted.
+
+`setParameterValue` on a parameter that carries an expression clears the
+expression and detaches its edges.
+
+The alternative — refuse, and require the expression to be cleared first — was
+rejected for a concrete reason rather than a stylistic one: **undo replays this
+exact pair.** `applyDelta` sets the value and THEN the expression, so a rule
+refusing a value while an expression is present would leave undo unable to
+restore its own record. Clearing keeps one edit atomic in both directions, which
+is why `ParameterValueEdit` has carried `expressionBefore`/`expressionAfter`
+since M9.1. Pinned by `M11_WIRE_062` and `M11_WIRE_081`.
+
+An empty or whitespace-only expression CLEARS, and is normalised to empty — two
+blank states that round-trip differently is one state too many.
+
+## ADR-M11-007 — Deleting a parameter another expression reads is REFUSED (M11.2)
+Status: Accepted. Extends ADR-M5-009 unchanged.
+
+M5 refused deleting a Parameter a sketch constraint binds, because a Parameter
+is a named, shared, document-level object and cascading its deletion destroys
+more than was asked for. An expression is the second kind of reference such a
+parameter attracts, and the reasoning transfers exactly — with one thing worse:
+a cascaded formula would not even be visibly gone, it would just stop resolving.
+
+Checked before anything is unhooked, so a refusal leaves the document unchanged.
+`parametersReferencingParameter` is the query, mirroring
+`constraintsBindingParameter`.
+
+## ADR-M11-008 — Expression edges are DERIVED on load, and both ends refuse a document that cannot carry them (M11.2)
+Status: Accepted.
+
+Edges are not persisted — the graph is rebuilt on load — so a document whose
+parameters reference each other arrives with the text and none of the wiring.
+`rewireParameterExpressions()` re-derives it ONCE, after every parameter is
+restored, because the file lists parameters in document order and an expression
+may legally read one written later (`M11_WIRE_141`). It records no undo step
+(ADR-M9-001).
+
+A file that cannot be wired is REFUSED rather than opened: a document whose
+parameters would evaluate in the wrong order, or not at all, is not a document.
+
+`validateSaveable` carries the same check on the save side — the ADR-M3-008
+backstop, the same shape as the id-uniqueness net: *a save that emits a document
+this loader would refuse is worse than a save that fails.* No facade route
+produces one; the reachable route is `restoreParameter`, and `M11_WIRE_145`
+takes it.
+
+## ADR-M11-009 — ParameterState follows the graph only for parameters that HAVE an expression (M11.2, from a test failure and then from a second one)
+Status: Accepted.
+
+ADR-011's bridge kept `ParameterState` in step with the graph for the one shape
+that existed before M11.2: a parameter is dirtied by its own edit, and that edit
+also sets `ParameterState::Dirty`. A parameter had no prerequisites, so nothing
+else could make its node stale.
+
+`#Width / 2` breaks that. Editing Width dirties Height's graph node through the
+ordinary machinery while Height's own `ParameterState` stayed Valid — a stale
+value reporting itself as current, which is exactly the staleness invariant
+ADR-M3-004 states for features. **Four M11.2 tests failed on it.**
+
+The first fix synced EVERY parameter from the graph, and that was too broad: a
+freshly added parameter's graph node starts Dirty (it has never been through a
+recompute), so every literal parameter was demoted to Dirty and an accepted
+round-trip test that had every right to expect Valid went red. A literal
+parameter is not stale — it is the number the user typed, current by definition.
+
+The rule is therefore: **`ParameterState` is a derived-currency signal only when
+something derives it.** Parameters with an expression follow the graph; literal
+parameters do not.
+
+## ADR-M11-010 — What a state probe cannot see (M11.2 mutation findings)
+Status: Recorded, because three mutations survived the first test battery for
+the same reason and the reason generalises.
+
+Evaluation resolves `#name` through the parameter table, NOT along the edge. The
+edge governs ORDER and DIRTYING, nothing else. So a missing or leftover edge
+produces the right number, and a test that checks values cannot see it.
+
+Worse, the obvious substitute is also blind in places:
+
+* `DependencyGraph::removeDependency` DIRTIES the dependent by itself. After a
+  refused edit that detached and re-attached, the parameter is dirty either way
+  — so "is it dirty?" answers a question about the detach, not about the edge.
+  `M11_WIRE_043` now recomputes first, to consume that dirt.
+* A parameter with no expression does not follow the graph (ADR-M11-009), so
+  after CLEARING an expression no state probe can see whether its edge went with
+  it.
+
+What does see it is **the direction of legality**: with a stale `B -> A` edge
+still attached, giving A an expression that reads B is refused as a cycle,
+though nothing in the document says B depends on A. `M11_WIRE_044`,
+`M11_WIRE_045` and `M11_WIRE_063` all use that probe, and each kills a mutation
+that a value or state check let through.
+
+## ADR-M11-011 — A parameter shows TWO rows, not one field with two modes (M11.3)
+Status: Accepted. **Intentional difference from the reference model.**
+
+The reference puts an expression and its result in a single box that shows one
+or the other depending on focus. A table cell has nowhere to put a mode
+indicator, so the same trick here would mean a number that silently is not the
+thing you can edit.
+
+EP3D shows `Value` and `Expression` as separate rows. Both facts are visible at
+all times, and each row says plainly whether it can be typed into.
+
+The `Value` row is READ-ONLY while an expression drives it: typing a number
+there would clear the formula (ADR-M11-006), and a cell that quietly deletes a
+formula is not an edit anyone asked for. Clearing is done in the Expression row,
+where it is what the gesture means. The rule is enforced in
+`ApplyPropertyEdit`, not only by the widget's editable flag — a flag is
+presentation, the refusal is a decision.
+
+The `Expression` row is present even when empty, because a row that only appears
+once you already know it exists is not discoverable. It is offered only for
+units an expression can produce (`ExpressionDimensionOf`); for the others it
+would be an invitation the facade always refuses.
+
+Whether two rows reads better than one field is question F5 on the owner
+checklist, and is worth overturning if the answer is no.
+
+## ADR-M11-012 — A refused edit keeps what the user typed (M11.3)
+Status: Accepted.
+
+On refusal the panel puts the rejected text BACK in the cell rather than
+restoring the stored value, and attaches a three-line tooltip: the text, a caret
+row under the offending characters, and the message.
+
+Discarding a rejected expression makes the user retype the whole thing to fix
+one character — which defeats the point of having a positioned error at all.
+The document is unchanged either way; this is purely about not throwing away
+work.
+
+Two details that a first version got wrong and a mutation caught:
+
+* **Tabs are rendered as single spaces before the caret row is built.** A tab in
+  the source shifted every caret after it, so the marker pointed confidently at
+  the wrong character — worse than no marker.
+* **The span is clamped to the line.** An error position past the end of the
+  text otherwise builds a caret row longer than the line it points at.
+
+## ADR-M11-013 — The decision layer is Qt-free ON PURPOSE, and three mutations proved the widget test earns its keep (M11.3)
+Status: Accepted. Records the M6.14 lesson applied deliberately rather than
+after the fact.
+
+M6.14 shipped a property panel showing ten labels and no values, and none of 561
+tests could see it, because all of them asked the model. The response then was
+`displayedPropertyValue()` — a readback from the widget. M11.3 takes the same
+lesson in the other direction as well: everything that DECIDES lives in
+`src/Viewer/PropertyEditing.{h,cpp}`, which links no Qt and is unit tested
+directly; what remains in `MainWindow` is item text, tooltips and a status line.
+
+**That split is verified, not asserted.** Of twelve M11.3 mutations, nine are
+killed by the unit battery, and three — the rejected-text restore, the caret
+tooltip, and the driven-value tooltip — are killed by NOTHING BUT
+`--selftest --sample m11-expression`. Those three are precisely the M6.14 shape:
+the model is right and the screen is wrong.
+
+**A harness note worth keeping**, because it cost real time and is the same
+family as AGENTS.md rule 9: the first run of that battery reported all three as
+SURVIVED. They were not. `$LASTEXITCODE` did not survive the assignment of a
+native command's merged stderr under PowerShell 5.1, so the harness read a green
+oracle from a failing test. Worse, when the preference was tightened the harness
+THREW mid-mutation and left the source tree mutated. **A mutation harness with a
+broken oracle is worse than no harness**: it reports confidence it has not
+earned. It now matches on `SELFTEST FAIL` in the captured output.
