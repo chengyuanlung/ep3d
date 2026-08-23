@@ -185,6 +185,14 @@ double Evaluate(const SolveResidual& r, const Vec& x) {
                        : (duA * duB + dvA * dvB) / (lengthA * lengthB);
         }
 
+        case SolveResidual::Kind::SplineHandleTipU:
+        case SolveResidual::Kind::SplineHandleTipV:
+            // (tip, base, delta) in one component -- the tip of a spline handle
+            // IS its point plus its tangent, and this is that sentence as an
+            // equation. Linear, so its Jacobian row is constant and it never
+            // goes rank-deficient.
+            return ValueAt(x, r.vars[0]) - ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[2]);
+
         case SolveResidual::Kind::MidpointU:
         case SolveResidual::Kind::MidpointV:
             // (p, start, end) in one component.

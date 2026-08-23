@@ -111,6 +111,17 @@ void CollectPointCandidates(const Sketch& sketch, Vec2 query, std::vector<Candid
                 out.push_back(Candidate{SplineRefFor(entity.id, *spline, static_cast<int>(i)),
                                         spline->points[i],
                                         Distance(query, spline->points[i]), true});
+            // ...and the tip of every handle (M18). A handle nobody can aim at
+            // is a handle nobody can constrain, which was the whole complaint
+            // about interior spline points before M17.30.
+            for (const auto& [index, tangent] : spline->handles) {
+                if (index < 0 || index >= static_cast<int>(spline->points.size())) continue;
+                const Vec2 base = spline->points[static_cast<std::size_t>(index)];
+                const Vec2 tip{base.x + tangent.x, base.y + tangent.y};
+                out.push_back(Candidate{
+                    SketchElementRef{entity.id, SketchSubElement::SplineHandle, index}, tip,
+                    Distance(query, tip), true});
+            }
         }
 
         // ...and an ELLIPTICAL ARC's two ends, which are ordinary snappable
@@ -185,6 +196,9 @@ std::string SubElementText(SketchSubElement part, int index) {
     // point 3" and "Spline1 point 4" are different things and a description
     // that called both "Spline1 point" would be unusable in a constraint list.
     case SketchSubElement::SplinePoint: return " point " + std::to_string(index);
+    // Named for the point it belongs to, because that is how a user thinks of
+    // it: they gave point 3 a handle, not "handle 3".
+    case SketchSubElement::SplineHandle: return " point " + std::to_string(index) + " handle";
     case SketchSubElement::Whole: break;
     }
     return "";
@@ -651,6 +665,8 @@ Vec2 ResolveElementPoint(const Sketch& sketch, const SketchElementRef& ref, bool
         // WHOLE is the middle OF THE CURVE, not the middle of the point list --
         // it is where a label or a badge goes, and it has to be on the shape.
         if (ref.subElement == SketchSubElement::Whole) return PointOnSpline(*spline, 0.5);
+        // A handle's tip comes out of PointOfSubElement below, which is the one
+        // place that knows a tip is its point plus its tangent.
         const std::optional<Vec2> at =
             PointOfSubElement(entity->geometry, ref.subElement, ref.index);
         if (!at) return fail();
@@ -687,8 +703,10 @@ bool IsPointRef(const Sketch& sketch, const SketchElementRef& ref) noexcept {
     // hold, not merely positions on screen. The comment that used to stand here
     // said otherwise and had been wrong since ADR-M17-018.
     if (const auto* spline = std::get_if<SketchSpline>(&entity->geometry))
-        // EVERY point, through the one resolvability rule -- so what the UI
-        // offers and what the solver accepts cannot come apart.
+        // EVERY point AND EVERY HANDLE'S TIP, through the one resolvability
+        // rule -- so what the UI offers and what the solver accepts cannot come
+        // apart. A handle's tip is a point: it can be dimensioned, made
+        // coincident, held horizontal from its own point.
         return IsResolvableRef(entity->geometry, ref.subElement, ref.index) &&
                ref.subElement != SketchSubElement::Whole && spline->points.size() > 0;
     if (std::holds_alternative<SketchArc>(entity->geometry) ||
@@ -758,11 +776,16 @@ std::vector<SketchElementRef> EntityHandles(const Sketch& sketch, SketchEntityId
         handles.push_back({id, SketchSubElement::StartPoint});
         handles.push_back({id, SketchSubElement::EndPoint});
     } else if (const auto* spline = std::get_if<SketchSpline>(&entity->geometry)) {
-        // EVERY POINT gets a handle now: a handle the user cannot grab is a
+        // EVERY POINT gets a grab point: one the user cannot grab is a
         // constraint they cannot make, and until M17.30 that was five of the
         // seven points on a spline.
         for (int i = 0; i < static_cast<int>(spline->points.size()); ++i)
             handles.push_back(SplineRefFor(id, *spline, i));
+        // ...and so does the tip of every tangent handle (M18).
+        for (const auto& [index, tangent] : spline->handles) {
+            (void)tangent;
+            handles.push_back(SketchElementRef{id, SketchSubElement::SplineHandle, index});
+        }
     } else if (std::holds_alternative<SketchArc>(entity->geometry) ||
                std::holds_alternative<SketchEllipticalArc>(entity->geometry)) {
         // THE CENTRE AND BOTH TIPS. The comment that used to stand here said an

@@ -40,6 +40,22 @@ bool IsValidSketchGeometry(const SketchGeometry& geometry) noexcept {
                 if (value.closed &&
                     SamePoint(value.points.front(), value.points.back(), kSketchToleranceMm))
                     return false;
+                // EVERY HANDLE NAMES A POINT THAT EXISTS, and points somewhere.
+                //
+                // This is the ONE place the handle map's invariant is enforced,
+                // and it is enforced rather than tested: every mutation path in
+                // this program commits through IsValidSketchGeometry, so a
+                // handle keyed past the end of the point list cannot be stored
+                // -- which is what makes a sparse map safe where a parallel
+                // array would not be.
+                //
+                // A ZERO-LENGTH tangent says nothing about direction, so it is
+                // not a handle; it is the absence of one, spelled wrongly.
+                for (const auto& [index, tangent] : value.handles) {
+                    if (index < 0 || index >= static_cast<int>(value.points.size())) return false;
+                    if (!IsFinite(tangent)) return false;
+                    if (std::hypot(tangent.x, tangent.y) < kSketchToleranceMm) return false;
+                }
                 return true;
             } else if constexpr (std::is_same_v<T, SketchEllipse>) {
                 if (!IsFinite(value.center)) return false;
@@ -100,19 +116,27 @@ bool HasEndpoints(const SketchGeometry& geometry) noexcept {
 
 namespace {
 
-// One Catmull-Rom span, between p1 and p2, with p0 and p3 as the neighbours
-// that set the tangents. `u` runs 0..1 across the span.
-Vec2 CatmullRom(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, double u) noexcept {
+// One HERMITE span, from `from` to `to`, leaving along `leaving` and arriving
+// along `arriving`. `u` runs 0..1 across the span.
+//
+// This replaced a Catmull-Rom span (M18), and the two are THE SAME CURVE when
+// the tangents are the Catmull-Rom ones -- Catmull-Rom is precisely Hermite
+// with m_i = (p[i+1] - p[i-1])/2. Multiplying out the four basis polynomials
+// against that substitution gives the halved Catmull-Rom basis coefficient for
+// coefficient; M18_HAN_001 checks it numerically rather than on the strength of
+// that paragraph.
+//
+// The generalisation is what lets a single point carry its own tangent while
+// every other point keeps the default, which is what a handle is.
+Vec2 Hermite(Vec2 from, Vec2 leaving, Vec2 to, Vec2 arriving, double u) noexcept {
     const double u2 = u * u;
     const double u3 = u2 * u;
-    const auto axis = [&](double a, double b, double c, double d) {
-        // The standard uniform Catmull-Rom basis, halved -- the tangent at b is
-        // (c - a)/2, which is what makes the curve pass through every point
-        // rather than near them.
-        return 0.5 * ((2.0 * b) + (-a + c) * u + (2.0 * a - 5.0 * b + 4.0 * c - d) * u2 +
-                      (-a + 3.0 * b - 3.0 * c + d) * u3);
-    };
-    return Vec2{axis(p0.x, p1.x, p2.x, p3.x), axis(p0.y, p1.y, p2.y, p3.y)};
+    const double h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+    const double h10 = u3 - 2.0 * u2 + u;
+    const double h01 = -2.0 * u3 + 3.0 * u2;
+    const double h11 = u3 - u2;
+    return Vec2{h00 * from.x + h10 * leaving.x + h01 * to.x + h11 * arriving.x,
+                h00 * from.y + h10 * leaving.y + h01 * to.y + h11 * arriving.y};
 }
 
 // The point `index` positions along, wrapping for a closed spline and
@@ -145,6 +169,35 @@ Vec2 SplinePointAt(const SketchSpline& spline, int index) noexcept {
 
 } // namespace
 
+Vec2 SplineTangentAt(const SketchSpline& spline, int index) noexcept {
+    const int count = static_cast<int>(spline.points.size());
+    if (count == 0) return Vec2{};
+    // THE HANDLE WINS where there is one. Only a real index has a handle: the
+    // virtual neighbours either side of an open spline are reflections, not
+    // points the user can put a handle on.
+    if (index >= 0 && index < count) {
+        const auto found = spline.handles.find(index);
+        if (found != spline.handles.end()) return found->second;
+    }
+    // ...and otherwise the Catmull-Rom default. Through SplinePointAt, so the
+    // reflection at the ends is stated once: it is what makes the tangent at
+    // the first point come out as exactly p1 - p0 (ADR-M18-001).
+    const Vec2 before = SplinePointAt(spline, index - 1);
+    const Vec2 after = SplinePointAt(spline, index + 1);
+    return Vec2{0.5 * (after.x - before.x), 0.5 * (after.y - before.y)};
+}
+
+namespace {
+
+// One span of the curve, span `span` at parameter `u`, whichever tangents its
+// two ends turn out to have.
+Vec2 SplineSpanAt(const SketchSpline& spline, int span, double u) noexcept {
+    return Hermite(SplinePointAt(spline, span), SplineTangentAt(spline, span),
+                   SplinePointAt(spline, span + 1), SplineTangentAt(spline, span + 1), u);
+}
+
+} // namespace
+
 std::vector<Vec2> SampleSpline(const SketchSpline& spline, int samplesPerSpan) {
     std::vector<Vec2> out;
     const int count = static_cast<int>(spline.points.size());
@@ -158,10 +211,7 @@ std::vector<Vec2> SampleSpline(const SketchSpline& spline, int samplesPerSpan) {
     out.reserve(static_cast<std::size_t>(spans) * steps + 1);
     for (int span = 0; span < spans; ++span) {
         for (int step = 0; step < steps; ++step)
-            out.push_back(CatmullRom(SplinePointAt(spline, span - 1), SplinePointAt(spline, span),
-                                     SplinePointAt(spline, span + 1),
-                                     SplinePointAt(spline, span + 2),
-                                     static_cast<double>(step) / steps));
+            out.push_back(SplineSpanAt(spline, span, static_cast<double>(step) / steps));
     }
     // THE LAST POINT, exactly. An open spline has to END where it was told to,
     // and a sampler that stopped one step short would leave a gap a profile
@@ -180,9 +230,7 @@ Vec2 PointOnSpline(const SketchSpline& spline, double t) {
     if (where > spans) where = spans;
     int span = static_cast<int>(where);
     if (span >= spans) span = spans - 1;
-    return CatmullRom(SplinePointAt(spline, span - 1), SplinePointAt(spline, span),
-                      SplinePointAt(spline, span + 1), SplinePointAt(spline, span + 2),
-                      where - span);
+    return SplineSpanAt(spline, span, where - span);
 }
 
 Vec2 PointOnEllipse(Vec2 centre, double majorRadiusMm, double minorRadiusMm, double rotationRad,
@@ -295,6 +343,14 @@ Vec2 MidPointOf(const SketchGeometry& geometry) noexcept {
 
 bool IsResolvableRef(const SketchGeometry& geometry, SketchSubElement part,
                      int index) noexcept {
+    if (part == SketchSubElement::SplineHandle) {
+        // ONLY A POINT THAT HAS ONE. A handle that is not there has no tip, and
+        // answering with the point itself would be a constraint on a place the
+        // caller did not name -- and one that looks satisfied from the start.
+        const auto* spline = std::get_if<SketchSpline>(&geometry);
+        if (spline == nullptr) return false;
+        return spline->handles.find(index) != spline->handles.end();
+    }
     if (part == SketchSubElement::SplinePoint) {
         const auto* spline = std::get_if<SketchSpline>(&geometry);
         if (spline == nullptr) return false;
@@ -312,6 +368,18 @@ bool IsResolvableRef(const SketchGeometry& geometry, SketchSubElement part,
 
 std::optional<Vec2> PointOfSubElement(const SketchGeometry& geometry, SketchSubElement part,
                                       int index) noexcept {
+    if (part == SketchSubElement::SplineHandle) {
+        const auto* spline = std::get_if<SketchSpline>(&geometry);
+        if (spline == nullptr) return std::nullopt;
+        if (index < 0 || index >= static_cast<int>(spline->points.size())) return std::nullopt;
+        const auto found = spline->handles.find(index);
+        if (found == spline->handles.end()) return std::nullopt;
+        // THE TIP: where the handle's end sits, which is the point plus the
+        // tangent. One place, so the canvas draws the grab target exactly where
+        // the solver's tip variable is.
+        const Vec2 base = spline->points[static_cast<std::size_t>(index)];
+        return Vec2{base.x + found->second.x, base.y + found->second.y};
+    }
     if (part == SketchSubElement::SplinePoint) {
         const auto* spline = std::get_if<SketchSpline>(&geometry);
         if (spline == nullptr) return std::nullopt;
@@ -381,6 +449,17 @@ bool SameSketchGeometryValue(const SketchGeometry& a, const SketchGeometry& b) n
                 if (first.points.size() != second.points.size()) return false;
                 for (std::size_t i = 0; i < first.points.size(); ++i)
                     if (!same(first.points[i], second.points[i])) return false;
+                // THE HANDLES TOO (M18). This is the ONE comparison the whole
+                // program uses to decide whether a solve changed anything, so
+                // leaving them out would make a solve that moved only a
+                // tangent look like a solve that changed nothing -- and the
+                // new shape would never be committed.
+                if (first.handles.size() != second.handles.size()) return false;
+                for (const auto& [index, tangent] : first.handles) {
+                    const auto found = second.handles.find(index);
+                    if (found == second.handles.end()) return false;
+                    if (!same(tangent, found->second)) return false;
+                }
                 return true;
             }
         },
@@ -392,6 +471,10 @@ bool IsSameCurve(const SketchGeometry& a, const SketchGeometry& b, double tolera
 
     if (const auto* splineA = std::get_if<SketchSpline>(&a)) {
         const auto& splineB = std::get<SketchSpline>(b);
+        // TWO CURVES WITH DIFFERENT HANDLES ARE DIFFERENT CURVES, even through
+        // the same points -- that is the whole point of a handle. Compared
+        // before the positions because it is the cheap half.
+        if (splineA->handles.size() != splineB.handles.size()) return false;
         // POINT FOR POINT, and in EITHER direction -- a spline drawn backwards
         // is the same curve, exactly as a line drawn backwards is. Comparing
         // only forwards would let a reversed duplicate through, and two curves

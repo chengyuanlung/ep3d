@@ -148,8 +148,12 @@ SketchWireframe BuildSketchWireframe(const std::vector<SketchGeometry>& geometry
                 std::vector<gp_Pnt> world;
                 world.reserve(spline->points.size());
                 for (const Vec2& point : spline->points) world.push_back(ToWorld(plane, point));
+                const gp_Pnt origin = ToWorld(plane, Vec2{0.0, 0.0});
+                std::map<int, gp_Vec> placed;
+                for (const auto& [index, tangent] : spline->handles)
+                    placed.emplace(index, gp_Vec(origin, ToWorld(plane, tangent)));
                 const Handle(Geom_BSplineCurve) curve =
-                    InterpolateSplineThrough(world, spline->closed);
+                    InterpolateSplineThrough(world, spline->closed, placed);
                 if (curve.IsNull()) {
                     ++result.skipped;
                     continue;

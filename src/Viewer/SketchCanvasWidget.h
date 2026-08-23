@@ -256,6 +256,11 @@ public:
     // drawn DASHED, and a flag whose only evidence is a JSON field is a flag
     // the user cannot use.
     int paintedConstructionEntities() const noexcept { return paintedConstructionEntities_; }
+    // How many tangent handles were actually stroked (M18). Counted, like every
+    // other readback here, because "the code that draws it ran" is the only
+    // thing a headless test can check about drawing -- and a handle nobody can
+    // see is a handle nobody can grab.
+    int paintedSplineHandles() const noexcept { return paintedSplineHandles_; }
 
     // Adds the sketch's origin point if it has none, and selects it either way,
     // so the command always leaves the user with the origin picked and ready to
@@ -424,6 +429,7 @@ private:
     std::vector<SketchEntityId> lastCreatedEntities_;
     std::vector<SketchConstraintId> lastCreatedConstraints_;
     int paintedConstructionEntities_ = 0;
+    int paintedSplineHandles_ = 0;
     int paintedSelectionHandles_ = 0;
     int paintedHighlightedGlyphs_ = 0;
     int paintedHighlightedEntities_ = 0;

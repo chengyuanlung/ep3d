@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <string>
+#include <map>
 #include <vector>
 
 namespace paramcad {
@@ -523,8 +524,24 @@ bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
                 // to swap. The curve through a reversed list is the same curve
                 // traversed the other way.
                 std::vector<Vec2> points = spline->points;
-                if (ref.reversed) std::reverse(points.begin(), points.end());
-                segments.push_back(ProfileSplineSegment{std::move(points), spline->closed});
+                std::map<int, Vec2> handles = spline->handles;
+                if (ref.reversed) {
+                    std::reverse(points.begin(), points.end());
+                    // A HANDLE REVERSES TWICE: point i becomes point n-1-i, and
+                    // its tangent turns round, because the direction the curve
+                    // LEAVES a point going one way is the direction it ARRIVES
+                    // going the other. Renumbering without negating would give
+                    // the reversed profile a curve that bulges the wrong way at
+                    // every handled point -- the same shape flipped, which is
+                    // not the same shape.
+                    const int last = static_cast<int>(points.size()) - 1;
+                    std::map<int, Vec2> flipped;
+                    for (const auto& [index, tangent] : handles)
+                        flipped.emplace(last - index, Vec2{-tangent.x, -tangent.y});
+                    handles = std::move(flipped);
+                }
+                segments.push_back(
+                    ProfileSplineSegment{std::move(points), spline->closed, std::move(handles)});
             } else {
                 return false; // a Point can never be a loop member
             }

@@ -136,3 +136,18 @@ built instead of the reader opening the saved file and reading numbers by hand.
 ```
 ep3d --script examples/spline-tangent-profile.ep3ds
 ```
+
+## `spline-handle.ep3ds` (M18)
+
+Two splines through the **same three points**; only the second has been told
+which way to leave the middle one. Their lengths differ, which is the whole
+point of a handle: it changes the shape without adding a point that would then
+need constraining itself.
+
+It goes on to hold the tangent level with a vertical distance of nought between
+the point and its handle's tip -- no constraint was written for the purpose,
+because a handle's tip is an ordinary point.
+
+```
+ep3d --script examples/spline-handle.ep3ds
+```

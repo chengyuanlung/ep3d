@@ -70,6 +70,24 @@ void WriteSketchGeometry(JsonValue& entry, const SketchGeometry& geometry) {
                 // profile chains through -- so a file that omitted it would
                 // load as the other shape rather than as a default.
                 entry.set("closed", JsonValue::makeBool(value.closed));
+                // WRITTEN ONLY WHEN THERE ARE ANY (M18), so every spline
+                // written before v24 is byte-identical -- and absent reads as
+                // "no handles", which is exactly what those files meant.
+                if (!value.handles.empty()) {
+                    JsonValue written = JsonValue::makeArray();
+                    for (const auto& [index, tangent] : value.handles) {
+                        JsonValue one = JsonValue::makeObject();
+                        one.set("point", JsonValue::makeNumber(index));
+                        // The TANGENT, relative to its point -- not the tip.
+                        // Storing the tip would mean a file whose points and
+                        // tips disagreed could be written by moving one, and
+                        // the reader would have no way to tell which was meant.
+                        one.set("du", JsonValue::makeNumber(tangent.x));
+                        one.set("dv", JsonValue::makeNumber(tangent.y));
+                        written.add(std::move(one));
+                    }
+                    entry.set("handles", std::move(written));
+                }
             } else if constexpr (std::is_same_v<T, SketchEllipse> ||
                                  std::is_same_v<T, SketchEllipticalArc>) {
                 entry.set("type",
@@ -105,7 +123,7 @@ void WriteSketchGeometry(JsonValue& entry, const SketchGeometry& geometry) {
 }
 
 
-constexpr int kSchemaVersion = 23;          // v23 adds splines (M17.26)
+constexpr int kSchemaVersion = 24;          // v24 adds spline handles (M18)
 // v15 added PointLineDistance (M17).
 // v14 added construction geometry (M17).
 // v13 added Horizontal/VerticalDistance (M17).
@@ -886,6 +904,40 @@ bool ReadSketchGeometry(const JsonValue& entry, const std::string& context, Fiel
         const JsonValue* closed = requireField(entry, "closed", JsonType::Bool, context, err);
         if (closed == nullptr) return false;
         spline.closed = closed->asBool();
+        // OPTIONAL, because every file written before v24 has none. Present and
+        // malformed is an ERROR, though: a handle that quietly failed to load
+        // would give the reader a different curve through the same points,
+        // which is the one thing a handle exists to make different.
+        if (const JsonValue* handles = entry.find("handles")) {
+            if (handles->type() != JsonType::Array) {
+                err = fieldError(SerializationError::InvalidFieldType,
+                                 context + ".handles: not an array");
+                return false;
+            }
+            std::size_t at = 0;
+            for (const JsonValue& one : handles->items()) {
+                const std::string where = context + ".handles[" + std::to_string(at++) + "]";
+                if (one.type() != JsonType::Object) {
+                    err = fieldError(SerializationError::InvalidFieldType,
+                                     where + ": not an object");
+                    return false;
+                }
+                const JsonValue* which = requireField(one, "point", JsonType::Number, where, err);
+                if (which == nullptr) return false;
+                const JsonValue* du = requireField(one, "du", JsonType::Number, where, err);
+                if (du == nullptr) return false;
+                const JsonValue* dv = requireField(one, "dv", JsonType::Number, where, err);
+                if (dv == nullptr) return false;
+                const double raw = which->asNumber();
+                if (raw < 0.0 || raw != std::floor(raw) ||
+                    raw >= static_cast<double>(spline.points.size())) {
+                    err = fieldError(SerializationError::InvalidFieldType,
+                                     where + ".point: not one of this spline's points");
+                    return false;
+                }
+                spline.handles[static_cast<int>(raw)] = Vec2{du->asNumber(), dv->asNumber()};
+            }
+        }
         out = std::move(spline);
         return true;
     }

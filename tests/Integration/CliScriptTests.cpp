@@ -668,3 +668,91 @@ TEST(CliScriptTest, M18_CLI_005_TangentTakesTheSplineFirstWHICHEVEROrderItIsSele
             << order << " -> " << run.only().solveMessage();
     }
 }
+
+// --- M18: TANGENT HANDLES FROM A SCRIPT --------------------------------------
+
+TEST(CliScriptTest, M18_CLI_006_AHandleChangesTheCurveAndIsMeasurable) {
+    // End to end: give a point a tangent, and the curve through the same points
+    // is a different length. A handle that did nothing would pass every test
+    // about naming it.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch A\ntool spline\nclick 5 7\nclick 60 60\nclick 120 5\nfinish\n"
+            "measure Spline1\nhandle Spline1.p1 40 0\nmeasure Spline1\nmeasure Spline1.h1\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    // The tip is the point plus the tangent: (60,60) + (40,0).
+    EXPECT_TRUE(LogMentions(outcome, "u = 100 mm")) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "v = 60 mm")) << outcome.message;
+
+    const auto& spline = std::get<SketchSpline>(run.only().entities().front().geometry);
+    ASSERT_EQ(spline.handles.size(), 1u);
+    EXPECT_DOUBLE_EQ(spline.handles.at(1).x, 40.0);
+}
+
+TEST(CliScriptTest, M18_CLI_007_AHandleCanBeTakenAwayAgain) {
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch A\ntool spline\nclick 5 7\nclick 60 60\nclick 120 5\nfinish\n"
+            "handle Spline1.p1 40 0\nhandle Spline1.p1 off\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(std::get<SketchSpline>(run.only().entities().front().geometry).handles.empty());
+}
+
+TEST(CliScriptTest, M18_CLI_008_NamingAHandleThatIsNotThereSaysHowToMakeOne) {
+    // The refusal has to carry the next move. "No handle" alone leaves the
+    // writer with a true statement and nothing to do about it.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch A\ntool spline\nclick 5 7\nclick 60 60\nclick 120 5\nfinish\n"
+            "measure Spline1.h1\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("handle Spline1.p1"), std::string::npos) << outcome.message;
+}
+
+TEST(CliScriptTest, M18_CLI_009_AHandleOnTheStartIsTheSameAsOnPointZero) {
+    // ONE POINT, ONE SPELLING, carried into the handle command: `.start` and
+    // `.p0` are the same point, so a handle put on one is the handle on the
+    // other -- not a second handle.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch A\ntool spline\nclick 5 7\nclick 60 60\nclick 120 5\nfinish\n"
+            "handle Spline1.start 10 20\nhandle Spline1.p0 30 40\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    const auto& spline = std::get<SketchSpline>(run.only().entities().front().geometry);
+    ASSERT_EQ(spline.handles.size(), 1u);
+    EXPECT_DOUBLE_EQ(spline.handles.at(0).x, 30.0);
+}
+
+TEST(CliScriptTest, M18_CLI_010_ASignedDistanceOfZEROIsALegalDimension) {
+    // "Make these two level" is a horizontal distance of nought, and the canvas
+    // refused it for being "too small to dimension" -- a magnitude assumption
+    // applied to a SIGNED quantity, which is the same correction
+    // DimensionValueValid already carries, living on in a second place that
+    // never heard about it.
+    //
+    // Found by writing the M18 example: saying "this handle is level with its
+    // point" is exactly a vertical distance of nought, and it is the ordinary
+    // way to hold a tangent.
+    for (const char* kind : {"hdistance", "vdistance"}) {
+        ScriptRun run;
+        const ScriptOutcome outcome =
+            run(std::string("sketch A\ntool line\nclick 5 5\nclick 80 5\n"
+                            "tool point\nclick 40 60\n") +
+                "dimension " + kind + " Line1.start Point1 0 as Zero\n");
+        EXPECT_TRUE(outcome.ok) << kind << " -> " << outcome.message;
+    }
+}
+
+TEST(CliScriptTest, M18_CLI_011_DimensioningGeometryWithNoEXTENTIsStillREFUSED) {
+    // The other half, and what the guard actually guards: the CURRENT measured
+    // value, not the number being typed. Two points on top of each other have
+    // no separation to name -- the direction a dimension would drive them apart
+    // in is undefined -- so the minimum stays where it means something, and the
+    // fix above is not simply the guard switched off.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch A\ntool point\nclick 40 60\ntool point\nclick 40 60\n"
+            "dimension distance Point1 Point2 25 as Apart\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("too small"), std::string::npos) << outcome.message;
+}

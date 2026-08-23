@@ -1570,6 +1570,7 @@ void SketchCanvasWidget::paintEvent(QPaintEvent* event) {
     // reporting the colour of a sketch that is no longer there.
     paintedGeometryColour_ = QColor();
     paintedConstructionEntities_ = 0;
+    paintedSplineHandles_ = 0;
     paintedReferences_ = 0;
     paintedDimensionGhosts_ = 0;
     paintedSelectionHandles_ = 0;
@@ -1785,6 +1786,26 @@ void SketchCanvasWidget::paintEvent(QPaintEvent* event) {
                 for (const Vec2& at : spline->points) {
                     const Vec2 p = view_.toPixels(at);
                     painter.drawRect(QRectF(p.x - 1.5, p.y - 1.5, 3.0, 3.0));
+                }
+                // ...and every TANGENT HANDLE as a stalk with a round end
+                // (M18). Round rather than square, because a handle's tip is
+                // not one of the points the curve goes through, and telling a
+                // user "this one is different" by shape rather than by colour
+                // alone is A06.
+                //
+                // The stalk is DASHED for the same reason construction geometry
+                // is: it is not part of the shape, it is a control on it.
+                for (const auto& [index, tangent] : spline->handles) {
+                    if (index < 0 || index >= static_cast<int>(spline->points.size())) continue;
+                    const Vec2 base = spline->points[static_cast<std::size_t>(index)];
+                    const Vec2 from = view_.toPixels(base);
+                    const Vec2 to = view_.toPixels(Vec2{base.x + tangent.x, base.y + tangent.y});
+                    QPen stalk(kept.color(), 1.0, Qt::DashLine);
+                    painter.setPen(stalk);
+                    painter.drawLine(QPointF(from.x, from.y), QPointF(to.x, to.y));
+                    painter.setPen(QPen(kept.color(), 1.0));
+                    painter.drawEllipse(QPointF(to.x, to.y), 2.5, 2.5);
+                    ++paintedSplineHandles_;
                 }
                 painter.setPen(kept);
             }

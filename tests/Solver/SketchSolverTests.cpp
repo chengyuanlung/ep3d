@@ -25,7 +25,8 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kTol = 1e-6; // mm, generous next to the solver's own 1e-9
 
 SolveVariable PointVar(int entity, SolveVariable::Component c) {
-    return SolveVariable{static_cast<SketchEntityId>(entity), SketchSubElement::Whole, c};
+    // The 0 is SolveVariable::index, which only a spline handle uses (M18).
+    return SolveVariable{static_cast<SketchEntityId>(entity), SketchSubElement::Whole, 0, c};
 }
 
 SolveResidual Fixed(SolveResidual::Kind kind, int var, double target, int constraint = 1) {

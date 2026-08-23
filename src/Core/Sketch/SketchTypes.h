@@ -4,6 +4,7 @@
 #include "Core/Geometry/MathTypes.h"
 #include <cmath>
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <variant>
 #include <vector>
@@ -55,7 +56,13 @@ enum class SketchSubElement {
     // second spelling. Two ways to say the same point is the shape of defect
     // this project keeps paying for -- the same point would compare unequal to
     // itself, so selecting it twice would look like selecting two things.
-    SplinePoint
+    SplinePoint,
+    // THE TIP OF THE HANDLE on point `index` of a spline, as a point (M18).
+    //
+    // The tip rather than the tangent vector, because a reference names
+    // something a constraint can hold, and every constraint in this program
+    // holds points. Only a point that HAS a handle has one of these.
+    SplineHandle
 };
 
 struct SketchElementRef {
@@ -171,6 +178,30 @@ struct SketchSpline {
     // A closed spline runs back to its first point smoothly, and forms an
     // entire loop on its own the way a circle does.
     bool closed{false};
+
+    // WHICH WAY THE CURVE LEAVES a point, for the points that have been given
+    // a handle (M18). Keyed by point index, and sparse: most points have none
+    // and take the default below.
+    //
+    // A MAP RATHER THAN A SECOND LIST the same length as `points`. A parallel
+    // array carries an invariant -- "these two are the same length" -- and this
+    // project's entire defect history is that shape. A map carries only "every
+    // key names a point that exists", which IsValidSketchGeometry checks in the
+    // one place every mutation already funnels through.
+    //
+    // The value is the tangent as a VECTOR, relative to the point, not the
+    // position of a handle's tip. Relative so that moving the point carries its
+    // tangent along instead of silently turning the curve.
+    //
+    // Its LENGTH matters as well as its direction: it is how hard the curve is
+    // pulled that way before it turns, which is the whole reason a handle beats
+    // adding another point.
+    //
+    // WITHOUT a handle the tangent is the Catmull-Rom one, (p[i+1] - p[i-1])/2,
+    // with the ends reflected -- which makes the end tangent exactly the chord
+    // (ADR-M18-001). Handles do not replace that rule, they override it point
+    // by point.
+    std::map<int, Vec2> handles;
 };
 
 using SketchGeometry =
@@ -196,6 +227,15 @@ inline constexpr std::size_t kMinSplinePoints = 2;
 //
 // `samplesPerSpan` is how finely each span between two given points is cut.
 std::vector<Vec2> SampleSpline(const SketchSpline& spline, int samplesPerSpan);
+
+// The tangent AT point `index`: its handle when it has one, and the Catmull-Rom
+// default when it does not.
+//
+// One place, because "which way does the curve leave here" is asked by the
+// evaluator, by the end-tangency constraint, by the kernel when it hands the
+// points to OCCT, and by the canvas when it draws the handle. Four copies of
+// the reflection rule would be four chances to disagree about the ends.
+Vec2 SplineTangentAt(const SketchSpline& spline, int index) noexcept;
 
 // A point partway along, with `t` in [0,1] over the whole curve.
 Vec2 PointOnSpline(const SketchSpline& spline, double t);

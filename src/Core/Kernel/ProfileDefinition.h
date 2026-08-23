@@ -2,6 +2,7 @@
 
 #include "Core/Geometry/MathTypes.h"
 #include <variant>
+#include <map>
 #include <vector>
 
 namespace paramcad {
@@ -79,6 +80,12 @@ struct ProfileEllipticalArcSegment {
 struct ProfileSplineSegment {
     std::vector<Vec2> points;
     bool closed{false};
+    // The tangent at the points that carry a handle, by index (M18). Crossing
+    // this boundary because it is part of WHAT THE USER DREW: a spline with a
+    // handle and one without are different curves through the same points, and
+    // a profile that dropped them would build a solid that does not match the
+    // sketch it came from.
+    std::map<int, Vec2> handles;
 };
 
 using ProfileSegment =

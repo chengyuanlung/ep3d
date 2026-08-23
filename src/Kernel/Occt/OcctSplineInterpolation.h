@@ -5,6 +5,9 @@
 #include <Geom_BSplineCurve.hxx>
 #include <gp_Pnt.hxx>
 
+#include <gp_Vec.hxx>
+
+#include <map>
 #include <vector>
 
 namespace paramcad {
@@ -38,6 +41,10 @@ namespace paramcad {
 //
 // Returns a null handle when the points cannot be interpolated; every caller
 // has to decide what to do about that, and none of them can do it here.
-Handle(Geom_BSplineCurve) InterpolateSplineThrough(const std::vector<gp_Pnt>& points, bool closed);
+// `handles` gives the tangent at the points that carry one, by index. The two
+// ends take the chord when they have no handle; every other unhandled point is
+// left for OCCT to choose, which is what makes the curve smooth between them.
+Handle(Geom_BSplineCurve) InterpolateSplineThrough(const std::vector<gp_Pnt>& points, bool closed,
+                                                   const std::map<int, gp_Vec>& handles = {});
 
 } // namespace paramcad

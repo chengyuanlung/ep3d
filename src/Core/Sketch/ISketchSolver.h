@@ -25,6 +25,14 @@ namespace paramcad {
 struct SolveVariable {
     SketchEntityId entityId{kInvalidSketchEntityId};
     SketchSubElement subElement{SketchSubElement::Whole};
+    // WHICH ONE, where the sub-element alone does not say -- a spline's handles
+    // are all SplineHandle, and there is one per handled point (M18).
+    //
+    // Carried rather than recovered from the order the variables were made.
+    // A spline's POINTS are recovered by order, and that works only because
+    // there is one per point with no gaps; handles are sparse, so an order that
+    // silently skipped one would write every later handle onto the wrong point.
+    int index{0};
     // Which scalar of that sub-element: u/v for points, or the radius of a
     // circle or arc.
     // U/V for points, the radius of a circle or arc, and -- since M17 -- the
@@ -46,7 +54,24 @@ struct SolveVariable {
         MinorRadius,
         Rotation,
         StartParam,
-        EndParam
+        EndParam,
+        // M18 -- a spline handle. HandleU/V are the tangent as a VECTOR
+        // relative to its point, which is the state that is stored and the
+        // thing that stays put when the point moves.
+        //
+        // The handle's TIP -- the same tangent as an absolute point, p + m --
+        // is an ordinary U/V variable, exactly as an arc's tips are, and for
+        // the same reason: a tip that is an ordinary point is something every
+        // constraint which already holds a point can hold, so a handle can be
+        // made horizontal, or parallel to a line, or given an angle, without a
+        // single new residual for each. It is told apart from a spline's actual
+        // points by its SUB-ELEMENT, which is SplineHandle.
+        //
+        // Giving the tips components of their own was tried first and is what
+        // the packing guard is for: every point constraint refused them,
+        // because a Distance reads Component::V and found something else.
+        HandleU,
+        HandleV
     } component{Component::U};
 };
 
@@ -271,6 +296,14 @@ struct SolveResidual {
         // packed where a radius belongs from a deliberate choice.
         EllipseRotation,     //                                        (1 slot)
 
+        // A SPLINE HANDLE'S TIP, tied to its point and its tangent (M18):
+        // tip - base - delta, in one component. The same shape as ArcTipU, and
+        // for the same reason -- see Component::HandleTipU.
+        //
+        // Slots: tip base delta.
+        SplineHandleTipU,    //                                       (3 slots)
+        SplineHandleTipV,    //                                       (3 slots)
+
         // A LINE TANGENT TO AN ELLIPSE (M18).
         //
         // In the ellipse's own frame a line with unit normal (nu, nv) touches
@@ -434,6 +467,14 @@ constexpr bool SlotAccepts(SolveResidual::Kind kind, int slot,
             return alternating;
         case SolveResidual::Kind::EllipseRotation:
             return component == C::Rotation;
+        case SolveResidual::Kind::SplineHandleTipU:
+            // (tip, base, delta) -- the first two are both ordinary U's, and
+            // which is which is decided by the packing, not by the component.
+            if (slot == 2) return component == C::HandleU;
+            return component == C::U;
+        case SolveResidual::Kind::SplineHandleTipV:
+            if (slot == 2) return component == C::HandleV;
+            return component == C::V;
         case SolveResidual::Kind::TangentLineEllipse:
             // (p.u, p.v, q.u, q.v, c.u, c.v, a, b, rot)
             if (slot == 6) return component == C::Radius;
@@ -493,6 +534,9 @@ constexpr int SlotsRequired(SolveResidual::Kind kind) noexcept {
             return 7;
         case SolveResidual::Kind::TangentLineEllipse:
             return 9;
+        case SolveResidual::Kind::SplineHandleTipU:
+        case SolveResidual::Kind::SplineHandleTipV:
+            return 3;
         case SolveResidual::Kind::Angle:
         case SolveResidual::Kind::LinesParallel:
         case SolveResidual::Kind::LinesPerpendicular:

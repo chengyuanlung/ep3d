@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Parameter/Parameter.h"
 
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -45,6 +46,11 @@ struct EntitySlots {
     // points has fourteen variables and a spline through three has six, so the
     // struct grew a vector rather than the eighth, ninth and tenth field.
     std::vector<std::pair<int, int>> splinePoints;
+    // M18, splines only: the FOUR variables each handle needs, by point index.
+    // {tangent.u, tangent.v, tip.u, tip.v} -- the tangent is the state and the
+    // tip is what constraints grab, tied by SplineHandleTipU/V. Sparse, because
+    // most points have no handle.
+    std::map<int, std::array<int, 4>> splineHandles;
 };
 
 const Parameter* ResolveParameter(const ObjectRegistry& registry, ObjectId id) {
@@ -142,6 +148,12 @@ int SlotFor(const EntitySlots& slots, const SketchEntity& entity, SketchSubEleme
         //
         // A CLOSED spline has no ends, the way a circle has none, so its points
         // are ALL reached by index.
+        // A HANDLE'S TIP is its own pair of slots, not one of the points.
+        if (part == SketchSubElement::SplineHandle) {
+            const auto found = slots.splineHandles.find(index);
+            if (found == slots.splineHandles.end()) return -1;
+            return wantU ? found->second[2] : found->second[3];
+        }
         int which = -1;
         if (part == SketchSubElement::SplinePoint) which = index;
         else if (!spline->closed && part == SketchSubElement::StartPoint) which = 0;
@@ -186,11 +198,15 @@ BuildProblemResult BuildSolveProblem(const Sketch& sketch, const ObjectRegistry&
               });
 
     std::map<ObjectId, EntitySlots> slots;
-    const auto addVariable = [&](SketchEntityId id, SketchSubElement part,
-                                 SolveVariable::Component component, double value) {
-        out.problem.variables.push_back(SolveVariable{id, part, component});
+    const auto addVariableAt = [&](SketchEntityId id, SketchSubElement part, int index,
+                                   SolveVariable::Component component, double value) {
+        out.problem.variables.push_back(SolveVariable{id, part, index, component});
         out.problem.initialValues.push_back(value);
         return static_cast<int>(out.problem.variables.size()) - 1;
+    };
+    const auto addVariable = [&](SketchEntityId id, SketchSubElement part,
+                                 SolveVariable::Component component, double value) {
+        return addVariableAt(id, part, 0, component, value);
     };
 
     for (const SketchEntity* entity : entities) {
@@ -237,6 +253,30 @@ BuildProblemResult BuildSolveProblem(const Sketch& sketch, const ObjectRegistry&
                         const int v = addVariable(entity->id, part, SolveVariable::Component::V,
                                                   geometry.points[i].y);
                         s.splinePoints.emplace_back(u, v);
+                    }
+                    // ...and FOUR MORE for every point that carries a handle.
+                    // Net two degrees of freedom each: four variables less the
+                    // two equations that tie the tip to the point and the
+                    // tangent. Exactly what an arc's tips cost, for exactly the
+                    // same reason.
+                    for (const auto& [index, tangent] : geometry.handles) {
+                        if (index < 0 || index >= static_cast<int>(count)) continue;
+                        const Vec2 base = geometry.points[static_cast<std::size_t>(index)];
+                        const int mu =
+                            addVariableAt(entity->id, SketchSubElement::SplineHandle, index,
+                                          SolveVariable::Component::HandleU, tangent.x);
+                        const int mv =
+                            addVariableAt(entity->id, SketchSubElement::SplineHandle, index,
+                                          SolveVariable::Component::HandleV, tangent.y);
+                        const int tipU =
+                            addVariableAt(entity->id, SketchSubElement::SplineHandle, index,
+                                          SolveVariable::Component::U,
+                                          base.x + tangent.x);
+                        const int tipV =
+                            addVariableAt(entity->id, SketchSubElement::SplineHandle, index,
+                                          SolveVariable::Component::V,
+                                          base.y + tangent.y);
+                        s.splineHandles.emplace(index, std::array<int, 4>{mu, mv, tipU, tipV});
                     }
                 } else if constexpr (std::is_same_v<T, SketchEllipse> ||
                                      std::is_same_v<T, SketchEllipticalArc>) {
@@ -349,6 +389,39 @@ BuildProblemResult BuildSolveProblem(const Sketch& sketch, const ObjectRegistry&
         };
         bind(s.tipStartU, s.tipStartV, s.startAngle);
         bind(s.tipEndU, s.tipEndV, s.endAngle);
+    }
+
+    // ...and the same for every SPLINE HANDLE'S TIP (M18): tip = point +
+    // tangent, one equation per component.
+    //
+    // These are what make the tip MEAN something rather than being two loose
+    // numbers that happen to have been seeded nearby.
+    //
+    // They do NOT make the tangent stick to its point. A handle is two degrees
+    // of freedom like anything else here, so when a dimension moves the point
+    // the solver is free to satisfy this equation by moving the tip, by
+    // changing the tangent, or -- being a least-norm step -- by doing half of
+    // each, which is what it does. A tangent that must survive its point moving
+    // is one the user has to constrain, exactly like every other quantity in
+    // this sketch. M18_HAN_005 pins that behaviour rather than wishing it away.
+    for (const SketchEntity& entity : sketch.entities()) {
+        if (!std::holds_alternative<SketchSpline>(entity.geometry)) continue;
+        const EntitySlots& s = slots[ToObjectId(entity.id)];
+        for (const auto& [index, handle] : s.splineHandles) {
+            if (index < 0 || index >= static_cast<int>(s.splinePoints.size())) continue;
+            const auto& base = s.splinePoints[static_cast<std::size_t>(index)];
+            SolveResidual residual;
+            residual.kind = SolveResidual::Kind::SplineHandleTipU;
+            residual.vars[0] = handle[2];
+            residual.vars[1] = base.first;
+            residual.vars[2] = handle[0];
+            out.problem.residuals.push_back(residual);
+            residual.kind = SolveResidual::Kind::SplineHandleTipV;
+            residual.vars[0] = handle[3];
+            residual.vars[1] = base.second;
+            residual.vars[2] = handle[1];
+            out.problem.residuals.push_back(residual);
+        }
     }
 
     // ...and the same for an ELLIPTICAL arc's tips, which need a bigger formula
@@ -524,7 +597,24 @@ BuildProblemResult BuildSolveProblem(const Sketch& sketch, const ObjectRegistry&
             const int count = static_cast<int>(mine.splinePoints.size());
             if (count < 2) return "a spline needs two points before it has a direction";
             const bool atStart = at == SketchSubElement::StartPoint;
-            const auto& tip = atStart ? mine.splinePoints.front() : mine.splinePoints.back();
+            const int which = atStart ? 0 : count - 1;
+            const auto& tip = mine.splinePoints[static_cast<std::size_t>(which)];
+            // THE HANDLE WINS, exactly as it does in the evaluator (M18).
+            //
+            // The residuals below say "the curve leaves this point towards THAT
+            // one", and with a handle the direction is the point-to-tip vector
+            // rather than the chord. So the far point changes and the equation
+            // does not -- which is the same reuse the chord rule bought in the
+            // first place (ADR-M18-001).
+            //
+            // Reading the chord here while the curve followed a handle would be
+            // a tangency that converges on a direction the shape does not have:
+            // the sketch would say smooth and the drawing would show a kink.
+            const auto handle = mine.splineHandles.find(which);
+            if (handle != mine.splineHandles.end()) {
+                *found = SplineEnd{tip.first, tip.second, handle->second[2], handle->second[3]};
+                return nullptr;
+            }
             const auto& next = atStart ? mine.splinePoints[1]
                                        : mine.splinePoints[static_cast<std::size_t>(count - 2)];
             *found = SplineEnd{tip.first, tip.second, next.first, next.second};
@@ -1312,6 +1402,9 @@ bool CommitSolvedGeometry(Sketch& sketch, const SketchSolveProblem& problem,
         // sub-element routing below because a spline's interior points all
         // carry Whole and would otherwise overwrite one another.
         std::vector<Vec2> splinePoints;
+        // BY POINT INDEX, not by position -- handles are sparse. See the
+        // gathering loop below.
+        std::map<int, Vec2> splineHandles;
     };
     std::map<ObjectId, Gathered> gathered;
 
@@ -1331,6 +1424,22 @@ bool CommitSolvedGeometry(Sketch& sketch, const SketchSolveProblem& problem,
         // count before trusting it.
         const SketchEntity* owner = sketch.findEntity(v.entityId);
         if (owner != nullptr && std::holds_alternative<SketchSpline>(owner->geometry)) {
+            // BY SUB-ELEMENT FIRST. A handle's tip is an ordinary U/V variable
+            // -- that is what lets every point constraint hold it -- so telling
+            // it from an actual point by component alone is impossible, and a
+            // tip swept into the point list would shift every later point onto
+            // the wrong one.
+            if (v.subElement == SketchSubElement::SplineHandle) {
+                if (v.component == SolveVariable::Component::HandleU)
+                    g.splineHandles[v.index].x = value;
+                else if (v.component == SolveVariable::Component::HandleV)
+                    g.splineHandles[v.index].y = value;
+                // The TIP is deliberately dropped: tip = point + tangent is the
+                // tie the solver just satisfied, so storing it as well would be
+                // a second copy of a number this model already has -- and the
+                // two could then disagree.
+                continue;
+            }
             if (v.component == SolveVariable::Component::U)
                 g.splinePoints.push_back(Vec2{value, 0.0});
             else if (v.component == SolveVariable::Component::V && !g.splinePoints.empty())
@@ -1414,6 +1523,14 @@ bool CommitSolvedGeometry(Sketch& sketch, const SketchSolveProblem& problem,
                     // collapse every one of them onto the same field.
                     if (g.splinePoints.size() == geometry.points.size())
                         geometry.points = g.splinePoints;
+                    // ONLY THE HANDLES THAT WERE ALREADY THERE. A solve moves
+                    // tangents; it never grows or drops a handle, so a key the
+                    // sketch did not already have is a packing mistake and not
+                    // a new handle.
+                    for (auto& [index, tangent] : geometry.handles) {
+                        const auto found = g.splineHandles.find(index);
+                        if (found != g.splineHandles.end()) tangent = found->second;
+                    }
                 } else if constexpr (std::is_same_v<T, SketchEllipse> ||
                                      std::is_same_v<T, SketchEllipticalArc>) {
                     if (g.hasCentre) geometry.center = Vec2{g.centreU, g.centreV};

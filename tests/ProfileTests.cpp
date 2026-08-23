@@ -447,3 +447,49 @@ TEST(ProfileTest, M4_PROFILE_042_ConcaveButValidProfileAccepted) {
 }
 
 } // namespace
+
+// --- M18: a spline's handles crossing into a profile -------------------------
+
+TEST(ProfileTest, M18_PRO_001_AReversedSplineTurnsItsHandlesROUNDAndRenumbersThem) {
+    // A profile walks its loop in one direction, so an entity drawn the other
+    // way is handed over reversed. For a spline that means reversing the point
+    // list -- and a handle has to reverse TWICE.
+    //
+    // It is renumbered, because point i becomes point n-1-i. And it is NEGATED,
+    // because the direction the curve LEAVES a point going one way is the
+    // direction it ARRIVES going the other. Renumbering without negating gives
+    // the reversed profile a curve that bulges the wrong way at every handled
+    // point -- the same shape flipped, which is not the same shape, and the
+    // solid would not match the sketch it came from.
+    Sketch sketch{"Sketch001"};
+    // THE LINE FIRST, and that is the whole setup. Traversal starts from the
+    // lowest entity id and walks end to end, so starting at the line means
+    // arriving at the spline's END -- and the spline is handed over reversed.
+    // Adding the spline first walks it forwards, and a test written that way
+    // passes whether or not the reversal does anything at all.
+    sketch.addLine(Vec2{0, 0}, Vec2{100, 0});
+    SketchSpline geometry{{Vec2{0, 0}, Vec2{40, 40}, Vec2{100, 0}}, false};
+    geometry.handles[0] = Vec2{10, 25};
+    const SketchEntityId spline = sketch.addSpline(geometry.points, geometry.closed);
+    ASSERT_TRUE(sketch.setEntityGeometry(spline, geometry));
+
+    const ProfileResult result = BuildProfile(sketch);
+    ASSERT_TRUE(result) << result.message;
+    PlanarProfileDefinition definition;
+    ASSERT_TRUE(BuildKernelProfile(sketch, result.profile, definition));
+
+    const ProfileSplineSegment* segment = nullptr;
+    for (const ProfileSegment& one : definition.segments)
+        if (const auto* found = std::get_if<ProfileSplineSegment>(&one)) segment = found;
+    ASSERT_NE(segment, nullptr);
+    ASSERT_EQ(segment->handles.size(), 1u);
+
+    ASSERT_GT(segment->points.front().x, segment->points.back().x)
+        << "the walk did not reverse the spline, so this test proves nothing";
+    // Point 0 became point 2...
+    EXPECT_EQ(segment->handles.find(0), segment->handles.end());
+    ASSERT_NE(segment->handles.find(2), segment->handles.end());
+    // ...and its tangent turned round.
+    EXPECT_DOUBLE_EQ(segment->handles.at(2).x, -10.0);
+    EXPECT_DOUBLE_EQ(segment->handles.at(2).y, -25.0);
+}

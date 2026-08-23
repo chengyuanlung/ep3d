@@ -1,0 +1,38 @@
+# A TANGENT HANDLE (M18).
+#
+# The point of a handle is that it changes the SHAPE without adding a point.
+# Both splines below go through exactly the same three points; only the second
+# one has been told which way to leave the middle.
+
+sketch Handles
+
+tool spline
+click 10 10
+click 60 60
+click 110 10
+finish
+echo --- no handle ---
+measure Spline1
+
+tool spline
+click 10 90
+click 60 140
+click 110 90
+finish
+handle Spline2.p1 45 0
+echo --- same three points, one handle ---
+measure Spline2
+
+# The handle's tip is a POINT, so everything that holds a point holds it:
+# a vertical distance of zero from its own point says "leave horizontally".
+dimension vdistance Spline2.p1 Spline2.h1 0 as Flat
+
+# ...and now the middle point can be dimensioned anywhere without the tangent
+# drifting, which an UNCONSTRAINED handle would do (see ADR-M18-005).
+dimension vdistance Spline2.start Spline2.p1 70 as Rise
+solve
+
+echo --- the middle point and its tip, after solving ---
+measure Spline2.p1
+measure Spline2.h1
+echo (the two v values are equal: the tangent is level, which is what Flat says)

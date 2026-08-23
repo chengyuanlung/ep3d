@@ -434,11 +434,30 @@ TEST(SketchCanvasSolveTest, M17_AXIS_004_TheSolverReachesTheTargetFromAnAlignedS
         fixture.dimension({SketchElementRef{pa, SketchSubElement::Whole},
                            SketchElementRef{pb, SketchSubElement::Whole}},
                           SketchEditKind::AddHorizontalDistance);
-    // Seeded at zero, which is below the minimum a dimension may take -- so the
-    // command is REFUSED, and it says so rather than creating a dimension the
-    // solver cannot move off zero.
-    EXPECT_FALSE(dimension.applied);
-    EXPECT_FALSE(dimension.status.empty());
+    // ACCEPTED, and then it works. This test used to assert the opposite -- the
+    // command refused for being "seeded below the minimum" -- while its own
+    // preamble three lines above explained why a signed distance has no trouble
+    // at zero. The two halves contradicted each other, and the name promised
+    // something the body then made unreachable: with the command refused, the
+    // solver never ran, so nothing here ever checked that it reaches the target.
+    //
+    // The refusal was a magnitude rule applied to a signed quantity (M18). It
+    // also refused the two most ordinary requests there are -- "line these up"
+    // and "make these level" -- which is how it was finally noticed.
+    ASSERT_TRUE(dimension.applied) << dimension.status;
+    ASSERT_EQ(dimension.createdConstraints.size(), 1u);
+
+    ASSERT_TRUE(CommitDimensionValue(fixture.document, fixture.sketch(),
+                                     dimension.createdConstraints.front(), "40")
+                    .applied);
+    (void)fixture.document.recompute();
+
+    const SketchEntity* moved = fixture.sketch().findEntity(pb);
+    ASSERT_NE(moved, nullptr);
+    // Straight to the answer from a start where an |b - a| residual would have
+    // had no derivative at all.
+    EXPECT_NEAR(std::get<SketchPoint>(moved->geometry).position.x, 40.0, 1e-6)
+        << fixture.sketch().solveMessage();
 }
 
 // =============================================================================

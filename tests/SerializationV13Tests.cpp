@@ -86,7 +86,7 @@ TEST(SerializationV13Test, M17_SER_001_TheSchemaVersionIsStamped) {
     // so a bump lands here and nowhere else -- and it has to land somewhere, or
     // a format change that forgot to bump would write files an older loader
     // silently mis-reads.
-    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 23"), std::string::npos);
+    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 24"), std::string::npos);
 }
 
 TEST(SerializationV13Test, M17_SER_002_BothKindsAreWrittenUnderTheirOwnNames) {
@@ -934,4 +934,62 @@ TEST(SerializationV13Test, M17_SER_046_NoIndexIsWrittenForAnOrdinarySubElement) 
 
     const std::string text = SaveToString(document);
     EXPECT_EQ(text.find("\"index\""), std::string::npos) << text;
+}
+
+// --- M18 (v24): SPLINE TANGENT HANDLES ---------------------------------------
+
+TEST(SerializationV13Test, M18_SER_001_AHandleSurvivesARoundTrip) {
+    // A spline with a handle and one without are DIFFERENT CURVES through the
+    // same points. A round trip that dropped the handle would reload a
+    // different shape while every point matched, which is the hardest kind of
+    // wrong to notice.
+    PartDocument document{"HandleDoc"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    SketchSpline geometry{{Vec2{0, 0}, Vec2{40, 30}, Vec2{90, 10}}, false};
+    geometry.handles[1] = Vec2{25.5, -12.25};
+    const SketchEntityId spline = sketch.addSpline(geometry.points, geometry.closed);
+    ASSERT_TRUE(document.setSketchEntityGeometry(sketch.id(), spline, geometry));
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const Sketch* back = loaded.document->findSketch(loaded.document->sketches().front()->id());
+    ASSERT_NE(back, nullptr);
+    const auto& reloaded = std::get<SketchSpline>(back->entities().front().geometry);
+    ASSERT_EQ(reloaded.handles.size(), 1u);
+    ASSERT_NE(reloaded.handles.find(1), reloaded.handles.end());
+    EXPECT_DOUBLE_EQ(reloaded.handles.at(1).x, 25.5);
+    EXPECT_DOUBLE_EQ(reloaded.handles.at(1).y, -12.25);
+}
+
+TEST(SerializationV13Test, M18_SER_002_ASplineWithNoHandlesWritesNoHandlesField) {
+    // Every spline written before v24 is still byte-identical, because the
+    // field only appears where it means something -- and absent reads as "no
+    // handles", which is exactly what those files meant.
+    PartDocument document{"HandleDoc"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    sketch.addSpline({Vec2{0, 0}, Vec2{40, 30}, Vec2{90, 10}}, false);
+
+    const std::string text = SaveToString(document);
+    EXPECT_EQ(text.find("\"handles\""), std::string::npos) << text;
+}
+
+TEST(SerializationV13Test, M18_SER_003_AHandleOnAPointThatDoesNotExistIsREFUSED) {
+    // Refused, not skipped. A handle that quietly failed to load would give the
+    // reader a different curve through the same points, which is the one thing
+    // a handle exists to make different.
+    PartDocument document{"HandleDoc"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    SketchSpline geometry{{Vec2{0, 0}, Vec2{40, 30}, Vec2{90, 10}}, false};
+    geometry.handles[1] = Vec2{25.0, 0.0};
+    const SketchEntityId spline = sketch.addSpline(geometry.points, geometry.closed);
+    ASSERT_TRUE(document.setSketchEntityGeometry(sketch.id(), spline, geometry));
+
+    std::string text = SaveToString(document);
+    const std::size_t at = text.find("\"point\": 1");
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, std::string("\"point\": 1").size(), "\"point\": 9");
+
+    const LoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_NE(loaded.message.find("point"), std::string::npos) << loaded.message;
 }

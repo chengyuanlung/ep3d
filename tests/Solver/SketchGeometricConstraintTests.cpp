@@ -1058,3 +1058,324 @@ TEST(SketchGeometricConstraintTest, M18_TAN_009_TheENDUsesITSOwnNeighbourNotTheS
     // above about the end rather than about splines in general.
     EXPECT_GT(std::fabs(sineWith(startChord)), 0.1) << sketch.solveMessage();
 }
+
+// --- M18: SPLINE TANGENT HANDLES ---------------------------------------------
+
+TEST(SketchGeometricConstraintTest, M18_HAN_001_HermiteIsCatmullRomWhenNobodySetAHandle) {
+    // The substitution the whole change rests on. The evaluator was rewritten
+    // from a Catmull-Rom span to a Hermite one so that a single point could
+    // carry its own tangent -- and Catmull-Rom IS Hermite with
+    // m_i = (p[i+1] - p[i-1])/2, so a spline with no handles must be the SAME
+    // CURVE it was before, not merely a similar one.
+    //
+    // Checked against the Catmull-Rom basis written out here by hand, not
+    // against the old code, which is gone.
+    const SketchSpline spline{{Vec2{10, 5}, Vec2{40, 25}, Vec2{75, 0}, Vec2{110, 30}}, false};
+    const auto catmullRom = [](double a, double b, double c, double d, double u) {
+        const double u2 = u * u;
+        const double u3 = u2 * u;
+        return 0.5 * ((2.0 * b) + (-a + c) * u + (2.0 * a - 5.0 * b + 4.0 * c - d) * u2 +
+                      (-a + 3.0 * b - 3.0 * c + d) * u3);
+    };
+    // Span 1, between points 1 and 2, whose neighbours are both real points --
+    // so this compares the basis alone, with no end reflection involved.
+    for (int step = 0; step <= 10; ++step) {
+        const double u = step / 10.0;
+        const Vec2 got = PointOnSpline(spline, (1.0 + u) / 3.0);
+        const double x = catmullRom(spline.points[0].x, spline.points[1].x, spline.points[2].x,
+                                    spline.points[3].x, u);
+        const double y = catmullRom(spline.points[0].y, spline.points[1].y, spline.points[2].y,
+                                    spline.points[3].y, u);
+        EXPECT_NEAR(got.x, x, 1e-9) << "u = " << u;
+        EXPECT_NEAR(got.y, y, 1e-9) << "u = " << u;
+    }
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_002_AHandleCHANGESTheCurveItLeavesAlong) {
+    // What a handle is for. Without this the whole feature could be inert and
+    // every other test here would still pass.
+    SketchSpline spline{{Vec2{0, 0}, Vec2{50, 50}, Vec2{100, 0}}, false};
+    const Vec2 before = PointOnSpline(spline, 0.25);
+    spline.handles[0] = Vec2{0, 60}; // leave straight UP instead of along the chord
+    const Vec2 after = PointOnSpline(spline, 0.25);
+
+    EXPECT_GT(std::hypot(after.x - before.x, after.y - before.y), 1.0);
+    // ...and it really does leave upwards now.
+    const Vec2 justAfterStart = PointOnSpline(spline, 1e-6);
+    EXPECT_GT(justAfterStart.y - 0.0, std::fabs(justAfterStart.x - 0.0));
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_003_TheHandlesLENGTHMattersNotJustItsDirection) {
+    // A handle is better than another point precisely because it says how HARD
+    // the curve is pulled before it turns. A version that normalised the vector
+    // would draw the same curve for both of these.
+    SketchSpline gentle{{Vec2{0, 0}, Vec2{50, 50}, Vec2{100, 0}}, false};
+    gentle.handles[0] = Vec2{20, 0};
+    SketchSpline firm = gentle;
+    firm.handles[0] = Vec2{90, 0};
+
+    const Vec2 a = PointOnSpline(gentle, 0.25);
+    const Vec2 b = PointOnSpline(firm, 0.25);
+    EXPECT_GT(std::hypot(b.x - a.x, b.y - a.y), 1.0);
+    // ALONG the handle, which here is +u. Both handles point the same way, so
+    // the difference between them is entirely in how FAR the curve is carried
+    // before it turns -- and asserting anything about v would be asserting a
+    // number the basis makes identical either way.
+    EXPECT_GT(b.x, a.x + 5.0);
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_004_AHandleCostsTWODegreesOfFreedom) {
+    // Four variables -- the tangent and the tip -- less the two equations that
+    // tie the tip to its point. A handle is two new numbers, and the readout
+    // has to say so.
+    //
+    // This also holds the no-constraint DOF shortcut to what the solver would
+    // measure: that path counts variables and subtracts the residuals the
+    // builder emits anyway, on the strength of those ties being independent.
+    // Here a real constraint forces the solver's own rank computation, and the
+    // two answers have to agree.
+    PartDocument document{"HandleDoc"};
+    GaussNewtonSketchSolver solver;
+    document.setSketchSolver(&solver);
+    Sketch& sketch = document.addSketch("Sketch001");
+    SketchSpline geometry{{Vec2{10, 10}, Vec2{50, 50}, Vec2{100, 10}}, false};
+    geometry.handles[1] = Vec2{30, 0};
+    const SketchEntityId spline = sketch.addSpline(geometry.points, geometry.closed);
+    ASSERT_TRUE(document.setSketchEntityGeometry(sketch.id(), spline, geometry));
+
+    // One Fix, so the solver runs rather than the count-only path.
+    document.addSketchConstraint(
+        sketch.id(), FixConstraint{SketchElementRef{spline, SketchSubElement::StartPoint}});
+
+    ASSERT_TRUE(document.recompute().success) << sketch.solveMessage();
+    // Six for the points, two for the handle, less the two the Fix takes.
+    EXPECT_EQ(sketch.degreesOfFreedom(), 6) << sketch.solveMessage();
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_005_AnUnconstrainedHandleIsFreeAndMOVES) {
+    // WHAT THE TIE DOES AND WHAT IT DOES NOT.
+    //
+    // It makes the tip mean p + m, so a constraint on the tip is a constraint
+    // on the tangent. It does NOT nail the tangent to its point: a handle is
+    // two degrees of freedom like everything else here, so when a dimension
+    // moves the point, the solver may satisfy the tie by moving the tip, by
+    // changing the tangent, or -- taking a least-norm step -- by doing half of
+    // each. It does half of each, and this test says so rather than wishing
+    // otherwise.
+    //
+    // A tangent that must survive its point moving is one the user constrains.
+    // M18_HAN_005b is that, and it is the answer to anyone surprised by this.
+    PartDocument document{"HandleDoc"};
+    GaussNewtonSketchSolver solver;
+    document.setSketchSolver(&solver);
+    Sketch& sketch = document.addSketch("Sketch001");
+    SketchSpline geometry{{Vec2{10, 10}, Vec2{50, 50}, Vec2{100, 10}}, false};
+    geometry.handles[1] = Vec2{30, 0};
+    const SketchEntityId spline = sketch.addSpline(geometry.points, geometry.closed);
+    ASSERT_TRUE(document.setSketchEntityGeometry(sketch.id(), spline, geometry));
+
+    Parameter& lift = document.addParameter("Y", 80.0, UnitType::Millimeter);
+    document.addSketchConstraint(
+        sketch.id(), FixConstraint{SketchElementRef{spline, SketchSubElement::StartPoint}});
+    ASSERT_NE(document.addSketchConstraint(
+                  sketch.id(),
+                  VerticalDistanceConstraint{
+                      SketchElementRef{spline, SketchSubElement::StartPoint},
+                      SketchElementRef{spline, SketchSubElement::SplinePoint, 1}, lift.id()}),
+              kInvalidSketchConstraintId);
+
+    ASSERT_TRUE(document.recompute().success) << sketch.solveMessage();
+    const auto& solved = std::get<SketchSpline>(sketch.findEntity(spline)->geometry);
+    EXPECT_NEAR(solved.points[1].y - solved.points[0].y, 80.0, 1e-6) << sketch.solveMessage();
+    ASSERT_NE(solved.handles.find(1), solved.handles.end());
+    // The point rose 40 mm. Half of that went into the tip and half into the
+    // tangent, which is the least-norm split -- so the tangent tilted by 20 and
+    // NOT by 40, and not by nothing.
+    EXPECT_NEAR(solved.handles.at(1).x, 30.0, 1e-6) << sketch.solveMessage();
+    EXPECT_NEAR(std::fabs(solved.handles.at(1).y), 20.0, 1e-3) << sketch.solveMessage();
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_005b_AConstrainedHandleIsHELDWhileItsPointMoves) {
+    // The other half of M18_HAN_005, and the reason the tip is a point at all.
+    //
+    // Saying "this tangent is horizontal" is an ordinary vertical distance of
+    // zero between the point and its handle's tip -- no residual was written
+    // for the purpose. With it in place the point can be dimensioned anywhere
+    // and the tangent stays where the user put it.
+    PartDocument document{"HandleDoc"};
+    GaussNewtonSketchSolver solver;
+    document.setSketchSolver(&solver);
+    Sketch& sketch = document.addSketch("Sketch001");
+    SketchSpline geometry{{Vec2{10, 10}, Vec2{50, 50}, Vec2{100, 10}}, false};
+    geometry.handles[1] = Vec2{30, 0};
+    const SketchEntityId spline = sketch.addSpline(geometry.points, geometry.closed);
+    ASSERT_TRUE(document.setSketchEntityGeometry(sketch.id(), spline, geometry));
+
+    Parameter& lift = document.addParameter("Y", 80.0, UnitType::Millimeter);
+    Parameter& level = document.addParameter("Flat", 0.0, UnitType::Millimeter);
+    document.addSketchConstraint(
+        sketch.id(), FixConstraint{SketchElementRef{spline, SketchSubElement::StartPoint}});
+    document.addSketchConstraint(
+        sketch.id(),
+        VerticalDistanceConstraint{SketchElementRef{spline, SketchSubElement::SplinePoint, 1},
+                                   SketchElementRef{spline, SketchSubElement::SplineHandle, 1},
+                                   level.id()});
+    ASSERT_NE(document.addSketchConstraint(
+                  sketch.id(),
+                  VerticalDistanceConstraint{
+                      SketchElementRef{spline, SketchSubElement::StartPoint},
+                      SketchElementRef{spline, SketchSubElement::SplinePoint, 1}, lift.id()}),
+              kInvalidSketchConstraintId);
+
+    ASSERT_TRUE(document.recompute().success) << sketch.solveMessage();
+    const auto& solved = std::get<SketchSpline>(sketch.findEntity(spline)->geometry);
+    EXPECT_NEAR(solved.points[1].y - solved.points[0].y, 80.0, 1e-6) << sketch.solveMessage();
+    ASSERT_NE(solved.handles.find(1), solved.handles.end());
+    EXPECT_NEAR(solved.handles.at(1).y, 0.0, 1e-6) << sketch.solveMessage();
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_006_AHandleCanBeCONSTRAINEDLikeAnyPoint) {
+    // Why the tip is a variable at all. It is a point, so a Horizontal between
+    // it and its own point makes the tangent horizontal -- with no residual
+    // written for the purpose, exactly as an arc's tips buy every point
+    // constraint for an arc.
+    PartDocument document{"HandleDoc"};
+    GaussNewtonSketchSolver solver;
+    document.setSketchSolver(&solver);
+    Sketch& sketch = document.addSketch("Sketch001");
+    SketchSpline geometry{{Vec2{10, 10}, Vec2{50, 50}, Vec2{100, 10}}, false};
+    geometry.handles[1] = Vec2{30, 25}; // deliberately NOT horizontal
+    const SketchEntityId spline = sketch.addSpline(geometry.points, geometry.closed);
+    ASSERT_TRUE(document.setSketchEntityGeometry(sketch.id(), spline, geometry));
+
+    ASSERT_NE(document.addSketchConstraint(
+                  sketch.id(),
+                  VerticalDistanceConstraint{
+                      SketchElementRef{spline, SketchSubElement::SplinePoint, 1},
+                      SketchElementRef{spline, SketchSubElement::SplineHandle, 1},
+                      document.addParameter("Zero", 0.0, UnitType::Millimeter).id()}),
+              kInvalidSketchConstraintId);
+
+    ASSERT_TRUE(document.recompute().success) << sketch.solveMessage();
+    const auto& solved = std::get<SketchSpline>(sketch.findEntity(spline)->geometry);
+    ASSERT_NE(solved.handles.find(1), solved.handles.end());
+    EXPECT_NEAR(solved.handles.at(1).y, 0.0, 1e-6) << sketch.solveMessage();
+    // ...and it did not simply collapse: the handle still points somewhere.
+    EXPECT_GT(std::fabs(solved.handles.at(1).x), 1.0) << sketch.solveMessage();
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_007_AnEndsTangencyUsesTheHANDLENotTheChord) {
+    // ADR-M18-001 said the end tangent is the chord; a handle overrides that,
+    // and the tangency constraint has to follow the same rule the evaluator
+    // does. Reading the chord here while the curve left along a handle would be
+    // a tangency that converges on a direction the shape does not have.
+    PartDocument document{"HandleDoc"};
+    GaussNewtonSketchSolver solver;
+    document.setSketchSolver(&solver);
+    Sketch& sketch = document.addSketch("Sketch001");
+    SketchSpline geometry{{Vec2{100, 40}, Vec2{70, 33}, Vec2{40, 10}}, false};
+    geometry.handles[0] = Vec2{-20, -35}; // nothing like the chord
+    const SketchEntityId spline = sketch.addSpline(geometry.points, geometry.closed);
+    ASSERT_TRUE(document.setSketchEntityGeometry(sketch.id(), spline, geometry));
+    const SketchEntityId line = sketch.addLine(Vec2{100, 40}, Vec2{160, 40});
+
+    document.addSketchConstraint(
+        sketch.id(),
+        CoincidentConstraint{SketchElementRef{spline, SketchSubElement::StartPoint},
+                             SketchElementRef{line, SketchSubElement::StartPoint}});
+    ASSERT_NE(document.addSketchConstraint(
+                  sketch.id(),
+                  TangentConstraint{spline, line, false, SketchSubElement::StartPoint}),
+              kInvalidSketchConstraintId);
+
+    ASSERT_TRUE(document.recompute().success) << sketch.solveMessage();
+    const auto& solved = std::get<SketchSpline>(sketch.findEntity(spline)->geometry);
+    const auto& solvedLine = std::get<SketchLine>(sketch.findEntity(line)->geometry);
+    const Vec2 along{solvedLine.end.x - solvedLine.start.x, solvedLine.end.y - solvedLine.start.y};
+    const auto sineWith = [&](Vec2 direction) {
+        return (direction.x * along.y - direction.y * along.x) /
+               (std::hypot(direction.x, direction.y) * std::hypot(along.x, along.y));
+    };
+    ASSERT_NE(solved.handles.find(0), solved.handles.end());
+    // THE HANDLE is what became parallel to the line...
+    EXPECT_NEAR(sineWith(solved.handles.at(0)), 0.0, 1e-6) << sketch.solveMessage();
+    // ...and the chord did NOT, which is what makes that assertion about the
+    // handle rather than about the spline in general.
+    const Vec2 chord{solved.points[1].x - solved.points[0].x,
+                     solved.points[1].y - solved.points[0].y};
+    EXPECT_GT(std::fabs(sineWith(chord)), 0.05) << sketch.solveMessage();
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_008_AHandleOnAPointThatHasNoneIsREFUSED) {
+    // Answering with the point itself would be a constraint on a place the
+    // caller never named -- and one that looks satisfied from the start,
+    // because a zero-length tangent is parallel to everything.
+    PartDocument document{"HandleDoc"};
+    GaussNewtonSketchSolver solver;
+    document.setSketchSolver(&solver);
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId spline =
+        sketch.addSpline({Vec2{10, 10}, Vec2{50, 50}, Vec2{100, 10}}, false);
+    const SketchEntityId point = sketch.addPoint(Vec2{5, 5});
+
+    document.addSketchConstraint(
+        sketch.id(),
+        CoincidentConstraint{SketchElementRef{point, SketchSubElement::Whole},
+                             SketchElementRef{spline, SketchSubElement::SplineHandle, 1}});
+
+    EXPECT_FALSE(document.recompute().success) << sketch.solveMessage();
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_009_AHandleKeyedPastTheEndIsNOTVALIDGeometry) {
+    // The one place the sparse map's invariant is enforced. A handle naming a
+    // point that does not exist is what a parallel array would have made
+    // impossible by construction, and what a map has to be told.
+    SketchSpline geometry{{Vec2{10, 10}, Vec2{50, 50}, Vec2{100, 10}}, false};
+    geometry.handles[7] = Vec2{30, 0};
+    EXPECT_FALSE(IsValidSketchGeometry(geometry));
+
+    SketchSpline zeroLength{{Vec2{10, 10}, Vec2{50, 50}, Vec2{100, 10}}, false};
+    zeroLength.handles[1] = Vec2{0, 0};
+    // A tangent with no length says nothing about direction: that is the
+    // ABSENCE of a handle, spelled wrongly.
+    EXPECT_FALSE(IsValidSketchGeometry(zeroLength));
+}
+
+TEST(SketchGeometricConstraintTest, M18_HAN_010_ACONSTRAINTFREESketchStillCountsItsTieEquations) {
+    // The DOF readout has TWO implementations and they have to agree.
+    //
+    // A sketch with no constraints never reaches the solver at all: that path
+    // counts the variables the problem would have had. But not every residual
+    // comes from a constraint -- an arc's tips, an elliptical arc's tips and a
+    // spline handle's tip are each DEFINED by an equation the builder emits
+    // regardless, and those take freedom away exactly as a constraint would.
+    //
+    // Counting only the variables reported a bare arc as nine free scalars when
+    // it has five, and had done so since arcs grew tips. It was invisible until
+    // a handle made the gap four.
+    PartDocument document{"FreeDoc"};
+    GaussNewtonSketchSolver solver;
+    document.setSketchSolver(&solver);
+
+    Sketch& arcOnly = document.addSketch("Arc");
+    arcOnly.addArc(Vec2{0, 0}, 40.0, 0.0, 1.0, true);
+    ASSERT_TRUE(document.recompute().success) << arcOnly.solveMessage();
+    // Centre, radius and two angles. The four tip variables are paid for by the
+    // four equations that place them.
+    EXPECT_EQ(arcOnly.degreesOfFreedom(), 5) << arcOnly.solveMessage();
+
+    Sketch& plain = document.addSketch("Spline");
+    plain.addSpline({Vec2{0, 0}, Vec2{40, 30}, Vec2{90, 10}}, false);
+    ASSERT_TRUE(document.recompute().success) << plain.solveMessage();
+    EXPECT_EQ(plain.degreesOfFreedom(), 6) << plain.solveMessage();
+
+    Sketch& handled = document.addSketch("Handled");
+    SketchSpline geometry{{Vec2{0, 0}, Vec2{40, 30}, Vec2{90, 10}}, false};
+    geometry.handles[1] = Vec2{20, 0};
+    const SketchEntityId spline = handled.addSpline(geometry.points, geometry.closed);
+    ASSERT_TRUE(document.setSketchEntityGeometry(handled.id(), spline, geometry));
+    ASSERT_TRUE(document.recompute().success) << handled.solveMessage();
+    // Six for the points and TWO for the handle -- four variables less the two
+    // equations that tie the tip to its point.
+    EXPECT_EQ(handled.degreesOfFreedom(), 8) << handled.solveMessage();
+}

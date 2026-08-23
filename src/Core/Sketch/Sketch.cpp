@@ -452,8 +452,25 @@ RecomputeResult Sketch::recompute(const RecomputeContext& context) {
         // read "Under-constrained, DOF 0", which is self-contradictory: 0 is
         // what a FULLY constrained sketch reports. Counting needs no solver,
         // only the variables the problem would have had.
-        degreesOfFreedom_ =
-            static_cast<int>(BuildSolveProblem(*this, context.registry).problem.variables.size());
+        //
+        // ...MINUS THE EQUATIONS THE PROBLEM CARRIES ANYWAY (M18).
+        //
+        // Not every residual comes from a constraint. An arc's tips, an
+        // elliptical arc's tips and a spline handle's tip are each DEFINED by
+        // an equation the builder emits whether or not the user constrained
+        // anything, and those equations take freedom away exactly as a
+        // constraint would. Counting only the variables reported a bare arc as
+        // nine free scalars when it has five, and it had done so since arcs
+        // grew tips -- invisible until a spline handle made the gap four.
+        //
+        // The count IS the rank here: every one of these ties owns a tip
+        // variable that no other residual mentions, so no two can be multiples
+        // of one another. That is a property of how they are built, and
+        // M18_HAN_004 holds the builder to it by comparing this number against
+        // the one the solver measures from the Jacobian.
+        const BuildProblemResult free = BuildSolveProblem(*this, context.registry);
+        degreesOfFreedom_ = std::max(0, static_cast<int>(free.problem.variables.size()) -
+                                            static_cast<int>(free.problem.residuals.size()));
         solveMessage_.clear();
         offendingConstraints_.clear();
         return {RecomputeStatus::Success, {}};

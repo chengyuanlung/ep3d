@@ -165,12 +165,20 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
     // InterpolateSplineThrough -- ONE copy, shared with the wireframe the 3D
     // view draws, so a preview and the solid it previews cannot show different
     // curves through the same points.
-    const auto splineThrough = [&](const std::vector<Vec2>& points,
-                                   bool closed) -> Handle(Geom_BSplineCurve) {
+    const auto splineThrough = [&](const std::vector<Vec2>& points, bool closed,
+                                   const std::map<int, Vec2>& handles)
+        -> Handle(Geom_BSplineCurve) {
         std::vector<gp_Pnt> world;
         world.reserve(points.size());
         for (const Vec2& point : points) world.push_back(toWorld(point));
-        return InterpolateSplineThrough(world, closed);
+        // A TANGENT IS A DIRECTION, so it is rotated onto the plane but NOT
+        // translated onto it: the difference of two placed points, which drops
+        // the origin the way subtracting always does.
+        const gp_Pnt origin = toWorld(Vec2{0.0, 0.0});
+        std::map<int, gp_Vec> placed;
+        for (const auto& [index, tangent] : handles)
+            placed.emplace(index, gp_Vec(origin, toWorld(tangent)));
+        return InterpolateSplineThrough(world, closed, placed);
     };
 
     // ONE wire builder, used for the outer boundary and for every hole. The
@@ -206,7 +214,7 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
             wireMaker.Add(edge.Edge());
         } else if (const auto* spline = std::get_if<ProfileSplineSegment>(&segment)) {
             const Handle(Geom_BSplineCurve) curve =
-                splineThrough(spline->points, spline->closed);
+                splineThrough(spline->points, spline->closed, spline->handles);
             if (curve.IsNull()) {
                 error = "OCCT could not interpolate a spline through those points";
                 return false;

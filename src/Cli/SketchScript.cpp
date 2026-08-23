@@ -258,15 +258,20 @@ private:
             else if (suffix == "center" || suffix == "centre")
                 part = SketchSubElement::CenterPoint;
             else if (suffix == "whole") part = SketchSubElement::Whole;
-            else if (suffix.size() > 1 && suffix[0] == 'p' &&
+            else if (suffix.size() > 1 && suffix[0] == 'h' &&
+                       suffix.find_first_not_of("0123456789", 1) == std::string::npos) {
+                // `Spline1.h3` -- the TIP of the handle on point 3.
+                part = SketchSubElement::SplineHandle;
+                index = std::atoi(suffix.c_str() + 1);
+            } else if (suffix.size() > 1 && suffix[0] == 'p' &&
                      suffix.find_first_not_of("0123456789", 1) == std::string::npos) {
                 // `Spline1.p3` -- ONE OF A SPLINE'S POINTS, counted from 0.
                 part = SketchSubElement::SplinePoint;
                 index = std::atoi(suffix.c_str() + 1);
             } else
                 return fail("'" + suffix +
-                            "' is not a sub-element; use start, end, center, or pN for a "
-                            "spline's Nth point");
+                            "' is not a sub-element; use start, end, center, pN for a "
+                            "spline's Nth point, or hN for that point's handle");
         }
         const auto found = names_.find(name);
         if (found == names_.end()) {
@@ -274,6 +279,21 @@ private:
             for (const auto& pair : names_) known.push_back(pair.first);
             return fail("nothing here is called '" + name + "'" +
                         (known.empty() ? "" : "; this sketch has " + Join(known)));
+        }
+        if (part == SketchSubElement::SplineHandle) {
+            const Sketch* current = sketch();
+            const SketchEntity* entity =
+                current == nullptr ? nullptr : current->findEntity(found->second);
+            const auto* spline =
+                entity == nullptr ? nullptr : std::get_if<SketchSpline>(&entity->geometry);
+            if (spline == nullptr)
+                return fail("'" + name + "' is not a spline, so it has no handles");
+            if (spline->handles.find(index) == spline->handles.end())
+                return fail("point " + std::to_string(index) + " of '" + name +
+                            "' has no handle; give it one with `handle " + name + ".p" +
+                            std::to_string(index) + " DU DV`");
+            *out = SketchElementRef{found->second, SketchSubElement::SplineHandle, index};
+            return true;
         }
         // THROUGH THE ONE SPELLING RULE, so `Spline1.p0` and `Spline1.start`
         // produce the SAME reference rather than two that compare unequal.
@@ -328,7 +348,55 @@ private:
             note("constraints: " + Join(ScriptConstraintNames()));
             note("dimensions: " + Join(ScriptDimensionNames()));
             note("commands: sketch, tool, click, finish, constrain, dimension, pad, solve, "
-                 "save, measure, echo, help");
+                 "save, measure, handle, echo, help");
+            return true;
+        }
+        if (verb == "handle") {
+            // `handle Spline1.p2 30 10`  -- give point 2 that tangent
+            // `handle Spline1.p2 off`    -- take its handle away
+            //
+            // A handle is GEOMETRY, not a constraint: it changes what curve the
+            // points describe. So this reshapes the entity in place, keeping its
+            // id and every constraint already on it.
+            if (tokens.size() != 3 && tokens.size() != 4)
+                return fail("handle needs `handle REF DU DV` or `handle REF off`");
+            SketchElementRef ref{};
+            if (!parseRef(tokens[1], &ref)) return false;
+            const Sketch* current = sketch();
+            const SketchEntity* entity =
+                current == nullptr ? nullptr : current->findEntity(ref.entityId);
+            const auto* spline =
+                entity == nullptr ? nullptr : std::get_if<SketchSpline>(&entity->geometry);
+            if (spline == nullptr) return fail("'" + tokens[1] + "' is not a spline");
+            // WHICH POINT, through the same rule that names one: `.start` is
+            // point 0 and `.end` is the last, so `handle Spline1.start` works
+            // and means what it looks like.
+            int which = -1;
+            const int count = static_cast<int>(spline->points.size());
+            if (ref.subElement == SketchSubElement::StartPoint) which = 0;
+            else if (ref.subElement == SketchSubElement::EndPoint) which = count - 1;
+            else if (ref.subElement == SketchSubElement::SplinePoint ||
+                     ref.subElement == SketchSubElement::SplineHandle) which = ref.index;
+            if (which < 0 || which >= count)
+                return fail("'" + tokens[1] + "' does not name one of that spline's points");
+
+            SketchSpline reshaped = *spline;
+            if (tokens.size() == 3) {
+                if (tokens[2] != "off")
+                    return fail("expected `off`, or a DU and a DV, after '" + tokens[1] + "'");
+                if (reshaped.handles.erase(which) == 0)
+                    return fail("point " + std::to_string(which) + " has no handle to remove");
+            } else {
+                double du = 0.0;
+                double dv = 0.0;
+                if (!ParseNumber(tokens[2], &du) || !ParseNumber(tokens[3], &dv)) return false;
+                reshaped.handles[which] = Vec2{du, dv};
+            }
+            if (!document_.setSketchEntityGeometry(sketchId_, ref.entityId, std::move(reshaped)))
+                return fail("the sketch refused that handle");
+            note(tokens.size() == 3 ? "handle removed from point " + std::to_string(which)
+                                    : "handle on point " + std::to_string(which) + " = " +
+                                          tokens[2] + ", " + tokens[3]);
             return true;
         }
         if (verb == "measure") {

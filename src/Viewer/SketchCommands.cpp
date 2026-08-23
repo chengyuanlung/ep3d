@@ -950,7 +950,23 @@ SketchEditOutcome ApplySketchEdit(PartDocument& document, ObjectId sketchId,
         // MAGNITUDE, not value. Two of these kinds are signed -- a point on the
         // far side of a line measures negative, and refusing that would refuse
         // half the plane for being "too small".
-        if (unit == UnitType::Millimeter && !(std::abs(seed) >= kMinSketchDimensionMm))
+        //
+        // ...AND ZERO IS A REAL ANSWER for the signed ones (M18). A horizontal
+        // distance of nought says "these two are level", a vertical one says
+        // "these two are side by side", and a point-line distance of nought
+        // says "this point is on that line". Those are three of the most
+        // ordinary things a user asks for, and this guard refused all of them
+        // for being too small -- the same magnitude assumption DimensionValueValid
+        // was corrected for, living on in a second place that never heard.
+        //
+        // A LENGTH or a DISTANCE of nought really is degenerate: it describes
+        // geometry with no extent, which the solver cannot orient. Those keep
+        // the minimum.
+        const bool signedSeparation = edit.kind == SketchEditKind::AddHorizontalDistance ||
+                                      edit.kind == SketchEditKind::AddVerticalDistance ||
+                                      edit.kind == SketchEditKind::AddPointLineDistance;
+        if (unit == UnitType::Millimeter && !signedSeparation &&
+            !(std::abs(seed) >= kMinSketchDimensionMm))
             return fail("That geometry is too small to dimension.",
                         "The measured value is below the smallest dimension the solver "
                         "accepts (kMinSketchDimensionMm).");
