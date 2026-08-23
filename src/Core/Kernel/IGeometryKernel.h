@@ -259,6 +259,25 @@ public:
     virtual ShapeResult mirrorShape(const KernelShape& shape, const Vec3& planeOriginMm,
                                     const Vec3& planeNormal) = 0;
     virtual ShapeResult translateShape(const KernelShape& shape, const Vec3& offsetMm) = 0;
+
+    // `rotateShape` is the CIRCULAR pattern's verb (M21): a pure rotation about
+    // a world axis, which is a rigid motion exactly as a translation is -- the
+    // copy is the same solid somewhere else, not a new one built from scratch.
+    //
+    // The axis arrives as world origin+direction because Core has already done
+    // any frame conversion; the kernel never re-derives a frame (ADR-M4-002).
+    virtual ShapeResult rotateShape(const KernelShape& shape, const Vec3& axisOriginMm,
+                                    const Vec3& axisDirection, double angleRad) = 0;
+
+    // `intersectShapes` keeps ONLY what both solids occupy (M21).
+    //
+    // The third boolean, and the one whose empty answer is meaningful: two
+    // solids that do not overlap intersect to nothing, and that is a real
+    // result rather than a failure. It is still REFUSED here, because a feature
+    // whose output is an empty solid is one the user did not mean to make --
+    // and a chain carrying an empty shape forward looks exactly like a chain
+    // that worked.
+    virtual ShapeResult intersectShapes(const KernelShape& a, const KernelShape& b) = 0;
     virtual ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) = 0;
 };
 

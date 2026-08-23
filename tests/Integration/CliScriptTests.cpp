@@ -917,3 +917,67 @@ TEST(CliScriptTest, M20_CLI_007_FACINGAndTHEEXTREMEFaceAreDifferentSentences) {
     EXPECT_TRUE(draft->faces().front().facing.has_value());
     EXPECT_FALSE(draft->faces().front().extremeTowards.has_value());
 }
+
+// --- M21: BOOLEANS, MULTI-BODY and patterns from a script --------------------
+
+TEST(CliScriptTest, M21_CLI_001_TwoPadsInONEBodyAreTwoSeparateSolids) {
+    // What multi-body means here: a Body is a feature chain, and two features
+    // in it that nothing consumes are two disjoint parts. `subtract` then turns
+    // two into one -- 80x80x30 less the 20x80x30 of slot that lay inside it.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Plate\ntool rect\nclick -40 -40\nclick 40 40\npad Block 30\n"
+            "sketch Slot\ntool rect\nclick -10 -60\nclick 10 60\npad Block 30\n"
+            "subtract Block\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "volume = 144000 mm^3")) << outcome.message;
+    EXPECT_EQ(run.document.bodies().size(), 1u);
+}
+
+TEST(CliScriptTest, M21_CLI_002_ABooleanNeedsTWOSolidsAndSaysHowToMakeThem) {
+    // The refusal has to carry the next move: "two separate solids" is not
+    // something a reader can act on without being told that padding into the
+    // same body twice is how you get them.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Plate\ntool rect\nclick -40 -40\nclick 40 40\npad Block 30\n"
+            "subtract Block\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("pad into the same body twice"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M21_CLI_003_ARingOfSixTeethIsSixTimesTheOne) {
+    // The step is PER INSTANCE: six at 60 degrees is a full ring, and the six
+    // do not touch, so the volume is six times one tooth.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Tooth\ntool rect\nclick 60 -8\nclick 90 8\npad Rotor 12\n"
+            "ring Rotor 6 60\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "volume = 34560 mm^3")) << outcome.message;
+}
+
+TEST(CliScriptTest, M21_CLI_004_ARingStepIsGivenInDEGREESAndStoredInRadians) {
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Tooth\ntool rect\nclick 60 -8\nclick 90 8\npad Rotor 12\n"
+            "ring Rotor 6 60\nsolve\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    const Parameter* step = run.document.parameters().findByName("RingStep1");
+    ASSERT_NE(step, nullptr);
+    EXPECT_EQ(step->unit(), UnitType::Radian);
+    EXPECT_NEAR(step->value(), 60.0 * 3.14159265358979323846 / 180.0, 1e-12);
+}
+
+TEST(CliScriptTest, M21_CLI_005_CopiesAreSpacedAlongThePathSketch) {
+    // Five studs along a 150 mm line, each 10 mm: they do not touch, so the
+    // volume is five times one.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Stud\ntool rect\nclick -5 -5\nclick 5 5\npad Rail 8\n"
+            "sketch Track\ntool line\nclick 0 0\nclick 150 0\n"
+            "along Rail Track 5\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "volume = 4000 mm^3")) << outcome.message;
+}

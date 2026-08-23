@@ -6,8 +6,13 @@
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Parameter/Parameter.h"
 #include "Core/Recompute/RecomputeContext.h"
+#include "Core/Sketch/Profile.h"
+#include "Core/Sketch/Sketch.h"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
+#include <string>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -22,6 +27,14 @@ const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
     if (!ref) return nullptr;
     auto* const* parameter = std::get_if<const Parameter*>(&*ref);
     return parameter != nullptr ? *parameter : nullptr;
+}
+
+const Sketch* resolveSketchFor(const ObjectRegistry& registry, ObjectId id) {
+    if (id == kInvalidObjectId) return nullptr;
+    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
+    if (!ref) return nullptr;
+    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
+    return sketch != nullptr ? *sketch : nullptr;
 }
 
 const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
@@ -44,6 +57,16 @@ TransformFeature::TransformFeature(ObjectId id, std::string name, ComputeState s
                                    ObjectId baseFeatureId, ObjectId frameId, ObjectId materialId)
     : Feature(id, std::move(name), state), baseFeatureId_(baseFeatureId), frameId_(frameId),
       materialId_(materialId) {}
+
+bool TransformFeature::frameWorldOrFail(const RecomputeContext& context, Transform3D& out,
+                                       std::string& why) const {
+    if (context.document.findFrame(frameId_) == nullptr) {
+        why = std::string(typeName()) + " frame is missing";
+        return false;
+    }
+    out = context.document.worldTransform(frameId_);
+    return true;
+}
 
 RecomputeResult TransformFeature::recompute(const RecomputeContext& context) {
     const std::string noun(typeName());
@@ -68,15 +91,7 @@ RecomputeResult TransformFeature::recompute(const RecomputeContext& context) {
         return fail(noun + " base feature is not in a valid state");
     if (!base->currentShape().isValid()) return fail(noun + " base feature has no valid shape");
 
-    // The frame must exist. A transform defined against a frame that is gone
-    // has no plane and no axis, and defaulting to the world origin would move
-    // the geometry silently -- the same refusal a missing sketch support frame
-    // gets (M10 gate I).
-    if (context.document.findFrame(frameId_) == nullptr)
-        return fail(noun + " frame is missing");
-    const Transform3D frameWorld = context.document.worldTransform(frameId_);
-
-    ShapeResult copies = buildCopies(context, base->currentShape(), frameWorld);
+    ShapeResult copies = buildCopies(context, base->currentShape());
     if (!copies) return fail(copies.message.empty() ? "kernel failed to build the " + noun
                                                     : copies.message);
     if (!copies.shape.isValid()) return fail("kernel returned an invalid " + noun + " result");
@@ -102,8 +117,12 @@ MirrorFeature::MirrorFeature(ObjectId id, std::string name, ComputeState state,
                              ObjectId baseFeatureId, ObjectId frameId, ObjectId materialId)
     : TransformFeature(id, std::move(name), state, baseFeatureId, frameId, materialId) {}
 
-ShapeResult MirrorFeature::buildCopies(const RecomputeContext& context, const KernelShape& base,
-                                       const Transform3D& frameWorld) {
+ShapeResult MirrorFeature::buildCopies(const RecomputeContext& context,
+                                       const KernelShape& base) {
+    Transform3D frameWorld;
+    std::string why;
+    if (!frameWorldOrFail(context, frameWorld, why))
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed, why};
     // The frame's XY plane: its origin, and its local +Z as the normal. Same
     // convention SketchFrame uses for a sketch plane, because a frame should
     // mean one thing (roadmap §5 -- sketch-on-frame and mirror-about-frame are
@@ -127,8 +146,12 @@ PatternFeature::PatternFeature(ObjectId id, std::string name, ComputeState state
     : TransformFeature(id, std::move(name), state, baseFeatureId, frameId, materialId),
       countParameterId_(countParameterId), spacingParameterId_(spacingParameterId) {}
 
-ShapeResult PatternFeature::buildCopies(const RecomputeContext& context, const KernelShape& base,
-                                        const Transform3D& frameWorld) {
+ShapeResult PatternFeature::buildCopies(const RecomputeContext& context,
+                                        const KernelShape& base) {
+    Transform3D frameWorld;
+    std::string why;
+    if (!frameWorldOrFail(context, frameWorld, why))
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed, why};
     const Parameter* count = resolveParameter(context.registry, countParameterId_);
     if (count == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
@@ -165,6 +188,182 @@ ShapeResult PatternFeature::buildCopies(const RecomputeContext& context, const K
         const double distance = spacing->value() * static_cast<double>(i);
         ShapeResult copy = context.kernel->translateShape(
             base, Vec3{axis.x * distance, axis.y * distance, axis.z * distance});
+        if (!copy) return copy;
+        if (!accumulated.isValid()) {
+            accumulated = std::move(copy.shape);
+            continue;
+        }
+        ShapeResult merged = context.kernel->fuseShapes(accumulated, copy.shape);
+        if (!merged) return merged;
+        accumulated = std::move(merged.shape);
+    }
+    return ShapeResult{std::move(accumulated), KernelError::None, {}};
+}
+
+CircularPatternFeature::CircularPatternFeature(std::string name, ObjectId baseFeatureId,
+                                               ObjectId frameId, ObjectId countParameterId,
+                                               ObjectId stepParameterId, ObjectId materialId)
+    : TransformFeature(std::move(name), baseFeatureId, frameId, materialId),
+      countParameterId_(countParameterId), stepParameterId_(stepParameterId) {}
+
+CircularPatternFeature::CircularPatternFeature(ObjectId id, std::string name, ComputeState state,
+                                               ObjectId baseFeatureId, ObjectId frameId,
+                                               ObjectId countParameterId,
+                                               ObjectId stepParameterId, ObjectId materialId)
+    : TransformFeature(id, std::move(name), state, baseFeatureId, frameId, materialId),
+      countParameterId_(countParameterId), stepParameterId_(stepParameterId) {}
+
+ShapeResult CircularPatternFeature::buildCopies(const RecomputeContext& context,
+                                                const KernelShape& base) {
+    Transform3D frameWorld;
+    std::string why;
+    if (!frameWorldOrFail(context, frameWorld, why))
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed, why};
+
+    const Parameter* count = resolveParameter(context.registry, countParameterId_);
+    if (count == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "circular pattern count parameter not found"};
+    const Parameter* step = resolveParameter(context.registry, stepParameterId_);
+    if (step == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "circular pattern step parameter not found"};
+    // THE UNIT, checked the way a revolve's is. A step of 60 stored as
+    // millimetres reads as 60 RADIANS -- nine and a half turns -- and lands
+    // nowhere near where the drawing said, while looking like a number.
+    if (step->unit() != UnitType::Radian)
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "circular pattern step parameter must carry UnitType::Radian"};
+
+    // The same whole-number rule the linear pattern states, for the same
+    // reason: a value that cannot mean what it says is an error, not something
+    // to round (ADR-M3-009).
+    const double rawCount = count->value();
+    if (!std::isfinite(rawCount) || rawCount < 1.0 ||
+        rawCount != static_cast<double>(static_cast<long long>(rawCount)))
+        return ShapeResult{KernelShape{}, KernelError::NonFinite,
+                           "circular pattern count must be a whole number of at least 1"};
+    if (!std::isfinite(step->value()) || std::fabs(step->value()) < kMinRevolveAngleRad)
+        return ShapeResult{KernelShape{}, KernelError::NonFinite,
+                           "circular pattern step must be a finite, non-zero angle"};
+
+    const long long instances = static_cast<long long>(rawCount);
+    if (instances == 1) return context.kernel->translateShape(base, Vec3{0.0, 0.0, 0.0});
+
+    // The frame's local +Z is the axis, its world orientation applied -- the
+    // same convention the mirror's plane normal and the linear pattern's
+    // direction follow.
+    const Vec3 axis = RotateByQuaternion(frameWorld.rotation, Vec3{0.0, 0.0, 1.0});
+    const Vec3 origin = frameWorld.translation;
+    KernelShape accumulated;
+    for (long long i = 1; i < instances; ++i) {
+        // EACH COPY FROM THE BASE, by i steps -- not from the previous copy by
+        // one. Chaining would accumulate the rounding of every step before it,
+        // so the last instance of a long ring would land visibly off.
+        ShapeResult copy = context.kernel->rotateShape(base, origin, axis,
+                                                       step->value() * static_cast<double>(i));
+        if (!copy) return copy;
+        if (!accumulated.isValid()) {
+            accumulated = std::move(copy.shape);
+            continue;
+        }
+        ShapeResult merged = context.kernel->fuseShapes(accumulated, copy.shape);
+        if (!merged) return merged;
+        accumulated = std::move(merged.shape);
+    }
+    return ShapeResult{std::move(accumulated), KernelError::None, {}};
+}
+
+CurvePatternFeature::CurvePatternFeature(std::string name, ObjectId baseFeatureId,
+                                         ObjectId pathSketchId, ObjectId countParameterId,
+                                         ObjectId materialId)
+    // NO FRAME. A curve pattern is defined against a path, so it carries
+    // kInvalidObjectId here and never asks frameWorldOrFail for one.
+    : TransformFeature(std::move(name), baseFeatureId, kInvalidObjectId, materialId),
+      pathSketchId_(pathSketchId), countParameterId_(countParameterId) {}
+
+CurvePatternFeature::CurvePatternFeature(ObjectId id, std::string name, ComputeState state,
+                                         ObjectId baseFeatureId, ObjectId pathSketchId,
+                                         ObjectId countParameterId, ObjectId materialId)
+    : TransformFeature(id, std::move(name), state, baseFeatureId, kInvalidObjectId, materialId),
+      pathSketchId_(pathSketchId), countParameterId_(countParameterId) {}
+
+ShapeResult CurvePatternFeature::buildCopies(const RecomputeContext& context,
+                                             const KernelShape& base) {
+    const Parameter* count = resolveParameter(context.registry, countParameterId_);
+    if (count == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "curve pattern count parameter not found"};
+    const double rawCount = count->value();
+    if (!std::isfinite(rawCount) || rawCount < 1.0 ||
+        rawCount != static_cast<double>(static_cast<long long>(rawCount)))
+        return ShapeResult{KernelShape{}, KernelError::NonFinite,
+                           "curve pattern count must be a whole number of at least 1"};
+
+    const Sketch* path = resolveSketchFor(context.registry, pathSketchId_);
+    if (path == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "curve pattern path sketch not found"};
+    if (context.document.sketchSupportFrameIsMissing(path->id()))
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "curve pattern path sketch's support frame is missing"};
+
+    // THE SAME CHAIN A SWEEP FOLLOWS (M19). One walker, so "along that curve"
+    // means the same thing to both -- including which end it starts from,
+    // which BuildPath decides from the drawing rather than from entity ids.
+    const PathResult walked = BuildPath(*path);
+    if (!walked)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "invalid curve pattern path: " + walked.message};
+
+    const long long instances = static_cast<long long>(rawCount);
+    if (instances == 1) return context.kernel->translateShape(base, Vec3{0.0, 0.0, 0.0});
+
+    // WHERE ALONG IT. The stations are sampled from the path's own geometry in
+    // the sketch's plane, then placed in the world through that sketch's
+    // effective frame -- the one conversion site (ADR-M4-002).
+    const SketchFrame frame = context.document.effectiveSketchFrame(path->id());
+    const std::vector<Vec2> walkPoints = PathPolyline(*path, walked.path);
+    if (walkPoints.size() < 2)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the curve pattern's path is too short to space anything along"};
+
+    // Arc length at every sample, so the stations can be EVENLY SPACED by
+    // length rather than by parameter. Parameter spacing bunches the copies up
+    // wherever the curve is slow, which on a spline is most of it.
+    std::vector<double> along;
+    along.reserve(walkPoints.size());
+    along.push_back(0.0);
+    for (std::size_t i = 1; i < walkPoints.size(); ++i)
+        along.push_back(along.back() + std::hypot(walkPoints[i].x - walkPoints[i - 1].x,
+                                                  walkPoints[i].y - walkPoints[i - 1].y));
+    const double total = along.back();
+    if (!(total > kMinExtrusionDistanceMm))
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the curve pattern's path has no length"};
+
+    const auto pointAt = [&](double distance) {
+        for (std::size_t i = 1; i < along.size(); ++i) {
+            if (along[i] < distance) continue;
+            const double span = along[i] - along[i - 1];
+            const double t = span > 0.0 ? (distance - along[i - 1]) / span : 0.0;
+            return Vec2{walkPoints[i - 1].x + (walkPoints[i].x - walkPoints[i - 1].x) * t,
+                        walkPoints[i - 1].y + (walkPoints[i].y - walkPoints[i - 1].y) * t};
+        }
+        return walkPoints.back();
+    };
+
+    // Instance 0 IS the base, sitting where it already is, and the offsets are
+    // measured from the path's start. So a base drawn at the path's start walks
+    // the whole path, and one drawn elsewhere keeps its offset from it -- which
+    // is what a user who put the two side by side expects.
+    const Vec3 start = frame.toWorld(walkPoints.front());
+    KernelShape accumulated;
+    for (long long i = 1; i < instances; ++i) {
+        const double distance = total * static_cast<double>(i) / static_cast<double>(instances - 1);
+        const Vec3 station = frame.toWorld(pointAt(distance));
+        ShapeResult copy = context.kernel->translateShape(
+            base, Vec3{station.x - start.x, station.y - start.y, station.z - start.z});
         if (!copy) return copy;
         if (!accumulated.isValid()) {
             accumulated = std::move(copy.shape);

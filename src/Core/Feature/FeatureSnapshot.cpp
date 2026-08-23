@@ -8,6 +8,7 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/LoftFeature.h"
@@ -53,6 +54,25 @@ FeatureSnapshot SnapshotFeature(const Feature& feature) {
     } else if (const auto* loft = dynamic_cast<const LoftFeature*>(&feature)) {
         snapshot.sectionSketchIds = loft->sectionSketchIds();
         snapshot.materialId = loft->materialId();
+    } else if (const auto* boolean = dynamic_cast<const BooleanFeature*>(&feature)) {
+        snapshot.baseFeatureId = boolean->targetFeatureId();
+        snapshot.toolFeatureId = boolean->toolFeatureId();
+        snapshot.booleanOperation = boolean->operation();
+        snapshot.materialId = boolean->materialId();
+    } else if (const auto* circular = dynamic_cast<const CircularPatternFeature*>(&feature)) {
+        // BEFORE PatternFeature and before TransformFeature, for the reason
+        // EdgeDressFeature is tested before its twins: a base class swallows
+        // the derived one and silently drops its fields.
+        snapshot.baseFeatureId = circular->baseFeatureId();
+        snapshot.frameId = circular->frameId();
+        snapshot.countParameterId = circular->countParameterId();
+        snapshot.spacingParameterId = circular->stepParameterId();
+        snapshot.materialId = circular->materialId();
+    } else if (const auto* curve = dynamic_cast<const CurvePatternFeature*>(&feature)) {
+        snapshot.baseFeatureId = curve->baseFeatureId();
+        snapshot.sketchId = curve->pathSketchId();
+        snapshot.countParameterId = curve->countParameterId();
+        snapshot.materialId = curve->materialId();
     } else if (const auto* shell = dynamic_cast<const ShellFeature*>(&feature)) {
         snapshot.baseFeatureId = shell->baseFeatureId();
         snapshot.faceSelection = shell->openFaces();
@@ -125,6 +145,20 @@ Feature& RestoreFeatureFromSnapshot(PartDocument& document, Body& body,
             body, snapshot.id, snapshot.name, snapshot.state, snapshot.sketchId,
             static_cast<SketchEntityId>(snapshot.axisEntityId), snapshot.angleParameterId,
             snapshot.materialId);
+    if (type == "Boolean")
+        return document.restoreBooleanFeature(body, snapshot.id, snapshot.name, snapshot.state,
+                                              snapshot.booleanOperation, snapshot.baseFeatureId,
+                                              snapshot.toolFeatureId, snapshot.materialId);
+    if (type == "CircularPattern")
+        return document.restoreCircularPatternFeature(
+            body, snapshot.id, snapshot.name, snapshot.state, snapshot.baseFeatureId,
+            snapshot.frameId, snapshot.countParameterId, snapshot.spacingParameterId,
+            snapshot.materialId);
+    if (type == "CurvePattern")
+        return document.restoreCurvePatternFeature(body, snapshot.id, snapshot.name,
+                                                   snapshot.state, snapshot.baseFeatureId,
+                                                   snapshot.sketchId, snapshot.countParameterId,
+                                                   snapshot.materialId);
     if (type == "Shell")
         return document.restoreShellFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                             snapshot.baseFeatureId, snapshot.faceSelection,

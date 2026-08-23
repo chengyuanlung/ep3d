@@ -9,6 +9,7 @@
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <string>
+#include <vector>
 #include <string_view>
 
 namespace paramcad {
@@ -68,7 +69,7 @@ public:
     // The chain declaration (ADR-M8-003): the base this feature consumes, so
     // the viewer and any other tail-follower can tell an intermediate result
     // from a final one without naming concrete feature types.
-    ObjectId consumedSolidId() const noexcept override { return baseFeatureId_; }
+    std::vector<ObjectId> consumedSolidIds() const override { return {baseFeatureId_}; }
 
     // Vestigial M1 contract, never called by the document engine (ADR-M3-004).
     bool recompute() override;

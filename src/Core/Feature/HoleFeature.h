@@ -9,6 +9,7 @@
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <string>
+#include <vector>
 #include <string_view>
 
 namespace paramcad {
@@ -54,7 +55,7 @@ public:
     std::string_view typeName() const noexcept override { return "Hole"; }
 
     ObjectId baseFeatureId() const noexcept { return baseFeatureId_; }
-    ObjectId consumedSolidId() const noexcept override { return baseFeatureId_; }
+    std::vector<ObjectId> consumedSolidIds() const override { return {baseFeatureId_}; }
     ObjectId sketchId() const noexcept { return sketchId_; }
     ObjectId consumedSketchId() const noexcept override { return sketchId_; }
     ObjectId diameterParameterId() const noexcept { return diameterParameterId_; }

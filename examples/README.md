@@ -182,3 +182,19 @@ walls, and shelling first would taper the cavity as well.
 ```
 ep3d --script examples/shell-draft-hole.ep3ds
 ```
+
+## `patterns-and-booleans.ep3ds` (M21)
+
+One body holding **two separate solids**, cut into one with a boolean; a
+six-tooth rotor from a circular pattern; and five studs spaced along a curve.
+
+Multi-body here means what it means in a Part Studio: a Body is a feature
+chain, and two features in it that nothing consumes are two disjoint parts.
+`pad` twice into the same body to make them, and `subtract` to join them.
+
+Every step ends in a `measure` whose expected value is written in the script
+as arithmetic, so the numbers can be checked by reading.
+
+```
+ep3d --script examples/patterns-and-booleans.ep3ds
+```

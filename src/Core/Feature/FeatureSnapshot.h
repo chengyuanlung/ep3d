@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Kernel/EdgeQuery.h"
 #include "Core/Feature/ComputeState.h"
+#include "Core/Feature/BooleanFeature.h"
 #include "Core/Kernel/FaceQuery.h"
 #include <string>
 #include <vector>
@@ -82,6 +83,13 @@ struct FeatureSnapshot {
     // these two say how big and how deep.
     ObjectId diameterParameterId = kInvalidObjectId;
     ObjectId holeDepthParameterId = kInvalidObjectId;
+    // Boolean (M21): `baseFeatureId` above is the TARGET, and this is the tool.
+    // `frameId` is unused here -- a boolean has no frame.
+    ObjectId toolFeatureId = kInvalidObjectId;
+    BooleanOperation booleanOperation = BooleanOperation::Union;
+    // Curve pattern (M21): `sketchId` above is the path, `countParameterId` the
+    // number of instances. Nothing new needed; the fields already existed and
+    // mean the same things.
 };
 
 // Reads a feature's semantic fields. Type dispatch is keyed by `typeName()`

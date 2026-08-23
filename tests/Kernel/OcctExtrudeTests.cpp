@@ -1206,3 +1206,114 @@ TEST(OcctExtrudeTest, M20_BOUNDS_002_AnEmptyShapeHasNoBoundsAndSaysSo) {
     EXPECT_FALSE(bounds.ok);
     EXPECT_FALSE(bounds.message.empty());
 }
+
+// --- M21: ROTATE and INTERSECT against real OCCT -----------------------------
+
+TEST(OcctExtrudeTest, M21_ROT_001_ARotationIsARIGIDMotion) {
+    // A rotated solid is the same solid somewhere else: same volume, and its
+    // centroid moved to where the rotation says it should be. Anything else
+    // means the copy was rebuilt rather than moved.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+    const KernelMassPropertiesResult before = kernel.calculateMassProperties(box);
+    ASSERT_TRUE(before) << before.message;
+
+    // A quarter turn about world +Z through the origin.
+    const ShapeResult turned = kernel.rotateShape(box, Vec3{0, 0, 0}, Vec3{0, 0, 1}, kPi / 2.0);
+    ASSERT_TRUE(turned) << turned.message;
+    const KernelMassPropertiesResult after = kernel.calculateMassProperties(turned.shape);
+    ASSERT_TRUE(after) << after.message;
+
+    ExpectRel(after.properties.volumeMm3, before.properties.volumeMm3, kVolumeRelTol);
+    // (x, y) -> (-y, x) for a quarter turn about +Z.
+    EXPECT_NEAR(after.properties.centerOfMassMm.x, -before.properties.centerOfMassMm.y, 1e-6);
+    EXPECT_NEAR(after.properties.centerOfMassMm.y, before.properties.centerOfMassMm.x, 1e-6);
+    EXPECT_NEAR(after.properties.centerOfMassMm.z, before.properties.centerOfMassMm.z, 1e-6);
+}
+
+TEST(OcctExtrudeTest, M21_ROT_002_RotatingDoesNotMOVETheOriginal) {
+    // The copy is a copy. A pattern rotates the SAME base once per instance, so
+    // transforming in place would leave the base somewhere else after the first
+    // copy and stack every later one on top of that.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+    const KernelMassPropertiesResult before = kernel.calculateMassProperties(box);
+    ASSERT_TRUE(before) << before.message;
+
+    const ShapeResult turned = kernel.rotateShape(box, Vec3{0, 0, 0}, Vec3{0, 0, 1}, kPi / 2.0);
+    ASSERT_TRUE(turned) << turned.message;
+
+    const KernelMassPropertiesResult still = kernel.calculateMassProperties(box);
+    ASSERT_TRUE(still) << still.message;
+    EXPECT_NEAR(still.properties.centerOfMassMm.x, before.properties.centerOfMassMm.x, 1e-9);
+    EXPECT_NEAR(still.properties.centerOfMassMm.y, before.properties.centerOfMassMm.y, 1e-9);
+}
+
+TEST(OcctExtrudeTest, M21_ROT_003_ADegenerateAxisIsREFUSED) {
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+    const ShapeResult turned = kernel.rotateShape(box, Vec3{0, 0, 0}, Vec3{0, 0, 0}, 1.0);
+    EXPECT_FALSE(turned);
+    EXPECT_EQ(turned.error, KernelError::InvalidDimension);
+}
+
+TEST(OcctExtrudeTest, M21_BOOL_001_TwoOverlappingBoxesIntersectToTheirOverlap) {
+    // Two 100 x 60 x 40 boxes, the second offset 60 in x: they share
+    // 40 x 60 x 40 of space, which is arithmetic and not the kernel's answer.
+    OcctGeometryKernel kernel;
+    const KernelShape first = TaggedBox(kernel, 100.0, 60.0, 40.0);
+    const ShapeResult second =
+        kernel.translateShape(TaggedBox(kernel, 100.0, 60.0, 40.0), Vec3{60, 0, 0});
+    ASSERT_TRUE(second) << second.message;
+
+    const ShapeResult shared = kernel.intersectShapes(first, second.shape);
+    ASSERT_TRUE(shared) << shared.message;
+    const KernelMassPropertiesResult properties = kernel.calculateMassProperties(shared.shape);
+    ASSERT_TRUE(properties) << properties.message;
+    ExpectRel(properties.properties.volumeMm3, 40.0 * 60.0 * 40.0, kVolumeRelTol);
+}
+
+TEST(OcctExtrudeTest, M21_BOOL_002_SolidsThatDoNotOverlapAreREFUSED) {
+    // OCCT returns an EMPTY COMPOUND rather than failing, and an empty shape
+    // carried down a chain looks exactly like a chain that worked: the viewer
+    // draws nothing and the mass is nought, which is also what a correct tiny
+    // part looks like.
+    OcctGeometryKernel kernel;
+    const KernelShape first = TaggedBox(kernel, 100.0, 60.0, 40.0);
+    const ShapeResult far =
+        kernel.translateShape(TaggedBox(kernel, 100.0, 60.0, 40.0), Vec3{500, 0, 0});
+    ASSERT_TRUE(far) << far.message;
+
+    const ShapeResult shared = kernel.intersectShapes(first, far.shape);
+    EXPECT_FALSE(shared);
+    EXPECT_NE(shared.message.find("do not overlap"), std::string::npos) << shared.message;
+}
+
+TEST(OcctExtrudeTest, M21_BOOL_003_IntersectIsNOTUnionAndNOTSubtract) {
+    // Three operations on the same pair, three different volumes -- computed
+    // here from the boxes, so a kernel that wired two of them to the same call
+    // has nowhere to hide.
+    OcctGeometryKernel kernel;
+    const KernelShape first = TaggedBox(kernel, 100.0, 60.0, 40.0);
+    const ShapeResult second =
+        kernel.translateShape(TaggedBox(kernel, 100.0, 60.0, 40.0), Vec3{60, 0, 0});
+    ASSERT_TRUE(second) << second.message;
+
+    const double whole = 100.0 * 60.0 * 40.0;
+    const double overlap = 40.0 * 60.0 * 40.0;
+
+    const ShapeResult united = kernel.fuseShapes(first, second.shape);
+    ASSERT_TRUE(united) << united.message;
+    ExpectRel(kernel.calculateMassProperties(united.shape).properties.volumeMm3,
+              2.0 * whole - overlap, kVolumeRelTol);
+
+    const ShapeResult cut = kernel.subtractShape(first, second.shape);
+    ASSERT_TRUE(cut) << cut.message;
+    ExpectRel(kernel.calculateMassProperties(cut.shape).properties.volumeMm3, whole - overlap,
+              kVolumeRelTol);
+
+    const ShapeResult shared = kernel.intersectShapes(first, second.shape);
+    ASSERT_TRUE(shared) << shared.message;
+    ExpectRel(kernel.calculateMassProperties(shared.shape).properties.volumeMm3, overlap,
+              kVolumeRelTol);
+}

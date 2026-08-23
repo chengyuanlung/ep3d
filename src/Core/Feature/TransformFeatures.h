@@ -9,6 +9,7 @@
 #include "Core/Recompute/IRecomputable.h"
 
 #include <string>
+#include <vector>
 
 namespace paramcad {
 
@@ -47,7 +48,7 @@ public:
     ComputeState currentState() const noexcept override { return state(); }
     // The chain declaration: a transform feature consumes its base, so the
     // viewer and the mass node follow IT and not the thing it was built from.
-    ObjectId consumedSolidId() const noexcept override { return baseFeatureId_; }
+    std::vector<ObjectId> consumedSolidIds() const override { return {baseFeatureId_}; }
 
     ObjectId materialId() const noexcept override { return materialId_; }
 
@@ -59,8 +60,27 @@ protected:
 
     // What the concrete feature does to the base's shape before the fuse.
     // Returns an empty result to mean "nothing to add".
-    virtual ShapeResult buildCopies(const RecomputeContext& context, const KernelShape& base,
-                                    const Transform3D& frameWorld) = 0;
+    //
+    // NO FRAME ARGUMENT since M21. It used to take one, and `recompute` looked
+    // it up and refused when it was gone -- which was right for a mirror and a
+    // linear pattern, and wrong the moment a CURVE pattern arrived: its copies
+    // are defined against a sketch's path, and it has no frame to lose.
+    //
+    // Requiring one anyway would have meant either a frame nobody used or a
+    // flag saying whether this feature has one, and a flag is how "two things
+    // must agree" starts. Each feature now asks for what it actually needs,
+    // through frameWorldOrFail below when that is a frame.
+    virtual ShapeResult buildCopies(const RecomputeContext& context,
+                                    const KernelShape& base) = 0;
+
+    // The frame's world transform, or false with the reason.
+    //
+    // ONE implementation for the three features that are defined against a
+    // frame. A transform whose frame is gone has no plane and no axis, and
+    // defaulting to the world origin would move the geometry silently -- the
+    // same refusal a missing sketch support frame gets (M10 gate I).
+    bool frameWorldOrFail(const RecomputeContext& context, Transform3D& out,
+                          std::string& why) const;
 
 private:
     friend class PartDocument;
@@ -84,8 +104,8 @@ public:
     std::string_view typeName() const noexcept override { return "Mirror"; }
 
 protected:
-    ShapeResult buildCopies(const RecomputeContext& context, const KernelShape& base,
-                            const Transform3D& frameWorld) override;
+    ShapeResult buildCopies(const RecomputeContext& context,
+                            const KernelShape& base) override;
 };
 
 // Copies the base `count - 1` times along its frame's local +X, each `spacing`
@@ -110,12 +130,85 @@ public:
     std::string_view typeName() const noexcept override { return "Pattern"; }
 
 protected:
-    ShapeResult buildCopies(const RecomputeContext& context, const KernelShape& base,
-                            const Transform3D& frameWorld) override;
+    ShapeResult buildCopies(const RecomputeContext& context,
+                            const KernelShape& base) override;
 
 private:
     ObjectId countParameterId_;
     ObjectId spacingParameterId_;
+};
+
+// Turns the base `count - 1` times about its frame's local +Z, each `step`
+// further round than the last, and fuses them all (M21).
+//
+// +Z BY THE SAME CONVENTION the other two follow: the mirror plane is the
+// frame's XY, the linear direction is its +X, and the rotation axis is its +Z.
+// Three features, one convention -- a fourth axis chosen per feature would be
+// three things to remember instead of one.
+//
+// THE STEP IS PER INSTANCE, not a total sweep. Six instances at 60 degrees is
+// a full ring; six at 360 would be six copies on top of each other. The
+// alternative -- "spread `count` evenly over this total" -- cannot express a
+// partial ring without dividing, and it makes the number in the parameter
+// table mean something different depending on the count beside it.
+//
+// The step's unit is checked: it must carry UnitType::Radian, for the reason a
+// revolve's angle is checked. A step of 60 stored as millimetres reads as 60
+// radians, which is nine and a half turns and lands nowhere near where the
+// drawing said.
+class CircularPatternFeature final : public TransformFeature {
+public:
+    CircularPatternFeature(std::string name, ObjectId baseFeatureId, ObjectId frameId,
+                           ObjectId countParameterId, ObjectId stepParameterId,
+                           ObjectId materialId = kInvalidObjectId);
+    CircularPatternFeature(ObjectId id, std::string name, ComputeState state,
+                           ObjectId baseFeatureId, ObjectId frameId, ObjectId countParameterId,
+                           ObjectId stepParameterId, ObjectId materialId);
+
+    ObjectId countParameterId() const noexcept { return countParameterId_; }
+    ObjectId stepParameterId() const noexcept { return stepParameterId_; }
+
+    std::string_view typeName() const noexcept override { return "CircularPattern"; }
+
+protected:
+    ShapeResult buildCopies(const RecomputeContext& context,
+                            const KernelShape& base) override;
+
+private:
+    ObjectId countParameterId_;
+    ObjectId stepParameterId_;
+};
+
+// Places `count` copies of the base ALONG A SKETCH'S PATH, evenly spaced by arc
+// length, and fuses them all (M21).
+//
+// The path is the same chain a sweep follows (M19's BuildPath), which is why
+// this arrives now rather than earlier: "along that curve" needs a curve the
+// program can walk, and a spine is exactly that.
+//
+// The copies are TRANSLATED, not swept: each one is the base moved from the
+// path's start to the i-th station along it. They are not turned to follow the
+// curve's tangent, and that is a limit rather than a decision -- see the ADR.
+class CurvePatternFeature final : public TransformFeature {
+public:
+    CurvePatternFeature(std::string name, ObjectId baseFeatureId, ObjectId pathSketchId,
+                        ObjectId countParameterId, ObjectId materialId = kInvalidObjectId);
+    CurvePatternFeature(ObjectId id, std::string name, ComputeState state,
+                        ObjectId baseFeatureId, ObjectId pathSketchId,
+                        ObjectId countParameterId, ObjectId materialId);
+
+    ObjectId pathSketchId() const noexcept { return pathSketchId_; }
+    ObjectId countParameterId() const noexcept { return countParameterId_; }
+
+    std::string_view typeName() const noexcept override { return "CurvePattern"; }
+
+protected:
+    ShapeResult buildCopies(const RecomputeContext& context,
+                            const KernelShape& base) override;
+
+private:
+    ObjectId pathSketchId_;
+    ObjectId countParameterId_;
 };
 
 } // namespace paramcad

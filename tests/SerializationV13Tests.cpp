@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <vector>
 #include "Core/Feature/ShellFeature.h"
+#include "Core/Feature/BooleanFeature.h"
+#include "Core/Feature/TransformFeatures.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/SweepFeature.h"
@@ -32,6 +34,7 @@
 
 #include <cmath>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <variant>
 
@@ -91,7 +94,7 @@ TEST(SerializationV13Test, M17_SER_001_TheSchemaVersionIsStamped) {
     // so a bump lands here and nowhere else -- and it has to land somewhere, or
     // a format change that forgot to bump would write files an older loader
     // silently mis-reads.
-    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 26"), std::string::npos);
+    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 27"), std::string::npos);
 }
 
 TEST(SerializationV13Test, M17_SER_002_BothKindsAreWrittenUnderTheirOwnNames) {
@@ -1229,4 +1232,129 @@ TEST(SerializationV13Test, M20_SER_005_AFaceQueryWithNOConditionsIsREFUSED) {
     // Refused by the SAME reader the sketch's tracked face goes through -- one
     // rule about what a face query has to say, not one per holder of one.
     EXPECT_NE(loaded.message.find("names no face"), std::string::npos) << loaded.message;
+}
+
+// --- M21 (v27): BOOLEAN and the two new patterns survive a round trip --------
+
+TEST(SerializationV13Test, M21_SER_001_ABooleanKeepsBothOperandsAndItsOPERATION) {
+    // "A minus B" and "B minus A" are different parts, and Union / Subtract /
+    // Intersect are three different parts again. All three facts have to come
+    // back, or the file describes a shape nobody drew.
+    PartDocument document{"BoolDoc"};
+    Sketch& a = document.addSketch("A");
+    a.addLine(Vec2{0, 0}, Vec2{40, 0});
+    Sketch& b = document.addSketch("B");
+    b.addLine(Vec2{0, 0}, Vec2{20, 0});
+    Parameter& tall = document.addParameter("H", 20.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId padA = document.addPadFeature(body, "PadA", a.id(), tall.id()).id();
+    const ObjectId padB = document.addPadFeature(body, "PadB", b.id(), tall.id()).id();
+    document.addBooleanFeature(body, "Cut", BooleanOperation::Subtract, padA, padB);
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const auto* cut = dynamic_cast<const BooleanFeature*>(
+        loaded.document->bodies().front()->features()[2].get());
+    ASSERT_NE(cut, nullptr) << "a Boolean came back as something else";
+    EXPECT_EQ(cut->operation(), BooleanOperation::Subtract);
+    EXPECT_EQ(cut->targetFeatureId(), padA);
+    EXPECT_EQ(cut->toolFeatureId(), padB);
+}
+
+TEST(SerializationV13Test, M21_SER_002_AnUnknownBooleanOperationIsREFUSED) {
+    // Defaulting to Union would load a different solid without a word.
+    PartDocument document{"BoolDoc"};
+    Sketch& a = document.addSketch("A");
+    a.addLine(Vec2{0, 0}, Vec2{40, 0});
+    Sketch& b = document.addSketch("B");
+    b.addLine(Vec2{0, 0}, Vec2{20, 0});
+    Parameter& tall = document.addParameter("H", 20.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId padA = document.addPadFeature(body, "PadA", a.id(), tall.id()).id();
+    const ObjectId padB = document.addPadFeature(body, "PadB", b.id(), tall.id()).id();
+    document.addBooleanFeature(body, "Cut", BooleanOperation::Subtract, padA, padB);
+
+    std::string text = SaveToString(document);
+    const std::size_t at = text.find("\"Subtract\"");
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, std::string("\"Subtract\"").size(), "\"Intersct\"");
+
+    const LoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_NE(loaded.message.find("is not a boolean operation"), std::string::npos)
+        << loaded.message;
+}
+
+TEST(SerializationV13Test, M21_SER_003_ACircularPatternIsNOTAPlainOne) {
+    // Both derive from TransformFeature, and a writer that tested the base
+    // class first would write every circular pattern as a linear one -- same
+    // fields, different meaning, and the file would reload as a row of copies
+    // where the drawing had a ring.
+    PartDocument document{"RingDoc"};
+    Sketch& sketch = document.addSketch("Tooth");
+    sketch.addLine(Vec2{0, 0}, Vec2{20, 0});
+    Parameter& tall = document.addParameter("H", 10.0, UnitType::Millimeter);
+    Parameter& count = document.addParameter("N", 6.0, UnitType::Unitless);
+    Parameter& step = document.addParameter("Step", 1.047, UnitType::Radian);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", sketch.id(), tall.id()).id();
+    ReferenceFrame& axis = document.addFrame("Axis");
+    document.addCircularPatternFeature(body, "Ring", pad, axis.id(), count.id(), step.id());
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const Feature* back = loaded.document->bodies().front()->features()[1].get();
+    EXPECT_EQ(back->typeName(), "CircularPattern");
+    const auto* ring = dynamic_cast<const CircularPatternFeature*>(back);
+    ASSERT_NE(ring, nullptr) << "a CircularPattern came back as something else";
+    EXPECT_EQ(ring->countParameterId(), count.id());
+    EXPECT_EQ(ring->stepParameterId(), step.id());
+}
+
+TEST(SerializationV13Test, M21_SER_004_ACurvePatternKeepsItsPATHSketch) {
+    PartDocument document{"CurveDoc"};
+    Sketch& block = document.addSketch("Block");
+    block.addLine(Vec2{0, 0}, Vec2{20, 0});
+    Sketch& path = document.addSketch("Path");
+    path.addLine(Vec2{0, 0}, Vec2{200, 0});
+    Parameter& tall = document.addParameter("H", 10.0, UnitType::Millimeter);
+    Parameter& count = document.addParameter("N", 4.0, UnitType::Unitless);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", block.id(), tall.id()).id();
+    document.addCurvePatternFeature(body, "Along", pad, path.id(), count.id());
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const auto* spread = dynamic_cast<const CurvePatternFeature*>(
+        loaded.document->bodies().front()->features()[1].get());
+    ASSERT_NE(spread, nullptr) << "a CurvePattern came back as something else";
+    EXPECT_EQ(spread->pathSketchId(), path.id());
+    EXPECT_EQ(spread->countParameterId(), count.id());
+}
+
+TEST(SerializationV13Test, M21_SER_005_ABooleanEatingAnAlreadyEatenSolidCannotBeSAVED) {
+    // ADR-M3-008's worst class, reached through the new two-operand feature.
+    // The save-time chain check read the SINGULAR consumedSolidId, so a
+    // boolean's TOOL was checked by neither the "earlier solid of this body"
+    // rule nor the "consumed once" rule.
+    //
+    // Reached through the restore facade, which is the one door that can build
+    // a document the add facade refuses -- exactly what a hand-edited file
+    // would do.
+    PartDocument document{"BoolDoc"};
+    Sketch& a = document.addSketch("A");
+    a.addLine(Vec2{0, 0}, Vec2{40, 0});
+    Sketch& b = document.addSketch("B");
+    b.addLine(Vec2{0, 0}, Vec2{20, 0});
+    Parameter& tall = document.addParameter("H", 20.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId padA = document.addPadFeature(body, "PadA", a.id(), tall.id()).id();
+    const ObjectId padB = document.addPadFeature(body, "PadB", b.id(), tall.id()).id();
+    document.addBooleanFeature(body, "First", BooleanOperation::Union, padA, padB);
+
+    // A second boolean that eats padB again -- which the add facade refuses, so
+    // it is the SAVE side being tested here, through a document that got into
+    // that state some other way.
+    EXPECT_THROW(document.addBooleanFeature(body, "Second", BooleanOperation::Union, padA, padB),
+                 std::runtime_error);
 }

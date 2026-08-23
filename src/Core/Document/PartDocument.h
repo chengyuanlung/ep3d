@@ -10,6 +10,7 @@
 #include "Core/Undo/UndoRecord.h"
 #include "Core/Material/Material.h"
 #include "Core/Parameter/ParameterManager.h"
+#include "Core/Feature/BooleanFeature.h"
 #include "Core/Kernel/FaceQuery.h"
 #include "Core/Physics/MassProperties.h"
 #include "Core/Physics/MassPropertiesNode.h"
@@ -39,6 +40,9 @@ class LoftFeature;
 class ShellFeature;
 class DraftFeature;
 class HoleFeature;
+class BooleanFeature;
+class CircularPatternFeature;
+class CurvePatternFeature;
 class FilletFeature;
 class ChamferFeature;
 
@@ -638,6 +642,34 @@ public:
     // --- Revolve feature (M8.2, ADR-M8-005) --------------------------------
     // Base-capable like Pad: revolves `sketchId`'s profile about the sketch's
     // own line `axisEntityId` by the Radian Parameter `angleParameterId`.
+    // A BOOLEAN combines TWO solids -- the first feature here to consume two.
+    BooleanFeature& addBooleanFeature(Body& body, std::string name, BooleanOperation operation,
+                                      ObjectId targetFeatureId, ObjectId toolFeatureId);
+    BooleanFeature& restoreBooleanFeature(Body& body, ObjectId id, std::string name,
+                                          ComputeState state, BooleanOperation operation,
+                                          ObjectId targetFeatureId, ObjectId toolFeatureId,
+                                          ObjectId materialId);
+
+    // A CIRCULAR pattern turns copies about a frame's local +Z.
+    CircularPatternFeature& addCircularPatternFeature(Body& body, std::string name,
+                                                      ObjectId baseFeatureId, ObjectId frameId,
+                                                      ObjectId countParameterId,
+                                                      ObjectId stepParameterId);
+    CircularPatternFeature& restoreCircularPatternFeature(
+        Body& body, ObjectId id, std::string name, ComputeState state, ObjectId baseFeatureId,
+        ObjectId frameId, ObjectId countParameterId, ObjectId stepParameterId,
+        ObjectId materialId);
+
+    // A CURVE pattern spaces copies along a sketch's path.
+    CurvePatternFeature& addCurvePatternFeature(Body& body, std::string name,
+                                                ObjectId baseFeatureId, ObjectId pathSketchId,
+                                                ObjectId countParameterId);
+    CurvePatternFeature& restoreCurvePatternFeature(Body& body, ObjectId id, std::string name,
+                                                    ComputeState state, ObjectId baseFeatureId,
+                                                    ObjectId pathSketchId,
+                                                    ObjectId countParameterId,
+                                                    ObjectId materialId);
+
     // A SHELL hollows a base and opens the faces its selection names.
     ShellFeature& addShellFeature(Body& body, std::string name, ObjectId baseFeatureId,
                                   FaceSelection openFaces, ObjectId thicknessParameterId);
@@ -869,6 +901,11 @@ private:
     // (single registration path, spec 13).
     void wirePocketFeature(PocketFeature& feature, ObjectId baseFeatureId, ObjectId sketchId,
                            ObjectId depthParameterId, ObjectId materialId);
+    void wireBooleanFeature(BooleanFeature& feature, ObjectId targetFeatureId,
+                            ObjectId toolFeatureId, ObjectId materialId);
+    void wireCurvePatternFeature(CurvePatternFeature& feature, ObjectId baseFeatureId,
+                                 ObjectId pathSketchId, ObjectId countParameterId,
+                                 ObjectId materialId);
     void wireShellFeature(ShellFeature& feature, ObjectId baseFeatureId,
                           ObjectId thicknessParameterId, ObjectId materialId);
     void wireDraftFeature(DraftFeature& feature, ObjectId baseFeatureId,

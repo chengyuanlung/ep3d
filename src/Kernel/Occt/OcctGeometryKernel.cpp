@@ -19,6 +19,7 @@
 #include <TopoDS_Solid.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
@@ -52,6 +53,7 @@
 #include <GeomAPI_Interpolate.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Precision.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
 #include <gp_Mat.hxx>
 #include <gp_Pln.hxx>
@@ -686,7 +688,23 @@ ShapeResult OcctGeometryKernel::fuseShapes(const KernelShape& a, const KernelSha
         // DISJOINT inputs give a compound, and its volume is the sum. That is a
         // legal result and is returned as an ordinary shape -- the same rule
         // subtractShape applies to a disjoint tool (M8 spec 6).
-        auto handle = std::make_shared<OcctShape>(fuse.Shape());
+        //
+        // COPLANAR FACES ARE MERGED (M21). Two boxes fused side by side leave
+        // THREE faces across the top -- one per box and one for the overlap --
+        // where the user sees a single flat surface. Nothing about the solid is
+        // wrong, and every face query on it then finds three matches at the
+        // same height and refuses as ambiguous.
+        //
+        // That is the shape "topological naming under booleans" actually takes
+        // here: not a broken history, but a face set fragmented into pieces the
+        // drawing has no names for. UnifySameDomain is the standard cleanup,
+        // and doing it inside the fuse means every caller -- boolean, pattern,
+        // mirror -- gets a solid whose faces match what is drawn.
+        ShapeUpgrade_UnifySameDomain unify(fuse.Shape(), Standard_True, Standard_True,
+                                           Standard_False);
+        unify.Build();
+        auto handle = std::make_shared<OcctShape>(unify.Shape().IsNull() ? fuse.Shape()
+                                                                        : unify.Shape());
         return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
     } catch (const Standard_Failure& error) {
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
@@ -880,6 +898,86 @@ FaceQueryResult OcctGeometryKernel::resolveFace(const KernelShape& shape,
 KernelShape OcctGeometryKernel::tagCreatedFaces(const KernelShape& result,
                                                const KernelShape& base, std::uint64_t tag) {
     return WithProvenance(result, base, tag);
+}
+
+ShapeResult OcctGeometryKernel::rotateShape(const KernelShape& shape,
+                                            const Vec3& axisOriginMm,
+                                            const Vec3& axisDirection, double angleRad) {
+    const auto* occtShape = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occtShape == nullptr || occtShape->shape().IsNull())
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "rotate input is not an OcctShape (null or foreign kernel)"};
+    if (!std::isfinite(angleRad))
+        return ShapeResult{KernelShape{}, KernelError::NonFinite,
+                           "rotation angle must be finite"};
+    const double length = std::sqrt(axisDirection.x * axisDirection.x +
+                                    axisDirection.y * axisDirection.y +
+                                    axisDirection.z * axisDirection.z);
+    if (!std::isfinite(length) || length < kMinExtrusionDistanceMm)
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "a rotation axis needs a direction"};
+
+    try {
+        const gp_Ax1 axis(gp_Pnt(axisOriginMm.x, axisOriginMm.y, axisOriginMm.z),
+                          gp_Dir(axisDirection.x, axisDirection.y, axisDirection.z));
+        gp_Trsf turn;
+        turn.SetRotation(axis, angleRad);
+        // COPY, not in place: the caller still owns the shape it handed in, and
+        // a pattern rotates the SAME base once per instance. Transforming it
+        // without copying would leave the base somewhere else after the first
+        // copy and stack every later one on top of that.
+        BRepBuilderAPI_Transform maker(occtShape->shape(), turn, Standard_True);
+        maker.Build();
+        if (!maker.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not rotate that shape"};
+        auto handle = std::make_shared<OcctShape>(maker.Shape());
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused the rotation: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
+    }
+}
+
+ShapeResult OcctGeometryKernel::intersectShapes(const KernelShape& a, const KernelShape& b) {
+    const auto* first = dynamic_cast<const OcctShape*>(a.handle());
+    const auto* second = dynamic_cast<const OcctShape*>(b.handle());
+    if (first == nullptr || second == nullptr || first->shape().IsNull() ||
+        second->shape().IsNull())
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "intersect input is not an OcctShape (null or foreign kernel)"};
+
+    try {
+        BRepAlgoAPI_Common common(first->shape(), second->shape());
+        common.Build();
+        if (!common.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not intersect those solids"};
+
+        const TopoDS_Shape shared = common.Shape();
+        // NOTHING IN COMMON is a real geometric answer and a useless feature.
+        // OCCT returns an empty compound rather than failing, and an empty
+        // shape carried down a chain looks exactly like a chain that worked --
+        // the viewer draws nothing and the mass is nought, both of which are
+        // also what a correct tiny part looks like.
+        GProp_GProps volumeProps;
+        BRepGProp::VolumeProperties(shared, volumeProps);
+        if (shared.IsNull() || !(std::fabs(volumeProps.Mass()) > kMinExtrusionDistanceMm))
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "those two solids do not overlap, so their intersection is empty"};
+
+        auto handle = std::make_shared<OcctShape>(shared);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused the intersection: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
+    }
 }
 
 ShapeResult OcctGeometryKernel::shellSolid(const KernelShape& base,

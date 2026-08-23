@@ -292,6 +292,43 @@ public:
     // operation, and there is no such model of hollowing an arbitrary solid.
     // A plausible-looking volume would let a feature that computes the wrong
     // shape pass every Core-side test.
+    // ROTATE is modelled, because the fake CAN: its shapes carry mass
+    // properties, and a rigid motion does not change any of them. That is not a
+    // convenience -- it is exactly what makes a circular pattern's arithmetic
+    // checkable without OCCT, the way translateShape already does for a linear
+    // one.
+    ShapeResult rotateShape(const KernelShape& shape, const Vec3& axisOriginMm,
+                            const Vec3& axisDirection, double angleRad) override {
+        ++rotateShapeCallCount;
+        if (!std::isfinite(angleRad))
+            return ShapeResult{KernelShape{}, KernelError::NonFinite,
+                               "rotation angle must be finite"};
+        const double length = std::sqrt(axisDirection.x * axisDirection.x +
+                                        axisDirection.y * axisDirection.y +
+                                        axisDirection.z * axisDirection.z);
+        if (!std::isfinite(length) || length <= 0.0)
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "a rotation axis needs a direction"};
+        (void)axisOriginMm;
+        const auto* handle = dynamic_cast<const FakeShapeHandle*>(shape.handle());
+        if (handle == nullptr)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "rotate input is not a FakeShapeHandle"};
+        return ShapeResult{KernelShape(std::make_shared<FakeShapeHandle>(handle->properties())),
+                           KernelError::None, {}};
+    }
+
+    // INTERSECT is refused: the fake tracks volume and nothing about WHERE, so
+    // it cannot say how much two solids share. Inventing a number would let a
+    // feature that intersects the wrong pair pass every Core-side test.
+    ShapeResult intersectShapes(const KernelShape& a, const KernelShape& b) override {
+        ++intersectShapesCallCount;
+        (void)a;
+        (void)b;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel does not model intersections"};
+    }
+
     ShapeResult shellSolid(const KernelShape& base, const FaceSelection& openFaces,
                            double thicknessMm) override {
         ++shellSolidCallCount;
@@ -486,6 +523,8 @@ public:
     int shellSolidCallCount = 0;
     int draftFacesCallCount = 0;
     int boundsOfShapeCallCount = 0;
+    int rotateShapeCallCount = 0;
+    int intersectShapesCallCount = 0;
     int loftProfilesCallCount = 0;
     int filletCallCount = 0;
     int chamferCallCount = 0;

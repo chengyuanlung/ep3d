@@ -801,6 +801,13 @@ public:
         ++subtracts;
         return inner.subtractShape(base, tool);
     }
+    ShapeResult rotateShape(const KernelShape& shape, const Vec3& axisOriginMm,
+                            const Vec3& axisDirection, double angleRad) override {
+        return inner.rotateShape(shape, axisOriginMm, axisDirection, angleRad);
+    }
+    ShapeResult intersectShapes(const KernelShape& a, const KernelShape& b) override {
+        return inner.intersectShapes(a, b);
+    }
     ShapeResult shellSolid(const KernelShape& base, const FaceSelection& openFaces,
                            double thicknessMm) override {
         return inner.shellSolid(base, openFaces, thicknessMm);

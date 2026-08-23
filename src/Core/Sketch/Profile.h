@@ -153,6 +153,17 @@ bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
 bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
                         PlanarProfileDefinition& out);
 
+// A PATH as a polyline, in sketch (u, v) (M21).
+//
+// The SAME sampler the profile's own winding test uses -- promoted rather than
+// copied when the curve pattern needed to walk a spine. A second sampling rule
+// would let "along that curve" mean one thing to a pattern and another to the
+// containment test, and both would be right about their own version.
+//
+// An OPEN chain keeps its final point; a closed one does not, because there
+// the last piece ends where the first begins.
+std::vector<Vec2> PathPolyline(const Sketch& sketch, const ValidatedPath& path);
+
 // The same translation, for a path (M19). Goes through the ONE translator that
 // turns an oriented entity into a segment, so a reversed arc -- or a reversed
 // spline's handles -- behaves identically whether it is part of a boundary or

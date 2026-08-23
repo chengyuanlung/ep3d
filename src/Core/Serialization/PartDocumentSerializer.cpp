@@ -8,6 +8,7 @@
 #include "Core/Kernel/FaceQuery.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/LoftFeature.h"
@@ -128,7 +129,7 @@ void WriteSketchGeometry(JsonValue& entry, const SketchGeometry& geometry) {
 }
 
 
-constexpr int kSchemaVersion = 26;          // v26 adds shell, draft and hole (M20)
+constexpr int kSchemaVersion = 27;          // v27 adds boolean and two patterns (M21)
 // v15 added PointLineDistance (M17).
 // v14 added construction geometry (M17).
 // v13 added Horizontal/VerticalDistance (M17).
@@ -442,6 +443,44 @@ JsonValue toJson(const PartDocument& document) {
                 featureEntry.set("lengthParameterId",
                                  JsonValue::makeString(idToString(pad->lengthParameterId())));
                 featureEntry.set("materialId", JsonValue::makeString(idToString(pad->materialId())));
+            } else if (const auto* boolean =
+                           dynamic_cast<const BooleanFeature*>(feature.get())) {
+                // v27 (M21). TWO operands, and the ORDER is written because
+                // "A minus B" and "B minus A" are different parts.
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(boolean->targetFeatureId())));
+                featureEntry.set("toolFeatureId",
+                                 JsonValue::makeString(idToString(boolean->toolFeatureId())));
+                featureEntry.set("operation",
+                                 JsonValue::makeString(
+                                     BooleanOperationName(boolean->operation())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(boolean->materialId())));
+            } else if (const auto* circular =
+                           dynamic_cast<const CircularPatternFeature*>(feature.get())) {
+                // BEFORE the PatternFeature branch below, for the reason the
+                // snapshot tests it first: a base class swallows the derived
+                // one and writes the wrong record.
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(circular->baseFeatureId())));
+                featureEntry.set("frameId",
+                                 JsonValue::makeString(idToString(circular->frameId())));
+                featureEntry.set("countParameterId",
+                                 JsonValue::makeString(idToString(circular->countParameterId())));
+                featureEntry.set("spacingParameterId",
+                                 JsonValue::makeString(idToString(circular->stepParameterId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(circular->materialId())));
+            } else if (const auto* curve =
+                           dynamic_cast<const CurvePatternFeature*>(feature.get())) {
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(curve->baseFeatureId())));
+                featureEntry.set("sketchId",
+                                 JsonValue::makeString(idToString(curve->pathSketchId())));
+                featureEntry.set("countParameterId",
+                                 JsonValue::makeString(idToString(curve->countParameterId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(curve->materialId())));
             } else if (const auto* shell = dynamic_cast<const ShellFeature*>(feature.get())) {
                 // v26 (M20). The faces are QUERIES, written as the sentences
                 // they are -- never as an index, which is what a stored face
@@ -1200,7 +1239,8 @@ constexpr std::string_view kSolidFeatureTypeNames[] = {"Box",     "Pad",     "Po
                                                        "Revolve", "Fillet",  "Chamfer",
                                                        "Mirror",  "Pattern", "Sweep",
                                                        "Loft",    "Shell",   "Draft",
-                                                       "Hole"};
+                                                       "Hole",    "Boolean", "CircularPattern",
+                                                       "CurvePattern"};
 
 bool IsSolidFeatureTypeName(std::string_view name) {
     for (const std::string_view solid : kSolidFeatureTypeNames)
@@ -1421,9 +1461,15 @@ SaveResult validateSaveable(const PartDocument& document) {
         std::unordered_set<ObjectId> consumedBases;
         for (const auto& feature : body->features()) {
             const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get());
-            const ObjectId consumedBase =
-                solid != nullptr ? solid->consumedSolidId() : kInvalidObjectId;
-            if (consumedBase != kInvalidObjectId) {
+            // EVERY operand (M21). This read the singular consumedSolidId, so a
+            // boolean's TOOL was checked by neither rule: a file could name a
+            // tool from another body, or a tool an earlier feature had already
+            // eaten, and save cleanly. The plural is the whole fix, and it is
+            // one line rather than a second branch for two-operand features --
+            // which is what a second branch would have become.
+            for (const ObjectId consumedBase :
+                 solid != nullptr ? solid->consumedSolidIds() : std::vector<ObjectId>{}) {
+                if (consumedBase == kInvalidObjectId) continue;
                 if (earlierSolids.count(consumedBase) == 0)
                     return SaveResult{SerializationError::UnknownDependencyId,
                                       "feature " + idToString(feature->id()) + " (" +
@@ -2235,6 +2281,107 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.sketchId = *sketchRef;
                 featureData.depthParameterId = *depthRef;
                 featureData.materialId = *pocketMaterialId;
+            } else if (featureData.typeName == "Boolean") {
+                const JsonValue* targetField = requireField(featureEntry, "baseFeatureId",
+                                                            JsonType::String, featureContext, err);
+                if (targetField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* toolField = requireField(featureEntry, "toolFeatureId",
+                                                          JsonType::String, featureContext, err);
+                if (toolField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* opField = requireField(featureEntry, "operation",
+                                                        JsonType::String, featureContext, err);
+                if (opField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* boolMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (boolMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                // BY NAME, and an unknown one is REFUSED rather than defaulted
+                // to Union. A file that says "Intersct" describes a part this
+                // build cannot make, and quietly unioning instead would load a
+                // different solid without a word.
+                const std::string opName = opField->asString();
+                if (opName == "Union") featureData.booleanOperation = BooleanOperation::Union;
+                else if (opName == "Subtract")
+                    featureData.booleanOperation = BooleanOperation::Subtract;
+                else if (opName == "Intersect")
+                    featureData.booleanOperation = BooleanOperation::Intersect;
+                else
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": '" + opName +
+                                           "' is not a boolean operation");
+
+                const auto targetRef = idFromString(targetField->asString());
+                const auto toolRef = idFromString(toolField->asString());
+                const auto boolMaterialId = idFromString(boolMaterialField->asString());
+                if (!targetRef || !toolRef || !boolMaterialId || *targetRef > kMaxObjectId ||
+                    *toolRef > kMaxObjectId || *boolMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": boolean references are not valid ids");
+                featureData.baseFeatureId = *targetRef;
+                featureData.toolFeatureId = *toolRef;
+                featureData.materialId = *boolMaterialId;
+            } else if (featureData.typeName == "CircularPattern") {
+                const JsonValue* baseField = requireField(featureEntry, "baseFeatureId",
+                                                          JsonType::String, featureContext, err);
+                if (baseField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* frameField = requireField(featureEntry, "frameId",
+                                                          JsonType::String, featureContext, err);
+                if (frameField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* countField = requireField(featureEntry, "countParameterId",
+                                                          JsonType::String, featureContext, err);
+                if (countField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* stepField = requireField(featureEntry, "spacingParameterId",
+                                                         JsonType::String, featureContext, err);
+                if (stepField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* ringMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (ringMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                const auto baseRef = idFromString(baseField->asString());
+                const auto frameRef = idFromString(frameField->asString());
+                const auto countRef = idFromString(countField->asString());
+                const auto stepRef = idFromString(stepField->asString());
+                const auto ringMaterialId = idFromString(ringMaterialField->asString());
+                if (!baseRef || !frameRef || !countRef || !stepRef || !ringMaterialId ||
+                    *baseRef > kMaxObjectId || *frameRef > kMaxObjectId ||
+                    *countRef > kMaxObjectId || *stepRef > kMaxObjectId ||
+                    *ringMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext +
+                                           ": circular pattern references are not valid ids");
+                featureData.baseFeatureId = *baseRef;
+                featureData.frameId = *frameRef;
+                featureData.countParameterId = *countRef;
+                featureData.spacingParameterId = *stepRef;
+                featureData.materialId = *ringMaterialId;
+            } else if (featureData.typeName == "CurvePattern") {
+                const JsonValue* baseField = requireField(featureEntry, "baseFeatureId",
+                                                          JsonType::String, featureContext, err);
+                if (baseField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* pathField = requireField(featureEntry, "sketchId",
+                                                          JsonType::String, featureContext, err);
+                if (pathField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* countField = requireField(featureEntry, "countParameterId",
+                                                          JsonType::String, featureContext, err);
+                if (countField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* alongMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (alongMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                const auto baseRef = idFromString(baseField->asString());
+                const auto pathRef = idFromString(pathField->asString());
+                const auto countRef = idFromString(countField->asString());
+                const auto alongMaterialId = idFromString(alongMaterialField->asString());
+                if (!baseRef || !pathRef || !countRef || !alongMaterialId ||
+                    *baseRef > kMaxObjectId || *pathRef > kMaxObjectId ||
+                    *countRef > kMaxObjectId || *alongMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext +
+                                           ": curve pattern references are not valid ids");
+                featureData.baseFeatureId = *baseRef;
+                featureData.sketchId = *pathRef;
+                featureData.countParameterId = *countRef;
+                featureData.materialId = *alongMaterialId;
             } else if (featureData.typeName == "Shell" ||
                        featureData.typeName == "Draft") {
                 const bool isDraft = featureData.typeName == "Draft";

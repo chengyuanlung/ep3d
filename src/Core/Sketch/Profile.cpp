@@ -186,7 +186,7 @@ ProfileResult BuildProfile(const Sketch& sketch) {
 // together that the answer depends on chord accuracy are loops OCCT will refuse
 // anyway. Nothing built from this reaches the kernel -- the kernel gets the
 // exact curves.
-std::vector<Vec2> LoopPolygon(const Sketch& sketch, const ProfileLoop& loop) {
+std::vector<Vec2> LoopPolygonImpl(const Sketch& sketch, const ProfileLoop& loop, bool closed) {
     constexpr int kArcSteps = 24;
     std::vector<Vec2> polygon;
     for (const OrientedSketchEntityRef& ref : loop.entities) {
@@ -243,7 +243,25 @@ std::vector<Vec2> LoopPolygon(const Sketch& sketch, const ProfileLoop& loop) {
             polygon.insert(polygon.end(), sampled.begin(), sampled.end());
         }
     }
+    // THE FINAL POINT, for an OPEN chain only.
+    //
+    // Each branch above contributes a piece's START and leaves its END to the
+    // next piece -- which is right for a ring, where the last piece's end IS
+    // the first piece's start, and wrong for a path, where dropping it would
+    // lose the last segment entirely. A curve pattern spacing copies along
+    // such a polyline would then stop short of the end.
+    if (!closed && !loop.entities.empty()) {
+        const OrientedSketchEntityRef& last = loop.entities.back();
+        const SketchEntity* entity = sketch.findEntity(last.entityId);
+        if (entity != nullptr && HasEndpoints(entity->geometry))
+            polygon.push_back(last.reversed ? StartPointOf(entity->geometry)
+                                            : EndPointOf(entity->geometry));
+    }
     return polygon;
+}
+
+std::vector<Vec2> LoopPolygon(const Sketch& sketch, const ProfileLoop& loop) {
+    return LoopPolygonImpl(sketch, loop, true);
 }
 
 // Ray casting: is `p` inside `polygon`?
@@ -714,6 +732,10 @@ PathResult BuildPath(const Sketch& sketch) {
     }
 
     return PathResult{std::move(out), ProfileError::None, {}};
+}
+
+std::vector<Vec2> PathPolyline(const Sketch& sketch, const ValidatedPath& path) {
+    return LoopPolygonImpl(sketch, path.chain, path.closed);
 }
 
 bool BuildKernelPath(const Sketch& sketch, const ValidatedPath& validated,

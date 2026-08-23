@@ -10,6 +10,7 @@
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <string>
+#include <vector>
 #include <string_view>
 #include <utility>
 
@@ -54,7 +55,7 @@ public:
 
     const KernelShape& currentShape() const noexcept override { return currentShape_; }
     ComputeState currentState() const noexcept override { return Feature::state(); }
-    ObjectId consumedSolidId() const noexcept override { return baseFeatureId_; }
+    std::vector<ObjectId> consumedSolidIds() const override { return {baseFeatureId_}; }
 
     // Vestigial M1 contract, never called by the document engine (ADR-M3-004).
     bool recompute() override;

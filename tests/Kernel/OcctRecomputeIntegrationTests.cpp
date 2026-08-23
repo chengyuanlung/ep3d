@@ -3,6 +3,8 @@
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Core/Feature/SweepFeature.h"
 #include "Core/Feature/ShellFeature.h"
+#include "Core/Feature/BooleanFeature.h"
+#include "Core/Feature/TransformFeatures.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/LoftFeature.h"
@@ -41,6 +43,13 @@ public:
     ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override {
         ++subtractCallCount;
         return inner_.subtractShape(base, tool);
+    }
+    ShapeResult rotateShape(const KernelShape& shape, const Vec3& axisOriginMm,
+                            const Vec3& axisDirection, double angleRad) override {
+        return inner_.rotateShape(shape, axisOriginMm, axisDirection, angleRad);
+    }
+    ShapeResult intersectShapes(const KernelShape& a, const KernelShape& b) override {
+        return inner_.intersectShapes(a, b);
     }
     ShapeResult shellSolid(const KernelShape& base, const FaceSelection& openFaces,
                            double thicknessMm) override {
@@ -911,4 +920,385 @@ TEST(OcctRecomputeIntegrationTest, M20_FEAT_010_AThroughHoleReachesEvenOnATALLPa
     ASSERT_EQ(drilled.currentState(), ComputeState::Valid);
     const double expected = 60.0 * 60.0 * 2000.0 - kPi * 25.0 * 2000.0;
     EXPECT_NEAR(VolumeOfFeature(kernel, drilled), expected, 1e-6 * expected);
+}
+
+// --- M21: BOOLEANS, MULTI-BODY and the pattern family ------------------------
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_001_ABooleanCombinesTWOSolids) {
+    // The multi-body feature, and the first thing here to consume two.
+    // Two 60 x 60 x 40 pads, one offset 40 in x: they share 20 x 60 x 40.
+    OcctGeometryKernel kernel;
+    PartDocument document{"BoolDoc"};
+    document.setGeometryKernel(&kernel);
+
+    Sketch& left = document.addSketch("Left");
+    AddSquare(document, left.id(), 60.0);
+    const std::optional<SketchFrame> shifted =
+        SketchFrame::FromBasis(Vec3{40, 0, 0}, Vec3{1, 0, 0}, Vec3{0, 0, 1});
+    ASSERT_TRUE(shifted.has_value());
+    Sketch& right = document.addSketch("Right", *shifted);
+    AddSquare(document, right.id(), 60.0);
+
+    Parameter& tall = document.addParameter("H", 40.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId a = document.addPadFeature(body, "PadA", left.id(), tall.id()).id();
+    const ObjectId b = document.addPadFeature(body, "PadB", right.id(), tall.id()).id();
+
+    BooleanFeature& shared = document.addBooleanFeature(body, "Common",
+                                                        BooleanOperation::Intersect, a, b);
+    ASSERT_TRUE(document.recompute().success);
+    ASSERT_EQ(shared.currentState(), ComputeState::Valid);
+
+    const double expected = 20.0 * 60.0 * 40.0;
+    EXPECT_NEAR(VolumeOfFeature(kernel, shared), expected, 1e-6 * expected);
+}
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_002_BOTHOperandsAreConsumed) {
+    // The reason consumedSolidIds became plural. With one id a boolean could
+    // declare only its target, and the tool would stay a live chain tail --
+    // the viewer would draw the leftover alongside the result, so the part
+    // would appear twice.
+    OcctGeometryKernel kernel;
+    PartDocument document{"BoolDoc"};
+    document.setGeometryKernel(&kernel);
+
+    Sketch& left = document.addSketch("Left");
+    AddSquare(document, left.id(), 60.0);
+    const std::optional<SketchFrame> shifted =
+        SketchFrame::FromBasis(Vec3{40, 0, 0}, Vec3{1, 0, 0}, Vec3{0, 0, 1});
+    ASSERT_TRUE(shifted.has_value());
+    Sketch& right = document.addSketch("Right", *shifted);
+    AddSquare(document, right.id(), 60.0);
+
+    Parameter& tall = document.addParameter("H", 40.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId a = document.addPadFeature(body, "PadA", left.id(), tall.id()).id();
+    const ObjectId b = document.addPadFeature(body, "PadB", right.id(), tall.id()).id();
+    BooleanFeature& united =
+        document.addBooleanFeature(body, "Joined", BooleanOperation::Union, a, b);
+    ASSERT_TRUE(document.recompute().success);
+
+    const std::vector<ObjectId> eaten = united.consumedSolidIds();
+    ASSERT_EQ(eaten.size(), 2u);
+    EXPECT_EQ(eaten[0], a);
+    EXPECT_EQ(eaten[1], b);
+    // ...and the DOCUMENT agrees, which is the half that matters: the
+    // consumed-once rule (ADR-M8-008) now refuses to let anything else eat the
+    // tool. With a single-id declaration it would have said yes, because
+    // nothing knew the boolean had taken it.
+    Parameter& wall = document.addParameter("W", 5.0, UnitType::Millimeter);
+    FaceQuery top;
+    top.extremeTowards = Vec3{0, 0, 1};
+    EXPECT_THROW(document.addShellFeature(body, "Late", b, {top}, wall.id()),
+                 std::runtime_error);
+}
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_003_SubtractKeepsItsORDER) {
+    // "A minus B" and "B minus A" are different parts, and nothing here can
+    // tell which the user meant -- so the order is stored, never normalised.
+    OcctGeometryKernel kernel;
+    const auto volumeFor = [&kernel](bool swapped) {
+        PartDocument document{"BoolDoc"};
+        document.setGeometryKernel(&kernel);
+        Sketch& big = document.addSketch("Big");
+        AddSquare(document, big.id(), 60.0);
+        Sketch& small = document.addSketch("Small");
+        AddSquare(document, small.id(), 30.0);
+        Parameter& tall = document.addParameter("H", 40.0, UnitType::Millimeter);
+        Parameter& shortOne = document.addParameter("S", 20.0, UnitType::Millimeter);
+        Body& body = document.addBody("Body");
+        const ObjectId a = document.addPadFeature(body, "PadA", big.id(), tall.id()).id();
+        const ObjectId b = document.addPadFeature(body, "PadB", small.id(), shortOne.id()).id();
+        BooleanFeature& cut = document.addBooleanFeature(
+            body, "Cut", BooleanOperation::Subtract, swapped ? b : a, swapped ? a : b);
+        EXPECT_TRUE(document.recompute().success);
+        EXPECT_EQ(cut.currentState(), ComputeState::Valid);
+        return VolumeOfFeature(kernel, cut);
+    };
+
+    // Big minus small: 60*60*40 less the 30*30*20 the small one occupies.
+    const double drawn = volumeFor(false);
+    EXPECT_NEAR(drawn, 60.0 * 60.0 * 40.0 - 30.0 * 30.0 * 20.0, 1e-3);
+    // Small minus big is a DIFFERENT part -- the small one sits entirely
+    // inside the big one, so almost nothing is left. A feature that sorted its
+    // operands would return the same number twice.
+    const double swapped = volumeFor(true);
+    EXPECT_GT(std::fabs(drawn - swapped), 1.0)
+        << "the two orders produced the same solid, so something normalised them";
+}
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_004_ABooleanWithITSELFIsREFUSED) {
+    // Union gives the same solid, intersect gives the same solid, subtract
+    // gives nothing -- three answers, none of them what anybody meant, and two
+    // of which look like success.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+    BooleanFeature& silly = part.document.addBooleanFeature(
+        *part.body, "Same", BooleanOperation::Union, part.padId, part.padId);
+
+    const DocumentRecomputeReport report = part.document.recompute();
+    EXPECT_EQ(silly.currentState(), ComputeState::Failed);
+    EXPECT_NE(FailureMessageFor(report, silly.id()).find("two different solids"),
+              std::string::npos)
+        << FailureMessageFor(report, silly.id());
+}
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_005_ACircularPatternMakesARing) {
+    // Four instances at 90 degrees about the world Z: a full ring of four
+    // disjoint blocks, so the volume is four times the one.
+    OcctGeometryKernel kernel;
+    PartDocument document{"RingDoc"};
+    document.setGeometryKernel(&kernel);
+
+    // A 20 mm block, offset from the axis so the copies do not overlap.
+    const std::optional<SketchFrame> offset =
+        SketchFrame::FromBasis(Vec3{80, 0, 0}, Vec3{1, 0, 0}, Vec3{0, 0, 1});
+    ASSERT_TRUE(offset.has_value());
+    Sketch& sketch = document.addSketch("Tooth", *offset);
+    AddSquare(document, sketch.id(), 20.0);
+    Parameter& tall = document.addParameter("H", 10.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", sketch.id(), tall.id()).id();
+
+    ReferenceFrame& axis = document.addFrame("Axis");
+    Parameter& count = document.addParameter("N", 4.0, UnitType::Unitless);
+    Parameter& step = document.addParameter("Step", kPi / 2.0, UnitType::Radian);
+    CircularPatternFeature& ring = document.addCircularPatternFeature(
+        body, "Ring", pad, axis.id(), count.id(), step.id());
+
+    ASSERT_TRUE(document.recompute().success);
+    ASSERT_EQ(ring.currentState(), ComputeState::Valid);
+    const double one = 20.0 * 20.0 * 10.0;
+    EXPECT_NEAR(VolumeOfFeature(kernel, ring), 4.0 * one, 1e-6 * one);
+}
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_006_ACircularStepInMILLIMETRESIsREFUSED) {
+    // 90 stored as millimetres reads as 90 RADIANS -- fourteen turns -- and
+    // lands nowhere near where the drawing said, while looking like a number.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 20.0, 10.0};
+    ReferenceFrame& axis = part.document.addFrame("Axis");
+    Parameter& count = part.document.addParameter("N", 4.0, UnitType::Unitless);
+    Parameter& step = part.document.addParameter("Step", 90.0, UnitType::Millimeter);
+    CircularPatternFeature& ring = part.document.addCircularPatternFeature(
+        *part.body, "Ring", part.padId, axis.id(), count.id(), step.id());
+
+    const DocumentRecomputeReport report = part.document.recompute();
+    EXPECT_EQ(ring.currentState(), ComputeState::Failed);
+    EXPECT_NE(FailureMessageFor(report, ring.id()).find("UnitType::Radian"), std::string::npos)
+        << FailureMessageFor(report, ring.id());
+}
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_007_ACurvePatternSpacesCopiesAlongASketchPath) {
+    // Three instances along a 200 mm straight path: the base at one end, one at
+    // the far end, one exactly in the middle -- so they do not touch and the
+    // volume is three times one.
+    OcctGeometryKernel kernel;
+    PartDocument document{"CurveDoc"};
+    document.setGeometryKernel(&kernel);
+
+    Sketch& block = document.addSketch("Block");
+    AddSquare(document, block.id(), 20.0);
+    Parameter& tall = document.addParameter("H", 10.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", block.id(), tall.id()).id();
+
+    // The path starts where the block is and runs 200 mm along +X.
+    Sketch& path = document.addSketch("Path");
+    document.addSketchEntity(path.id(), SketchLine{Vec2{0, 0}, Vec2{200, 0}});
+
+    Parameter& count = document.addParameter("N", 3.0, UnitType::Unitless);
+    CurvePatternFeature& spread =
+        document.addCurvePatternFeature(body, "Along", pad, path.id(), count.id());
+
+    ASSERT_TRUE(document.recompute().success);
+    ASSERT_EQ(spread.currentState(), ComputeState::Valid);
+    const double one = 20.0 * 20.0 * 10.0;
+    EXPECT_NEAR(VolumeOfFeature(kernel, spread), 3.0 * one, 1e-6 * one);
+
+    // ...and they really are spread out, not stacked: the bounds reach the far
+    // end of the path.
+    const KernelBoundsResult bounds = kernel.boundsOfShape(spread.currentShape());
+    ASSERT_TRUE(bounds.ok);
+    EXPECT_NEAR(bounds.max.x, 210.0, 1e-6);
+}
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_008_MovingThePATHMovesTheCopies) {
+    // The path sketch is a dependency, so editing the curve rebuilds the
+    // pattern. Without that edge the copies would stay where the old curve put
+    // them, and nothing would say so.
+    OcctGeometryKernel kernel;
+    PartDocument document{"CurveDoc"};
+    document.setGeometryKernel(&kernel);
+
+    Sketch& block = document.addSketch("Block");
+    AddSquare(document, block.id(), 20.0);
+    Parameter& tall = document.addParameter("H", 10.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", block.id(), tall.id()).id();
+
+    Sketch& path = document.addSketch("Path");
+    const SketchEntityId line =
+        document.addSketchEntity(path.id(), SketchLine{Vec2{0, 0}, Vec2{200, 0}});
+    Parameter& count = document.addParameter("N", 3.0, UnitType::Unitless);
+    CurvePatternFeature& spread =
+        document.addCurvePatternFeature(body, "Along", pad, path.id(), count.id());
+    ASSERT_TRUE(document.recompute().success);
+
+    ASSERT_TRUE(document.setSketchEntityGeometry(path.id(), line,
+                                                 SketchLine{Vec2{0, 0}, Vec2{400, 0}}));
+    ASSERT_TRUE(document.recompute().success);
+    const KernelBoundsResult bounds = kernel.boundsOfShape(spread.currentShape());
+    ASSERT_TRUE(bounds.ok);
+    EXPECT_NEAR(bounds.max.x, 410.0, 1e-6) << "the copies did not follow the path";
+}
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_009_AFaceQuerySURVIVESABoolean) {
+    // THE RISK THE PLAN NAMED FIRST, under pressure for the first time.
+    //
+    // `CreatedBy` rides OCCT's modelling history, and history is what a boolean
+    // is worst at keeping. If it breaks, a shell that named "the top face of
+    // what the pad made" stops finding it -- and in an assembly the same break
+    // is a mate on a face that no longer resolves, which is the failure the
+    // parity plan calls the one that takes the whole machine apart.
+    //
+    // So: build two pads, union them, and then shell the RESULT through a
+    // query that names a direction -- the one kind of query that must survive
+    // any history at all, because it describes shape rather than provenance.
+    OcctGeometryKernel kernel;
+    PartDocument document{"HistoryDoc"};
+    document.setGeometryKernel(&kernel);
+
+    Sketch& left = document.addSketch("Left");
+    AddSquare(document, left.id(), 60.0);
+    const std::optional<SketchFrame> shifted =
+        SketchFrame::FromBasis(Vec3{40, 0, 0}, Vec3{1, 0, 0}, Vec3{0, 0, 1});
+    ASSERT_TRUE(shifted.has_value());
+    Sketch& right = document.addSketch("Right", *shifted);
+    AddSquare(document, right.id(), 60.0);
+
+    Parameter& tall = document.addParameter("H", 40.0, UnitType::Millimeter);
+    Parameter& wall = document.addParameter("W", 5.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId a = document.addPadFeature(body, "PadA", left.id(), tall.id()).id();
+    const ObjectId b = document.addPadFeature(body, "PadB", right.id(), tall.id()).id();
+    const ObjectId joined =
+        document.addBooleanFeature(body, "Joined", BooleanOperation::Union, a, b).id();
+
+    FaceQuery top;
+    top.extremeTowards = Vec3{0, 0, 1};
+    ShellFeature& hollow =
+        document.addShellFeature(body, "Shell1", joined, {top}, wall.id());
+
+    const DocumentRecomputeReport report = document.recompute();
+    EXPECT_EQ(hollow.currentState(), ComputeState::Valid)
+        << "a face query did not survive the boolean: " << FailureMessageFor(report, hollow.id());
+    ASSERT_TRUE(report.success) << FailureMessageFor(report, hollow.id());
+    // ...and it really hollowed it: less material than the union it came from.
+    const double union_ = 2.0 * 60.0 * 60.0 * 40.0 - 20.0 * 60.0 * 40.0;
+    EXPECT_LT(VolumeOfFeature(kernel, hollow), union_ * 0.9);
+}
+
+TEST(OcctRecomputeIntegrationTest, M21_FEAT_011_EVERYChainFeatureRefusesAnAlreadyEatenBase) {
+    // ADR-M8-008's consumed-once rule is enforced by a CALL AT EACH SITE, and
+    // five features added in M20 and M21 were written without it. Nothing
+    // noticed, because every test that exercised the rule used one of the older
+    // features that had it.
+    //
+    // So this test walks EVERY chain feature the document can build. It is a
+    // list, and a list can drift -- but it is a list in the one test whose
+    // whole job is to catch that drift, and a new chain feature that forgets
+    // the guard fails here on the day it is written rather than the day
+    // somebody double-consumes a solid and gets two parts drawn on top of each
+    // other.
+    OcctGeometryKernel kernel;
+
+    // Each entry: build a fresh part, take something else that already ate the
+    // pad, then try to add THIS feature on the same pad.
+    const auto expectRefused = [&kernel](const char* what,
+                                         const std::function<void(PartDocument&, Body&,
+                                                                  ObjectId)>& addOnTop) {
+        PaddedBox part{kernel, 60.0, 40.0};
+        Parameter& wall = part.document.addParameter("W", 5.0, UnitType::Millimeter);
+        FaceQuery top;
+        top.extremeTowards = Vec3{0, 0, 1};
+        // The first consumer, which is allowed.
+        part.document.addShellFeature(*part.body, "First", part.padId, {top}, wall.id());
+        // The second, which is not.
+        EXPECT_THROW(addOnTop(part.document, *part.body, part.padId), std::runtime_error)
+            << what << " let a second feature consume the same solid";
+    };
+
+    expectRefused("Shell", [](PartDocument& d, Body& b, ObjectId base) {
+        FaceQuery top;
+        top.extremeTowards = Vec3{0, 0, 1};
+        Parameter& w = d.addParameter("W2", 5.0, UnitType::Millimeter);
+        d.addShellFeature(b, "X", base, {top}, w.id());
+    });
+    expectRefused("Draft", [](PartDocument& d, Body& b, ObjectId base) {
+        FaceQuery wall;
+        wall.facing = Vec3{0, 1, 0};
+        FaceQuery neutral;
+        neutral.extremeTowards = Vec3{0, 0, -1};
+        Parameter& a = d.addParameter("A2", 0.1, UnitType::Radian);
+        d.addDraftFeature(b, "X", base, {wall}, neutral, a.id());
+    });
+    expectRefused("Hole", [](PartDocument& d, Body& b, ObjectId base) {
+        Sketch& s = d.addSketch("Pts2");
+        d.addSketchEntity(s.id(), SketchPoint{Vec2{0, 0}});
+        Parameter& dia = d.addParameter("D2", 5.0, UnitType::Millimeter);
+        Parameter& dep = d.addParameter("Z2", -5.0, UnitType::Millimeter);
+        d.addHoleFeature(b, "X", base, s.id(), dia.id(), dep.id());
+    });
+    expectRefused("Pocket", [](PartDocument& d, Body& b, ObjectId base) {
+        Sketch& s = d.addSketch("Cut2");
+        AddSquare(d, s.id(), 10.0);
+        Parameter& dep = d.addParameter("Z3", 5.0, UnitType::Millimeter);
+        d.addPocketFeature(b, "X", base, s.id(), dep.id());
+    });
+    expectRefused("Fillet", [](PartDocument& d, Body& b, ObjectId base) {
+        Parameter& r = d.addParameter("R2", 2.0, UnitType::Millimeter);
+        d.addFilletFeature(b, "X", base, r.id());
+    });
+    expectRefused("Chamfer", [](PartDocument& d, Body& b, ObjectId base) {
+        Parameter& r = d.addParameter("C2", 2.0, UnitType::Millimeter);
+        d.addChamferFeature(b, "X", base, r.id());
+    });
+    expectRefused("Mirror", [](PartDocument& d, Body& b, ObjectId base) {
+        ReferenceFrame& f = d.addFrame("F2");
+        d.addMirrorFeature(b, "X", base, f.id());
+    });
+    expectRefused("Pattern", [](PartDocument& d, Body& b, ObjectId base) {
+        ReferenceFrame& f = d.addFrame("F3");
+        Parameter& n = d.addParameter("N2", 2.0, UnitType::Unitless);
+        Parameter& s = d.addParameter("S2", 20.0, UnitType::Millimeter);
+        d.addPatternFeature(b, "X", base, f.id(), n.id(), s.id());
+    });
+    expectRefused("CircularPattern", [](PartDocument& d, Body& b, ObjectId base) {
+        ReferenceFrame& f = d.addFrame("F4");
+        Parameter& n = d.addParameter("N3", 2.0, UnitType::Unitless);
+        Parameter& s = d.addParameter("S3", 1.0, UnitType::Radian);
+        d.addCircularPatternFeature(b, "X", base, f.id(), n.id(), s.id());
+    });
+    expectRefused("CurvePattern", [](PartDocument& d, Body& b, ObjectId base) {
+        Sketch& p = d.addSketch("Path2");
+        d.addSketchEntity(p.id(), SketchLine{Vec2{0, 0}, Vec2{100, 0}});
+        Parameter& n = d.addParameter("N4", 2.0, UnitType::Unitless);
+        d.addCurvePatternFeature(b, "X", base, p.id(), n.id());
+    });
+    expectRefused("Boolean (target)", [](PartDocument& d, Body& b, ObjectId base) {
+        Sketch& s = d.addSketch("Other");
+        AddSquare(d, s.id(), 20.0);
+        Parameter& h = d.addParameter("H2", 10.0, UnitType::Millimeter);
+        const ObjectId other = d.addPadFeature(b, "PadOther", s.id(), h.id()).id();
+        d.addBooleanFeature(b, "X", BooleanOperation::Union, base, other);
+    });
+    expectRefused("Boolean (tool)", [](PartDocument& d, Body& b, ObjectId base) {
+        Sketch& s = d.addSketch("Other2");
+        AddSquare(d, s.id(), 20.0);
+        Parameter& h = d.addParameter("H3", 10.0, UnitType::Millimeter);
+        const ObjectId other = d.addPadFeature(b, "PadOther2", s.id(), h.id()).id();
+        // The TOOL side, which a guard on the target alone would let through.
+        d.addBooleanFeature(b, "X", BooleanOperation::Union, other, base);
+    });
 }

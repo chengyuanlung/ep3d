@@ -1,0 +1,84 @@
+# PATTERNS, BOOLEANS AND MULTI-BODY (M21).
+#
+# The M21 gate: one sketch cut into two parts, a ring of teeth, and copies
+# spaced along a curve -- all in one script, all measurable.
+
+# --- multi-body: one body, two separate solids -------------------------------
+#
+# A Body here is a feature chain, and two features in it that nothing consumes
+# are two disjoint solids. That IS multi-body: `pad` twice into the same body.
+
+sketch Plate
+tool rect
+click -40 -40
+click 40 40
+pad Block 30
+
+sketch Slot
+tool rect
+click -10 -60
+click 10 60
+pad Block 30
+
+# `measure` reports the LAST solid feature, not the whole body -- so what it
+# shows here is the slot alone (20 x 120 x 30 = 72000), which is itself the
+# evidence that the two pads really are two separate solids.
+echo --- the slot, as its own solid ---
+solve
+measure
+
+# ...and a boolean turns two into one. The order is the order they were drawn,
+# so this removes the slot from the plate.
+subtract Block
+
+# 80 x 80 x 30 less the part of the slot that was inside it (20 x 80 x 30):
+# 192000 - 48000 = 144000.
+echo --- one solid, with the slot cut out ---
+solve
+measure
+
+# --- a ring of teeth ---------------------------------------------------------
+#
+# The step is PER INSTANCE, not a total sweep: six at 60 degrees is a full ring.
+# Six at 360 would be six copies on top of each other.
+
+sketch Tooth xy 0
+tool rect
+click 60 -8
+click 90 8
+pad Rotor 12
+ring Rotor 6 60
+
+# One tooth is 30 x 16 x 12 = 5760, and six of them do not touch: 34560.
+echo --- a six-tooth rotor ---
+solve
+measure
+
+# --- copies along a curve ----------------------------------------------------
+#
+# The path is the same chain a sweep follows, so "along that curve" means the
+# same thing to both.
+
+sketch Stud
+tool rect
+click -5 -5
+click 5 5
+pad Rail 8
+
+sketch Track
+tool line
+click 0 0
+click 150 0
+tool arc3
+click 150 0
+click 190 40
+click 150 80
+
+along Rail Track 5
+
+# One stud is 10 x 10 x 8 = 800, and five of them: 4000.
+echo --- five studs along the track ---
+solve
+measure
+
+save build/patterns.ep3d

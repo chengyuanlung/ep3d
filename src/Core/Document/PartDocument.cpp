@@ -10,6 +10,7 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/LoftFeature.h"
@@ -2312,8 +2313,12 @@ void PartDocument::rewireMassPropertiesToTail(const Body& body) {
         for (const std::unique_ptr<Feature>& feature : anyBody->features()) {
             if (!isFeatureActive(feature->id())) continue;
             if (const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get()))
-                if (solid->consumedSolidId() != kInvalidObjectId)
-                    consumed.insert(activeChainBase(solid->consumedSolidId()));
+                // EVERY one it consumes (M21). A boolean eats two, and the one
+                // this loop missed would stay a live chain tail -- so the
+                // viewer would draw the leftover alongside the result and the
+                // part would appear twice.
+                for (const ObjectId eaten : solid->consumedSolidIds())
+                    if (eaten != kInvalidObjectId) consumed.insert(activeChainBase(eaten));
         }
 
     const Feature* tail = nullptr;
@@ -2387,7 +2392,11 @@ void PartDocument::requireConsumableBase(const Body& body, ObjectId baseFeatureI
     for (const auto& anyBody : bodies_)
         for (const auto& feature : anyBody->features()) {
             const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get());
-            if (solid != nullptr && solid->consumedSolidId() == baseFeatureId)
+            bool eatsIt = false;
+            if (solid != nullptr)
+                for (const ObjectId eaten : solid->consumedSolidIds())
+                    if (eaten == baseFeatureId) eatsIt = true;
+            if (eatsIt)
                 throw std::runtime_error(std::string(consumerNoun) + ": base feature " +
                                          std::to_string(baseFeatureId) +
                                          " is already consumed by feature " +
@@ -2448,6 +2457,114 @@ PocketFeature& PartDocument::restorePocketFeature(Body& body, ObjectId id, std::
 }
 
 
+void PartDocument::wireBooleanFeature(BooleanFeature& feature, ObjectId targetFeatureId,
+                                      ObjectId toolFeatureId, ObjectId materialId) {
+    addRecomputableNode(feature);
+    // BOTH operands. Either one changing changes the result, so either one
+    // has to dirty this -- the same reason a sweep needs two edges.
+    addDependency(feature.id(), targetFeatureId);
+    addDependency(feature.id(), toolFeatureId);
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+BooleanFeature& PartDocument::addBooleanFeature(Body& body, std::string name,
+                                                BooleanOperation operation,
+                                                ObjectId targetFeatureId,
+                                                ObjectId toolFeatureId) {
+    // BOTH operands, because a boolean eats both -- and the rule is about
+    // what gets eaten, not about how many arguments a feature takes.
+    requireConsumableBase(body, targetFeatureId, "addBooleanFeature");
+    requireConsumableBase(body, toolFeatureId, "addBooleanFeature");
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    BooleanFeature& feature = body.addFeature<BooleanFeature>(
+        std::move(name), operation, targetFeatureId, toolFeatureId, materialId);
+    wireBooleanFeature(feature, targetFeatureId, toolFeatureId, materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+BooleanFeature& PartDocument::restoreBooleanFeature(Body& body, ObjectId id, std::string name,
+                                                    ComputeState state,
+                                                    BooleanOperation operation,
+                                                    ObjectId targetFeatureId,
+                                                    ObjectId toolFeatureId,
+                                                    ObjectId materialId) {
+    requireConsumableBase(body, targetFeatureId, "restoreBooleanFeature");
+    requireConsumableBase(body, toolFeatureId, "restoreBooleanFeature");
+    requireUnusedId(id, "restoreBooleanFeature");
+    BooleanFeature& feature = body.addFeature<BooleanFeature>(
+        id, std::move(name), state, operation, targetFeatureId, toolFeatureId, materialId);
+    wireBooleanFeature(feature, targetFeatureId, toolFeatureId, materialId);
+    return feature;
+}
+
+CircularPatternFeature& PartDocument::addCircularPatternFeature(Body& body, std::string name,
+                                                                ObjectId baseFeatureId,
+                                                                ObjectId frameId,
+                                                                ObjectId countParameterId,
+                                                                ObjectId stepParameterId) {
+    requireConsumableBase(body, baseFeatureId, "addCircularPatternFeature");
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    CircularPatternFeature& feature = body.addFeature<CircularPatternFeature>(
+        std::move(name), baseFeatureId, frameId, countParameterId, stepParameterId, materialId);
+    // The SAME wiring a linear pattern uses -- base, frame, count and the one
+    // driving number -- so the two cannot drift apart in what they depend on.
+    wireTransformFeature(feature, baseFeatureId, frameId, countParameterId, stepParameterId,
+                         materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+CircularPatternFeature& PartDocument::restoreCircularPatternFeature(
+    Body& body, ObjectId id, std::string name, ComputeState state, ObjectId baseFeatureId,
+    ObjectId frameId, ObjectId countParameterId, ObjectId stepParameterId, ObjectId materialId) {
+    requireUnusedId(id, "restoreCircularPatternFeature");
+    CircularPatternFeature& feature = body.addFeature<CircularPatternFeature>(
+        id, std::move(name), state, baseFeatureId, frameId, countParameterId, stepParameterId,
+        materialId);
+    wireTransformFeature(feature, baseFeatureId, frameId, countParameterId, stepParameterId,
+                         materialId);
+    return feature;
+}
+
+void PartDocument::wireCurvePatternFeature(CurvePatternFeature& feature, ObjectId baseFeatureId,
+                                           ObjectId pathSketchId, ObjectId countParameterId,
+                                           ObjectId materialId) {
+    addRecomputableNode(feature);
+    addDependency(feature.id(), baseFeatureId);
+    // THE PATH SKETCH, because moving the curve moves every copy.
+    addDependency(feature.id(), pathSketchId);
+    addDependency(feature.id(), countParameterId);
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+CurvePatternFeature& PartDocument::addCurvePatternFeature(Body& body, std::string name,
+                                                          ObjectId baseFeatureId,
+                                                          ObjectId pathSketchId,
+                                                          ObjectId countParameterId) {
+    requireConsumableBase(body, baseFeatureId, "addCurvePatternFeature");
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    CurvePatternFeature& feature = body.addFeature<CurvePatternFeature>(
+        std::move(name), baseFeatureId, pathSketchId, countParameterId, materialId);
+    wireCurvePatternFeature(feature, baseFeatureId, pathSketchId, countParameterId, materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+CurvePatternFeature& PartDocument::restoreCurvePatternFeature(Body& body, ObjectId id,
+                                                              std::string name,
+                                                              ComputeState state,
+                                                              ObjectId baseFeatureId,
+                                                              ObjectId pathSketchId,
+                                                              ObjectId countParameterId,
+                                                              ObjectId materialId) {
+    requireUnusedId(id, "restoreCurvePatternFeature");
+    CurvePatternFeature& feature = body.addFeature<CurvePatternFeature>(
+        id, std::move(name), state, baseFeatureId, pathSketchId, countParameterId, materialId);
+    wireCurvePatternFeature(feature, baseFeatureId, pathSketchId, countParameterId, materialId);
+    return feature;
+}
+
 void PartDocument::wireShellFeature(ShellFeature& feature, ObjectId baseFeatureId,
                                     ObjectId thicknessParameterId, ObjectId materialId) {
     addRecomputableNode(feature);
@@ -2463,6 +2580,7 @@ void PartDocument::wireShellFeature(ShellFeature& feature, ObjectId baseFeatureI
 ShellFeature& PartDocument::addShellFeature(Body& body, std::string name, ObjectId baseFeatureId,
                                             FaceSelection openFaces,
                                             ObjectId thicknessParameterId) {
+    requireConsumableBase(body, baseFeatureId, "addShellFeature");
     const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
     ShellFeature& feature = body.addFeature<ShellFeature>(
         std::move(name), baseFeatureId, std::move(openFaces), thicknessParameterId, materialId);
@@ -2495,6 +2613,7 @@ void PartDocument::wireDraftFeature(DraftFeature& feature, ObjectId baseFeatureI
 DraftFeature& PartDocument::addDraftFeature(Body& body, std::string name, ObjectId baseFeatureId,
                                             FaceSelection faces, FaceQuery neutral,
                                             ObjectId angleParameterId) {
+    requireConsumableBase(body, baseFeatureId, "addDraftFeature");
     const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
     DraftFeature& feature =
         body.addFeature<DraftFeature>(std::move(name), baseFeatureId, std::move(faces),
@@ -2534,6 +2653,7 @@ void PartDocument::wireHoleFeature(HoleFeature& feature, ObjectId baseFeatureId,
 HoleFeature& PartDocument::addHoleFeature(Body& body, std::string name, ObjectId baseFeatureId,
                                           ObjectId sketchId, ObjectId diameterParameterId,
                                           ObjectId depthParameterId) {
+    requireConsumableBase(body, baseFeatureId, "addHoleFeature");
     const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
     HoleFeature& feature = body.addFeature<HoleFeature>(
         std::move(name), baseFeatureId, sketchId, diameterParameterId, depthParameterId,
@@ -3107,7 +3227,8 @@ bool PartDocument::removeObject(ObjectId id) {
         for (const std::unique_ptr<Body>& body : bodies_)
             for (const std::unique_ptr<Feature>& feature : body->features())
                 if (const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get()))
-                    if (solid->consumedSolidId() == id) consumedByAnother = true;
+                    for (const ObjectId eaten : solid->consumedSolidIds())
+                        if (eaten == id) consumedByAnother = true;
     }
     if (removedFeature != nullptr && !consumedByAnother) {
         FeatureExistenceEdit edit;

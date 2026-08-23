@@ -1,5 +1,6 @@
 #include "Cli/SketchScript.h"
 
+#include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Measure/SketchMeasure.h"
 
@@ -17,7 +18,9 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <algorithm>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <variant>
 #include <vector>
@@ -188,7 +191,29 @@ public:
             const std::vector<std::string> tokens = Tokenize(line);
             if (tokens.empty()) continue;
             line_ = number;
-            if (!command(tokens)) {
+            // A DOCUMENT INVARIANT THROWS, and an uncaught throw here is not a
+            // clean crash: on Windows the Debug CRT's abort handler waits for a
+            // dialog nobody is there to click, so the whole script -- and a
+            // socket connection driving it -- simply stops answering. That is
+            // how this was found: an earlier version of the boolean verb passed
+            // a base from another body, the facade refused correctly, and the
+            // symptom was ep3d.exe sitting at 100% of nothing.
+            //
+            // NO SCRIPT COMMAND CAN REACH IT TODAY. Every verb picks its base
+            // from the body it is dressing, so the facade's rules are satisfied
+            // before they are checked -- which is why there is no test below
+            // this line rather than a test that exercises nothing.
+            //
+            // It stays because the facade's contract SAYS it throws, and the
+            // cost of being wrong about "nothing can reach it" is a connection
+            // that stops answering rather than an error message.
+            bool ok = false;
+            try {
+                ok = command(tokens);
+            } catch (const std::exception& error) {
+                ok = fail(std::string("the document refused that: ") + error.what());
+            }
+            if (!ok) {
                 outcome_ = nullptr;
                 return outcome;
             }
@@ -344,6 +369,10 @@ private:
         if (verb == "shell") return doShell(tokens);
         if (verb == "draft") return doDraft(tokens);
         if (verb == "hole") return doHole(tokens);
+        if (verb == "union" || verb == "subtract" || verb == "intersect")
+            return doBoolean(tokens);
+        if (verb == "ring") return doRing(tokens);
+        if (verb == "along") return doAlong(tokens);
         if (verb == "solve") return doSolve();
         if (verb == "save") return doSave(tokens);
         if (verb == "help") {
@@ -354,7 +383,8 @@ private:
             note("constraints: " + Join(ScriptConstraintNames()));
             note("dimensions: " + Join(ScriptDimensionNames()));
             note("commands: sketch, tool, click, finish, constrain, dimension, pad, sweep, "
-                 "loft, shell, draft, hole, solve, save, measure, handle, echo, help");
+                 "loft, shell, draft, hole, union, subtract, intersect, ring, along, "
+                 "solve, save, measure, handle, echo, help");
             return true;
         }
         if (verb == "handle") {
@@ -737,6 +767,95 @@ private:
                     "' is not a face; use top, bottom, +x, -x, +y, -y, +z, -z, or facing:DIR");
     }
 
+    bool doBoolean(const std::vector<std::string>& tokens) {
+        // union BODY | subtract BODY | intersect BODY
+        //
+        // ONE BODY, and that is the model rather than a limitation of the
+        // script. A Body here is a feature chain, and two features in it that
+        // nothing consumes are two disjoint solids -- which is what multi-body
+        // means: `pad Case 40` twice with two sketches gives one body holding
+        // two parts. A boolean joins two of them into one.
+        //
+        // It cannot span two bodies, because a consumer's base must be an
+        // EARLIER feature of the same body: restore replays features in array
+        // order, and a consumer restored before its operand would wire an edge
+        // to a node that does not exist yet.
+        //
+        // The two it takes are the body's two unconsumed solids, IN THE ORDER
+        // THEY WERE DRAWN -- so `subtract` removes the second from the first,
+        // which is the order the script reads in.
+        if (tokens.size() != 2) return fail(tokens[0] + " needs a body");
+        Body* body = document_.findBodyNamed(tokens[1]);
+        if (body == nullptr) return fail("there is no body called '" + tokens[1] + "'");
+
+        const std::vector<ObjectId> loose = unconsumedSolidsIn(*body);
+        if (loose.size() < 2)
+            return fail("'" + tokens[1] + "' holds " + std::to_string(loose.size()) +
+                        " separate solid(s); a boolean needs two -- pad into the same body "
+                        "twice to make them");
+
+        BooleanOperation operation = BooleanOperation::Union;
+        if (tokens[0] == "subtract") operation = BooleanOperation::Subtract;
+        else if (tokens[0] == "intersect") operation = BooleanOperation::Intersect;
+
+        document_.addBooleanFeature(*body, tokens[1] + BooleanOperationName(operation),
+                                    operation, loose[loose.size() - 2], loose.back());
+        note(tokens[0] + " " + tokens[1]);
+        return true;
+    }
+
+    bool doRing(const std::vector<std::string>& tokens) {
+        // ring BODY COUNT DEGREES
+        if (tokens.size() != 4)
+            return fail("ring needs a body, a count and a step in degrees");
+        Body* body = document_.findBodyNamed(tokens[1]);
+        if (body == nullptr) return fail("there is no body called '" + tokens[1] + "'");
+        double howMany = 0.0;
+        double degrees = 0.0;
+        if (!ParseNumber(tokens[2], &howMany)) return fail("a ring's count is a whole number");
+        if (!ParseNumber(tokens[3], &degrees)) return fail("a ring's step is in degrees");
+        const ObjectId base = lastSolidIn(*body);
+        if (base == kInvalidObjectId) return fail("'" + tokens[1] + "' has nothing to pattern");
+
+        // THE AXIS IS THE WORLD Z through the origin, which is what a frame at
+        // the origin gives -- the same +Z convention a mirror's plane normal
+        // and a linear pattern's direction already follow.
+        ReferenceFrame& axis = document_.addFrame("RingAxis" + std::to_string(++ringCount_));
+        Parameter& count =
+            document_.addParameter("RingCount" + std::to_string(ringCount_), howMany,
+                                   UnitType::Unitless);
+        Parameter& step = document_.addParameter(
+            "RingStep" + std::to_string(ringCount_),
+            degrees * 3.14159265358979323846 / 180.0, UnitType::Radian);
+        document_.addCircularPatternFeature(*body, tokens[1] + "Ring", base, axis.id(),
+                                            count.id(), step.id());
+        note("ring " + tokens[1] + " x" + tokens[2] + " at " + tokens[3] + " deg");
+        return true;
+    }
+
+    bool doAlong(const std::vector<std::string>& tokens) {
+        // along BODY SKETCH COUNT
+        if (tokens.size() != 4) return fail("along needs a body, a path sketch and a count");
+        Body* body = document_.findBodyNamed(tokens[1]);
+        if (body == nullptr) return fail("there is no body called '" + tokens[1] + "'");
+        const Sketch* path = sketchNamed(tokens[2]);
+        if (path == nullptr) return fail("there is no sketch called '" + tokens[2] + "'");
+        double howMany = 0.0;
+        if (!ParseNumber(tokens[3], &howMany)) return fail("a count is a whole number");
+        const ObjectId base = lastSolidIn(*body);
+        if (base == kInvalidObjectId) return fail("'" + tokens[1] + "' has nothing to pattern");
+
+        Parameter& count = document_.addParameter(
+            "AlongCount" + std::to_string(++alongCount_), howMany, UnitType::Unitless);
+        document_.addCurvePatternFeature(*body, tokens[1] + "Along", base, path->id(),
+                                         count.id());
+        note("along " + tokens[1] + " " + tokens[2] + " x" + tokens[3]);
+        return true;
+    }
+
+    int ringCount_{0};
+    int alongCount_{0};
+
     bool doShell(const std::vector<std::string>& tokens) {
         // shell BODY THICKNESS FACE [FACE...]
         if (tokens.size() < 4) return fail("shell needs a body, a thickness and a face to open");
@@ -832,6 +951,23 @@ private:
     int shellCount_{0};
     int draftCount_{0};
     int holeCount_{0};
+
+    // THE SOLIDS NOTHING HAS EATEN, in the order they were made -- the body's
+    // separate parts. Two of them is multi-body; a boolean turns two into one.
+    std::vector<ObjectId> unconsumedSolidsIn(const Body& body) const {
+        std::vector<ObjectId> eaten;
+        for (const auto& feature : body.features())
+            if (const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get()))
+                for (const ObjectId one : solid->consumedSolidIds())
+                    if (one != kInvalidObjectId) eaten.push_back(one);
+        std::vector<ObjectId> loose;
+        for (const auto& feature : body.features()) {
+            if (dynamic_cast<const ISolidFeature*>(feature.get()) == nullptr) continue;
+            if (std::find(eaten.begin(), eaten.end(), feature->id()) != eaten.end()) continue;
+            loose.push_back(feature->id());
+        }
+        return loose;
+    }
 
     // WHAT TO DRESS: the last solid feature in the body, which is what "the
     // part as it stands" means in a script that builds top to bottom. A chain
