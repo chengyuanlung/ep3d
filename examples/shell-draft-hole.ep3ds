@@ -1,0 +1,54 @@
+# AN ENCLOSURE (M20).
+#
+# The M20 gate: a part with a draft, a shell and a counterbored hole, built in
+# one script. All three name FACES, and none of them names an index -- what is
+# stored is a sentence ("the top face", "every face pointing +y") that is
+# answered again against whatever the part currently is.
+
+# The block it all starts from.
+sketch Base
+tool rect
+click -40 -30
+click 40 30
+pad Case 50
+
+# TAPER the four walls first, so the shell that follows is hollowed out of the
+# tapered shape rather than the square one. Order is not cosmetic here: shell
+# then draft would taper the walls AND the cavity's walls, which is a different
+# part.
+#
+# The neutral face is the bottom: that is what the enclosure sits on, and it
+# is also the direction it comes out of a mould.
+draft Case 3 bottom facing:+y facing:-y facing:+x facing:-x
+
+# HOLLOW it, leaving 3 mm of wall and an open top.
+shell Case 3 top
+
+# `measure` reports what has been BUILT, so it needs a solve first -- before
+# one, the features exist and the geometry does not.
+solve
+echo --- the enclosure, before drilling ---
+measure
+
+# FOUR MOUNTING HOLES through the floor. The points are the drawing: each one
+# can be dimensioned or constrained, and the bore follows wherever it goes.
+sketch Mounts xy 50
+tool point
+click -28 -18
+tool point
+click 28 -18
+tool point
+click -28 18
+tool point
+click 28 18
+
+# No depth given means all the way through -- which asks the solid how far it
+# reaches rather than guessing a deep cylinder.
+hole Case Mounts 5
+
+solve
+
+echo --- and after ---
+measure
+
+save build/enclosure.ep3d

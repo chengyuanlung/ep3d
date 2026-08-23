@@ -19,6 +19,9 @@
 #include "Core/Dependency/DependencyGraph.h"
 #include <algorithm>
 #include <vector>
+#include "Core/Feature/ShellFeature.h"
+#include "Core/Feature/DraftFeature.h"
+#include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/SweepFeature.h"
 #include "Core/Feature/LoftFeature.h"
 #include "Core/Sketch/Sketch.h"
@@ -88,7 +91,7 @@ TEST(SerializationV13Test, M17_SER_001_TheSchemaVersionIsStamped) {
     // so a bump lands here and nowhere else -- and it has to land somewhere, or
     // a format change that forgot to bump would write files an older loader
     // silently mis-reads.
-    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 25"), std::string::npos);
+    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 26"), std::string::npos);
 }
 
 TEST(SerializationV13Test, M17_SER_002_BothKindsAreWrittenUnderTheirOwnNames) {
@@ -1083,4 +1086,147 @@ TEST(SerializationV13Test, M19_SER_004_ASweepNamingAMissingSketchIsREFUSEDATSAVE
     const SaveResult saved = savePartDocument(document, out);
     EXPECT_FALSE(saved);
     EXPECT_NE(saved.message.find("path sketch id"), std::string::npos) << saved.message;
+}
+
+// --- M20 (v26): SHELL, DRAFT and HOLE survive a round trip -------------------
+
+TEST(SerializationV13Test, M20_SER_001_AShellKeepsItsFaceQUERIESAndItsThickness) {
+    // The faces are sentences, not indices -- so what has to come back is the
+    // sentence. A round trip that stored "face 3" would open whatever is third
+    // in the reloaded solid, which is a different part with no complaint.
+    PartDocument document{"ShellDoc"};
+    Sketch& sketch = document.addSketch("Base");
+    sketch.addLine(Vec2{0, 0}, Vec2{40, 0});
+    Parameter& tall = document.addParameter("H", 20.0, UnitType::Millimeter);
+    Parameter& wall = document.addParameter("W", 3.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", sketch.id(), tall.id()).id();
+
+    FaceQuery top;
+    top.extremeTowards = Vec3{0, 0, 1};
+    FaceQuery madeByPad;
+    madeByPad.createdBy = pad;
+    madeByPad.facing = Vec3{0, 1, 0};
+    document.addShellFeature(body, "Shell1", pad, {top, madeByPad}, wall.id());
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const auto* shell =
+        dynamic_cast<const ShellFeature*>(loaded.document->bodies().front()->features()[1].get());
+    ASSERT_NE(shell, nullptr) << "a Shell came back as something else";
+    ASSERT_EQ(shell->openFaces().size(), 2u);
+    EXPECT_TRUE(shell->openFaces()[0].extremeTowards.has_value());
+    EXPECT_FALSE(shell->openFaces()[0].createdBy.has_value());
+    ASSERT_TRUE(shell->openFaces()[1].createdBy.has_value());
+    EXPECT_EQ(*shell->openFaces()[1].createdBy, pad);
+    ASSERT_TRUE(shell->openFaces()[1].facing.has_value());
+    EXPECT_NEAR(shell->openFaces()[1].facing->y, 1.0, 1e-12);
+    EXPECT_EQ(shell->thicknessParameterId(), wall.id());
+}
+
+TEST(SerializationV13Test, M20_SER_002_ADraftKeepsItsNEUTRALFaceToo) {
+    // The neutral face is not one of the tapered ones: it decides where the
+    // taper pivots AND which way the part is pulled. A round trip that kept the
+    // list and dropped it would reload a draft that cannot be built.
+    PartDocument document{"DraftDoc"};
+    Sketch& sketch = document.addSketch("Base");
+    sketch.addLine(Vec2{0, 0}, Vec2{40, 0});
+    Parameter& tall = document.addParameter("H", 20.0, UnitType::Millimeter);
+    Parameter& angle = document.addParameter("A", 0.12, UnitType::Radian);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", sketch.id(), tall.id()).id();
+
+    FaceQuery wall;
+    wall.facing = Vec3{0, 1, 0};
+    FaceQuery neutral;
+    neutral.extremeTowards = Vec3{0, 0, -1};
+    document.addDraftFeature(body, "Draft1", pad, {wall}, neutral, angle.id());
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const auto* draft =
+        dynamic_cast<const DraftFeature*>(loaded.document->bodies().front()->features()[1].get());
+    ASSERT_NE(draft, nullptr) << "a Draft came back as something else";
+    ASSERT_EQ(draft->faces().size(), 1u);
+    ASSERT_TRUE(draft->neutralFace().extremeTowards.has_value());
+    EXPECT_NEAR(draft->neutralFace().extremeTowards->z, -1.0, 1e-12);
+    EXPECT_EQ(draft->angleParameterId(), angle.id());
+}
+
+TEST(SerializationV13Test, M20_SER_003_AHoleKeepsAllFOUROfItsReferences) {
+    PartDocument document{"HoleDoc"};
+    Sketch& base = document.addSketch("Base");
+    base.addLine(Vec2{0, 0}, Vec2{40, 0});
+    Sketch& holes = document.addSketch("Holes");
+    holes.addPoint(Vec2{10, 10});
+    Parameter& tall = document.addParameter("H", 20.0, UnitType::Millimeter);
+    Parameter& bore = document.addParameter("D", 6.0, UnitType::Millimeter);
+    Parameter& deep = document.addParameter("Z", -8.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", base.id(), tall.id()).id();
+    document.addHoleFeature(body, "Hole1", pad, holes.id(), bore.id(), deep.id());
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const auto* hole =
+        dynamic_cast<const HoleFeature*>(loaded.document->bodies().front()->features()[1].get());
+    ASSERT_NE(hole, nullptr) << "a Hole came back as something else";
+    EXPECT_EQ(hole->baseFeatureId(), pad);
+    EXPECT_EQ(hole->sketchId(), holes.id());
+    EXPECT_EQ(hole->diameterParameterId(), bore.id());
+    EXPECT_EQ(hole->depthParameterId(), deep.id());
+}
+
+TEST(SerializationV13Test, M20_SER_004_AShellNamingNOFacesIsREFUSEDAtTheDoor) {
+    // A hollow with no way in weighs less than the part and looks exactly like
+    // it. A file describing one is refused where the reason is near the cause.
+    PartDocument document{"ShellDoc"};
+    Sketch& sketch = document.addSketch("Base");
+    sketch.addLine(Vec2{0, 0}, Vec2{40, 0});
+    Parameter& tall = document.addParameter("H", 20.0, UnitType::Millimeter);
+    Parameter& wall = document.addParameter("W", 3.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", sketch.id(), tall.id()).id();
+    FaceQuery top;
+    top.extremeTowards = Vec3{0, 0, 1};
+    document.addShellFeature(body, "Shell1", pad, {top}, wall.id());
+
+    std::string text = SaveToString(document);
+    const std::size_t at = text.find("\"faceSelection\"");
+    ASSERT_NE(at, std::string::npos) << text;
+    const std::size_t open = text.find('[', at);
+    const std::size_t close = text.find(']', open);
+    ASSERT_NE(close, std::string::npos);
+    text.replace(open, close - open + 1, "[]");
+
+    const LoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_NE(loaded.message.find("names no faces"), std::string::npos) << loaded.message;
+}
+
+TEST(SerializationV13Test, M20_SER_005_AFaceQueryWithNOConditionsIsREFUSED) {
+    // A query with nothing set matches every face, so it names none. A file
+    // holding one describes a feature that fails on every recompute from now
+    // on, with nothing to fix.
+    PartDocument document{"ShellDoc"};
+    Sketch& sketch = document.addSketch("Base");
+    sketch.addLine(Vec2{0, 0}, Vec2{40, 0});
+    Parameter& tall = document.addParameter("H", 20.0, UnitType::Millimeter);
+    Parameter& wall = document.addParameter("W", 3.0, UnitType::Millimeter);
+    Body& body = document.addBody("Body");
+    const ObjectId pad = document.addPadFeature(body, "Pad1", sketch.id(), tall.id()).id();
+    FaceQuery top;
+    top.extremeTowards = Vec3{0, 0, 1};
+    document.addShellFeature(body, "Shell1", pad, {top}, wall.id());
+
+    std::string text = SaveToString(document);
+    const std::size_t at = text.find("\"extremeTowards\"");
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, std::string("\"extremeTowards\"").size(), "\"somethingElse\"");
+
+    const LoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    // Refused by the SAME reader the sketch's tracked face goes through -- one
+    // rule about what a face query has to say, not one per holder of one.
+    EXPECT_NE(loaded.message.find("names no face"), std::string::npos) << loaded.message;
 }

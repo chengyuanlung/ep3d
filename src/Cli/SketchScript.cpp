@@ -1,5 +1,6 @@
 #include "Cli/SketchScript.h"
 
+#include "Core/Feature/ISolidFeature.h"
 #include "Core/Measure/SketchMeasure.h"
 
 #include <iomanip>
@@ -340,6 +341,9 @@ private:
         if (verb == "pad") return doPad(tokens);
         if (verb == "sweep") return doSweep(tokens);
         if (verb == "loft") return doLoft(tokens);
+        if (verb == "shell") return doShell(tokens);
+        if (verb == "draft") return doDraft(tokens);
+        if (verb == "hole") return doHole(tokens);
         if (verb == "solve") return doSolve();
         if (verb == "save") return doSave(tokens);
         if (verb == "help") {
@@ -350,7 +354,7 @@ private:
             note("constraints: " + Join(ScriptConstraintNames()));
             note("dimensions: " + Join(ScriptDimensionNames()));
             note("commands: sketch, tool, click, finish, constrain, dimension, pad, sweep, "
-                 "loft, solve, save, measure, handle, echo, help");
+                 "loft, shell, draft, hole, solve, save, measure, handle, echo, help");
             return true;
         }
         if (verb == "handle") {
@@ -683,7 +687,7 @@ private:
             return fail("a Parameter is already called '" + parameterName + "'");
         Parameter& thickness =
             document_.addParameter(parameterName, length, UnitType::Millimeter);
-        Body& body = document_.addBody(tokens[1]);
+        Body& body = bodyNamed(tokens[1]);
         document_.addPadFeature(body, tokens[1] + "Pad", sketchId_, thickness.id());
         note("pad " + tokens[1] + " " + tokens[last - 1] + " (" + parameterName + ")");
         return true;
@@ -701,6 +705,147 @@ private:
         return nullptr;
     }
 
+    // A FACE, said the way a script can say it: `top`, `bottom`, `+x`, `-y`,
+    // or `made-by BODY` for everything a body's last feature created.
+    //
+    // The vocabulary is deliberately small. A face query is a conjunction of
+    // conditions and the useful ones on a prismatic part are "the extreme face
+    // that way" and "what that feature made"; anything richer is a picking
+    // problem, not a typing one, and belongs in the canvas.
+    bool parseFace(const std::string& text, FaceQuery* out) {
+        static const struct { const char* name; Vec3 direction; } kDirections[] = {
+            {"top", Vec3{0, 0, 1}},  {"bottom", Vec3{0, 0, -1}}, {"+x", Vec3{1, 0, 0}},
+            {"-x", Vec3{-1, 0, 0}},  {"+y", Vec3{0, 1, 0}},      {"-y", Vec3{0, -1, 0}},
+            {"+z", Vec3{0, 0, 1}},   {"-z", Vec3{0, 0, -1}},
+        };
+        for (const auto& entry : kDirections) {
+            if (text != entry.name) continue;
+            out->extremeTowards = entry.direction;
+            return true;
+        }
+        // `facing:+y` -- every face pointing that way, however far out it is.
+        // Different from `+y`, which is the OUTERMOST one, and the difference
+        // matters the moment a part has a step in it.
+        if (text.rfind("facing:", 0) == 0) {
+            for (const auto& entry : kDirections) {
+                if (text.substr(7) != entry.name) continue;
+                out->facing = entry.direction;
+                return true;
+            }
+        }
+        return fail("'" + text +
+                    "' is not a face; use top, bottom, +x, -x, +y, -y, +z, -z, or facing:DIR");
+    }
+
+    bool doShell(const std::vector<std::string>& tokens) {
+        // shell BODY THICKNESS FACE [FACE...]
+        if (tokens.size() < 4) return fail("shell needs a body, a thickness and a face to open");
+        Body* body = document_.findBodyNamed(tokens[1]);
+        if (body == nullptr) return fail("there is no body called '" + tokens[1] + "'");
+        double thickness = 0.0;
+        if (!ParseNumber(tokens[2], &thickness)) return fail("a shell's thickness is in mm");
+        FaceSelection faces;
+        for (std::size_t i = 3; i < tokens.size(); ++i) {
+            FaceQuery query;
+            if (!parseFace(tokens[i], &query)) return false;
+            faces.push_back(std::move(query));
+        }
+        const ObjectId base = lastSolidIn(*body);
+        if (base == kInvalidObjectId)
+            return fail("'" + tokens[1] + "' has nothing to hollow yet");
+        const std::string parameterName = "ShellWall" + std::to_string(++shellCount_);
+        Parameter& wall = document_.addParameter(parameterName, thickness, UnitType::Millimeter);
+        document_.addShellFeature(*body, tokens[1] + "Shell", base, std::move(faces), wall.id());
+        note("shell " + tokens[1] + " " + tokens[2] + " (" + parameterName + ")");
+        return true;
+    }
+
+    bool doDraft(const std::vector<std::string>& tokens) {
+        // draft BODY DEGREES NEUTRAL FACE [FACE...]
+        if (tokens.size() < 5)
+            return fail("draft needs a body, an angle in degrees, a neutral face and a face to "
+                        "taper");
+        Body* body = document_.findBodyNamed(tokens[1]);
+        if (body == nullptr) return fail("there is no body called '" + tokens[1] + "'");
+        double degrees = 0.0;
+        if (!ParseNumber(tokens[2], &degrees)) return fail("a draft's angle is in degrees");
+        FaceQuery neutral;
+        if (!parseFace(tokens[3], &neutral)) return false;
+        FaceSelection faces;
+        for (std::size_t i = 4; i < tokens.size(); ++i) {
+            FaceQuery query;
+            if (!parseFace(tokens[i], &query)) return false;
+            faces.push_back(std::move(query));
+        }
+        const ObjectId base = lastSolidIn(*body);
+        if (base == kInvalidObjectId)
+            return fail("'" + tokens[1] + "' has nothing to taper yet");
+        // DEGREES IN, RADIANS STORED. A script says what a drawing says, and a
+        // drawing says 3 degrees -- but the Parameter carries Radian because
+        // that is what the feature's unit check demands, and the conversion
+        // happens once, here.
+        const std::string parameterName = "DraftAngle" + std::to_string(++draftCount_);
+        Parameter& angle = document_.addParameter(
+            parameterName, degrees * 3.14159265358979323846 / 180.0, UnitType::Radian);
+        document_.addDraftFeature(*body, tokens[1] + "Draft", base, std::move(faces),
+                                  std::move(neutral), angle.id());
+        note("draft " + tokens[1] + " " + tokens[2] + " deg (" + parameterName + ")");
+        return true;
+    }
+
+    bool doHole(const std::vector<std::string>& tokens) {
+        // hole BODY SKETCH DIAMETER [DEPTH]
+        if (tokens.size() != 4 && tokens.size() != 5)
+            return fail("hole needs a body, a sketch of points and a diameter");
+        Body* body = document_.findBodyNamed(tokens[1]);
+        if (body == nullptr) return fail("there is no body called '" + tokens[1] + "'");
+        const Sketch* where = sketchNamed(tokens[2]);
+        if (where == nullptr) return fail("there is no sketch called '" + tokens[2] + "'");
+        double bore = 0.0;
+        if (!ParseNumber(tokens[3], &bore)) return fail("a hole's diameter is in mm");
+        // NO DEPTH MEANS THROUGH ALL, which is what a hole usually is, and the
+        // feature spells that as a depth of nought.
+        double depth = 0.0;
+        if (tokens.size() == 5 && !ParseNumber(tokens[4], &depth))
+            return fail("a hole's depth is in mm, and leaving it out means all the way through");
+        const ObjectId base = lastSolidIn(*body);
+        if (base == kInvalidObjectId)
+            return fail("'" + tokens[1] + "' has nothing to drill yet");
+        const std::string boreName = "HoleDia" + std::to_string(++holeCount_);
+        const std::string depthName = "HoleDepth" + std::to_string(holeCount_);
+        Parameter& diameter = document_.addParameter(boreName, bore, UnitType::Millimeter);
+        Parameter& deep = document_.addParameter(depthName, depth, UnitType::Millimeter);
+        document_.addHoleFeature(*body, tokens[1] + "Hole", base, where->id(), diameter.id(),
+                                 deep.id());
+        note("hole " + tokens[1] + " " + tokens[3] + " through " + tokens[2]);
+        return true;
+    }
+
+    // ONE BODY PER NAME. `addBody` always makes a new one, so building a part
+    // in two steps -- `pad Pipe`, then `shell Pipe` -- used to leave two bodies
+    // both called Pipe, and the second command dressed an empty one.
+    Body& bodyNamed(const std::string& name) {
+        if (Body* found = document_.findBodyNamed(name)) return *found;
+        return document_.addBody(name);
+    }
+
+    int shellCount_{0};
+    int draftCount_{0};
+    int holeCount_{0};
+
+    // WHAT TO DRESS: the last solid feature in the body, which is what "the
+    // part as it stands" means in a script that builds top to bottom. A chain
+    // feature has to name its base, and asking the user to name it by id in a
+    // script that never showed them one would be asking for a number they do
+    // not have.
+    ObjectId lastSolidIn(const Body& body) const {
+        ObjectId last = kInvalidObjectId;
+        for (const auto& feature : body.features())
+            if (dynamic_cast<const ISolidFeature*>(feature.get()) != nullptr)
+                last = feature->id();
+        return last;
+    }
+
     bool doSweep(const std::vector<std::string>& tokens) {
         // sweep BODY PROFILE PATH
         if (tokens.size() != 4)
@@ -712,7 +857,7 @@ private:
         if (profile->id() == path->id())
             return fail("a sweep needs two different sketches: a section swept along a path on "
                         "its own plane has no volume");
-        Body& body = document_.addBody(tokens[1]);
+        Body& body = bodyNamed(tokens[1]);
         document_.addSweepFeature(body, tokens[1] + "Sweep", profile->id(), path->id());
         note("sweep " + tokens[1] + " along " + tokens[3]);
         return true;
@@ -729,7 +874,7 @@ private:
             // order is the shape.
             sections.push_back(one->id());
         }
-        Body& body = document_.addBody(tokens[1]);
+        Body& body = bodyNamed(tokens[1]);
         document_.addLoftFeature(body, tokens[1] + "Loft", std::move(sections));
         note("loft " + tokens[1] + " through " + std::to_string(tokens.size() - 2) + " sections");
         return true;

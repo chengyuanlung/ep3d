@@ -166,3 +166,19 @@ anything; before it, the only signal was that nothing complained.
 ```
 ep3d --script examples/sweep-and-loft.ep3ds
 ```
+
+## `shell-draft-hole.ep3ds` (M20)
+
+An enclosure: a block, tapered on all four walls, hollowed to a 3 mm shell with
+an open top, and drilled with four mounting holes through the floor.
+
+All three features name **faces**, and none of them names an index -- what is
+stored is a sentence (`the top face`, `every face pointing +y`) that is
+answered again against whatever the part currently is.
+
+The order matters and the script says why: drafting before shelling tapers the
+walls, and shelling first would taper the cavity as well.
+
+```
+ep3d --script examples/shell-draft-hole.ep3ds
+```

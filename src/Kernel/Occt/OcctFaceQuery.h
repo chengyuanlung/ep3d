@@ -48,4 +48,13 @@ std::vector<FacePlane> FacesOf(const KernelShape& shape);
 // The ONE face a query names -- see FaceQueryResult in Core/Kernel/FaceQuery.h.
 FaceQueryResult ResolveFaceQuery(const KernelShape& shape, const FaceQuery& query);
 
+// The same answer as TOPOLOGY rather than geometry (M20) -- for the operations
+// that have to hand OCCT the face itself, a shell's opening or a draft's wall
+// -- is in OcctFaceQueryTopology.h.
+//
+// It lives in its own header because it NAMES AN OCCT TYPE, and this one does
+// not: the viewer includes this file, and the viewer is built without OCCT's
+// include directories. Widening this header broke it immediately, which is the
+// same lesson OcctSplineCurve.h learned in M18.
+
 } // namespace paramcad

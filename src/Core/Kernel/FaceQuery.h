@@ -6,6 +6,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace paramcad {
 
@@ -58,9 +59,30 @@ struct FaceQueryResult {
     FacePlane face{};
 };
 
+// SEVERAL faces, as several sentences (M20).
+//
+// A union of queries, exactly as EdgeSelection is -- and for the same reason a
+// FaceQuery on its own is a CONJUNCTION: narrowing names one face, and naming
+// several means saying it several times. A shell opens "the top face, and the
+// face the pocket made"; a draft tapers "these four walls".
+//
+// Deliberately NOT a FaceQuery with the narrowing relaxed. A query that matched
+// several faces would make `resolveFace` ambiguous everywhere it is already
+// used, and the ambiguity would surface as "the first face the explorer
+// happened to visit" -- which is what naming one face exists to avoid.
+//
+// An EMPTY selection is a real answer for a draft (nothing to taper is a
+// caller mistake) and for a shell (a shell with no opening is a hollow shape
+// with no way in). Both refuse it rather than guessing.
+using FaceSelection = std::vector<FaceQuery>;
+
 // What the query says, in words a user can check against the part. The one
 // place a face query is turned into text, so every surface that shows one says
 // the same thing.
 std::string DescribeFaceQuery(const FaceQuery& query);
+
+// ...and the same for a selection of them, joined. One place, so a shell's
+// diagnostic and a draft's read alike.
+std::string DescribeFaceSelection(const FaceSelection& selection);
 
 } // namespace paramcad

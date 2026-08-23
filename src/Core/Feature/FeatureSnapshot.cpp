@@ -8,7 +8,10 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/DraftFeature.h"
+#include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/LoftFeature.h"
+#include "Core/Feature/ShellFeature.h"
 #include "Core/Feature/RevolveFeature.h"
 #include "Core/Feature/SweepFeature.h"
 #include "Core/Feature/TransformFeatures.h"
@@ -50,6 +53,23 @@ FeatureSnapshot SnapshotFeature(const Feature& feature) {
     } else if (const auto* loft = dynamic_cast<const LoftFeature*>(&feature)) {
         snapshot.sectionSketchIds = loft->sectionSketchIds();
         snapshot.materialId = loft->materialId();
+    } else if (const auto* shell = dynamic_cast<const ShellFeature*>(&feature)) {
+        snapshot.baseFeatureId = shell->baseFeatureId();
+        snapshot.faceSelection = shell->openFaces();
+        snapshot.sizeParameterId = shell->thicknessParameterId();
+        snapshot.materialId = shell->materialId();
+    } else if (const auto* draft = dynamic_cast<const DraftFeature*>(&feature)) {
+        snapshot.baseFeatureId = draft->baseFeatureId();
+        snapshot.faceSelection = draft->faces();
+        snapshot.neutralFace = draft->neutralFace();
+        snapshot.sizeParameterId = draft->angleParameterId();
+        snapshot.materialId = draft->materialId();
+    } else if (const auto* hole = dynamic_cast<const HoleFeature*>(&feature)) {
+        snapshot.baseFeatureId = hole->baseFeatureId();
+        snapshot.sketchId = hole->sketchId();
+        snapshot.diameterParameterId = hole->diameterParameterId();
+        snapshot.holeDepthParameterId = hole->depthParameterId();
+        snapshot.materialId = hole->materialId();
     } else if (const auto* dress = dynamic_cast<const EdgeDressFeature*>(&feature)) {
         snapshot.baseFeatureId = dress->baseFeatureId();
         snapshot.sizeParameterId = dress->sizeParameterId();
@@ -105,6 +125,20 @@ Feature& RestoreFeatureFromSnapshot(PartDocument& document, Body& body,
             body, snapshot.id, snapshot.name, snapshot.state, snapshot.sketchId,
             static_cast<SketchEntityId>(snapshot.axisEntityId), snapshot.angleParameterId,
             snapshot.materialId);
+    if (type == "Shell")
+        return document.restoreShellFeature(body, snapshot.id, snapshot.name, snapshot.state,
+                                            snapshot.baseFeatureId, snapshot.faceSelection,
+                                            snapshot.sizeParameterId, snapshot.materialId);
+    if (type == "Draft")
+        return document.restoreDraftFeature(body, snapshot.id, snapshot.name, snapshot.state,
+                                            snapshot.baseFeatureId, snapshot.faceSelection,
+                                            snapshot.neutralFace, snapshot.sizeParameterId,
+                                            snapshot.materialId);
+    if (type == "Hole")
+        return document.restoreHoleFeature(body, snapshot.id, snapshot.name, snapshot.state,
+                                           snapshot.baseFeatureId, snapshot.sketchId,
+                                           snapshot.diameterParameterId,
+                                           snapshot.holeDepthParameterId, snapshot.materialId);
     if (type == "Sweep")
         return document.restoreSweepFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                             snapshot.sketchId, snapshot.pathSketchId,

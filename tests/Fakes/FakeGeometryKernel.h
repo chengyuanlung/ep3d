@@ -287,6 +287,51 @@ public:
     // A refusal is the honest fake: it proves the feature reached the kernel
     // with what it meant to send, and every claim about the SHAPE is made
     // against real OCCT in the kernel suite.
+    // SHELL and DRAFT are REFUSED here rather than modelled, for the reason
+    // sweep and loft are: the fake carries a narrow ANALYTICAL model of each
+    // operation, and there is no such model of hollowing an arbitrary solid.
+    // A plausible-looking volume would let a feature that computes the wrong
+    // shape pass every Core-side test.
+    ShapeResult shellSolid(const KernelShape& base, const FaceSelection& openFaces,
+                           double thicknessMm) override {
+        ++shellSolidCallCount;
+        if (openFaces.empty())
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "a shell needs at least one face to open"};
+        if (!IsValidExtrusionDistance(thicknessMm))
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "invalid shell thickness"};
+        (void)base;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel does not model shells"};
+    }
+
+    ShapeResult draftFaces(const KernelShape& base, const FaceSelection& faces,
+                           const FaceQuery& neutral, double angleRad) override {
+        ++draftFacesCallCount;
+        if (faces.empty())
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "a draft needs at least one face to taper"};
+        (void)base;
+        (void)neutral;
+        (void)angleRad;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel does not model drafts"};
+    }
+
+    // BOUNDS are REFUSED too, and that is a fact about this fake rather than a
+    // shortcut: its shape handle carries mass properties and nothing else, so
+    // it does not know WHERE any of its shapes are. Returning a box would be
+    // inventing one, and a hole that reads "how deep is this part" would then
+    // be drilled to an invented depth.
+    KernelBoundsResult boundsOfShape(const KernelShape& shape) override {
+        ++boundsOfShapeCallCount;
+        (void)shape;
+        KernelBoundsResult out;
+        out.message = "the fake kernel does not know where its shapes are";
+        return out;
+    }
+
     ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
                              const PlanarPathDefinition& path) override {
         ++sweepProfileCallCount;
@@ -438,6 +483,9 @@ public:
     int subtractShapeCallCount = 0;
     int revolveProfileCallCount = 0;
     int sweepProfileCallCount = 0;
+    int shellSolidCallCount = 0;
+    int draftFacesCallCount = 0;
+    int boundsOfShapeCallCount = 0;
     int loftProfilesCallCount = 0;
     int filletCallCount = 0;
     int chamferCallCount = 0;

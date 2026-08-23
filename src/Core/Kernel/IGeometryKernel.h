@@ -12,6 +12,18 @@
 
 namespace paramcad {
 
+// Where a shape reaches, and whether the question could be answered at all.
+//
+// `ok` is false for an empty or foreign handle: an empty shape has no extent,
+// and returning a box at the origin would be indistinguishable from geometry
+// that really is there.
+struct KernelBoundsResult {
+    bool ok{false};
+    std::string message;
+    Vec3 min{};
+    Vec3 max{};
+};
+
 struct ShapeResult {
     KernelShape shape;
     KernelError error = KernelError::None;
@@ -174,6 +186,46 @@ public:
         (void)tag;
         return result;
     }
+
+    // HOLLOWS the solid, leaving `thicknessMm` of wall and opening the faces
+    // the selection names (M20).
+    //
+    // The faces are QUERIES, re-answered against this shape, exactly as a
+    // fillet's edges are: a shell that remembered "face 3" would open whatever
+    // is now third after the part changed.
+    //
+    // Thickness is INWARD and positive. An outward shell is a different
+    // operation -- it grows the part -- and giving it to the same call under a
+    // sign would make "shell 2 mm" mean two different solids depending on a
+    // character.
+    //
+    // An EMPTY selection is refused: a shell with no opening is a hollow with
+    // no way in, and OCCT will happily build one that looks solid from every
+    // side and weighs less than it should.
+    virtual ShapeResult shellSolid(const KernelShape& base, const FaceSelection& openFaces,
+                                   double thicknessMm) = 0;
+
+    // TAPERS the faces the selection names, by `angleRad`, about `neutral` (M20).
+    //
+    // The neutral face is what the taper pivots on: it keeps its size, and
+    // everything above or below it moves in or out. It is a query too, because
+    // it is a face of this same solid -- usually the one the part sits on.
+    //
+    // The angle's SIGN chooses which way the taper leans, and there is no
+    // defensible default for it: a mould that has to release upwards and one
+    // that has to release downwards are the same magnitude and opposite
+    // intents.
+    virtual ShapeResult draftFaces(const KernelShape& base, const FaceSelection& faces,
+                                   const FaceQuery& neutral, double angleRad) = 0;
+
+    // The axis-aligned extent of a shape, in part-local XYZ (M20).
+    //
+    // Kernel-neutral by construction -- three numbers each way, no topology --
+    // and it exists because "through all" is a question about how far the
+    // material reaches. A hole that guessed a very deep cylinder instead would
+    // work until somebody built a part deeper than the guess, and then it
+    // would stop part-way with nothing to say.
+    virtual KernelBoundsResult boundsOfShape(const KernelShape& shape) = 0;
 
     virtual ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
                                     double radiusMm) = 0;

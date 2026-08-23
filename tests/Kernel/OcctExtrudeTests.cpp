@@ -995,3 +995,214 @@ TEST(OcctExtrudeTest, M19_LOFT_005_TheORDEROfTheSectionsIsTheCallersAndItMatters
     // sections would return the same number twice.
     EXPECT_GT(std::fabs(first.properties.volumeMm3 - second.properties.volumeMm3), 1.0);
 }
+
+// --- M20: SHELL and DRAFT against real OCCT ----------------------------------
+
+namespace {
+
+// A 100 x 60 x 40 box at the origin, tagged as feature 1 so its faces have
+// provenance the queries can name.
+KernelShape TaggedBox(OcctGeometryKernel& kernel, double w, double h, double d) {
+    BoxDefinition definition;
+    definition.widthMm = w;
+    definition.heightMm = h;
+    definition.depthMm = d;
+    const ShapeResult box = kernel.createBox(definition);
+    EXPECT_TRUE(box) << box.message;
+    return kernel.tagCreatedFaces(box.shape, KernelShape{}, 1u);
+}
+
+double VolumeOfShape(OcctGeometryKernel& kernel, const KernelShape& shape) {
+    const KernelMassPropertiesResult properties = kernel.calculateMassProperties(shape);
+    EXPECT_TRUE(properties) << properties.message;
+    return properties.properties.volumeMm3;
+}
+
+FaceQuery TopFace() {
+    FaceQuery query;
+    query.extremeTowards = Vec3{0, 0, 1};
+    return query;
+}
+
+} // namespace
+
+TEST(OcctExtrudeTest, M20_SHELL_001_AnOpenTopBoxHasTheWallsItsThicknessSaysItHas) {
+    // The one shell whose volume is arithmetic: a 100x60x40 box hollowed to a
+    // 5 mm wall with the top open leaves the outer solid minus the cavity, and
+    // the cavity is a box 90 x 50 x 35 -- 5 mm off each of the four sides and
+    // the floor, and nothing off the open top.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+
+    const ShapeResult shell = kernel.shellSolid(box, {TopFace()}, 5.0);
+    ASSERT_TRUE(shell) << shell.message;
+
+    const double outer = 100.0 * 60.0 * 40.0;
+    const double cavity = 90.0 * 50.0 * 35.0;
+    ExpectRel(VolumeOfShape(kernel, shell.shape), outer - cavity, kVolumeRelTol);
+}
+
+TEST(OcctExtrudeTest, M20_SHELL_002_TWOOpenFacesLeaveATube) {
+    // Top and bottom open: the cavity now runs the whole depth, so it is
+    // 90 x 50 x 40 and only the four walls remain.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+
+    FaceQuery bottom;
+    bottom.extremeTowards = Vec3{0, 0, -1};
+    const ShapeResult shell = kernel.shellSolid(box, {TopFace(), bottom}, 5.0);
+    ASSERT_TRUE(shell) << shell.message;
+
+    const double outer = 100.0 * 60.0 * 40.0;
+    const double cavity = 90.0 * 50.0 * 40.0;
+    ExpectRel(VolumeOfShape(kernel, shell.shape), outer - cavity, kVolumeRelTol);
+}
+
+TEST(OcctExtrudeTest, M20_SHELL_003_AShellWithNOOpeningIsREFUSED) {
+    // OCCT builds one happily: a hollow with no way in looks solid from every
+    // side and weighs less than it should, which is a lie only a mass reading
+    // tells. Refused rather than built.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+
+    const ShapeResult shell = kernel.shellSolid(box, {}, 5.0);
+    EXPECT_FALSE(shell);
+    EXPECT_EQ(shell.error, KernelError::InvalidDimension);
+}
+
+TEST(OcctExtrudeTest, M20_SHELL_004_AWallThickerThanTheSolidIsREFUSED) {
+    // Half of a 60 mm width is 30, so a 40 mm wall cannot fit. OCCT does not
+    // refuse it -- it returns a self-intersecting shape that weighs MORE than
+    // the solid it came from. Measured, and refused.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+
+    const ShapeResult shell = kernel.shellSolid(box, {TopFace()}, 40.0);
+    EXPECT_FALSE(shell);
+    EXPECT_NE(shell.message.find("does not fit"), std::string::npos) << shell.message;
+}
+
+TEST(OcctExtrudeTest, M20_SHELL_005_AFaceQueryThatNamesNothingIsREFUSEDWithTheReason) {
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+
+    FaceQuery nobody;
+    nobody.createdBy = static_cast<ObjectId>(999);
+    const ShapeResult shell = kernel.shellSolid(box, {nobody}, 5.0);
+    EXPECT_FALSE(shell);
+    EXPECT_NE(shell.message.find("could not open a face"), std::string::npos) << shell.message;
+}
+
+TEST(OcctExtrudeTest, M20_DRAFT_001_ATaperedWallChangesTheVolumeTheWayTrigonometrySays) {
+    // One wall of a box, tapered about the bottom face. The wall pivots on the
+    // neutral plane, so the solid gains a wedge: its cross-section is the full
+    // depth times depth*tan(angle)/2, run along the wall's width.
+    //
+    // The sign is what decides gain or loss, and there is no default for it --
+    // so this test states which way it went and checks the magnitude against
+    // the formula, not against the kernel.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+
+    FaceQuery wall;
+    wall.facing = Vec3{0, 1, 0};   // the +Y wall
+    FaceQuery neutral;
+    neutral.extremeTowards = Vec3{0, 0, -1}; // the floor
+
+    const double angle = 10.0 * kPi / 180.0;
+    const ShapeResult drafted = kernel.draftFaces(box, {wall}, neutral, angle);
+    ASSERT_TRUE(drafted) << drafted.message;
+
+    const double before = 100.0 * 60.0 * 40.0;
+    const double wedge = 100.0 * 40.0 * 40.0 * std::tan(angle) / 2.0;
+    const double after = VolumeOfShape(kernel, drafted.shape);
+    // WHICH WAY, not just how much. The pull direction is the neutral face's
+    // own normal, and taking it from anywhere else -- world +Z, say -- leans
+    // the wall the other way and builds a part that locks in its mould instead
+    // of releasing from it. An assertion on the magnitude alone cannot tell
+    // those two apart, because they differ by exactly a sign.
+    //
+    // Neutral is the FLOOR here, so a positive angle widens the part as it
+    // rises: the volume goes UP by the wedge.
+    EXPECT_NEAR(after - before, wedge, 1e-6 * wedge)
+        << "before " << before << ", after " << after;
+}
+
+TEST(OcctExtrudeTest, M20_DRAFT_002_TheOPPOSITESignLeansTheOtherWay) {
+    // The sign is the whole difference between a part that releases from a
+    // mould and one that locks in it, so it must not be normalised away.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+
+    FaceQuery wall;
+    wall.facing = Vec3{0, 1, 0};
+    FaceQuery neutral;
+    neutral.extremeTowards = Vec3{0, 0, -1};
+
+    const double angle = 10.0 * kPi / 180.0;
+    const ShapeResult positive = kernel.draftFaces(box, {wall}, neutral, angle);
+    ASSERT_TRUE(positive) << positive.message;
+    const ShapeResult negative = kernel.draftFaces(box, {wall}, neutral, -angle);
+    ASSERT_TRUE(negative) << negative.message;
+
+    const double before = 100.0 * 60.0 * 40.0;
+    const double up = VolumeOfShape(kernel, positive.shape);
+    const double down = VolumeOfShape(kernel, negative.shape);
+    // One gains and one loses: their difference from the original has opposite
+    // signs. Equal magnitudes would mean the sign was thrown away.
+    EXPECT_LT((up - before) * (down - before), 0.0)
+        << "up " << up << ", down " << down << ", before " << before;
+}
+
+TEST(OcctExtrudeTest, M20_DRAFT_003_ADraftWithNOFacesIsREFUSED) {
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+    FaceQuery neutral;
+    neutral.extremeTowards = Vec3{0, 0, -1};
+
+    const ShapeResult drafted = kernel.draftFaces(box, {}, neutral, 0.1);
+    EXPECT_FALSE(drafted);
+    EXPECT_EQ(drafted.error, KernelError::InvalidDimension);
+}
+
+TEST(OcctExtrudeTest, M20_DRAFT_004_AnAbsurdAngleIsREFUSEDBeforeOCCTSeesIt) {
+    // A quarter turn lays the wall flat. OCCT's complaint about it names
+    // nothing the user can act on, so it is refused here with a sentence that
+    // does.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+    FaceQuery wall;
+    wall.facing = Vec3{0, 1, 0};
+    FaceQuery neutral;
+    neutral.extremeTowards = Vec3{0, 0, -1};
+
+    const ShapeResult drafted = kernel.draftFaces(box, {wall}, neutral, kPi / 2.0);
+    EXPECT_FALSE(drafted);
+    EXPECT_EQ(drafted.error, KernelError::InvalidDimension);
+}
+
+TEST(OcctExtrudeTest, M20_BOUNDS_001_AShapeReportsWhereItReaches) {
+    // What "through all" is a question about. A hole that guessed a very deep
+    // cylinder instead would work until somebody built a part deeper than the
+    // guess, and then it would stop part-way with nothing to say.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+
+    const KernelBoundsResult bounds = kernel.boundsOfShape(box);
+    ASSERT_TRUE(bounds.ok) << bounds.message;
+    EXPECT_NEAR(bounds.min.x, 0.0, 1e-6);
+    EXPECT_NEAR(bounds.min.y, 0.0, 1e-6);
+    EXPECT_NEAR(bounds.min.z, 0.0, 1e-6);
+    EXPECT_NEAR(bounds.max.x, 100.0, 1e-6);
+    EXPECT_NEAR(bounds.max.y, 60.0, 1e-6);
+    EXPECT_NEAR(bounds.max.z, 40.0, 1e-6);
+}
+
+TEST(OcctExtrudeTest, M20_BOUNDS_002_AnEmptyShapeHasNoBoundsAndSaysSo) {
+    // Returning a box at the origin would be indistinguishable from geometry
+    // that really is there.
+    OcctGeometryKernel kernel;
+    const KernelBoundsResult bounds = kernel.boundsOfShape(KernelShape{});
+    EXPECT_FALSE(bounds.ok);
+    EXPECT_FALSE(bounds.message.empty());
+}

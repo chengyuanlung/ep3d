@@ -801,6 +801,17 @@ public:
         ++subtracts;
         return inner.subtractShape(base, tool);
     }
+    ShapeResult shellSolid(const KernelShape& base, const FaceSelection& openFaces,
+                           double thicknessMm) override {
+        return inner.shellSolid(base, openFaces, thicknessMm);
+    }
+    ShapeResult draftFaces(const KernelShape& base, const FaceSelection& faces,
+                           const FaceQuery& neutral, double angleRad) override {
+        return inner.draftFaces(base, faces, neutral, angleRad);
+    }
+    KernelBoundsResult boundsOfShape(const KernelShape& shape) override {
+        return inner.boundsOfShape(shape);
+    }
     ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
                              const PlanarPathDefinition& path) override {
         return inner.sweepProfile(profile, path);

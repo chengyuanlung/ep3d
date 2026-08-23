@@ -10,7 +10,10 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/DraftFeature.h"
+#include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/LoftFeature.h"
+#include "Core/Feature/ShellFeature.h"
 #include "Core/Feature/RevolveFeature.h"
 #include "Core/Feature/SweepFeature.h"
 #include "Core/Feature/EdgeDressFeatures.h"
@@ -523,6 +526,12 @@ Body& PartDocument::addBody(std::string name) {
     bodies_.push_back(std::move(item));
     registry_.registerObject(ref.id(), &ref);
     return ref;
+}
+
+Body* PartDocument::findBodyNamed(const std::string& name) noexcept {
+    for (const std::unique_ptr<Body>& body : bodies_)
+        if (body->name() == name) return body.get();
+    return nullptr;
 }
 
 Body& PartDocument::restoreBody(ObjectId id, std::string name) {
@@ -2438,6 +2447,115 @@ PocketFeature& PartDocument::restorePocketFeature(Body& body, ObjectId id, std::
     return feature;
 }
 
+
+void PartDocument::wireShellFeature(ShellFeature& feature, ObjectId baseFeatureId,
+                                    ObjectId thicknessParameterId, ObjectId materialId) {
+    addRecomputableNode(feature);
+    addDependency(feature.id(), baseFeatureId);
+    addDependency(feature.id(), thicknessParameterId);
+    // The face SELECTION needs no edge of its own: the faces belong to the
+    // base, so anything that can move them dirties the base this already
+    // depends on. A second edge would say the same thing twice -- the reason
+    // a revolve's axis has none either.
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+ShellFeature& PartDocument::addShellFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                            FaceSelection openFaces,
+                                            ObjectId thicknessParameterId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    ShellFeature& feature = body.addFeature<ShellFeature>(
+        std::move(name), baseFeatureId, std::move(openFaces), thicknessParameterId, materialId);
+    wireShellFeature(feature, baseFeatureId, thicknessParameterId, materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+ShellFeature& PartDocument::restoreShellFeature(Body& body, ObjectId id, std::string name,
+                                                ComputeState state, ObjectId baseFeatureId,
+                                                FaceSelection openFaces,
+                                                ObjectId thicknessParameterId,
+                                                ObjectId materialId) {
+    requireUnusedId(id, "restoreShellFeature");
+    ShellFeature& feature =
+        body.addFeature<ShellFeature>(id, std::move(name), state, baseFeatureId,
+                                      std::move(openFaces), thicknessParameterId, materialId);
+    wireShellFeature(feature, baseFeatureId, thicknessParameterId, materialId);
+    return feature;
+}
+
+void PartDocument::wireDraftFeature(DraftFeature& feature, ObjectId baseFeatureId,
+                                    ObjectId angleParameterId, ObjectId materialId) {
+    addRecomputableNode(feature);
+    addDependency(feature.id(), baseFeatureId);
+    addDependency(feature.id(), angleParameterId);
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+DraftFeature& PartDocument::addDraftFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                            FaceSelection faces, FaceQuery neutral,
+                                            ObjectId angleParameterId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    DraftFeature& feature =
+        body.addFeature<DraftFeature>(std::move(name), baseFeatureId, std::move(faces),
+                                      std::move(neutral), angleParameterId, materialId);
+    wireDraftFeature(feature, baseFeatureId, angleParameterId, materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+DraftFeature& PartDocument::restoreDraftFeature(Body& body, ObjectId id, std::string name,
+                                                ComputeState state, ObjectId baseFeatureId,
+                                                FaceSelection faces, FaceQuery neutral,
+                                                ObjectId angleParameterId, ObjectId materialId) {
+    requireUnusedId(id, "restoreDraftFeature");
+    DraftFeature& feature = body.addFeature<DraftFeature>(id, std::move(name), state,
+                                                          baseFeatureId, std::move(faces),
+                                                          std::move(neutral), angleParameterId,
+                                                          materialId);
+    wireDraftFeature(feature, baseFeatureId, angleParameterId, materialId);
+    return feature;
+}
+
+void PartDocument::wireHoleFeature(HoleFeature& feature, ObjectId baseFeatureId,
+                                   ObjectId sketchId, ObjectId diameterParameterId,
+                                   ObjectId depthParameterId, ObjectId materialId) {
+    addRecomputableNode(feature);
+    // FOUR EDGES: the solid it drills, the sketch that says where, and the two
+    // numbers that say how big and how deep. Every one of them changes the
+    // result, so every one of them has to dirty this feature.
+    addDependency(feature.id(), baseFeatureId);
+    addDependency(feature.id(), sketchId);
+    addDependency(feature.id(), diameterParameterId);
+    addDependency(feature.id(), depthParameterId);
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+HoleFeature& PartDocument::addHoleFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                          ObjectId sketchId, ObjectId diameterParameterId,
+                                          ObjectId depthParameterId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    HoleFeature& feature = body.addFeature<HoleFeature>(
+        std::move(name), baseFeatureId, sketchId, diameterParameterId, depthParameterId,
+        materialId);
+    wireHoleFeature(feature, baseFeatureId, sketchId, diameterParameterId, depthParameterId,
+                    materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+HoleFeature& PartDocument::restoreHoleFeature(Body& body, ObjectId id, std::string name,
+                                              ComputeState state, ObjectId baseFeatureId,
+                                              ObjectId sketchId, ObjectId diameterParameterId,
+                                              ObjectId depthParameterId, ObjectId materialId) {
+    requireUnusedId(id, "restoreHoleFeature");
+    HoleFeature& feature = body.addFeature<HoleFeature>(id, std::move(name), state, baseFeatureId,
+                                                        sketchId, diameterParameterId,
+                                                        depthParameterId, materialId);
+    wireHoleFeature(feature, baseFeatureId, sketchId, diameterParameterId, depthParameterId,
+                    materialId);
+    return feature;
+}
 
 void PartDocument::wireSweepFeature(SweepFeature& feature, ObjectId profileSketchId,
                                     ObjectId pathSketchId, ObjectId materialId) {

@@ -8,7 +8,10 @@
 #include "Core/Kernel/FaceQuery.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/DraftFeature.h"
+#include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/LoftFeature.h"
+#include "Core/Feature/ShellFeature.h"
 #include "Core/Feature/RevolveFeature.h"
 #include "Core/Feature/SweepFeature.h"
 #include "Core/Feature/EdgeDressFeatures.h"
@@ -125,7 +128,7 @@ void WriteSketchGeometry(JsonValue& entry, const SketchGeometry& geometry) {
 }
 
 
-constexpr int kSchemaVersion = 25;          // v25 adds sweep and loft (M19)
+constexpr int kSchemaVersion = 26;          // v26 adds shell, draft and hole (M20)
 // v15 added PointLineDistance (M17).
 // v14 added construction geometry (M17).
 // v13 added Horizontal/VerticalDistance (M17).
@@ -439,6 +442,42 @@ JsonValue toJson(const PartDocument& document) {
                 featureEntry.set("lengthParameterId",
                                  JsonValue::makeString(idToString(pad->lengthParameterId())));
                 featureEntry.set("materialId", JsonValue::makeString(idToString(pad->materialId())));
+            } else if (const auto* shell = dynamic_cast<const ShellFeature*>(feature.get())) {
+                // v26 (M20). The faces are QUERIES, written as the sentences
+                // they are -- never as an index, which is what a stored face
+                // would be (ADR-M17-036).
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(shell->baseFeatureId())));
+                featureEntry.set("sizeParameterId",
+                                 JsonValue::makeString(idToString(shell->thicknessParameterId())));
+                JsonValue faces = JsonValue::makeArray();
+                for (const FaceQuery& query : shell->openFaces())
+                    faces.add(WriteFaceQuery(query));
+                featureEntry.set("faceSelection", std::move(faces));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(shell->materialId())));
+            } else if (const auto* draft = dynamic_cast<const DraftFeature*>(feature.get())) {
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(draft->baseFeatureId())));
+                featureEntry.set("sizeParameterId",
+                                 JsonValue::makeString(idToString(draft->angleParameterId())));
+                JsonValue faces = JsonValue::makeArray();
+                for (const FaceQuery& query : draft->faces()) faces.add(WriteFaceQuery(query));
+                featureEntry.set("faceSelection", std::move(faces));
+                featureEntry.set("neutralFace", WriteFaceQuery(draft->neutralFace()));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(draft->materialId())));
+            } else if (const auto* hole = dynamic_cast<const HoleFeature*>(feature.get())) {
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(hole->baseFeatureId())));
+                featureEntry.set("sketchId",
+                                 JsonValue::makeString(idToString(hole->sketchId())));
+                featureEntry.set("diameterParameterId",
+                                 JsonValue::makeString(idToString(hole->diameterParameterId())));
+                featureEntry.set("depthParameterId",
+                                 JsonValue::makeString(idToString(hole->depthParameterId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(hole->materialId())));
             } else if (const auto* sweep = dynamic_cast<const SweepFeature*>(feature.get())) {
                 // v25 (M19): TWO sketches, each by ObjectId. `sketchId` is the
                 // SECTION -- the field every other sketch-consuming feature
@@ -1041,6 +1080,24 @@ bool ReadFaceQuery(const JsonValue& entry, const std::string& context, FieldErro
     return true;
 }
 
+// A whole SELECTION of them (M20), through the one reader above -- so a shell's
+// faces and a draft's are checked by the same rules the sketch's tracked face
+// is, including the refusal of a query that names every face.
+bool ReadFaceSelection(const JsonValue& entry, const char* name, const std::string& context,
+                       FieldError& err, FaceSelection& out) {
+    const JsonValue* array = requireField(entry, name, JsonType::Array, context, err);
+    if (array == nullptr) return false;
+    std::size_t at = 0;
+    for (const JsonValue& one : array->items()) {
+        FaceQuery query;
+        if (!ReadFaceQuery(one, context + "." + name + "[" + std::to_string(at++) + "]", err,
+                           query))
+            return false;
+        out.push_back(std::move(query));
+    }
+    return true;
+}
+
 // The inverse of WriteEdgeQuery. Returns false and fills `err` rather than
 // throwing, like every other reader here.
 bool ReadEdgeQuery(const JsonValue& entry, const std::string& context, FieldError& err,
@@ -1142,7 +1199,8 @@ LoadResult loadFailure(SerializationError error, std::string message) {
 constexpr std::string_view kSolidFeatureTypeNames[] = {"Box",     "Pad",     "Pocket",
                                                        "Revolve", "Fillet",  "Chamfer",
                                                        "Mirror",  "Pattern", "Sweep",
-                                                       "Loft"};
+                                                       "Loft",    "Shell",   "Draft",
+                                                       "Hole"};
 
 bool IsSolidFeatureTypeName(std::string_view name) {
     for (const std::string_view solid : kSolidFeatureTypeNames)
@@ -1450,6 +1508,40 @@ SaveResult validateSaveable(const PartDocument& document) {
                                           pocket->name() + "): pocket sketch id " +
                                           idToString(pocket->sketchId()) +
                                           " is not a sketch in this document"};
+            } else if (const auto* shell = dynamic_cast<const ShellFeature*>(feature.get())) {
+                // ADR-M3-008 again: every reference the LOADER resolves is
+                // checked HERE, or a document saves cleanly and refuses to load.
+                if (parameterIds.count(shell->thicknessParameterId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(shell->id()) + " (" +
+                                          shell->name() + "): shell thickness parameter id " +
+                                          idToString(shell->thicknessParameterId()) +
+                                          " is not a parameter in this document"};
+            } else if (const auto* draft = dynamic_cast<const DraftFeature*>(feature.get())) {
+                if (parameterIds.count(draft->angleParameterId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(draft->id()) + " (" +
+                                          draft->name() + "): draft angle parameter id " +
+                                          idToString(draft->angleParameterId()) +
+                                          " is not a parameter in this document"};
+            } else if (const auto* hole = dynamic_cast<const HoleFeature*>(feature.get())) {
+                if (sketchIds.count(hole->sketchId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(hole->id()) + " (" + hole->name() +
+                                          "): hole sketch id " + idToString(hole->sketchId()) +
+                                          " is not a sketch in this document"};
+                if (parameterIds.count(hole->diameterParameterId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(hole->id()) + " (" + hole->name() +
+                                          "): hole diameter parameter id " +
+                                          idToString(hole->diameterParameterId()) +
+                                          " is not a parameter in this document"};
+                if (parameterIds.count(hole->depthParameterId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(hole->id()) + " (" + hole->name() +
+                                          "): hole depth parameter id " +
+                                          idToString(hole->depthParameterId()) +
+                                          " is not a parameter in this document"};
             } else if (const auto* sweep = dynamic_cast<const SweepFeature*>(feature.get())) {
                 // The same lesson as Pad's, for both of a sweep's sketches
                 // (ADR-M3-008): every reference the LOADER rejects is checked
@@ -2143,6 +2235,83 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.sketchId = *sketchRef;
                 featureData.depthParameterId = *depthRef;
                 featureData.materialId = *pocketMaterialId;
+            } else if (featureData.typeName == "Shell" ||
+                       featureData.typeName == "Draft") {
+                const bool isDraft = featureData.typeName == "Draft";
+                const JsonValue* baseField = requireField(featureEntry, "baseFeatureId",
+                                                          JsonType::String, featureContext, err);
+                if (baseField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* sizeField = requireField(featureEntry, "sizeParameterId",
+                                                          JsonType::String, featureContext, err);
+                if (sizeField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* dressMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (dressMaterialField == nullptr) return loadFailure(err.error, err.message);
+                if (!ReadFaceSelection(featureEntry, "faceSelection", featureContext, err,
+                                       featureData.faceSelection))
+                    return loadFailure(err.error, err.message);
+                // AT LEAST ONE, checked at the door. A shell with no opening is
+                // a hollow with no way in and a draft with no face tapers
+                // nothing; both are features this program will refuse to build,
+                // so a file describing one is refused where the reason is near
+                // the cause.
+                if (featureData.faceSelection.empty())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": " + featureData.typeName +
+                                           " names no faces");
+                if (isDraft) {
+                    const JsonValue* neutralField = requireField(
+                        featureEntry, "neutralFace", JsonType::Object, featureContext, err);
+                    if (neutralField == nullptr) return loadFailure(err.error, err.message);
+                    if (!ReadFaceQuery(*neutralField, featureContext + ".neutralFace", err,
+                                       featureData.neutralFace))
+                        return loadFailure(err.error, err.message);
+                }
+
+                const auto baseRef = idFromString(baseField->asString());
+                const auto sizeRef = idFromString(sizeField->asString());
+                const auto dressMaterialId = idFromString(dressMaterialField->asString());
+                if (!baseRef || !sizeRef || !dressMaterialId || *baseRef > kMaxObjectId ||
+                    *sizeRef > kMaxObjectId || *dressMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": " + featureData.typeName +
+                                           " references are not valid ids");
+                featureData.baseFeatureId = *baseRef;
+                featureData.sizeParameterId = *sizeRef;
+                featureData.materialId = *dressMaterialId;
+            } else if (featureData.typeName == "Hole") {
+                const JsonValue* baseField = requireField(featureEntry, "baseFeatureId",
+                                                          JsonType::String, featureContext, err);
+                if (baseField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* sketchField = requireField(featureEntry, "sketchId",
+                                                            JsonType::String, featureContext, err);
+                if (sketchField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* boreField = requireField(featureEntry, "diameterParameterId",
+                                                          JsonType::String, featureContext, err);
+                if (boreField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* deepField = requireField(featureEntry, "depthParameterId",
+                                                          JsonType::String, featureContext, err);
+                if (deepField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* holeMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (holeMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                const auto baseRef = idFromString(baseField->asString());
+                const auto sketchRef = idFromString(sketchField->asString());
+                const auto boreRef = idFromString(boreField->asString());
+                const auto deepRef = idFromString(deepField->asString());
+                const auto holeMaterialId = idFromString(holeMaterialField->asString());
+                if (!baseRef || !sketchRef || !boreRef || !deepRef || !holeMaterialId ||
+                    *baseRef > kMaxObjectId || *sketchRef > kMaxObjectId ||
+                    *boreRef > kMaxObjectId || *deepRef > kMaxObjectId ||
+                    *holeMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": hole references are not valid ids");
+                featureData.baseFeatureId = *baseRef;
+                featureData.sketchId = *sketchRef;
+                featureData.diameterParameterId = *boreRef;
+                featureData.holeDepthParameterId = *deepRef;
+                featureData.materialId = *holeMaterialId;
             } else if (featureData.typeName == "Sweep") {
                 const JsonValue* sectionField = requireField(featureEntry, "sketchId",
                                                              JsonType::String, featureContext, err);

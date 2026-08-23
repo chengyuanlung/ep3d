@@ -22,7 +22,10 @@ add_library(ParametricCADCore
     src/Core/Dependency/DependencyGraph.cpp
     src/Core/Feature/BoxFeature.cpp
     src/Core/Feature/Feature.cpp
+    src/Core/Feature/DraftFeature.cpp
     src/Core/Feature/LoftFeature.cpp
+    src/Core/Feature/HoleFeature.cpp
+    src/Core/Feature/ShellFeature.cpp
     src/Core/Feature/PadFeature.cpp
     src/Core/Feature/SweepFeature.cpp
     src/Core/Feature/PocketFeature.cpp

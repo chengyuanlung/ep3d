@@ -10,6 +10,7 @@
 #include "Core/Undo/UndoRecord.h"
 #include "Core/Material/Material.h"
 #include "Core/Parameter/ParameterManager.h"
+#include "Core/Kernel/FaceQuery.h"
 #include "Core/Physics/MassProperties.h"
 #include "Core/Physics/MassPropertiesNode.h"
 #include "Core/Recompute/DocumentRecomputeEngine.h"
@@ -35,6 +36,9 @@ class PocketFeature;
 class RevolveFeature;
 class SweepFeature;
 class LoftFeature;
+class ShellFeature;
+class DraftFeature;
+class HoleFeature;
 class FilletFeature;
 class ChamferFeature;
 
@@ -154,6 +158,14 @@ public:
     // Restore path (deserialization): adds a body that keeps its persisted id.
     Body& restoreBody(ObjectId id, std::string name);
     const std::vector<std::unique_ptr<Body>>& bodies() const noexcept { return bodies_; }
+    // The body called `name`, or nullptr (M20).
+    //
+    // Bodies are named by the user, so this is how a command that dresses "the
+    // part" finds the one an earlier command built. It hands back a mutable
+    // Body because every addXFeature takes one -- a named door rather than
+    // reaching through the const-stops-at-the-pointer gap `bodies()` leaves,
+    // which the note below calls an open door and means to keep shut.
+    Body* findBodyNamed(const std::string& name) noexcept;
 
     // KNOWN OPEN DOOR (M8 round 3, R1R3-M2, recorded not fixed): constness
     // stops at the unique_ptr, so this leaks mutable ReferenceFrame* with a
@@ -626,6 +638,32 @@ public:
     // --- Revolve feature (M8.2, ADR-M8-005) --------------------------------
     // Base-capable like Pad: revolves `sketchId`'s profile about the sketch's
     // own line `axisEntityId` by the Radian Parameter `angleParameterId`.
+    // A SHELL hollows a base and opens the faces its selection names.
+    ShellFeature& addShellFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                  FaceSelection openFaces, ObjectId thicknessParameterId);
+    ShellFeature& restoreShellFeature(Body& body, ObjectId id, std::string name,
+                                      ComputeState state, ObjectId baseFeatureId,
+                                      FaceSelection openFaces, ObjectId thicknessParameterId,
+                                      ObjectId materialId);
+
+    // A DRAFT tapers faces about a neutral one, which also gives the pull.
+    DraftFeature& addDraftFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                  FaceSelection faces, FaceQuery neutral,
+                                  ObjectId angleParameterId);
+    DraftFeature& restoreDraftFeature(Body& body, ObjectId id, std::string name,
+                                      ComputeState state, ObjectId baseFeatureId,
+                                      FaceSelection faces, FaceQuery neutral,
+                                      ObjectId angleParameterId, ObjectId materialId);
+
+    // A HOLE drills at a sketch's points, through a base.
+    HoleFeature& addHoleFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                ObjectId sketchId, ObjectId diameterParameterId,
+                                ObjectId depthParameterId);
+    HoleFeature& restoreHoleFeature(Body& body, ObjectId id, std::string name, ComputeState state,
+                                    ObjectId baseFeatureId, ObjectId sketchId,
+                                    ObjectId diameterParameterId, ObjectId depthParameterId,
+                                    ObjectId materialId);
+
     // A SWEEP takes two sketches -- a section and a spine -- and depends on
     // both. See SweepFeature.h for why they cannot be one.
     SweepFeature& addSweepFeature(Body& body, std::string name, ObjectId profileSketchId,
@@ -831,6 +869,13 @@ private:
     // (single registration path, spec 13).
     void wirePocketFeature(PocketFeature& feature, ObjectId baseFeatureId, ObjectId sketchId,
                            ObjectId depthParameterId, ObjectId materialId);
+    void wireShellFeature(ShellFeature& feature, ObjectId baseFeatureId,
+                          ObjectId thicknessParameterId, ObjectId materialId);
+    void wireDraftFeature(DraftFeature& feature, ObjectId baseFeatureId,
+                          ObjectId angleParameterId, ObjectId materialId);
+    void wireHoleFeature(HoleFeature& feature, ObjectId baseFeatureId, ObjectId sketchId,
+                         ObjectId diameterParameterId, ObjectId depthParameterId,
+                         ObjectId materialId);
     void wireSweepFeature(SweepFeature& feature, ObjectId profileSketchId, ObjectId pathSketchId,
                           ObjectId materialId);
     void wireLoftFeature(LoftFeature& feature, const std::vector<ObjectId>& sectionSketchIds,

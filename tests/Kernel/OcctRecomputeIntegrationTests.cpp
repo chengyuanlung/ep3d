@@ -2,7 +2,11 @@
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Core/Feature/SweepFeature.h"
+#include "Core/Feature/ShellFeature.h"
+#include "Core/Feature/DraftFeature.h"
+#include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/LoftFeature.h"
+#include "Core/Feature/PadFeature.h"
 #include "Core/Sketch/Profile.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
 #include <gtest/gtest.h>
@@ -37,6 +41,17 @@ public:
     ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override {
         ++subtractCallCount;
         return inner_.subtractShape(base, tool);
+    }
+    ShapeResult shellSolid(const KernelShape& base, const FaceSelection& openFaces,
+                           double thicknessMm) override {
+        return inner_.shellSolid(base, openFaces, thicknessMm);
+    }
+    ShapeResult draftFaces(const KernelShape& base, const FaceSelection& faces,
+                           const FaceQuery& neutral, double angleRad) override {
+        return inner_.draftFaces(base, faces, neutral, angleRad);
+    }
+    KernelBoundsResult boundsOfShape(const KernelShape& shape) override {
+        return inner_.boundsOfShape(shape);
     }
     ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
                              const PlanarPathDefinition& path) override {
@@ -624,4 +639,276 @@ TEST(OcctRecomputeIntegrationTest, M19_FEAT_009_ASweepAlongItsOwnSketchSaysWHY) 
     EXPECT_NE(FailureMessageFor(report, sweep.id()).find("two different sketches"),
               std::string::npos)
         << FailureMessageFor(report, sweep.id());
+}
+
+// --- M20: SHELL, DRAFT and HOLE as FEATURES ----------------------------------
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+// A pad of `side` x `side` x `height`, as the base every M20 feature dresses.
+struct PaddedBox {
+    PartDocument document{"M20Doc"};
+    ObjectId sketchId{kInvalidObjectId};
+    ObjectId padId{kInvalidObjectId};
+    Body* body{nullptr};
+
+    PaddedBox(OcctGeometryKernel& kernel, double side, double height) {
+        document.setGeometryKernel(&kernel);
+        Sketch& sketch = document.addSketch("Base");
+        sketchId = sketch.id();
+        AddSquare(document, sketchId, side);
+        Parameter& tall = document.addParameter("H", height, UnitType::Millimeter);
+        body = &document.addBody("Body");
+        padId = document.addPadFeature(*body, "Pad1", sketchId, tall.id()).id();
+    }
+};
+
+double VolumeOfFeature(OcctGeometryKernel& kernel, const ISolidFeature& feature) {
+    const KernelMassPropertiesResult properties =
+        kernel.calculateMassProperties(feature.currentShape());
+    EXPECT_TRUE(properties) << properties.message;
+    return properties.properties.volumeMm3;
+}
+
+FaceQuery FaceTowards(Vec3 direction) {
+    FaceQuery query;
+    query.extremeTowards = direction;
+    return query;
+}
+
+} // namespace
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_001_AShellHollowsThePadItSitsOn) {
+    // 60 x 60 x 40 hollowed to a 5 mm wall with the top open: the cavity is
+    // 50 x 50 x 35, computed from the arithmetic rather than from the kernel.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+    Parameter& wall = part.document.addParameter("W", 5.0, UnitType::Millimeter);
+    ShellFeature& shell = part.document.addShellFeature(*part.body, "Shell1", part.padId,
+                                                        {FaceTowards(Vec3{0, 0, 1})}, wall.id());
+
+    ASSERT_TRUE(part.document.recompute().success);
+    ASSERT_EQ(shell.currentState(), ComputeState::Valid);
+    const double expected = 60.0 * 60.0 * 40.0 - 50.0 * 50.0 * 35.0;
+    EXPECT_NEAR(VolumeOfFeature(kernel, shell), expected, 1e-6 * expected);
+}
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_002_ChangingTheWALLRebuildsTheShell) {
+    // The thickness is a Parameter, so it is a dependency. A shell that did not
+    // depend on it would keep its old wall after the number changed -- and stay
+    // wrong until something unrelated dirtied it.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+    Parameter& wall = part.document.addParameter("W", 5.0, UnitType::Millimeter);
+    ShellFeature& shell = part.document.addShellFeature(*part.body, "Shell1", part.padId,
+                                                        {FaceTowards(Vec3{0, 0, 1})}, wall.id());
+    ASSERT_TRUE(part.document.recompute().success);
+    const double thin = VolumeOfFeature(kernel, shell);
+
+    ASSERT_TRUE(part.document.setParameterValue(wall.id(), 10.0));
+    ASSERT_TRUE(part.document.recompute().success);
+    const double thick = VolumeOfFeature(kernel, shell);
+
+    const double expected = 60.0 * 60.0 * 40.0 - 40.0 * 40.0 * 30.0;
+    EXPECT_GT(thick, thin) << "a thicker wall leaves more material";
+    EXPECT_NEAR(thick, expected, 1e-6 * expected);
+}
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_003_AShellWithNOOpenFaceIsREFUSED) {
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+    Parameter& wall = part.document.addParameter("W", 5.0, UnitType::Millimeter);
+    ShellFeature& shell =
+        part.document.addShellFeature(*part.body, "Shell1", part.padId, {}, wall.id());
+
+    const DocumentRecomputeReport report = part.document.recompute();
+    EXPECT_EQ(shell.currentState(), ComputeState::Failed);
+    EXPECT_NE(FailureMessageFor(report, shell.id()).find("no face to open"), std::string::npos)
+        << FailureMessageFor(report, shell.id());
+}
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_004_ADraftTapersAWallByTheAngleItIsGiven) {
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+    const double angleRad = 8.0 * kPi / 180.0;
+    Parameter& angle = part.document.addParameter("A", angleRad, UnitType::Radian);
+
+    FaceQuery wall;
+    wall.facing = Vec3{0, 1, 0};
+    DraftFeature& draft = part.document.addDraftFeature(
+        *part.body, "Draft1", part.padId, {wall}, FaceTowards(Vec3{0, 0, -1}), angle.id());
+
+    ASSERT_TRUE(part.document.recompute().success);
+    ASSERT_EQ(draft.currentState(), ComputeState::Valid);
+
+    const double before = 60.0 * 60.0 * 40.0;
+    const double wedge = 60.0 * 40.0 * 40.0 * std::tan(angleRad) / 2.0;
+    EXPECT_NEAR(std::fabs(VolumeOfFeature(kernel, draft) - before), wedge, 1e-6 * wedge);
+}
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_005_ADraftAngleInMILLIMETRESIsREFUSED) {
+    // The trap a revolve already guards: 8 stored in a Millimeter parameter
+    // reads as 8 RADIANS. A revolve gets caught by the kernel's 2*pi ceiling;
+    // a draft of 8 radians wraps to a plausible-looking taper of a shape turned
+    // inside out.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+    Parameter& angle = part.document.addParameter("A", 8.0, UnitType::Millimeter);
+
+    FaceQuery wall;
+    wall.facing = Vec3{0, 1, 0};
+    DraftFeature& draft = part.document.addDraftFeature(
+        *part.body, "Draft1", part.padId, {wall}, FaceTowards(Vec3{0, 0, -1}), angle.id());
+
+    const DocumentRecomputeReport report = part.document.recompute();
+    EXPECT_EQ(draft.currentState(), ComputeState::Failed);
+    EXPECT_NE(FailureMessageFor(report, draft.id()).find("UnitType::Radian"), std::string::npos)
+        << FailureMessageFor(report, draft.id());
+}
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_006_AHoleDrillsAtEverySketchPoint) {
+    // Two points, two bores. The volume says how many were drilled and how big
+    // they are, both computed from the arithmetic.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+
+    const std::optional<SketchFrame> onTop =
+        SketchFrame::FromBasis(Vec3{0, 0, 40}, Vec3{1, 0, 0}, Vec3{0, 0, 1});
+    ASSERT_TRUE(onTop.has_value());
+    Sketch& holes = part.document.addSketch("Holes", *onTop);
+    part.document.addSketchEntity(holes.id(), SketchPoint{Vec2{-15, 0}});
+    part.document.addSketchEntity(holes.id(), SketchPoint{Vec2{15, 0}});
+
+    Parameter& bore = part.document.addParameter("D", 10.0, UnitType::Millimeter);
+    Parameter& deep = part.document.addParameter("Z", -20.0, UnitType::Millimeter);
+    HoleFeature& drilled = part.document.addHoleFeature(*part.body, "Hole1", part.padId,
+                                                        holes.id(), bore.id(), deep.id());
+
+    ASSERT_TRUE(part.document.recompute().success);
+    ASSERT_EQ(drilled.currentState(), ComputeState::Valid);
+
+    const double expected = 60.0 * 60.0 * 40.0 - 2.0 * kPi * 25.0 * 20.0;
+    EXPECT_NEAR(VolumeOfFeature(kernel, drilled), expected, 1e-6 * expected);
+}
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_007_ADepthOfZEROGoesAllTheWayThrough) {
+    // "Through all" asks how far the part reaches rather than guessing a deep
+    // cylinder -- a guess works until somebody builds a part deeper than it.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+
+    const std::optional<SketchFrame> onTop =
+        SketchFrame::FromBasis(Vec3{0, 0, 40}, Vec3{1, 0, 0}, Vec3{0, 0, 1});
+    ASSERT_TRUE(onTop.has_value());
+    Sketch& holes = part.document.addSketch("Holes", *onTop);
+    part.document.addSketchEntity(holes.id(), SketchPoint{Vec2{0, 0}});
+
+    Parameter& bore = part.document.addParameter("D", 10.0, UnitType::Millimeter);
+    Parameter& deep = part.document.addParameter("Z", 0.0, UnitType::Millimeter);
+    HoleFeature& drilled = part.document.addHoleFeature(*part.body, "Hole1", part.padId,
+                                                        holes.id(), bore.id(), deep.id());
+
+    ASSERT_TRUE(part.document.recompute().success);
+    // The bore goes the FULL 40 mm, not part way.
+    const double expected = 60.0 * 60.0 * 40.0 - kPi * 25.0 * 40.0;
+    EXPECT_NEAR(VolumeOfFeature(kernel, drilled), expected, 1e-6 * expected);
+}
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_008_AHoleSketchWithNOPointsIsREFUSED) {
+    // A hole feature that removes no material is one the user meant to do
+    // something, and a chain that carries it forward unchanged looks exactly
+    // like a chain that worked.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+    Sketch& empty = part.document.addSketch("Holes");
+    Parameter& bore = part.document.addParameter("D", 10.0, UnitType::Millimeter);
+    Parameter& deep = part.document.addParameter("Z", -20.0, UnitType::Millimeter);
+    HoleFeature& drilled = part.document.addHoleFeature(*part.body, "Hole1", part.padId,
+                                                        empty.id(), bore.id(), deep.id());
+
+    const DocumentRecomputeReport report = part.document.recompute();
+    EXPECT_EQ(drilled.currentState(), ComputeState::Failed);
+    EXPECT_NE(FailureMessageFor(report, drilled.id()).find("no points"), std::string::npos)
+        << FailureMessageFor(report, drilled.id());
+}
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_009_MovingAHolesPointMovesTheBore) {
+    // The whole reason a hole is placed by sketch POINTS rather than by
+    // coordinates: the point can be dimensioned, and the bore follows.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 40.0};
+
+    const std::optional<SketchFrame> onTop =
+        SketchFrame::FromBasis(Vec3{0, 0, 40}, Vec3{1, 0, 0}, Vec3{0, 0, 1});
+    ASSERT_TRUE(onTop.has_value());
+    Sketch& holes = part.document.addSketch("Holes", *onTop);
+    const SketchEntityId centre =
+        part.document.addSketchEntity(holes.id(), SketchPoint{Vec2{0, 0}});
+
+    Parameter& bore = part.document.addParameter("D", 10.0, UnitType::Millimeter);
+    Parameter& deep = part.document.addParameter("Z", -20.0, UnitType::Millimeter);
+    HoleFeature& drilled = part.document.addHoleFeature(*part.body, "Hole1", part.padId,
+                                                        holes.id(), bore.id(), deep.id());
+    ASSERT_TRUE(part.document.recompute().success);
+    const KernelMassPropertiesResult centred =
+        kernel.calculateMassProperties(drilled.currentShape());
+    ASSERT_TRUE(centred) << centred.message;
+    // A bore down the middle of a square pad leaves the centroid where it was.
+    EXPECT_NEAR(std::hypot(centred.properties.centerOfMassMm.x,
+                           centred.properties.centerOfMassMm.y),
+                0.0, 1e-6);
+
+    ASSERT_TRUE(part.document.setSketchEntityGeometry(holes.id(), centre,
+                                                      SketchPoint{Vec2{20, 20}}));
+    ASSERT_TRUE(part.document.recompute().success);
+    const KernelMassPropertiesResult moved =
+        kernel.calculateMassProperties(drilled.currentShape());
+    ASSERT_TRUE(moved) << moved.message;
+
+    // The SAME material is removed, so the volume is unchanged -- what moved is
+    // WHERE it was removed from, and the centroid says exactly how far.
+    //
+    // Taking a bore of volume v out at (20, 20) shifts the centroid of a solid
+    // of volume V to -v*20/(V - v) on each axis. That is arithmetic, not the
+    // kernel's answer read back, which is what makes it a check: a bore that
+    // ignored its point and stayed in the middle would leave the centroid at
+    // nought, and one that moved somewhere else would not land on this number.
+    const double solid = 60.0 * 60.0 * 40.0;
+    const double bored = kPi * 25.0 * 20.0;
+    const double offset = bored * 20.0 / (solid - bored);
+    EXPECT_NEAR(moved.properties.centerOfMassMm.x, -offset, 1e-6 * offset)
+        << "the bore did not follow its point";
+    EXPECT_NEAR(moved.properties.centerOfMassMm.y, -offset, 1e-6 * offset);
+    EXPECT_NEAR(moved.properties.volumeMm3, centred.properties.volumeMm3,
+                1e-6 * centred.properties.volumeMm3);
+}
+
+TEST(OcctRecomputeIntegrationTest, M20_FEAT_010_AThroughHoleReachesEvenOnATALLPart) {
+    // "Through all" ASKS how far the part reaches. The alternative -- a
+    // generous fixed depth -- works on every part anyone happens to test with
+    // and then stops part-way on the first one that is bigger, leaving a blind
+    // hole that looks exactly like a through hole from the top.
+    //
+    // This part is 2 metres tall on purpose: a guess would have to be at least
+    // that to survive it, and whatever number it was, some part is taller.
+    OcctGeometryKernel kernel;
+    PaddedBox part{kernel, 60.0, 2000.0};
+
+    const std::optional<SketchFrame> onTop =
+        SketchFrame::FromBasis(Vec3{0, 0, 2000}, Vec3{1, 0, 0}, Vec3{0, 0, 1});
+    ASSERT_TRUE(onTop.has_value());
+    Sketch& holes = part.document.addSketch("Holes", *onTop);
+    part.document.addSketchEntity(holes.id(), SketchPoint{Vec2{0, 0}});
+
+    Parameter& bore = part.document.addParameter("D", 10.0, UnitType::Millimeter);
+    Parameter& deep = part.document.addParameter("Z", 0.0, UnitType::Millimeter);
+    HoleFeature& drilled = part.document.addHoleFeature(*part.body, "Hole1", part.padId,
+                                                        holes.id(), bore.id(), deep.id());
+
+    ASSERT_TRUE(part.document.recompute().success);
+    ASSERT_EQ(drilled.currentState(), ComputeState::Valid);
+    const double expected = 60.0 * 60.0 * 2000.0 - kPi * 25.0 * 2000.0;
+    EXPECT_NEAR(VolumeOfFeature(kernel, drilled), expected, 1e-6 * expected);
 }

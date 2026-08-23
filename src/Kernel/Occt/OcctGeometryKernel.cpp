@@ -4,6 +4,7 @@
 #include <GeomAbs_CurveType.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include "Kernel/Occt/OcctFaceQuery.h"
+#include "Kernel/Occt/OcctFaceQueryTopology.h"
 #include "Kernel/Occt/OcctProvenance.h"
 #include "Core/Kernel/EdgeQuery.h"
 #include "Kernel/Occt/OcctShape.h"
@@ -19,7 +20,12 @@
 #include <TopExp_Explorer.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <Bnd_Box.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -40,6 +46,7 @@
 #include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Elips.hxx>
+#include "Kernel/Occt/OcctFaceQuery.h"
 #include "Kernel/Occt/OcctSplineInterpolation.h"
 
 #include <GeomAPI_Interpolate.hxx>
@@ -873,6 +880,170 @@ FaceQueryResult OcctGeometryKernel::resolveFace(const KernelShape& shape,
 KernelShape OcctGeometryKernel::tagCreatedFaces(const KernelShape& result,
                                                const KernelShape& base, std::uint64_t tag) {
     return WithProvenance(result, base, tag);
+}
+
+ShapeResult OcctGeometryKernel::shellSolid(const KernelShape& base,
+                                           const FaceSelection& openFaces,
+                                           double thicknessMm) {
+    const auto* occtShape = dynamic_cast<const OcctShape*>(base.handle());
+    if (occtShape == nullptr || occtShape->shape().IsNull())
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "shell input is not an OcctShape (null or foreign kernel)"};
+    if (!IsValidExtrusionDistance(thicknessMm))
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "invalid shell thickness: must be finite and at least " +
+                               std::to_string(kMinExtrusionDistanceMm) + " mm"};
+    // A shell with NO OPENING is a hollow with no way in. OCCT builds one
+    // happily: it looks solid from every side and weighs less than it should,
+    // which is a lie a mass reading tells and nothing else does.
+    if (openFaces.empty())
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "a shell needs at least one face to open"};
+
+    try {
+        TopTools_ListOfShape toRemove;
+        for (const FaceQuery& query : openFaces) {
+            std::string why;
+            const TopoDS_Face face = FaceForQuery(base, query, why);
+            if (face.IsNull())
+                return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                                   "the shell could not open a face: " + why};
+            toRemove.Append(face);
+        }
+
+        // NEGATIVE thickness, because OCCT measures a thick solid's offset
+        // OUTWARD and a shell is hollowed INWARD. Passing the positive number
+        // grows the part instead of hollowing it -- a solid that is bigger than
+        // the one it came from, which looks like a shell that did nothing.
+        BRepOffsetAPI_MakeThickSolid maker;
+        maker.MakeThickSolidByJoin(occtShape->shape(), toRemove, -thicknessMm,
+                                   Precision::Confusion());
+        maker.Build();
+        if (!maker.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not hollow that solid to " +
+                                   std::to_string(thicknessMm) + " mm"};
+
+        const TopoDS_Shape hollow = maker.Shape();
+        if (hollow.IsNull())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the shell produced no shape"};
+        // THINNER WALLS THAN THE PART IS THICK is the failure mode here: OCCT
+        // returns a shape that self-intersects rather than refusing, and it
+        // weighs more than the solid it was cut from. Caught by measuring.
+        GProp_GProps volumeProps;
+        BRepGProp::VolumeProperties(hollow, volumeProps);
+        GProp_GProps beforeProps;
+        BRepGProp::VolumeProperties(occtShape->shape(), beforeProps);
+        if (!(std::fabs(volumeProps.Mass()) > kMinExtrusionDistanceMm) ||
+            std::fabs(volumeProps.Mass()) >= std::fabs(beforeProps.Mass()))
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "that wall thickness does not fit inside this solid"};
+
+        auto handle = std::make_shared<OcctShape>(hollow);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused the shell: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
+    }
+}
+
+ShapeResult OcctGeometryKernel::draftFaces(const KernelShape& base, const FaceSelection& faces,
+                                           const FaceQuery& neutral, double angleRad) {
+    const auto* occtShape = dynamic_cast<const OcctShape*>(base.handle());
+    if (occtShape == nullptr || occtShape->shape().IsNull())
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "draft input is not an OcctShape (null or foreign kernel)"};
+    if (!std::isfinite(angleRad) || std::fabs(angleRad) < kMinRevolveAngleRad ||
+        std::fabs(angleRad) >= kMaxRevolveAngleRad / 4.0)
+        // A quarter turn is already absurd for a draft -- the wall would lie
+        // flat. Refused rather than handed to OCCT, whose complaint about it
+        // names nothing the user can act on.
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "invalid draft angle: must be finite and less than a quarter turn"};
+    if (faces.empty())
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "a draft needs at least one face to taper"};
+
+    try {
+        std::string why;
+        const TopoDS_Face neutralFace = FaceForQuery(base, neutral, why);
+        if (neutralFace.IsNull())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the draft could not find its neutral face: " + why};
+        const FaceQueryResult neutralPlane = ResolveFaceQuery(base, neutral);
+        if (!neutralPlane.ok || !neutralPlane.face.planar)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "a draft's neutral face has to be a plane"};
+
+        // THE PULL DIRECTION is the neutral face's own normal. A draft is what
+        // lets a part come out of a mould, and the direction it comes out is
+        // away from the surface it was sitting on -- so taking it from the
+        // neutral face is not a convenience, it is the definition.
+        const gp_Dir pull(neutralPlane.face.normal.x, neutralPlane.face.normal.y,
+                          neutralPlane.face.normal.z);
+        const gp_Pnt on(neutralPlane.face.point.x, neutralPlane.face.point.y,
+                        neutralPlane.face.point.z);
+        const gp_Pln plane(on, pull);
+
+        BRepOffsetAPI_DraftAngle draft(occtShape->shape());
+        for (const FaceQuery& query : faces) {
+            const TopoDS_Face face = FaceForQuery(base, query, why);
+            if (face.IsNull())
+                return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                                   "the draft could not find a face to taper: " + why};
+            draft.Add(face, pull, angleRad, plane);
+            if (!draft.AddDone())
+                return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                                   "OCCT will not taper that face by that angle"};
+        }
+        draft.Build();
+        if (!draft.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not apply that draft"};
+
+        const TopoDS_Shape tapered = draft.Shape();
+        if (tapered.IsNull())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the draft produced no shape"};
+        auto handle = std::make_shared<OcctShape>(tapered);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused the draft: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
+    }
+}
+
+KernelBoundsResult OcctGeometryKernel::boundsOfShape(const KernelShape& shape) {
+    KernelBoundsResult out;
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull()) {
+        out.message = "there is no shape to measure";
+        return out;
+    }
+    try {
+        Bnd_Box box;
+        BRepBndLib::Add(occt->shape(), box);
+        if (box.IsVoid()) {
+            out.message = "that shape has no extent";
+            return out;
+        }
+        Standard_Real xMin = 0, yMin = 0, zMin = 0, xMax = 0, yMax = 0, zMax = 0;
+        box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+        out.ok = true;
+        out.min = Vec3{xMin, yMin, zMin};
+        out.max = Vec3{xMax, yMax, zMax};
+        return out;
+    } catch (const Standard_Failure&) {
+        out.message = "OCCT could not measure that shape";
+        return out;
+    }
 }
 
 ShapeResult OcctGeometryKernel::filletEdges(const KernelShape& shape,

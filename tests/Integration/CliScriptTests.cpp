@@ -5,6 +5,7 @@
 // document, a real solver and a real kernel would be checking it against a stub.
 
 #include "Cli/SketchScript.h"
+#include "Core/Feature/DraftFeature.h"
 #include "Core/Body/Body.h"
 #include "Core/Parameter/Parameter.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
@@ -813,4 +814,106 @@ TEST(CliScriptTest, M19_CLI_005_AnUnknownPlaneIsREFUSEDNotSilentlyWorldXY) {
     const ScriptOutcome outcome = run("sketch Tilted zx\n");
     EXPECT_FALSE(outcome.ok);
     EXPECT_NE(outcome.message.find("xy, xz or yz"), std::string::npos) << outcome.message;
+}
+
+// --- M20: SHELL, DRAFT and HOLE from a script --------------------------------
+
+TEST(CliScriptTest, M20_CLI_001_AShellHollowsThePartToTheThicknessGiven) {
+    // 60 x 60 x 40 with a 5 mm wall and an open top: the cavity is 50 x 50 x 35,
+    // which is arithmetic and not the kernel's answer read back.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Base\ntool rect\nclick -30 -30\nclick 30 30\n"
+            "pad Case 40\nshell Case 5 top\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "volume = 56500 mm^3")) << outcome.message;
+}
+
+TEST(CliScriptTest, M20_CLI_002_PadThenShellDressTheSAMEBody) {
+    // `addBody` always makes a new one, so building a part in two steps left
+    // two bodies both called Case and the second command dressed an empty one.
+    // The volume is what says which happened: a shell of nothing has none.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Base\ntool rect\nclick -30 -30\nclick 30 30\n"
+            "pad Case 40\nshell Case 5 top\nsolve\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_EQ(run.document.bodies().size(), 1u) << "the script made a second body of that name";
+}
+
+TEST(CliScriptTest, M20_CLI_003_AHoleWithNoDepthGoesAllTheWayThrough) {
+    // One 10 mm bore through a 60 x 60 x 20 pad: pi * 25 * 20 of material gone.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Base\ntool rect\nclick -30 -30\nclick 30 30\npad Block 20\n"
+            "sketch Mounts xy 20\ntool point\nclick 0 0\n"
+            "hole Block Mounts 10\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+
+    const double expected = 60.0 * 60.0 * 20.0 - 3.14159265358979323846 * 25.0 * 20.0;
+    bool found = false;
+    for (const ScriptLogEntry& entry : outcome.log) {
+        const std::size_t at = entry.text.find("volume = ");
+        if (at == std::string::npos) continue;
+        found = true;
+        EXPECT_NEAR(std::stod(entry.text.substr(at + 9)), expected, 1e-3) << entry.text;
+    }
+    EXPECT_TRUE(found) << "measure reported no volume";
+}
+
+TEST(CliScriptTest, M20_CLI_004_ADraftIsGivenInDEGREESAndStoredInRadians) {
+    // A drawing says 3 degrees; the feature's unit check demands radians. The
+    // conversion happens once, in the script, and the Parameter that comes out
+    // has to carry the right unit or the feature refuses it.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Base\ntool rect\nclick -30 -30\nclick 30 30\npad Block 40\n"
+            "draft Block 3 bottom facing:+y\nsolve\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+
+    const Parameter* angle = run.document.parameters().findByName("DraftAngle1");
+    ASSERT_NE(angle, nullptr);
+    EXPECT_EQ(angle->unit(), UnitType::Radian);
+    EXPECT_NEAR(angle->value(), 3.0 * 3.14159265358979323846 / 180.0, 1e-12);
+}
+
+TEST(CliScriptTest, M20_CLI_005_AnUnknownFaceWordIsREFUSEDNotGuessed) {
+    // Guessing "top" would open a face nobody asked for, and the part would
+    // come back hollow in the wrong place with nothing to say.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Base\ntool rect\nclick -30 -30\nclick 30 30\npad Case 40\n"
+            "shell Case 5 sideways\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("is not a face"), std::string::npos) << outcome.message;
+}
+
+TEST(CliScriptTest, M20_CLI_006_DressingABodyThatHasNothingInItIsREFUSED) {
+    ScriptRun run;
+    const ScriptOutcome outcome = run("sketch Base\ntool rect\nclick -30 -30\nclick 30 30\n"
+                                      "shell Ghost 5 top\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("no body called"), std::string::npos) << outcome.message;
+}
+
+TEST(CliScriptTest, M20_CLI_007_FACINGAndTHEEXTREMEFaceAreDifferentSentences) {
+    // `+y` is the OUTERMOST face pointing that way; `facing:+y` is EVERY face
+    // pointing that way. On a plain box they name the same one face, so the
+    // difference only shows once a part has a step in it -- but the words have
+    // to mean different things from the start, or a script written with one
+    // will quietly get the other.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Base\ntool rect\nclick -30 -30\nclick 30 30\npad Block 40\n"
+            "draft Block 3 bottom facing:+y\nsolve\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+
+    const Body* body = run.document.bodies().front().get();
+    const auto* draft = dynamic_cast<const DraftFeature*>(body->features().back().get());
+    ASSERT_NE(draft, nullptr);
+    ASSERT_EQ(draft->faces().size(), 1u);
+    // `facing:` sets facing and NOT extremeTowards. Setting both would narrow
+    // to one face on every part, which is the other sentence.
+    EXPECT_TRUE(draft->faces().front().facing.has_value());
+    EXPECT_FALSE(draft->faces().front().extremeTowards.has_value());
 }

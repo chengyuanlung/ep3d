@@ -58,6 +58,17 @@ public:
     ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override {
         return inner_.subtractShape(base, tool);
     }
+    ShapeResult shellSolid(const KernelShape& base, const FaceSelection& openFaces,
+                           double thicknessMm) override {
+        return inner_.shellSolid(base, openFaces, thicknessMm);
+    }
+    ShapeResult draftFaces(const KernelShape& base, const FaceSelection& faces,
+                           const FaceQuery& neutral, double angleRad) override {
+        return inner_.draftFaces(base, faces, neutral, angleRad);
+    }
+    KernelBoundsResult boundsOfShape(const KernelShape& shape) override {
+        return inner_.boundsOfShape(shape);
+    }
     ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
                              const PlanarPathDefinition& path) override {
         return inner_.sweepProfile(profile, path);

@@ -1,4 +1,5 @@
 #include "Kernel/Occt/OcctFaceQuery.h"
+#include "Kernel/Occt/OcctFaceQueryTopology.h"
 
 #include "Kernel/Occt/OcctShape.h"
 
@@ -124,19 +125,26 @@ std::vector<FacePlane> FacesOf(const KernelShape& shape) {
 
 // --- Resolving a face query against real topology (M17.14, ADR-M17-036) -----
 
-FaceQueryResult ResolveFaceQuery(const KernelShape& shape, const FaceQuery& query) {
-    FaceQueryResult result;
+// WHICH ONE, as a position in the face list -- or -1 with the reason.
+//
+// The narrowing lives here and nowhere else. `ResolveFaceQuery` wants the
+// face's GEOMETRY and `FaceForQuery` wants its TOPOLOGY, and those are two
+// questions about the same answer: a second copy of "furthest along, and
+// facing that way, and ties are ambiguous" would be two places to disagree
+// about which face a sentence names.
+//
+// The index is into the order TopExp_Explorer visits faces in, which is also
+// the order FacesOf builds them in. That is an index used as identity, and it
+// is safe for exactly one reason: it never leaves this call. Nothing stores
+// it, nothing writes it to a file, and the shape cannot change while it is in
+// hand.
+int ChooseFace(const std::vector<FacePlane>& faces, const FaceQuery& query,
+               std::string& message) {
     if (query.empty()) {
         // Never "the first face we found". A query that narrows to nothing has
         // no answer, and inventing one puts a sketch on a face nobody chose.
-        result.message = "no face was named";
-        return result;
-    }
-
-    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
-    if (occt == nullptr || occt->shape().IsNull()) {
-        result.message = "there is no solid to find that face on";
-        return result;
+        message = "no face was named";
+        return -1;
     }
 
     constexpr double kFacing = 0.9;   // the cone EdgesOfExtremeFace uses
@@ -144,19 +152,20 @@ FaceQueryResult ResolveFaceQuery(const KernelShape& shape, const FaceQuery& quer
 
     // Narrow by every condition that is set. The order does not matter -- this
     // is a conjunction, and each pass only removes.
-    std::vector<FacePlane> candidates;
-    for (const FacePlane& face : FacesOf(shape)) {
+    std::vector<int> candidates;
+    for (int i = 0; i < static_cast<int>(faces.size()); ++i) {
+        const FacePlane& face = faces[static_cast<std::size_t>(i)];
         if (!face.planar) continue; // a sketch and an edge set both need a plane
         if (query.createdBy.has_value() &&
             face.createdBy != static_cast<std::uint64_t>(*query.createdBy))
             continue;
         if (query.facing.has_value() && Dot(face.normal, *query.facing) < kFacing) continue;
-        candidates.push_back(face);
+        candidates.push_back(i);
     }
 
     if (candidates.empty()) {
-        result.message = "no face on the solid matches " + DescribeFaceQuery(query);
-        return result;
+        message = "no face on the solid matches " + DescribeFaceQuery(query);
+        return -1;
     }
 
     if (query.extremeTowards.has_value()) {
@@ -164,51 +173,84 @@ FaceQueryResult ResolveFaceQuery(const KernelShape& shape, const FaceQuery& quer
         // ExtremeFace already documents: "highest point" alone picks a side
         // wall whose top corner is the highest thing around.
         const Vec3 towards = *query.extremeTowards;
-        const FacePlane* best = nullptr;
+        int best = -1;
         double furthest = 0.0;
-        for (const FacePlane& face : candidates) {
+        for (const int index : candidates) {
+            const FacePlane& face = faces[static_cast<std::size_t>(index)];
             if (Dot(face.normal, towards) < kFacing) continue;
             const double offset = Dot(face.point, towards);
-            if (best != nullptr && offset <= furthest) continue;
-            best = &face;
+            if (best >= 0 && offset <= furthest) continue;
+            best = index;
             furthest = offset;
         }
-        if (best == nullptr) {
-            result.message = "no face faces " + DescribeFaceQuery(query);
-            return result;
+        if (best < 0) {
+            message = "no face faces " + DescribeFaceQuery(query);
+            return -1;
         }
         // Ties are AMBIGUOUS, not resolved by picking one. Two faces at the
         // same offset facing the same way is a symmetric part, and choosing
         // between them arbitrarily would put the answer somewhere the user
         // could not predict and could not correct.
         int atFurthest = 0;
-        for (const FacePlane& face : candidates)
+        for (const int index : candidates) {
+            const FacePlane& face = faces[static_cast<std::size_t>(index)];
             if (Dot(face.normal, towards) >= kFacing &&
                 Dot(face.point, towards) > furthest - kSameMm)
                 ++atFurthest;
-        if (atFurthest > 1) {
-            result.message = DescribeFaceQuery(query) + " matches " +
-                             std::to_string(atFurthest) + " faces at the same distance";
-            return result;
         }
-        result.ok = true;
-        result.face = *best;
-        result.message = DescribeFaceQuery(query);
-        return result;
+        if (atFurthest > 1) {
+            message = DescribeFaceQuery(query) + " matches " + std::to_string(atFurthest) +
+                      " faces at the same distance";
+            return -1;
+        }
+        message = DescribeFaceQuery(query);
+        return best;
     }
 
     if (candidates.size() > 1) {
         // Narrowed, but not to one. Said with the COUNT, because the fix is to
         // add a condition and the user needs to know how far off they are.
-        result.message = DescribeFaceQuery(query) + " matches " +
-                         std::to_string(candidates.size()) + " faces; it needs narrowing";
+        message = DescribeFaceQuery(query) + " matches " + std::to_string(candidates.size()) +
+                  " faces; it needs narrowing";
+        return -1;
+    }
+
+    message = DescribeFaceQuery(query);
+    return candidates.front();
+}
+
+FaceQueryResult ResolveFaceQuery(const KernelShape& shape, const FaceQuery& query) {
+    FaceQueryResult result;
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull()) {
+        result.message = "there is no solid to find that face on";
         return result;
     }
 
+    const std::vector<FacePlane> faces = FacesOf(shape);
+    const int chosen = ChooseFace(faces, query, result.message);
+    if (chosen < 0) return result;
     result.ok = true;
-    result.face = candidates.front();
-    result.message = DescribeFaceQuery(query);
+    result.face = faces[static_cast<std::size_t>(chosen)];
     return result;
+}
+
+TopoDS_Face FaceForQuery(const KernelShape& shape, const FaceQuery& query, std::string& why) {
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull()) {
+        why = "there is no solid to find that face on";
+        return TopoDS_Face();
+    }
+
+    const int chosen = ChooseFace(FacesOf(shape), query, why);
+    if (chosen < 0) return TopoDS_Face();
+
+    // The SAME walk FacesOf made, stopped at the index it chose.
+    int at = 0;
+    for (TopExp_Explorer it(occt->shape(), TopAbs_FACE); it.More(); it.Next(), ++at)
+        if (at == chosen) return TopoDS::Face(it.Current());
+    why = "that face went missing between being chosen and being fetched";
+    return TopoDS_Face();
 }
 
 } // namespace paramcad

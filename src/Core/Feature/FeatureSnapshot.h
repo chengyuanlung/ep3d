@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Kernel/EdgeQuery.h"
 #include "Core/Feature/ComputeState.h"
+#include "Core/Kernel/FaceQuery.h"
 #include <string>
 #include <vector>
 
@@ -72,6 +73,15 @@ struct FeatureSnapshot {
     // pair because a loft takes as many as the user drew -- and because the
     // order is the shape, so nothing may reorder it on the way through.
     std::vector<ObjectId> sectionSketchIds;
+    // Shell / Draft (M20): WHICH faces, as queries -- and for a draft, the one
+    // it pivots on. `sizeParameterId` above carries the thickness or the angle,
+    // the way it already carries a fillet's radius and a chamfer's setback.
+    FaceSelection faceSelection;
+    FaceQuery neutralFace;
+    // Hole (M20): `sketchId` says where and `baseFeatureId` says what to drill;
+    // these two say how big and how deep.
+    ObjectId diameterParameterId = kInvalidObjectId;
+    ObjectId holeDepthParameterId = kInvalidObjectId;
 };
 
 // Reads a feature's semantic fields. Type dispatch is keyed by `typeName()`

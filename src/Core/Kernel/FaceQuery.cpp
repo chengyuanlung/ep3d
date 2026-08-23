@@ -61,4 +61,14 @@ std::string DescribeFaceQuery(const FaceQuery& query) {
     return text;
 }
 
+std::string DescribeFaceSelection(const FaceSelection& selection) {
+    if (selection.empty()) return "no faces";
+    std::string text;
+    for (const FaceQuery& query : selection) {
+        if (!text.empty()) text += ", and ";
+        text += DescribeFaceQuery(query);
+    }
+    return text;
+}
+
 } // namespace paramcad

@@ -26,6 +26,11 @@ public:
     KernelShape tagCreatedFaces(const KernelShape& result, const KernelShape& base,
                                 std::uint64_t tag) override;
 
+    ShapeResult shellSolid(const KernelShape& base, const FaceSelection& openFaces,
+                           double thicknessMm) override;
+    ShapeResult draftFaces(const KernelShape& base, const FaceSelection& faces,
+                           const FaceQuery& neutral, double angleRad) override;
+    KernelBoundsResult boundsOfShape(const KernelShape& shape) override;
     ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
                             double radiusMm) override;
     ShapeResult chamferEdges(const KernelShape& shape, const EdgeSelection& selection,
