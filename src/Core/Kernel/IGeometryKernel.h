@@ -8,6 +8,7 @@
 #include "Core/Kernel/KernelTypes.h"
 #include "Core/Kernel/ProfileDefinition.h"
 #include <string>
+#include <vector>
 
 namespace paramcad {
 
@@ -83,6 +84,36 @@ public:
     // angleRad in (0, 2*pi]; exactly 2*pi is a full solid of revolution.
     // Invalid input -- bad profile, degenerate axis direction, out-of-range
     // angle -- returns a controlled InvalidDimension. Never throws.
+    // SWEEPS the profile along a path (M19).
+    //
+    // The profile and the path arrive on their OWN planes, each already
+    // converted to world by Core through its sketch's frame -- the kernel never
+    // re-derives a frame (ADR-M4-002). They are usually different planes, and
+    // for a sweep to be anything other than an extrusion they had better be.
+    //
+    // The profile is NOT required to sit on the path, or to touch it. What is
+    // swept is the profile's shape; where it starts is where the profile is.
+    // Requiring contact would refuse the ordinary case of drawing the section
+    // on one datum and the spine on another.
+    //
+    // Invalid input -- an empty profile, an empty path, a degenerate plane --
+    // returns a controlled InvalidDimension. A path OCCT cannot sweep along
+    // (one that doubles back inside the profile's own width, say) returns
+    // GeometryConstructionFailed with OCCT's own complaint. Never throws.
+    virtual ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
+                                     const PlanarPathDefinition& path) = 0;
+
+    // LOFTS through two or more profiles, in the order given (M19).
+    //
+    // Order is the caller's, and it is load-bearing: lofting A-B-C and A-C-B
+    // are different solids, and sorting them by anything the kernel could see
+    // -- distance from the origin, plane height -- would be the kernel deciding
+    // what the user meant.
+    //
+    // Each profile must be closed and valid on its own; a loft through fewer
+    // than two is an InvalidDimension, not an extrusion by another name.
+    virtual ShapeResult loftProfiles(const std::vector<PlanarProfileDefinition>& profiles) = 0;
+
     virtual ShapeResult revolveProfile(const PlanarProfileDefinition& profile,
                                        const Vec3& axisOriginMm, const Vec3& axisDirection,
                                        double angleRad) = 0;

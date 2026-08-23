@@ -58,6 +58,14 @@ public:
     ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override {
         return inner_.subtractShape(base, tool);
     }
+    ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
+                             const PlanarPathDefinition& path) override {
+        return inner_.sweepProfile(profile, path);
+    }
+    ShapeResult loftProfiles(const std::vector<PlanarProfileDefinition>& profiles)
+        override {
+        return inner_.loftProfiles(profiles);
+    }
     ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
                                const Vec3& axisDirection, double angleRad) override {
         return inner_.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);

@@ -37,6 +37,22 @@ struct ValidatedProfile {
     std::vector<ProfileLoop> inners;
 };
 
+// A CHAIN to sweep along (M19).
+//
+// The same walk as a profile's boundary, stopped one rule short: a path does
+// not have to come back to where it started. What it must be is ONE chain --
+// every curve in the sketch used, no branches, no second component -- because
+// a sweep follows a single spine and "which of these two chains did you mean"
+// is a question with no defensible default.
+//
+// `closed` is recorded rather than left to be re-derived from the endpoints. A
+// ring and an open chain whose ends happen to be near each other are different
+// intentions, and a tolerance is not the place to guess which was meant.
+struct ValidatedPath {
+    ProfileLoop chain;
+    bool closed{false};
+};
+
 enum class ProfileError {
     None,
     NoEntities,        // nothing that could form a loop
@@ -56,6 +72,24 @@ struct ProfileResult {
     std::string message;
     explicit operator bool() const noexcept { return error == ProfileError::None; }
 };
+
+struct PathResult {
+    ValidatedPath path;
+    ProfileError error = ProfileError::None;
+    std::string message;
+    explicit operator bool() const noexcept { return error == ProfileError::None; }
+};
+
+// Builds and validates the sweep path of `sketch` (M19).
+//
+// Deterministic in the same way BuildProfile is: an open chain is walked from
+// the end whose entity id is lowest, and a closed one from the lowest id
+// outright -- so the same sketch always yields the same spine no matter what
+// order its entities were added in.
+//
+// Construction geometry and Points are skipped, exactly as in a profile: they
+// are in the drawing to be measured from, not to be swept along.
+PathResult BuildPath(const Sketch& sketch);
 
 // Builds and validates the closed outer loop of `sketch` (ADR-M4-005).
 //
@@ -118,5 +152,12 @@ bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
 
 bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
                         PlanarProfileDefinition& out);
+
+// The same translation, for a path (M19). Goes through the ONE translator that
+// turns an oriented entity into a segment, so a reversed arc -- or a reversed
+// spline's handles -- behaves identically whether it is part of a boundary or
+// part of a spine.
+bool BuildKernelPath(const Sketch& sketch, const ValidatedPath& validated,
+                     const SketchFrame& frame, PlanarPathDefinition& out);
 
 } // namespace paramcad

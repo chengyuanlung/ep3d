@@ -151,3 +151,18 @@ because a handle's tip is an ordinary point.
 ```
 ep3d --script examples/spline-handle.ep3ds
 ```
+
+## `sweep-and-loft.ep3ds` (M19)
+
+A bent pipe and a tapered tower, in one script. Both need sketches on
+**different planes** -- which is why `sketch` learned to take one: a section
+swept along a spine drawn on its own plane has no volume at all, and a loft
+between two sections in the same place has nothing to run through.
+
+It ends with a bare `measure`, which reports the mass properties of the solid
+that was built. That is the evidence a script has that a feature produced
+anything; before it, the only signal was that nothing complained.
+
+```
+ep3d --script examples/sweep-and-loft.ep3ds
+```

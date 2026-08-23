@@ -8,7 +8,9 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/RevolveFeature.h"
+#include "Core/Feature/SweepFeature.h"
 #include "Core/Feature/TransformFeatures.h"
 
 #include <string>
@@ -41,6 +43,13 @@ FeatureSnapshot SnapshotFeature(const Feature& feature) {
         snapshot.axisEntityId = ToObjectId(revolve->axisEntityId());
         snapshot.angleParameterId = revolve->angleParameterId();
         snapshot.materialId = revolve->materialId();
+    } else if (const auto* sweep = dynamic_cast<const SweepFeature*>(&feature)) {
+        snapshot.sketchId = sweep->profileSketchId();
+        snapshot.pathSketchId = sweep->pathSketchId();
+        snapshot.materialId = sweep->materialId();
+    } else if (const auto* loft = dynamic_cast<const LoftFeature*>(&feature)) {
+        snapshot.sectionSketchIds = loft->sectionSketchIds();
+        snapshot.materialId = loft->materialId();
     } else if (const auto* dress = dynamic_cast<const EdgeDressFeature*>(&feature)) {
         snapshot.baseFeatureId = dress->baseFeatureId();
         snapshot.sizeParameterId = dress->sizeParameterId();
@@ -96,6 +105,13 @@ Feature& RestoreFeatureFromSnapshot(PartDocument& document, Body& body,
             body, snapshot.id, snapshot.name, snapshot.state, snapshot.sketchId,
             static_cast<SketchEntityId>(snapshot.axisEntityId), snapshot.angleParameterId,
             snapshot.materialId);
+    if (type == "Sweep")
+        return document.restoreSweepFeature(body, snapshot.id, snapshot.name, snapshot.state,
+                                            snapshot.sketchId, snapshot.pathSketchId,
+                                            snapshot.materialId);
+    if (type == "Loft")
+        return document.restoreLoftFeature(body, snapshot.id, snapshot.name, snapshot.state,
+                                           snapshot.sectionSketchIds, snapshot.materialId);
     if (type == "Mirror")
         return document.restoreMirrorFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                              snapshot.baseFeatureId, snapshot.frameId,

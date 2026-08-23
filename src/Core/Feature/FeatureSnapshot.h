@@ -4,6 +4,7 @@
 #include "Core/Kernel/EdgeQuery.h"
 #include "Core/Feature/ComputeState.h"
 #include <string>
+#include <vector>
 
 namespace paramcad {
 
@@ -65,6 +66,12 @@ struct FeatureSnapshot {
     ObjectId frameId = kInvalidObjectId;
     ObjectId countParameterId = kInvalidObjectId;
     ObjectId spacingParameterId = kInvalidObjectId;
+    // Sweep (M19): the section's sketch is `sketchId` above; this is the spine.
+    ObjectId pathSketchId = kInvalidObjectId;
+    // Loft (M19): every section, IN ORDER. A list rather than a first/second
+    // pair because a loft takes as many as the user drew -- and because the
+    // order is the shape, so nothing may reorder it on the way through.
+    std::vector<ObjectId> sectionSketchIds;
 };
 
 // Reads a feature's semantic fields. Type dispatch is keyed by `typeName()`

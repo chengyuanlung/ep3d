@@ -338,6 +338,8 @@ private:
         if (verb == "constrain") return doConstrain(tokens);
         if (verb == "dimension") return doDimension(tokens);
         if (verb == "pad") return doPad(tokens);
+        if (verb == "sweep") return doSweep(tokens);
+        if (verb == "loft") return doLoft(tokens);
         if (verb == "solve") return doSolve();
         if (verb == "save") return doSave(tokens);
         if (verb == "help") {
@@ -347,8 +349,8 @@ private:
             note("tools: " + Join(ScriptToolNames()));
             note("constraints: " + Join(ScriptConstraintNames()));
             note("dimensions: " + Join(ScriptDimensionNames()));
-            note("commands: sketch, tool, click, finish, constrain, dimension, pad, solve, "
-                 "save, measure, handle, echo, help");
+            note("commands: sketch, tool, click, finish, constrain, dimension, pad, sweep, "
+                 "loft, solve, save, measure, handle, echo, help");
             return true;
         }
         if (verb == "handle") {
@@ -405,6 +407,32 @@ private:
             // to check a script built what it meant to is to ask, and until
             // now the only way to ask was to open the file and read numbers
             // out of it by hand.
+            // `measure` ON ITS OWN is the mass properties of the solid this
+            // document's MassPropertiesNode is pointed at (roadmap 50.1).
+            //
+            // That is ONE feature, not the whole document: the node tracks a
+            // single source, rewired to whichever solid feature was added last.
+            // So a document with two bodies reports the second, and saying
+            // "the document's volume" here would be a plausible number about
+            // something else. Per-body and per-selection mass properties are
+            // roadmap 50.1's `適用對象` line and are not done.
+            //
+            // Even so it is the number a script needs: it is the evidence that
+            // a pad, a sweep or a loft actually produced a solid, and without
+            // it the only evidence was that nothing complained.
+            if (tokens.size() == 1) {
+                const MassProperties& mass = document_.massProperties();
+                if (!mass.valid)
+                    return fail("no solid to measure yet: nothing has been built, or its "
+                                "material has no density");
+                note("  (the last solid feature built, not the whole document)");
+                note("  volume = " + FormatNumber(mass.volumeMm3) + " mm^3");
+                note("  mass = " + FormatNumber(mass.massKg) + " kg");
+                note("  centre = " + FormatNumber(mass.centerOfMassMm.x) + ", " +
+                     FormatNumber(mass.centerOfMassMm.y) + ", " +
+                     FormatNumber(mass.centerOfMassMm.z) + " mm");
+                return true;
+            }
             const Sketch* current = sketch();
             if (current == nullptr) return fail("no sketch yet; use `sketch NAME` first");
             std::vector<SketchElementRef> selection;
@@ -444,8 +472,34 @@ private:
     }
 
     bool doSketch(const std::vector<std::string>& tokens) {
-        if (tokens.size() != 2) return fail("sketch needs a name");
-        Sketch& made = document_.addSketch(tokens[1]);
+        // `sketch NAME` | `sketch NAME xz` | `sketch NAME xy 40`
+        //
+        // A PLANE, because M19 needs sketches that are not all on top of each
+        // other: a section swept along a spine drawn on its own plane has no
+        // volume, and a loft between two sections in the same place has nothing
+        // to run through. Until now every script sketch was world XY, which
+        // made both of those impossible to write.
+        if (tokens.size() < 2 || tokens.size() > 4) return fail("sketch needs a name");
+        SketchFrame frame = SketchFrame::WorldXY();
+        if (tokens.size() >= 3) {
+            double offset = 0.0;
+            if (tokens.size() == 4 && !ParseNumber(tokens[3], &offset))
+                return fail("a sketch's offset is a distance in mm along its normal");
+            // u AND the normal; v follows from them, so nothing here chooses a
+            // handedness the rest of the program might choose differently.
+            Vec3 uAxis{1, 0, 0};
+            Vec3 normal{0, 0, 1};
+            if (tokens[2] == "xy") { uAxis = Vec3{1, 0, 0}; normal = Vec3{0, 0, 1}; }
+            else if (tokens[2] == "xz") { uAxis = Vec3{1, 0, 0}; normal = Vec3{0, -1, 0}; }
+            else if (tokens[2] == "yz") { uAxis = Vec3{0, 1, 0}; normal = Vec3{1, 0, 0}; }
+            else return fail("'" + tokens[2] + "' is not a plane; use xy, xz or yz");
+            const Vec3 origin{normal.x * offset, normal.y * offset, normal.z * offset};
+            const std::optional<SketchFrame> placed =
+                SketchFrame::FromBasis(origin, uAxis, normal);
+            if (!placed) return fail("that plane is degenerate");
+            frame = *placed;
+        }
+        Sketch& made = document_.addSketch(tokens[1], frame);
         sketchId_ = made.id();
         names_.clear();
         counts_.clear();
@@ -636,6 +690,50 @@ private:
     }
 
     int padCount_{0};
+
+    // A sketch BY NAME, which is how a script refers to one it made earlier.
+    // Names are the script's own handle on things -- the same way entities get
+    // `Line1` -- so a sweep says which section and which spine in the words the
+    // author already used.
+    const Sketch* sketchNamed(const std::string& name) const {
+        for (const Sketch* one : document_.sketches())
+            if (one->name() == name) return one;
+        return nullptr;
+    }
+
+    bool doSweep(const std::vector<std::string>& tokens) {
+        // sweep BODY PROFILE PATH
+        if (tokens.size() != 4)
+            return fail("sweep needs a body, a profile sketch and a path sketch");
+        const Sketch* profile = sketchNamed(tokens[2]);
+        if (profile == nullptr) return fail("there is no sketch called '" + tokens[2] + "'");
+        const Sketch* path = sketchNamed(tokens[3]);
+        if (path == nullptr) return fail("there is no sketch called '" + tokens[3] + "'");
+        if (profile->id() == path->id())
+            return fail("a sweep needs two different sketches: a section swept along a path on "
+                        "its own plane has no volume");
+        Body& body = document_.addBody(tokens[1]);
+        document_.addSweepFeature(body, tokens[1] + "Sweep", profile->id(), path->id());
+        note("sweep " + tokens[1] + " along " + tokens[3]);
+        return true;
+    }
+
+    bool doLoft(const std::vector<std::string>& tokens) {
+        // loft BODY SECTION SECTION [SECTION...]
+        if (tokens.size() < 4) return fail("loft needs a body and at least two sections");
+        std::vector<ObjectId> sections;
+        for (std::size_t i = 2; i < tokens.size(); ++i) {
+            const Sketch* one = sketchNamed(tokens[i]);
+            if (one == nullptr) return fail("there is no sketch called '" + tokens[i] + "'");
+            // IN THE ORDER THEY WERE TYPED. Nothing sorts them, because the
+            // order is the shape.
+            sections.push_back(one->id());
+        }
+        Body& body = document_.addBody(tokens[1]);
+        document_.addLoftFeature(body, tokens[1] + "Loft", std::move(sections));
+        note("loft " + tokens[1] + " through " + std::to_string(tokens.size() - 2) + " sections");
+        return true;
+    }
 
     bool doSolve() {
         const DocumentRecomputeReport report = document_.recompute();

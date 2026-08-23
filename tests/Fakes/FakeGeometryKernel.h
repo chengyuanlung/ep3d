@@ -275,6 +275,44 @@ public:
         return maxU > minU && maxV > minV;
     }
 
+    // SWEEP and LOFT are REFUSED here rather than modelled (M19).
+    //
+    // The fake exists to let Core's plumbing be tested without OCCT, and it
+    // does that by carrying a narrow ANALYTICAL model of each operation -- a
+    // rectangle revolved about a vertical in-plane axis, and so on. There is no
+    // narrow analytical model of a sweep along an arbitrary spine, and inventing
+    // a plausible-looking volume would let a feature that computes the wrong
+    // solid pass every Core-side test.
+    //
+    // A refusal is the honest fake: it proves the feature reached the kernel
+    // with what it meant to send, and every claim about the SHAPE is made
+    // against real OCCT in the kernel suite.
+    ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
+                             const PlanarPathDefinition& path) override {
+        ++sweepProfileCallCount;
+        if (!IsValidProfileDefinition(profile))
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "invalid profile definition"};
+        if (!IsValidPathDefinition(path))
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "invalid path definition"};
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel does not model sweeps"};
+    }
+
+    ShapeResult loftProfiles(const std::vector<PlanarProfileDefinition>& profiles) override {
+        ++loftProfilesCallCount;
+        if (profiles.size() < 2)
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "a loft needs at least two profiles"};
+        for (const PlanarProfileDefinition& one : profiles)
+            if (!IsValidProfileDefinition(one))
+                return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                                   "invalid profile definition"};
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel does not model lofts"};
+    }
+
     ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
                                const Vec3& axisDirection, double angleRad) override {
         ++revolveProfileCallCount;
@@ -399,6 +437,8 @@ public:
     int calculateMassPropertiesCallCount = 0;
     int subtractShapeCallCount = 0;
     int revolveProfileCallCount = 0;
+    int sweepProfileCallCount = 0;
+    int loftProfilesCallCount = 0;
     int filletCallCount = 0;
     int chamferCallCount = 0;
 

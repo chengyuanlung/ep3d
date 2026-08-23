@@ -758,3 +758,240 @@ TEST(OcctExtrudeTest, M18_KERNEL_004_TheProfileAndTheWireframeAreTheSameCurve) {
     EXPECT_NEAR(drawn.max.y, built.max.y, 1e-9);
     EXPECT_NEAR(drawn.max.x, built.max.x, 1e-9);
 }
+
+// --- M19: SWEEP and LOFT against real OCCT ------------------------------------
+
+namespace {
+
+// A square of `side`, centred on the sketch origin, on the given plane.
+std::vector<ProfileSegment> Square(double side) {
+    const double h = side / 2.0;
+    return {ProfileLineSegment{Vec2{-h, -h}, Vec2{h, -h}},
+            ProfileLineSegment{Vec2{h, -h}, Vec2{h, h}},
+            ProfileLineSegment{Vec2{h, h}, Vec2{-h, h}},
+            ProfileLineSegment{Vec2{-h, h}, Vec2{-h, -h}}};
+}
+
+// The XZ plane through the origin: u = +X, v = +Z, so a path drawn on it runs
+// out of the XY plane a profile sits on.
+ProfilePlane WorldXZ() {
+    ProfilePlane plane;
+    plane.origin = Vec3{0, 0, 0};
+    plane.uAxis = Vec3{1, 0, 0};
+    plane.vAxis = Vec3{0, 0, 1};
+    plane.normal = Vec3{0, -1, 0};
+    return plane;
+}
+
+} // namespace
+
+TEST(OcctExtrudeTest, M19_SWEEP_001_AStraightPathSweepsToAPrism) {
+    // The one sweep whose volume is known without integrating anything: a
+    // 20 mm square carried 100 mm along a straight line is a prism, so its
+    // volume is 20 * 20 * 100 exactly. Anything else -- a curved spine -- has
+    // a volume this test would have to compute the same way the kernel does,
+    // which would check nothing.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition profile;
+    profile.plane = PlaneOf(SketchFrame::WorldXY());
+    profile.segments = Square(20.0);
+
+    PlanarPathDefinition path;
+    path.plane = WorldXZ();
+    // Straight UP out of the profile's plane: (0,0) to (0,100) in XZ is
+    // (0,0,0) to (0,0,100) in world.
+    path.segments = {ProfileLineSegment{Vec2{0, 0}, Vec2{0, 100}}};
+
+    const ShapeResult swept = kernel.sweepProfile(profile, path);
+    ASSERT_TRUE(swept) << swept.message;
+    const KernelMassPropertiesResult properties = kernel.calculateMassProperties(swept.shape);
+    ASSERT_TRUE(properties) << properties.message;
+    ExpectRel(properties.properties.volumeMm3, 20.0 * 20.0 * 100.0, kVolumeRelTol);
+}
+
+TEST(OcctExtrudeTest, M19_SWEEP_002_ASweepWithAHOLEKeepsTheHole) {
+    // A face is swept, not a wire -- which is the whole reason the kernel takes
+    // the profile as a face. Sweeping the outer wire alone would produce a
+    // solid bar and lose the bore, and the volume is what says which happened.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition profile;
+    profile.plane = PlaneOf(SketchFrame::WorldXY());
+    profile.segments = Square(20.0);
+    profile.innerLoops = {Square(8.0)};
+
+    PlanarPathDefinition path;
+    path.plane = WorldXZ();
+    path.segments = {ProfileLineSegment{Vec2{0, 0}, Vec2{0, 50}}};
+
+    const ShapeResult swept = kernel.sweepProfile(profile, path);
+    ASSERT_TRUE(swept) << swept.message;
+    const KernelMassPropertiesResult properties = kernel.calculateMassProperties(swept.shape);
+    ASSERT_TRUE(properties) << properties.message;
+    ExpectRel(properties.properties.volumeMm3, (20.0 * 20.0 - 8.0 * 8.0) * 50.0, kVolumeRelTol);
+}
+
+TEST(OcctExtrudeTest, M19_SWEEP_003_ACurvedPathBendsTheSolidWithoutLosingIt) {
+    // A quarter-circle spine. The exact volume of a swept square round a bend
+    // is not something this test can state without doing the kernel's own work,
+    // so it asserts what CAN be checked independently: the solid exists, it is
+    // heavier than the straight prism of the same arc length would be at the
+    // inner radius and lighter than at the outer, and it REACHES round the
+    // corner -- the bounding box has to be wide in both x and z.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition profile;
+    profile.plane = PlaneOf(SketchFrame::WorldXY());
+    profile.segments = Square(10.0);
+
+    PlanarPathDefinition path;
+    path.plane = WorldXZ();
+    // Centre at (60, 0) in XZ, radius 60, walked CLOCKWISE from angle pi to
+    // pi/2 -- so the spine leaves the origin going straight UP and arrives at
+    // (60, 60) going along +u.
+    //
+    // The direction it LEAVES BY is the point of that arithmetic: a section
+    // must not be swept along a direction lying in its own plane. Get it wrong
+    // and OCCT returns a surface with no volume, which the kernel now refuses
+    // rather than passing on as a solid that weighs nothing.
+    path.segments = {ProfileArcSegment{Vec2{60, 0}, 60.0, kPi, kPi / 2.0, false}};
+
+    const ShapeResult swept = kernel.sweepProfile(profile, path);
+    ASSERT_TRUE(swept) << swept.message;
+    const KernelMassPropertiesResult properties = kernel.calculateMassProperties(swept.shape);
+    ASSERT_TRUE(properties) << properties.message;
+
+    // PAPPUS, exactly: the volume of a solid of revolution-by-sweeping is the
+    // section's area times the distance its CENTROID travels. The section is
+    // centred on the spine, so its centroid rides the spine itself and that
+    // distance is the arc length.
+    //
+    // An independent formula, not the kernel's own arithmetic -- which is what
+    // makes this a check rather than a restatement.
+    const double arcLength = 60.0 * kPi / 2.0;
+    const double area = 10.0 * 10.0;
+    ExpectRel(properties.properties.volumeMm3, area * arcLength, 1e-6);
+
+    const KernelBounds bounds = BoundsOf(swept.shape);
+    ASSERT_TRUE(bounds.ok);
+    EXPECT_GT(bounds.max.x - bounds.min.x, 50.0) << "the sweep never turned the corner";
+    EXPECT_GT(bounds.max.z - bounds.min.z, 50.0) << "the sweep never left its own plane";
+}
+
+TEST(OcctExtrudeTest, M19_SWEEP_004_AnEmptyPathIsREFUSEDNotSweptToNothing) {
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition profile;
+    profile.plane = PlaneOf(SketchFrame::WorldXY());
+    profile.segments = Square(20.0);
+
+    const ShapeResult swept = kernel.sweepProfile(profile, PlanarPathDefinition{});
+    EXPECT_FALSE(swept);
+    EXPECT_EQ(swept.error, KernelError::InvalidDimension);
+}
+
+TEST(OcctExtrudeTest, M19_LOFT_001_TwoEqualSquaresLoftToAPrism) {
+    // Again the one case with an arithmetic answer: two identical sections
+    // 40 mm apart make a prism, so the volume is side * side * gap exactly.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition bottom;
+    bottom.plane = PlaneOf(SketchFrame::WorldXY());
+    bottom.segments = Square(20.0);
+
+    PlanarProfileDefinition top = bottom;
+    top.plane.origin = Vec3{0, 0, 40};
+
+    const ShapeResult lofted = kernel.loftProfiles({bottom, top});
+    ASSERT_TRUE(lofted) << lofted.message;
+    const KernelMassPropertiesResult properties = kernel.calculateMassProperties(lofted.shape);
+    ASSERT_TRUE(properties) << properties.message;
+    ExpectRel(properties.properties.volumeMm3, 20.0 * 20.0 * 40.0, kVolumeRelTol);
+}
+
+TEST(OcctExtrudeTest, M19_LOFT_002_ATaperedLoftIsAFrustumAndTheFormulaSaysSo) {
+    // A square 20 running to a square 10 over 30 mm is a frustum, and a
+    // frustum's volume is h/3 * (A1 + A2 + sqrt(A1*A2)) -- an independent
+    // formula, not something the kernel computed.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition bottom;
+    bottom.plane = PlaneOf(SketchFrame::WorldXY());
+    bottom.segments = Square(20.0);
+
+    PlanarProfileDefinition top;
+    top.plane = PlaneOf(SketchFrame::WorldXY());
+    top.plane.origin = Vec3{0, 0, 30};
+    top.segments = Square(10.0);
+
+    const ShapeResult lofted = kernel.loftProfiles({bottom, top});
+    ASSERT_TRUE(lofted) << lofted.message;
+    const KernelMassPropertiesResult properties = kernel.calculateMassProperties(lofted.shape);
+    ASSERT_TRUE(properties) << properties.message;
+
+    const double a1 = 400.0;
+    const double a2 = 100.0;
+    const double expected = 30.0 / 3.0 * (a1 + a2 + std::sqrt(a1 * a2));
+    ExpectRel(properties.properties.volumeMm3, expected, 1e-6);
+}
+
+TEST(OcctExtrudeTest, M19_LOFT_003_ASingleProfileIsREFUSED) {
+    // A loft through one section has no second section to run to. Answering
+    // with an extrusion of some invented depth would be the kernel deciding
+    // what the user meant.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition only;
+    only.plane = PlaneOf(SketchFrame::WorldXY());
+    only.segments = Square(20.0);
+
+    const ShapeResult lofted = kernel.loftProfiles({only});
+    EXPECT_FALSE(lofted);
+    EXPECT_EQ(lofted.error, KernelError::InvalidDimension);
+}
+
+TEST(OcctExtrudeTest, M19_LOFT_004_AHoleInASectionIsREFUSEDRatherThanDropped) {
+    // ThruSections runs through WIRES, so an inner loop has nowhere to go: it
+    // would be silently ignored and the loft would come back solid where the
+    // user drew a bore. Said, not dropped.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition bottom;
+    bottom.plane = PlaneOf(SketchFrame::WorldXY());
+    bottom.segments = Square(20.0);
+    bottom.innerLoops = {Square(8.0)};
+
+    PlanarProfileDefinition top = bottom;
+    top.plane.origin = Vec3{0, 0, 40};
+
+    const ShapeResult lofted = kernel.loftProfiles({bottom, top});
+    EXPECT_FALSE(lofted);
+    EXPECT_NE(lofted.message.find("holes"), std::string::npos) << lofted.message;
+}
+
+TEST(OcctExtrudeTest, M19_LOFT_005_TheORDEROfTheSectionsIsTheCallersAndItMatters) {
+    // Lofting A-B-C and A-C-B are different solids. The kernel must not sort
+    // them by anything it can see -- plane height, distance from the origin --
+    // because that would be the kernel deciding what the user meant.
+    //
+    // Three sections, with the middle one offset sideways: run through in the
+    // drawn order the solid leans; run through with the last two swapped it
+    // leans the other way, and the two bounding boxes differ.
+    OcctGeometryKernel kernel;
+    const auto sectionAt = [](Vec3 origin, double side) {
+        PlanarProfileDefinition one;
+        one.plane = PlaneOf(SketchFrame::WorldXY());
+        one.plane.origin = origin;
+        one.segments = Square(side);
+        return one;
+    };
+    const PlanarProfileDefinition a = sectionAt(Vec3{0, 0, 0}, 20.0);
+    const PlanarProfileDefinition b = sectionAt(Vec3{40, 0, 20}, 20.0);
+    const PlanarProfileDefinition c = sectionAt(Vec3{0, 0, 40}, 20.0);
+
+    const ShapeResult drawn = kernel.loftProfiles({a, b, c});
+    ASSERT_TRUE(drawn) << drawn.message;
+    const ShapeResult swapped = kernel.loftProfiles({a, c, b});
+    ASSERT_TRUE(swapped) << swapped.message;
+
+    const KernelMassPropertiesResult first = kernel.calculateMassProperties(drawn.shape);
+    const KernelMassPropertiesResult second = kernel.calculateMassProperties(swapped.shape);
+    ASSERT_TRUE(first) << first.message;
+    ASSERT_TRUE(second) << second.message;
+    // Two different solids, so two different volumes. A kernel that sorted the
+    // sections would return the same number twice.
+    EXPECT_GT(std::fabs(first.properties.volumeMm3 - second.properties.volumeMm3), 1.0);
+}

@@ -493,3 +493,169 @@ TEST(ProfileTest, M18_PRO_001_AReversedSplineTurnsItsHandlesROUNDAndRenumbersThe
     EXPECT_DOUBLE_EQ(segment->handles.at(2).x, -10.0);
     EXPECT_DOUBLE_EQ(segment->handles.at(2).y, -25.0);
 }
+
+// --- M19: the sweep PATH walk -------------------------------------------------
+//
+// A path is a profile's walk with one rule dropped: it need not come back to
+// where it started. Everything else it keeps, and these say so -- because the
+// rules it keeps are the ones that stop a sweep guessing which of several
+// spines the user meant.
+
+TEST(ProfileTest, M19_PATH_001_AChainOfCurvesIsAPathInOrder) {
+    Sketch sketch{"Sketch001"};
+    const SketchEntityId first = sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+    const SketchEntityId second = sketch.addLine(Vec2{50, 0}, Vec2{50, 40});
+
+    const PathResult path = BuildPath(sketch);
+    ASSERT_TRUE(path) << path.message;
+    EXPECT_FALSE(path.path.closed);
+    ASSERT_EQ(path.path.chain.entities.size(), 2u);
+    EXPECT_EQ(path.path.chain.entities[0].entityId, first);
+    EXPECT_EQ(path.path.chain.entities[1].entityId, second);
+}
+
+TEST(ProfileTest, M19_PATH_002_ARINGIsAClosedPath) {
+    // A pipe round a ring is an ordinary thing to want, so a closed chain is a
+    // path -- and it says it is closed rather than leaving the caller to
+    // compare its two ends against a tolerance.
+    Sketch sketch{"Sketch001"};
+    sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+    sketch.addLine(Vec2{50, 0}, Vec2{50, 50});
+    sketch.addLine(Vec2{50, 50}, Vec2{0, 50});
+    sketch.addLine(Vec2{0, 50}, Vec2{0, 0});
+
+    const PathResult path = BuildPath(sketch);
+    ASSERT_TRUE(path) << path.message;
+    EXPECT_TRUE(path.path.closed);
+    EXPECT_EQ(path.path.chain.entities.size(), 4u);
+}
+
+TEST(ProfileTest, M19_PATH_003_ACIRCLEIsAWholePathAndCannotBeChainedTo) {
+    Sketch sketch{"Sketch001"};
+    sketch.addCircle(Vec2{0, 0}, 40.0);
+
+    const PathResult alone = BuildPath(sketch);
+    ASSERT_TRUE(alone) << alone.message;
+    EXPECT_TRUE(alone.path.closed);
+
+    sketch.addLine(Vec2{100, 0}, Vec2{150, 0});
+    const PathResult mixed = BuildPath(sketch);
+    EXPECT_FALSE(mixed);
+    EXPECT_EQ(mixed.error, ProfileError::NotChainable);
+}
+
+TEST(ProfileTest, M19_PATH_004_ABRANCHIsREFUSED) {
+    // Three curves meeting at a point: there are several spines here and
+    // picking one would be a guess about what the user drew. A sweep that
+    // guessed would follow a path the drawing does not contain.
+    Sketch sketch{"Sketch001"};
+    sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+    sketch.addLine(Vec2{50, 0}, Vec2{50, 40});
+    sketch.addLine(Vec2{50, 0}, Vec2{100, 0});
+
+    const PathResult path = BuildPath(sketch);
+    EXPECT_FALSE(path);
+    EXPECT_EQ(path.error, ProfileError::Branch);
+}
+
+TEST(ProfileTest, M19_PATH_005_TWOSEPARATEOpenChainsAreREFUSEDByTheirENDCOUNT) {
+    // Two chains, so FOUR ends. A path has two or none, and saying which is
+    // wrong -- and how many there are -- is more use than "disconnected".
+    Sketch sketch{"Sketch001"};
+    sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+    sketch.addLine(Vec2{200, 0}, Vec2{250, 0});
+
+    const PathResult path = BuildPath(sketch);
+    EXPECT_FALSE(path);
+    EXPECT_EQ(path.error, ProfileError::OpenLoop);
+    EXPECT_NE(path.message.find("has 4"), std::string::npos) << path.message;
+}
+
+TEST(ProfileTest, M19_PATH_005b_TWOSEPARATERingsAreREFUSEDByTheWALK) {
+    // The case the end count CANNOT see: two closed loops have no ends at all,
+    // so every junction has degree two and the incidence check is satisfied.
+    // Only running out of curves mid-walk notices -- and answering with
+    // whichever ring the walk happened to start in would sweep along half the
+    // drawing while looking like a success.
+    Sketch sketch{"Sketch001"};
+    sketch.addCircle(Vec2{0, 0}, 30.0);
+    sketch.addLine(Vec2{100, 0}, Vec2{150, 0});
+    sketch.addLine(Vec2{150, 0}, Vec2{150, 50});
+    sketch.addLine(Vec2{150, 50}, Vec2{100, 50});
+    sketch.addLine(Vec2{100, 50}, Vec2{100, 0});
+
+    const PathResult mixed = BuildPath(sketch);
+    EXPECT_FALSE(mixed) << "a circle beside a closed chain is two paths, not one";
+
+    Sketch rings{"Sketch002"};
+    rings.addLine(Vec2{0, 0}, Vec2{50, 0});
+    rings.addLine(Vec2{50, 0}, Vec2{50, 50});
+    rings.addLine(Vec2{50, 50}, Vec2{0, 50});
+    rings.addLine(Vec2{0, 50}, Vec2{0, 0});
+    rings.addLine(Vec2{200, 0}, Vec2{250, 0});
+    rings.addLine(Vec2{250, 0}, Vec2{250, 50});
+    rings.addLine(Vec2{250, 50}, Vec2{200, 50});
+    rings.addLine(Vec2{200, 50}, Vec2{200, 0});
+
+    const PathResult twoRings = BuildPath(rings);
+    EXPECT_FALSE(twoRings);
+    EXPECT_EQ(twoRings.error, ProfileError::Disconnected);
+    EXPECT_NE(twoRings.message.find("more than one chain"), std::string::npos)
+        << twoRings.message;
+}
+
+TEST(ProfileTest, M19_PATH_006_CONSTRUCTIONGeometryIsNotPartOfThePath) {
+    // The same rule a profile follows: construction geometry is in the drawing
+    // to be measured from, not to be swept along. Without this, a centreline
+    // beside the spine would read as a branch and refuse the whole sweep.
+    Sketch sketch{"Sketch001"};
+    sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+    const SketchEntityId note = sketch.addLine(Vec2{0, 20}, Vec2{50, 20});
+    ASSERT_TRUE(sketch.setEntityConstruction(note, true));
+
+    const PathResult path = BuildPath(sketch);
+    ASSERT_TRUE(path) << path.message;
+    EXPECT_EQ(path.path.chain.entities.size(), 1u);
+}
+
+TEST(ProfileTest, M19_PATH_007_TheWalkIsTHESAMEWhateverOrderTheCurvesWereAddedIn) {
+    // Determinism, the same promise BuildProfile makes: traversal starts from
+    // the lowest entity id, so the spine does not depend on the order entities
+    // were drawn, removed or restored in.
+    const auto walk = [](bool reversed) {
+        Sketch sketch{"Sketch001"};
+        if (reversed) {
+            sketch.addLine(Vec2{50, 0}, Vec2{50, 40});
+            sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+        } else {
+            sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+            sketch.addLine(Vec2{50, 0}, Vec2{50, 40});
+        }
+        const PathResult path = BuildPath(sketch);
+        EXPECT_TRUE(path) << path.message;
+        std::vector<Vec2> ends;
+        for (const OrientedSketchEntityRef& ref : path.path.chain.entities) {
+            const SketchEntity* entity = sketch.findEntity(ref.entityId);
+            EXPECT_NE(entity, nullptr);
+            ends.push_back(ref.reversed ? StartPointOf(entity->geometry)
+                                        : EndPointOf(entity->geometry));
+        }
+        return ends;
+    };
+
+    const std::vector<Vec2> forward = walk(false);
+    const std::vector<Vec2> backward = walk(true);
+    ASSERT_EQ(forward.size(), 2u);
+    ASSERT_EQ(backward.size(), 2u);
+    // THE SAME SPINE, RUNNING THE SAME WAY.
+    //
+    // Not merely the same set of curves: a sweep places its section at the
+    // spine's START, so a spine that ran the other way would build a different
+    // solid from the same drawing. Started from whichever end the walk met
+    // first, that is exactly what happened -- the direction followed the order
+    // the lines were drawn in.
+    for (std::size_t i = 0; i < forward.size(); ++i)
+        EXPECT_NEAR(std::hypot(forward[i].x - backward[i].x, forward[i].y - backward[i].y), 0.0,
+                    1e-9)
+            << "step " << i;
+}

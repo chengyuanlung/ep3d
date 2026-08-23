@@ -93,6 +93,86 @@ bool SegmentsProperlyIntersect(Vec2 p1, Vec2 p2, Vec2 q1, Vec2 q2) noexcept {
            onSegment(q1, q2, p2);
 }
 
+// ONE translator for every chain. A profile's outer boundary, one of its
+// holes, and a sweep's spine differ in what they MEAN, not in how a curve
+// becomes a segment -- and a second copy of the arc-reversal rule (or, since
+// M18, the spline-handle-negation rule) would be a second place to disagree
+// about it, which is a geometry bug that reads as a solver bug.
+//
+// Promoted out of BuildKernelProfile when M19 needed the same translation for a
+// path. Copying it would have been the smaller edit and the larger mistake.
+bool TranslateChain(const Sketch& sketch, const ProfileLoop& loop,
+                    std::vector<ProfileSegment>& segments) {
+    segments.reserve(loop.entities.size());
+    for (const OrientedSketchEntityRef& ref : loop.entities) {
+        const SketchEntity* entity = sketch.findEntity(ref.entityId);
+        if (entity == nullptr) return false;
+
+        if (const auto* line = std::get_if<SketchLine>(&entity->geometry)) {
+            segments.push_back(ref.reversed
+                                   ? ProfileLineSegment{line->end, line->start}
+                                   : ProfileLineSegment{line->start, line->end});
+        } else if (const auto* arc = std::get_if<SketchArc>(&entity->geometry)) {
+            // Reversing an arc swaps its endpoints AND its direction, so
+            // the traversal still runs start-to-end along the same curve.
+            segments.push_back(
+                ref.reversed
+                    ? ProfileArcSegment{arc->center, arc->radiusMm, arc->endAngleRad,
+                                        arc->startAngleRad, !arc->counterClockwise}
+                    : ProfileArcSegment{arc->center, arc->radiusMm, arc->startAngleRad,
+                                        arc->endAngleRad, arc->counterClockwise});
+        } else if (const auto* piece =
+                       std::get_if<SketchEllipticalArc>(&entity->geometry)) {
+            // Reversed the same way an arc is: swap the two parameters AND
+            // the direction, so the traversal still runs start-to-end along
+            // the same curve.
+            segments.push_back(
+                ref.reversed
+                    ? ProfileEllipticalArcSegment{
+                          piece->center, piece->majorRadiusMm, piece->minorRadiusMm,
+                          piece->rotationRad, piece->endParamRad, piece->startParamRad,
+                          !piece->counterClockwise}
+                    : ProfileEllipticalArcSegment{
+                          piece->center, piece->majorRadiusMm, piece->minorRadiusMm,
+                          piece->rotationRad, piece->startParamRad, piece->endParamRad,
+                          piece->counterClockwise});
+        } else if (const auto* circle = std::get_if<SketchCircle>(&entity->geometry)) {
+            segments.push_back(ProfileCircleSegment{circle->center, circle->radiusMm});
+        } else if (const auto* full = std::get_if<SketchEllipse>(&entity->geometry)) {
+            segments.push_back(ProfileEllipseSegment{full->center, full->majorRadiusMm,
+                                                     full->minorRadiusMm,
+                                                     full->rotationRad});
+        } else if (const auto* spline = std::get_if<SketchSpline>(&entity->geometry)) {
+            // REVERSED BY REVERSING THE POINTS, which is all a spline's
+            // direction is -- there is no sweep flag to flip and no angles
+            // to swap. The curve through a reversed list is the same curve
+            // traversed the other way.
+            std::vector<Vec2> points = spline->points;
+            std::map<int, Vec2> handles = spline->handles;
+            if (ref.reversed) {
+                std::reverse(points.begin(), points.end());
+                // A HANDLE REVERSES TWICE: point i becomes point n-1-i, and
+                // its tangent turns round, because the direction the curve
+                // LEAVES a point going one way is the direction it ARRIVES
+                // going the other. Renumbering without negating would give
+                // the reversed profile a curve that bulges the wrong way at
+                // every handled point -- the same shape flipped, which is
+                // not the same shape.
+                const int last = static_cast<int>(points.size()) - 1;
+                std::map<int, Vec2> flipped;
+                for (const auto& [index, tangent] : handles)
+                    flipped.emplace(last - index, Vec2{-tangent.x, -tangent.y});
+                handles = std::move(flipped);
+            }
+            segments.push_back(
+                ProfileSplineSegment{std::move(points), spline->closed, std::move(handles)});
+        } else {
+            return false; // a Point can never be a loop member
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 ProfileResult BuildProfile(const Sketch& sketch) {
@@ -473,88 +553,175 @@ bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
     out.segments.clear();
     out.innerLoops.clear();
 
-    // ONE translator for every loop. The outer boundary and a hole differ in
-    // what they mean, not in how a curve becomes a segment -- and two copies of
-    // the arc-reversal rule would be two places to disagree about it, which is
-    // a geometry bug that reads as a solver bug.
-    const auto translate = [&](const ProfileLoop& loop,
-                               std::vector<ProfileSegment>& segments) -> bool {
-        segments.reserve(loop.entities.size());
-        for (const OrientedSketchEntityRef& ref : loop.entities) {
-            const SketchEntity* entity = sketch.findEntity(ref.entityId);
-            if (entity == nullptr) return false;
-
-            if (const auto* line = std::get_if<SketchLine>(&entity->geometry)) {
-                segments.push_back(ref.reversed
-                                       ? ProfileLineSegment{line->end, line->start}
-                                       : ProfileLineSegment{line->start, line->end});
-            } else if (const auto* arc = std::get_if<SketchArc>(&entity->geometry)) {
-                // Reversing an arc swaps its endpoints AND its direction, so
-                // the traversal still runs start-to-end along the same curve.
-                segments.push_back(
-                    ref.reversed
-                        ? ProfileArcSegment{arc->center, arc->radiusMm, arc->endAngleRad,
-                                            arc->startAngleRad, !arc->counterClockwise}
-                        : ProfileArcSegment{arc->center, arc->radiusMm, arc->startAngleRad,
-                                            arc->endAngleRad, arc->counterClockwise});
-            } else if (const auto* piece =
-                           std::get_if<SketchEllipticalArc>(&entity->geometry)) {
-                // Reversed the same way an arc is: swap the two parameters AND
-                // the direction, so the traversal still runs start-to-end along
-                // the same curve.
-                segments.push_back(
-                    ref.reversed
-                        ? ProfileEllipticalArcSegment{
-                              piece->center, piece->majorRadiusMm, piece->minorRadiusMm,
-                              piece->rotationRad, piece->endParamRad, piece->startParamRad,
-                              !piece->counterClockwise}
-                        : ProfileEllipticalArcSegment{
-                              piece->center, piece->majorRadiusMm, piece->minorRadiusMm,
-                              piece->rotationRad, piece->startParamRad, piece->endParamRad,
-                              piece->counterClockwise});
-            } else if (const auto* circle = std::get_if<SketchCircle>(&entity->geometry)) {
-                segments.push_back(ProfileCircleSegment{circle->center, circle->radiusMm});
-            } else if (const auto* full = std::get_if<SketchEllipse>(&entity->geometry)) {
-                segments.push_back(ProfileEllipseSegment{full->center, full->majorRadiusMm,
-                                                         full->minorRadiusMm,
-                                                         full->rotationRad});
-            } else if (const auto* spline = std::get_if<SketchSpline>(&entity->geometry)) {
-                // REVERSED BY REVERSING THE POINTS, which is all a spline's
-                // direction is -- there is no sweep flag to flip and no angles
-                // to swap. The curve through a reversed list is the same curve
-                // traversed the other way.
-                std::vector<Vec2> points = spline->points;
-                std::map<int, Vec2> handles = spline->handles;
-                if (ref.reversed) {
-                    std::reverse(points.begin(), points.end());
-                    // A HANDLE REVERSES TWICE: point i becomes point n-1-i, and
-                    // its tangent turns round, because the direction the curve
-                    // LEAVES a point going one way is the direction it ARRIVES
-                    // going the other. Renumbering without negating would give
-                    // the reversed profile a curve that bulges the wrong way at
-                    // every handled point -- the same shape flipped, which is
-                    // not the same shape.
-                    const int last = static_cast<int>(points.size()) - 1;
-                    std::map<int, Vec2> flipped;
-                    for (const auto& [index, tangent] : handles)
-                        flipped.emplace(last - index, Vec2{-tangent.x, -tangent.y});
-                    handles = std::move(flipped);
-                }
-                segments.push_back(
-                    ProfileSplineSegment{std::move(points), spline->closed, std::move(handles)});
-            } else {
-                return false; // a Point can never be a loop member
-            }
-        }
-        return true;
-    };
-
-    if (!translate(validated.outer, out.segments)) return false;
+    if (!TranslateChain(sketch, validated.outer, out.segments)) return false;
     for (const ProfileLoop& inner : validated.inners) {
         out.innerLoops.emplace_back();
-        if (!translate(inner, out.innerLoops.back())) return false;
+        if (!TranslateChain(sketch, inner, out.innerLoops.back())) return false;
     }
     return true;
+}
+
+PathResult BuildPath(const Sketch& sketch) {
+    const auto refuse = [](ProfileError error, std::string message) {
+        return PathResult{ValidatedPath{}, error, std::move(message)};
+    };
+
+    // 1. The same partition a profile makes. Points and construction geometry
+    //    are in the drawing to be measured from, not to be swept along.
+    std::vector<Curve> curves;
+    std::vector<SketchEntityId> closedCurves;
+    for (const SketchEntity& entity : sketch.entities()) {
+        if (std::holds_alternative<SketchPoint>(entity.geometry)) continue;
+        if (entity.construction) continue;
+        if (!IsValidSketchGeometry(entity.geometry))
+            return refuse(ProfileError::InvalidGeometry,
+                          "entity " + IdText(entity.id) + " has invalid geometry");
+        if (!HasEndpoints(entity.geometry)) {
+            closedCurves.push_back(entity.id);
+            continue;
+        }
+        curves.push_back(Curve{entity.id, StartPointOf(entity.geometry),
+                               EndPointOf(entity.geometry), false});
+    }
+
+    // 2. A closed curve IS a path -- a pipe round a ring is an ordinary thing
+    //    to want -- but it is a whole one, so nothing may be chained to it.
+    if (!closedCurves.empty()) {
+        if (closedCurves.size() > 1 || !curves.empty())
+            return refuse(ProfileError::NotChainable,
+                          "a closed curve is a complete path on its own and cannot be "
+                          "chained with anything else");
+        ValidatedPath only;
+        only.chain.entities.push_back(OrientedSketchEntityRef{closedCurves.front(), false});
+        only.closed = true;
+        return PathResult{std::move(only), ProfileError::None, {}};
+    }
+    if (curves.empty())
+        return refuse(ProfileError::NoEntities, "sketch contains no curves to form a path");
+
+    std::sort(curves.begin(), curves.end(),
+              [](const Curve& a, const Curve& b) { return ToObjectId(a.id) < ToObjectId(b.id); });
+
+    // 3. Duplicates, by the same whole-curve comparison a profile uses: two
+    //    entities lying on top of each other make the spine ambiguous.
+    for (std::size_t i = 0; i < curves.size(); ++i) {
+        for (std::size_t j = i + 1; j < curves.size(); ++j) {
+            const SketchEntity* first = sketch.findEntity(curves[i].id);
+            const SketchEntity* second = sketch.findEntity(curves[j].id);
+            if (first == nullptr || second == nullptr) continue;
+            if (!IsSameCurve(first->geometry, second->geometry, kProfileConnectivityToleranceMm))
+                continue;
+            return refuse(ProfileError::DuplicateEntity,
+                          "entities " + IdText(curves[i].id) + " and " + IdText(curves[j].id) +
+                              " describe the same curve");
+        }
+    }
+
+    // 4. Incidence -- and THIS is where a path stops being a profile.
+    //
+    //    A loop needs every junction to join exactly two ends. A path allows
+    //    exactly TWO junctions of degree one: its two ends. Anything else is
+    //    still refused, because a branch means there are several spines and
+    //    picking one would be a guess about what the user drew.
+    std::vector<Junction> junctions;
+    for (const Curve& curve : curves) {
+        ++junctions[JunctionIndexFor(junctions, curve.start)].incidence;
+        ++junctions[JunctionIndexFor(junctions, curve.end)].incidence;
+    }
+    int ends = 0;
+    Vec2 firstEnd{};
+    for (const Junction& junction : junctions) {
+        if (junction.incidence == 2) continue;
+        if (junction.incidence > 2)
+            return refuse(ProfileError::Branch,
+                          "path branches: an endpoint near (" +
+                              std::to_string(junction.position.x) + ", " +
+                              std::to_string(junction.position.y) + ") is used by " +
+                              std::to_string(junction.incidence) + " curve ends");
+        // WHICH END TO START FROM, decided by POSITION rather than by which
+        // junction was met first.
+        //
+        // Met-first depends on the order the curves were sorted in, which is
+        // the order of their ids -- so the same drawing produced a spine
+        // running one way or the other depending on which line the user
+        // happened to draw first. A sweep places its section at the spine's
+        // START, so that is not a cosmetic difference: a section that is not
+        // centred on the spine builds a different solid.
+        //
+        // Lexicographic on (u, v) is arbitrary but it is a property of the
+        // DRAWING, and that is the whole difference.
+        if (ends == 0 || junction.position.x < firstEnd.x ||
+            (junction.position.x == firstEnd.x && junction.position.y < firstEnd.y))
+            firstEnd = junction.position;
+        ++ends;
+    }
+    if (ends != 0 && ends != 2)
+        return refuse(ProfileError::OpenLoop,
+                      "a path has two ends or none; this one has " + std::to_string(ends));
+
+    // 5. Walk it. From the lower-id curve at an END for an open path, and from
+    //    the lowest id outright for a closed one -- so the answer does not
+    //    depend on the order entities were added in.
+    ValidatedPath out;
+    out.closed = ends == 0;
+    Curve* seed = nullptr;
+    bool seedReversed = false;
+    for (Curve& candidate : curves) {
+        if (out.closed) {
+            seed = &candidate;
+            break;
+        }
+        if (SamePoint(candidate.start, firstEnd, kProfileConnectivityToleranceMm)) {
+            seed = &candidate;
+            seedReversed = false;
+            break;
+        }
+        if (SamePoint(candidate.end, firstEnd, kProfileConnectivityToleranceMm)) {
+            seed = &candidate;
+            seedReversed = true;
+            break;
+        }
+    }
+    if (seed == nullptr) return refuse(ProfileError::NotChainable, "path has no starting curve");
+
+    seed->used = true;
+    out.chain.entities.push_back(OrientedSketchEntityRef{seed->id, seedReversed});
+    Vec2 cursor = seedReversed ? seed->start : seed->end;
+    std::size_t used = 1;
+    while (used < curves.size()) {
+        bool advanced = false;
+        for (Curve& candidate : curves) {
+            if (candidate.used) continue;
+            const bool forward =
+                SamePoint(candidate.start, cursor, kProfileConnectivityToleranceMm);
+            const bool backward =
+                SamePoint(candidate.end, cursor, kProfileConnectivityToleranceMm);
+            if (!forward && !backward) continue;
+            candidate.used = true;
+            ++used;
+            out.chain.entities.push_back(OrientedSketchEntityRef{candidate.id, backward});
+            cursor = forward ? candidate.end : candidate.start;
+            advanced = true;
+            break;
+        }
+        // EVERY CURVE, or none of them. Incidence above proved there are no
+        // branches and at most two ends, so a walk that runs out early means
+        // the sketch holds a SECOND, separate chain -- and "which of these did
+        // you mean" has no defensible default.
+        if (!advanced)
+            return refuse(ProfileError::Disconnected,
+                          "the sketch holds more than one chain; a sweep follows one spine");
+    }
+
+    return PathResult{std::move(out), ProfileError::None, {}};
+}
+
+bool BuildKernelPath(const Sketch& sketch, const ValidatedPath& validated,
+                     const SketchFrame& frame, PlanarPathDefinition& out) {
+    out.plane = PlaneOfSketchFrame(frame);
+    out.segments.clear();
+    out.closed = validated.closed;
+    return TranslateChain(sketch, validated.chain, out.segments);
 }
 
 } // namespace paramcad

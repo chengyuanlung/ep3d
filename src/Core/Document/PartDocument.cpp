@@ -10,7 +10,9 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/RevolveFeature.h"
+#include "Core/Feature/SweepFeature.h"
 #include "Core/Feature/EdgeDressFeatures.h"
 #include "Core/Recompute/IRecomputable.h"
 #include "Core/Sketch/SketchSolveSession.h"
@@ -2436,6 +2438,70 @@ PocketFeature& PartDocument::restorePocketFeature(Body& body, ObjectId id, std::
     return feature;
 }
 
+
+void PartDocument::wireSweepFeature(SweepFeature& feature, ObjectId profileSketchId,
+                                    ObjectId pathSketchId, ObjectId materialId) {
+    addRecomputableNode(feature);
+    // BOTH SKETCHES. Moving the spine changes the solid exactly as much as
+    // moving the section does, so an edge from only one would leave the feature
+    // clean after an edit that changed its shape -- and it would stay wrong
+    // until something unrelated dirtied it.
+    addDependency(feature.id(), profileSketchId);
+    addDependency(feature.id(), pathSketchId);
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+SweepFeature& PartDocument::addSweepFeature(Body& body, std::string name,
+                                            ObjectId profileSketchId, ObjectId pathSketchId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    SweepFeature& feature =
+        body.addFeature<SweepFeature>(std::move(name), profileSketchId, pathSketchId, materialId);
+    wireSweepFeature(feature, profileSketchId, pathSketchId, materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+SweepFeature& PartDocument::restoreSweepFeature(Body& body, ObjectId id, std::string name,
+                                                ComputeState state, ObjectId profileSketchId,
+                                                ObjectId pathSketchId, ObjectId materialId) {
+    requireUnusedId(id, "restoreSweepFeature");
+    SweepFeature& feature = body.addFeature<SweepFeature>(
+        id, std::move(name), state, profileSketchId, pathSketchId, materialId);
+    wireSweepFeature(feature, profileSketchId, pathSketchId, materialId);
+    return feature;
+}
+
+void PartDocument::wireLoftFeature(LoftFeature& feature,
+                                   const std::vector<ObjectId>& sectionSketchIds,
+                                   ObjectId materialId) {
+    addRecomputableNode(feature);
+    // EVERY SECTION. A loft's shape is a function of all of them, so all of
+    // them are dependencies -- the same reason a sweep needs two edges rather
+    // than one.
+    for (const ObjectId sketchId : sectionSketchIds) addDependency(feature.id(), sketchId);
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+LoftFeature& PartDocument::addLoftFeature(Body& body, std::string name,
+                                          std::vector<ObjectId> sectionSketchIds) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    LoftFeature& feature =
+        body.addFeature<LoftFeature>(std::move(name), sectionSketchIds, materialId);
+    wireLoftFeature(feature, sectionSketchIds, materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+LoftFeature& PartDocument::restoreLoftFeature(Body& body, ObjectId id, std::string name,
+                                              ComputeState state,
+                                              std::vector<ObjectId> sectionSketchIds,
+                                              ObjectId materialId) {
+    requireUnusedId(id, "restoreLoftFeature");
+    LoftFeature& feature = body.addFeature<LoftFeature>(id, std::move(name), state,
+                                                        sectionSketchIds, materialId);
+    wireLoftFeature(feature, sectionSketchIds, materialId);
+    return feature;
+}
 
 void PartDocument::wireRevolveFeature(RevolveFeature& feature, ObjectId sketchId,
                                       ObjectId angleParameterId, ObjectId materialId) {

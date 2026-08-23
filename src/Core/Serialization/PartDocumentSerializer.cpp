@@ -8,7 +8,9 @@
 #include "Core/Kernel/FaceQuery.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/RevolveFeature.h"
+#include "Core/Feature/SweepFeature.h"
 #include "Core/Feature/EdgeDressFeatures.h"
 #include "Core/Sketch/Sketch.h"
 #include "Core/Feature/PlaceholderFeature.h"
@@ -123,7 +125,7 @@ void WriteSketchGeometry(JsonValue& entry, const SketchGeometry& geometry) {
 }
 
 
-constexpr int kSchemaVersion = 24;          // v24 adds spline handles (M18)
+constexpr int kSchemaVersion = 25;          // v25 adds sweep and loft (M19)
 // v15 added PointLineDistance (M17).
 // v14 added construction geometry (M17).
 // v13 added Horizontal/VerticalDistance (M17).
@@ -437,6 +439,29 @@ JsonValue toJson(const PartDocument& document) {
                 featureEntry.set("lengthParameterId",
                                  JsonValue::makeString(idToString(pad->lengthParameterId())));
                 featureEntry.set("materialId", JsonValue::makeString(idToString(pad->materialId())));
+            } else if (const auto* sweep = dynamic_cast<const SweepFeature*>(feature.get())) {
+                // v25 (M19): TWO sketches, each by ObjectId. `sketchId` is the
+                // SECTION -- the field every other sketch-consuming feature
+                // already uses for the thing that decides the outline -- and
+                // `pathSketchId` is the spine.
+                featureEntry.set("sketchId",
+                                 JsonValue::makeString(idToString(sweep->profileSketchId())));
+                featureEntry.set("pathSketchId",
+                                 JsonValue::makeString(idToString(sweep->pathSketchId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(sweep->materialId())));
+            } else if (const auto* loft = dynamic_cast<const LoftFeature*>(feature.get())) {
+                // v25 (M19): the sections AS AN ARRAY, because the ORDER is the
+                // shape. Written in the order the feature holds them and read
+                // back in the order the file holds them, with nothing between
+                // that could sort them -- lofting A-B-C and A-C-B are different
+                // solids.
+                JsonValue sections = JsonValue::makeArray();
+                for (const ObjectId sectionId : loft->sectionSketchIds())
+                    sections.add(JsonValue::makeString(idToString(sectionId)));
+                featureEntry.set("sectionSketchIds", std::move(sections));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(loft->materialId())));
             } else if (const auto* revolve = dynamic_cast<const RevolveFeature*>(feature.get())) {
                 // v7 (ADR-M8-005): the axis is a SketchEntityId in the named
                 // sketch, persisted as a decimal string exactly like every
@@ -1116,7 +1141,8 @@ LoadResult loadFailure(SerializationError error, std::string message) {
 // here, and only here.
 constexpr std::string_view kSolidFeatureTypeNames[] = {"Box",     "Pad",     "Pocket",
                                                        "Revolve", "Fillet",  "Chamfer",
-                                                       "Mirror",  "Pattern"};
+                                                       "Mirror",  "Pattern", "Sweep",
+                                                       "Loft"};
 
 bool IsSolidFeatureTypeName(std::string_view name) {
     for (const std::string_view solid : kSolidFeatureTypeNames)
@@ -1424,6 +1450,31 @@ SaveResult validateSaveable(const PartDocument& document) {
                                           pocket->name() + "): pocket sketch id " +
                                           idToString(pocket->sketchId()) +
                                           " is not a sketch in this document"};
+            } else if (const auto* sweep = dynamic_cast<const SweepFeature*>(feature.get())) {
+                // The same lesson as Pad's, for both of a sweep's sketches
+                // (ADR-M3-008): every reference the LOADER rejects is checked
+                // HERE, or a document saves cleanly and refuses to load.
+                if (sketchIds.count(sweep->profileSketchId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(sweep->id()) + " (" +
+                                          sweep->name() + "): sweep profile sketch id " +
+                                          idToString(sweep->profileSketchId()) +
+                                          " is not a sketch in this document"};
+                if (sketchIds.count(sweep->pathSketchId()) == 0)
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "feature " + idToString(sweep->id()) + " (" +
+                                          sweep->name() + "): sweep path sketch id " +
+                                          idToString(sweep->pathSketchId()) +
+                                          " is not a sketch in this document"};
+            } else if (const auto* loft = dynamic_cast<const LoftFeature*>(feature.get())) {
+                // EVERY section, because the loader resolves every one of them.
+                for (const ObjectId sectionId : loft->sectionSketchIds())
+                    if (sketchIds.count(sectionId) == 0)
+                        return SaveResult{SerializationError::UnknownDependencyId,
+                                          "feature " + idToString(loft->id()) + " (" +
+                                              loft->name() + "): loft section sketch id " +
+                                              idToString(sectionId) +
+                                              " is not a sketch in this document"};
             } else if (const auto* revolve = dynamic_cast<const RevolveFeature*>(feature.get())) {
                 if (parameterIds.count(revolve->angleParameterId()) == 0)
                     return SaveResult{SerializationError::UnknownDependencyId,
@@ -2092,6 +2143,60 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.sketchId = *sketchRef;
                 featureData.depthParameterId = *depthRef;
                 featureData.materialId = *pocketMaterialId;
+            } else if (featureData.typeName == "Sweep") {
+                const JsonValue* sectionField = requireField(featureEntry, "sketchId",
+                                                             JsonType::String, featureContext, err);
+                if (sectionField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* spineField = requireField(featureEntry, "pathSketchId",
+                                                           JsonType::String, featureContext, err);
+                if (spineField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* sweepMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (sweepMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                const auto sectionRef = idFromString(sectionField->asString());
+                const auto spineRef = idFromString(spineField->asString());
+                const auto sweepMaterialId = idFromString(sweepMaterialField->asString());
+                if (!sectionRef || !spineRef || !sweepMaterialId || *sectionRef > kMaxObjectId ||
+                    *spineRef > kMaxObjectId || *sweepMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": sweep references are not valid ids");
+                featureData.sketchId = *sectionRef;
+                featureData.pathSketchId = *spineRef;
+                featureData.materialId = *sweepMaterialId;
+            } else if (featureData.typeName == "Loft") {
+                const JsonValue* sectionsField = requireField(
+                    featureEntry, "sectionSketchIds", JsonType::Array, featureContext, err);
+                if (sectionsField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* loftMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (loftMaterialField == nullptr) return loadFailure(err.error, err.message);
+
+                // IN FILE ORDER, and nothing sorts them on the way in.
+                for (const JsonValue& one : sectionsField->items()) {
+                    if (one.type() != JsonType::String)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext +
+                                               ": a loft section id is not a string");
+                    const auto sectionRef = idFromString(one.asString());
+                    if (!sectionRef || *sectionRef > kMaxObjectId)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext +
+                                               ": a loft section id is not a valid id");
+                    featureData.sectionSketchIds.push_back(*sectionRef);
+                }
+                // TWO OR MORE, checked at the door. A file claiming a
+                // one-section loft describes a feature this program cannot
+                // build, and letting it in would trade a clear load error for a
+                // failed feature the user has to work out for themselves.
+                if (featureData.sectionSketchIds.size() < 2)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": a loft needs at least two sections");
+                const auto loftMaterialId = idFromString(loftMaterialField->asString());
+                if (!loftMaterialId || *loftMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": loft materialId is not a valid id");
+                featureData.materialId = *loftMaterialId;
             } else if (featureData.typeName == "Revolve") {
                 const JsonValue* sketchField = requireField(featureEntry, "sketchId",
                                                             JsonType::String, featureContext, err);

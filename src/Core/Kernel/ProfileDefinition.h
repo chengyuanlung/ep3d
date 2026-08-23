@@ -121,6 +121,31 @@ struct PlanarProfileDefinition {
     std::vector<std::vector<ProfileSegment>> innerLoops;
 };
 
+// A PATH to sweep along (M19).
+//
+// The same segment vocabulary as a profile, and deliberately its OWN TYPE
+// rather than a PlanarProfileDefinition with the holes left empty. A profile
+// promises a CLOSED, oriented boundary -- every reader of one is entitled to
+// assume it comes back to where it started -- and a sweep path usually does
+// not. Handing an open chain over in a type that promises closure is the shape
+// of defect this project keeps paying for: both sides correct, the contract
+// between them a matter of convention.
+//
+// `closed` is stated rather than inferred by comparing the first and last
+// points. A ring path and an open path that happens to end near its start are
+// different intentions, and a tolerance is not the place to guess which was
+// meant.
+struct PlanarPathDefinition {
+    ProfilePlane plane{};
+    // In order, head to tail. Each segment's start meets the previous one's
+    // end; Core has already walked and oriented them, exactly as it does for a
+    // profile's boundary (ADR-M4-003).
+    std::vector<ProfileSegment> segments;
+    bool closed{false};
+};
+
+bool IsValidPathDefinition(const PlanarPathDefinition& path) noexcept;
+
 // The ONE place extrusion input validation lives, mirroring
 // IsValidBoxDefinition's role for boxes (ADR-M3-001): every IGeometryKernel
 // implementation, real or fake, calls this first, so a degenerate profile or

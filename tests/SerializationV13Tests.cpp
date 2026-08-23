@@ -19,6 +19,8 @@
 #include "Core/Dependency/DependencyGraph.h"
 #include <algorithm>
 #include <vector>
+#include "Core/Feature/SweepFeature.h"
+#include "Core/Feature/LoftFeature.h"
 #include "Core/Sketch/Sketch.h"
 
 #include "Support/SchemaVersionText.h"
@@ -86,7 +88,7 @@ TEST(SerializationV13Test, M17_SER_001_TheSchemaVersionIsStamped) {
     // so a bump lands here and nowhere else -- and it has to land somewhere, or
     // a format change that forgot to bump would write files an older loader
     // silently mis-reads.
-    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 24"), std::string::npos);
+    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 25"), std::string::npos);
 }
 
 TEST(SerializationV13Test, M17_SER_002_BothKindsAreWrittenUnderTheirOwnNames) {
@@ -992,4 +994,93 @@ TEST(SerializationV13Test, M18_SER_003_AHandleOnAPointThatDoesNotExistIsREFUSED)
     const LoadResult loaded = LoadFromString(text);
     EXPECT_FALSE(loaded);
     EXPECT_NE(loaded.message.find("point"), std::string::npos) << loaded.message;
+}
+
+// --- M19 (v25): SWEEP and LOFT survive a round trip --------------------------
+
+TEST(SerializationV13Test, M19_SER_001_ASweepKeepsBOTHOfItsSketches) {
+    // A sweep is the first feature that consumes two sketches, and the one that
+    // would be easy to persist half of: `sketchId` alone loads, builds and
+    // fails at recompute time with a message about a missing path -- long after
+    // the save that lost it.
+    PartDocument document{"SweepDoc"};
+    Sketch& section = document.addSketch("Section");
+    section.addLine(Vec2{0, 0}, Vec2{20, 0});
+    Sketch& spine = document.addSketch("Spine");
+    spine.addLine(Vec2{0, 0}, Vec2{0, 50});
+    Body& body = document.addBody("Body");
+    document.addSweepFeature(body, "Sweep1", section.id(), spine.id());
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const Feature* feature = loaded.document->bodies().front()->features().front().get();
+    const auto* sweep = dynamic_cast<const SweepFeature*>(feature);
+    ASSERT_NE(sweep, nullptr) << "a Sweep came back as something else";
+    EXPECT_EQ(sweep->profileSketchId(), section.id());
+    EXPECT_EQ(sweep->pathSketchId(), spine.id());
+}
+
+TEST(SerializationV13Test, M19_SER_002_ALoftKeepsItsSectionsINORDER) {
+    // The order IS the shape: lofting A-B-C and A-C-B are different solids. A
+    // round trip that sorted them -- by id, by name, by anything -- would
+    // reload a different part from the same file.
+    PartDocument document{"LoftDoc"};
+    Sketch& a = document.addSketch("A");
+    Sketch& b = document.addSketch("B");
+    Sketch& c = document.addSketch("C");
+    Body& body = document.addBody("Body");
+    // Deliberately NOT in id order, so a sort would be visible.
+    document.addLoftFeature(body, "Loft1", {c.id(), a.id(), b.id()});
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const auto* loft =
+        dynamic_cast<const LoftFeature*>(loaded.document->bodies().front()->features().front().get());
+    ASSERT_NE(loft, nullptr) << "a Loft came back as something else";
+    ASSERT_EQ(loft->sectionSketchIds().size(), 3u);
+    EXPECT_EQ(loft->sectionSketchIds()[0], c.id());
+    EXPECT_EQ(loft->sectionSketchIds()[1], a.id());
+    EXPECT_EQ(loft->sectionSketchIds()[2], b.id());
+}
+
+TEST(SerializationV13Test, M19_SER_003_ALoftOfOneSectionIsREFUSEDAtTheDoor) {
+    // A file claiming a one-section loft describes a feature this program
+    // cannot build. Letting it in would trade a clear load error for a feature
+    // that fails later, with the reason a long way from the cause.
+    PartDocument document{"LoftDoc"};
+    Sketch& a = document.addSketch("A");
+    Sketch& b = document.addSketch("B");
+    Body& body = document.addBody("Body");
+    document.addLoftFeature(body, "Loft1", {a.id(), b.id()});
+
+    std::string text = SaveToString(document);
+    const std::size_t at = text.find("\"sectionSketchIds\"");
+    ASSERT_NE(at, std::string::npos) << text;
+    const std::size_t open = text.find('[', at);
+    const std::size_t close = text.find(']', open);
+    ASSERT_NE(close, std::string::npos);
+    text.replace(open, close - open + 1, "[\"" + std::to_string(a.id()) + "\"]");
+
+    const LoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_NE(loaded.message.find("at least two sections"), std::string::npos) << loaded.message;
+}
+
+TEST(SerializationV13Test, M19_SER_004_ASweepNamingAMissingSketchIsREFUSEDATSAVETIME) {
+    // ADR-M3-008's named worst class: a document that SAVES cleanly and then
+    // refuses to load. Every reference the loader checks is checked here too,
+    // and a sweep has two of them.
+    PartDocument document{"SweepDoc"};
+    Sketch& section = document.addSketch("Section");
+    Body& body = document.addBody("Body");
+    // A real ObjectId that is NOT a sketch. A bare invalid id would be caught
+    // by any check at all; a live id belonging to something else is the case
+    // that needs the set lookup, and it is what a stale reference looks like.
+    Parameter& notASketch = document.addParameter("L", 10.0, UnitType::Millimeter);
+    document.addSweepFeature(body, "Sweep1", section.id(), notASketch.id());
+
+    std::ostringstream out;
+    const SaveResult saved = savePartDocument(document, out);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("path sketch id"), std::string::npos) << saved.message;
 }

@@ -270,12 +270,13 @@ TEST(SerializationV4Test, M4_SER_013_UnreservedPlaceholderTypesStillRoundTrip) {
     // genuinely unknown feature types.
     PartDocument document{"Doc"};
     Body& body = document.addBody("Body001");
-    document.addPlaceholderFeature(body, "Ghost", "Loft");
+    document.addPlaceholderFeature(body, "Ghost", "SomeFutureFeature");
 
     const LoadResult loaded = LoadFromString(SaveToString(document));
     ASSERT_TRUE(loaded) << loaded.message;
     ASSERT_EQ(loaded.document->bodies().front()->features().size(), 1u);
-    EXPECT_EQ(loaded.document->bodies().front()->features().front()->typeName(), "Loft");
+    EXPECT_EQ(loaded.document->bodies().front()->features().front()->typeName(),
+              "SomeFutureFeature");
 }
 
 TEST(SerializationV4Test, M8_REV_341_RestorePlaceholderRefusesARegisteredId) {

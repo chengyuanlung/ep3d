@@ -85,6 +85,17 @@ bool IsValidRevolveAngle(double angleRad) noexcept {
            angleRad <= kMaxRevolveAngleRad;
 }
 
+bool IsValidPathDefinition(const PlanarPathDefinition& path) noexcept {
+    // THE SAME SEGMENT RULES as a profile's boundary, through the same
+    // predicate -- a path is made of the same curves and the arithmetic that
+    // makes one degenerate makes the other degenerate too. A second copy of
+    // "is this arc's radius sane" is a second chance to answer differently.
+    PlanarProfileDefinition asProfile;
+    asProfile.plane = path.plane;
+    asProfile.segments = path.segments;
+    return IsValidProfileDefinition(asProfile);
+}
+
 bool IsValidProfileDefinition(const PlanarProfileDefinition& profile) noexcept {
     if (profile.segments.empty()) return false;
 

@@ -1,0 +1,50 @@
+# SWEEP AND LOFT (M19).
+#
+# Both need sketches on DIFFERENT PLANES, which is why `sketch` learned to take
+# one. A section swept along a spine drawn on its own plane has no volume at
+# all, and a loft between two sections in the same place has nothing to run
+# through -- so until M19 neither could be written at all.
+
+# --- a bent pipe -------------------------------------------------------------
+# The section, on XY.
+sketch Section
+tool rect
+click -10 -10
+click 10 10
+
+# The spine, on XZ: straight up out of the section's plane, then round a bend.
+sketch Spine xz
+tool line
+click 0 0
+click 0 60
+tool arc3
+click 0 60
+click 17 102
+click 60 120
+
+sweep Pipe Section Spine
+
+# --- a tapered stack ---------------------------------------------------------
+sketch Big
+tool rect
+click -30 -30
+click 30 30
+
+sketch Middle xy 40
+tool rect
+click -20 -20
+click 20 20
+
+sketch Small xy 80
+tool rect
+click -8 -8
+click 8 8
+
+loft Tower Big Middle Small
+
+solve
+
+echo --- what got built ---
+measure
+
+save build/sweep-and-loft.ep3d

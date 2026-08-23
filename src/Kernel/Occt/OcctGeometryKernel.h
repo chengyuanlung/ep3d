@@ -16,6 +16,9 @@ public:
                                double distanceMm) override;
     KernelMassPropertiesResult calculateMassProperties(const KernelShape& shape) override;
     ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override;
+    ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
+                             const PlanarPathDefinition& path) override;
+    ShapeResult loftProfiles(const std::vector<PlanarProfileDefinition>& profiles) override;
     ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
                                const Vec3& axisDirection, double angleRad) override;
     FaceQueryResult resolveFace(const KernelShape& shape, const FaceQuery& query) override;

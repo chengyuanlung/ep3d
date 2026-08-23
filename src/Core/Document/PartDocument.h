@@ -33,6 +33,8 @@ class ISketchSolver;
 class PadFeature;
 class PocketFeature;
 class RevolveFeature;
+class SweepFeature;
+class LoftFeature;
 class FilletFeature;
 class ChamferFeature;
 
@@ -624,6 +626,20 @@ public:
     // --- Revolve feature (M8.2, ADR-M8-005) --------------------------------
     // Base-capable like Pad: revolves `sketchId`'s profile about the sketch's
     // own line `axisEntityId` by the Radian Parameter `angleParameterId`.
+    // A SWEEP takes two sketches -- a section and a spine -- and depends on
+    // both. See SweepFeature.h for why they cannot be one.
+    SweepFeature& addSweepFeature(Body& body, std::string name, ObjectId profileSketchId,
+                                  ObjectId pathSketchId);
+    SweepFeature& restoreSweepFeature(Body& body, ObjectId id, std::string name,
+                                      ComputeState state, ObjectId profileSketchId,
+                                      ObjectId pathSketchId, ObjectId materialId);
+
+    // A LOFT takes two or more sections IN ORDER, and depends on every one.
+    LoftFeature& addLoftFeature(Body& body, std::string name,
+                                std::vector<ObjectId> sectionSketchIds);
+    LoftFeature& restoreLoftFeature(Body& body, ObjectId id, std::string name, ComputeState state,
+                                    std::vector<ObjectId> sectionSketchIds, ObjectId materialId);
+
     RevolveFeature& addRevolveFeature(Body& body, std::string name, ObjectId sketchId,
                                       SketchEntityId axisEntityId, ObjectId angleParameterId);
     RevolveFeature& restoreRevolveFeature(Body& body, ObjectId id, std::string name,
@@ -815,6 +831,10 @@ private:
     // (single registration path, spec 13).
     void wirePocketFeature(PocketFeature& feature, ObjectId baseFeatureId, ObjectId sketchId,
                            ObjectId depthParameterId, ObjectId materialId);
+    void wireSweepFeature(SweepFeature& feature, ObjectId profileSketchId, ObjectId pathSketchId,
+                          ObjectId materialId);
+    void wireLoftFeature(LoftFeature& feature, const std::vector<ObjectId>& sectionSketchIds,
+                         ObjectId materialId);
     void wireRevolveFeature(RevolveFeature& feature, ObjectId sketchId,
                             ObjectId angleParameterId, ObjectId materialId);
     void wireTransformFeature(TransformFeature& feature, ObjectId baseFeatureId,

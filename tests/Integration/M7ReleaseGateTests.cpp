@@ -801,6 +801,14 @@ public:
         ++subtracts;
         return inner.subtractShape(base, tool);
     }
+    ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
+                             const PlanarPathDefinition& path) override {
+        return inner.sweepProfile(profile, path);
+    }
+    ShapeResult loftProfiles(const std::vector<PlanarProfileDefinition>& profiles)
+        override {
+        return inner.loftProfiles(profiles);
+    }
     ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
                                const Vec3& axisDirection, double angleRad) override {
         ++revolveCallCount;

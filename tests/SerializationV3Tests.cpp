@@ -255,11 +255,15 @@ TEST(SerializationV3Test, M3_SER_010_MismatchedBoxMaterialIdRejected) {
 TEST(SerializationV3Test, M3_SER_011_UnknownFeatureTypeFallsBackToPlaceholderLosslessly) {
     // A "type" string this build does not recognize round-trips losslessly
     // via PlaceholderFeature rather than being rejected or silently coerced.
+    //
+    // The name is deliberately a type name this build will never claim. It used to be "Sweep" and
+    // then "Loft", and M19 implemented both -- so the test stopped
+    // testing what it says and started failing for the right reason.
     constexpr const char* kDocument = R"({
       "format": "ParametricCAD", "schemaVersion": 3, "documentType": "Part",
       "id": "9301", "name": "Future", "material": null, "parameters": [],
       "bodies": [ {"id": "9302", "name": "Body001",
-                   "features": [ {"id": "9303", "name": "Sweep001", "type": "Sweep",
+                   "features": [ {"id": "9303", "name": "Ghost001", "type": "SomeFutureFeature",
                                   "state": "Dirty"} ]} ],
       "dependencies": []
     })";
@@ -267,7 +271,7 @@ TEST(SerializationV3Test, M3_SER_011_UnknownFeatureTypeFallsBackToPlaceholderLos
     ASSERT_TRUE(loaded) << loaded.message;
     ASSERT_EQ(loaded.document->bodies()[0]->features().size(), 1u);
     const Feature& feature = *loaded.document->bodies()[0]->features()[0];
-    EXPECT_EQ(feature.typeName(), "Sweep");
+    EXPECT_EQ(feature.typeName(), "SomeFutureFeature");
     EXPECT_NE(dynamic_cast<const PlaceholderFeature*>(&feature), nullptr);
 }
 

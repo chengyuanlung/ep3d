@@ -756,3 +756,61 @@ TEST(CliScriptTest, M18_CLI_011_DimensioningGeometryWithNoEXTENTIsStillREFUSED) 
     EXPECT_FALSE(outcome.ok);
     EXPECT_NE(outcome.message.find("too small"), std::string::npos) << outcome.message;
 }
+
+// --- M19: SWEEP and LOFT from a script ---------------------------------------
+
+TEST(CliScriptTest, M19_CLI_001_ASweepBuildsASolidTheScriptCanMEASURE) {
+    // The whole path in one script: two sketches on two planes, a sweep, and
+    // then the number that proves a solid came out. Before `measure` there was
+    // no evidence in a script beyond nothing having complained.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Section\ntool rect\nclick -10 -10\nclick 10 10\n"
+            "sketch Spine xz\ntool line\nclick 0 0\nclick 0 100\n"
+            "sweep Pipe Section Spine\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "volume = 40000 mm^3")) << outcome.message;
+}
+
+TEST(CliScriptTest, M19_CLI_002_ASketchCanBePutOnAPlaneAndOffsetAlongIt) {
+    // The thing M19 needed from the script vocabulary. Every script sketch was
+    // world XY, which made a sweep impossible to write -- a section swept along
+    // a spine on its own plane has no volume -- and a loft equally so.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Low\ntool rect\nclick -20 -20\nclick 20 20\n"
+            "sketch High xy 40\ntool rect\nclick -20 -20\nclick 20 20\n"
+            "loft Tower Low High\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    // Two identical 40 mm squares 40 mm apart: a prism, 40*40*40.
+    EXPECT_TRUE(LogMentions(outcome, "volume = 64000 mm^3")) << outcome.message;
+}
+
+TEST(CliScriptTest, M19_CLI_003_ASweepAlongItsOWNSketchIsREFUSEDWithTheReason) {
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Only\ntool rect\nclick -10 -10\nclick 10 10\n"
+            "sweep Pipe Only Only\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("two different sketches"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M19_CLI_004_ALoftNeedsTwoSectionsAndSaysSo) {
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Only\ntool rect\nclick -10 -10\nclick 10 10\nloft Tower Only\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("at least two sections"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M19_CLI_005_AnUnknownPlaneIsREFUSEDNotSilentlyWorldXY) {
+    // Falling back to XY would put the sketch somewhere the author did not ask
+    // for, and the sweep built from it would come out flat -- a failure a long
+    // way from the typo that caused it.
+    ScriptRun run;
+    const ScriptOutcome outcome = run("sketch Tilted zx\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("xy, xz or yz"), std::string::npos) << outcome.message;
+}

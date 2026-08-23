@@ -19,6 +19,8 @@
 #include <TopExp_Explorer.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -127,27 +129,40 @@ namespace {
 // On failure fills `error` and returns a null face; the caller owns the
 // try/catch, exactly as before. May throw OCCT exceptions like the code it was
 // extracted from -- callers already catch Standard_Failure.
-TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::string& error) {
+// ONE wire builder, for every chain this kernel ever builds: a profile's outer
+// boundary, each of its holes, and -- since M19 -- a sweep's spine.
+//
+// `requireClosed` is the only thing that differs between them, and it is a
+// parameter rather than a second copy of the function. Two copies of the
+// edge-building switch would be two places to disagree about how an arc is
+// trimmed or which way a reversed spline's handles point, and that is a
+// geometry bug that reads as a solver bug.
+//
+// Reads `plane` rather than a whole profile, because a path has no holes and
+// no outer boundary -- it has segments and a plane, which is all this needs.
+bool BuildWireOnPlane(const ProfilePlane& profilePlane,
+                      const std::vector<ProfileSegment>& segments, bool requireClosed,
+                      TopoDS_Wire& out, std::string& error) {
     // The sketch plane, expressed to OCCT exactly as Core computed it --
     // Kernel/Occt never re-derives the frame, so SketchFrame stays the
     // single conversion site (ADR-M4-002).
-    const gp_Pnt origin(profile.plane.origin.x, profile.plane.origin.y,
-                        profile.plane.origin.z);
-    const gp_Dir normal(profile.plane.normal.x, profile.plane.normal.y,
-                        profile.plane.normal.z);
-    const gp_Dir uDir(profile.plane.uAxis.x, profile.plane.uAxis.y, profile.plane.uAxis.z);
-    const gp_Dir vDir(profile.plane.vAxis.x, profile.plane.vAxis.y, profile.plane.vAxis.z);
+    const gp_Pnt origin(profilePlane.origin.x, profilePlane.origin.y,
+                        profilePlane.origin.z);
+    const gp_Dir normal(profilePlane.normal.x, profilePlane.normal.y,
+                        profilePlane.normal.z);
+    const gp_Dir uDir(profilePlane.uAxis.x, profilePlane.uAxis.y, profilePlane.uAxis.z);
+    const gp_Dir vDir(profilePlane.vAxis.x, profilePlane.vAxis.y, profilePlane.vAxis.z);
     const gp_Ax2 axes(origin, normal, uDir);
     const gp_Pln plane(axes);
 
     // (u,v) -> part-local XYZ, using the same basis Core handed over.
     const auto toWorld = [&](Vec2 uv) {
-        return gp_Pnt(profile.plane.origin.x + uv.x * profile.plane.uAxis.x +
-                          uv.y * profile.plane.vAxis.x,
-                      profile.plane.origin.y + uv.x * profile.plane.uAxis.y +
-                          uv.y * profile.plane.vAxis.y,
-                      profile.plane.origin.z + uv.x * profile.plane.uAxis.z +
-                          uv.y * profile.plane.vAxis.z);
+        return gp_Pnt(profilePlane.origin.x + uv.x * profilePlane.uAxis.x +
+                          uv.y * profilePlane.vAxis.x,
+                      profilePlane.origin.y + uv.x * profilePlane.uAxis.y +
+                          uv.y * profilePlane.vAxis.y,
+                      profilePlane.origin.z + uv.x * profilePlane.uAxis.z +
+                          uv.y * profilePlane.vAxis.z);
     };
 
     // An ellipse's supporting curve, in the sketch plane.
@@ -185,8 +200,6 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
     // loops differ in what they MEAN, not in how they are built, and two copies
     // of the edge-building switch would be two places to disagree about how an
     // arc is trimmed.
-    const auto buildWire = [&](const std::vector<ProfileSegment>& segments,
-                               TopoDS_Wire& out) -> bool {
     BRepBuilderAPI_MakeWire wireMaker;
     for (const ProfileSegment& segment : segments) {
         if (const auto* line = std::get_if<ProfileLineSegment>(&segment)) {
@@ -275,15 +288,53 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
         return false;
     }
     out = wireMaker.Wire();
-    if (!out.Closed()) {
+    // A PATH IS ALLOWED TO HAVE ENDS. A profile's boundary is not, and that
+    // check is what stops a face being built from a chain with a gap in it --
+    // OCCT would accept the gap and hand back a solid nobody asked for.
+    if (requireClosed && !out.Closed()) {
         error = "profile wire is not closed";
         return false;
     }
     return true;
-    };
+}
+
+// ONE closed wire, swept along a spine, as a SOLID (M19).
+//
+// BRepOffsetAPI_MakePipeShell rather than MakePipe, and that is the whole
+// lesson of this function. MakePipe given a face sweeps its BOUNDARY: the side
+// walls come out and the two caps do not, so the result is an open shell whose
+// volume integrates to about zero. Downstream nothing notices -- mass
+// properties return a number, the viewer draws faces -- and the only symptom is
+// a bent pipe that weighs nothing.
+//
+// MakePipeShell::MakeSolid() closes it properly, capping both ends. Its default
+// law is corrected Frenet, which keeps the section upright round a bend instead
+// of letting it spin with the curve's torsion.
+TopoDS_Shape SweepWireToSolid(const TopoDS_Wire& spine, const TopoDS_Wire& section,
+                              std::string& error) {
+    BRepOffsetAPI_MakePipeShell pipe(spine);
+    pipe.Add(section, Standard_False, Standard_False);
+    pipe.Build();
+    if (!pipe.IsDone()) {
+        error = "OCCT could not sweep that section along that path";
+        return TopoDS_Shape();
+    }
+    if (!pipe.MakeSolid()) {
+        error = "the sweep produced a surface that could not be closed into a solid";
+        return TopoDS_Shape();
+    }
+    return pipe.Shape();
+}
+
+TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::string& error) {
+    const gp_Pnt origin(profile.plane.origin.x, profile.plane.origin.y, profile.plane.origin.z);
+    const gp_Dir normal(profile.plane.normal.x, profile.plane.normal.y, profile.plane.normal.z);
+    const gp_Dir uDir(profile.plane.uAxis.x, profile.plane.uAxis.y, profile.plane.uAxis.z);
+    const gp_Pln plane(gp_Ax3(origin, normal, uDir));
 
     TopoDS_Wire outer;
-    if (!buildWire(profile.segments, outer)) return TopoDS_Face();
+    if (!BuildWireOnPlane(profile.plane, profile.segments, true, outer, error))
+        return TopoDS_Face();
 
     BRepBuilderAPI_MakeFace faceMaker(plane, outer);
     faceMaker.Build();
@@ -298,7 +349,7 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
     // hole -- and the result is a face OCCT accepts and a solid nobody wanted.
     for (const std::vector<ProfileSegment>& inner : profile.innerLoops) {
         TopoDS_Wire hole;
-        if (!buildWire(inner, hole)) return TopoDS_Face();
+        if (!BuildWireOnPlane(profile.plane, inner, true, hole, error)) return TopoDS_Face();
         faceMaker.Add(TopoDS::Wire(hole.Reversed()));
         faceMaker.Build();
         if (!faceMaker.IsDone()) {
@@ -353,6 +404,138 @@ ShapeResult OcctGeometryKernel::extrudeProfile(const PlanarProfileDefinition& pr
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            std::string("OCCT raised while extruding the profile: ") +
                                describe(failure)};
+    }
+}
+
+ShapeResult OcctGeometryKernel::sweepProfile(const PlanarProfileDefinition& profile,
+                                             const PlanarPathDefinition& path) {
+    // Single validation site, as everywhere: degenerate input never reaches
+    // OCCT and always surfaces as a structured InvalidDimension.
+    if (!IsValidProfileDefinition(profile))
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "sweep profile is empty or degenerate"};
+    if (!IsValidPathDefinition(path))
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "sweep path is empty or degenerate"};
+
+    const auto fail = [](KernelError code, std::string message) {
+        return ShapeResult{KernelShape{}, code, std::move(message)};
+    };
+
+    try {
+        std::string error;
+        TopoDS_Wire spine;
+        if (!BuildWireOnPlane(path.plane, path.segments, path.closed, spine, error))
+            return fail(KernelError::GeometryConstructionFailed,
+                        error.empty() ? "could not build the sweep path" : error);
+
+        TopoDS_Wire outer;
+        if (!BuildWireOnPlane(profile.plane, profile.segments, true, outer, error))
+            return fail(KernelError::GeometryConstructionFailed,
+                        error.empty() ? "could not build the sweep profile" : error);
+
+        TopoDS_Shape swept = SweepWireToSolid(spine, outer, error);
+        if (swept.IsNull())
+            return fail(KernelError::GeometryConstructionFailed,
+                        error.empty() ? "the sweep produced no shape" : error);
+
+        // HOLES ARE SWEPT AND SUBTRACTED, not carried along inside a face.
+        //
+        // A swept FACE loses its inner loops the moment the spine bends, so the
+        // bore has to be made the same way the outside was -- its own pipe --
+        // and then cut. That is also exactly what the hole means: the volume
+        // the section's inner loop carves out along the same path.
+        for (const std::vector<ProfileSegment>& inner : profile.innerLoops) {
+            TopoDS_Wire hole;
+            if (!BuildWireOnPlane(profile.plane, inner, true, hole, error))
+                return fail(KernelError::GeometryConstructionFailed,
+                            error.empty() ? "could not build a hole in the sweep profile"
+                                          : error);
+            const TopoDS_Shape bore = SweepWireToSolid(spine, hole, error);
+            if (bore.IsNull())
+                return fail(KernelError::GeometryConstructionFailed,
+                            error.empty() ? "could not sweep a hole along the path" : error);
+            BRepAlgoAPI_Cut cut(swept, bore);
+            cut.Build();
+            if (!cut.IsDone())
+                return fail(KernelError::GeometryConstructionFailed,
+                            "OCCT could not cut the swept hole out of the sweep");
+            swept = cut.Shape();
+        }
+
+        // A SWEEP THAT WEIGHS NOTHING is a shell that was never closed, and it
+        // is indistinguishable from success everywhere downstream. Refused here
+        // instead of handed on.
+        GProp_GProps volumeProps;
+        BRepGProp::VolumeProperties(swept, volumeProps);
+        if (!(std::fabs(volumeProps.Mass()) > kMinExtrusionDistanceMm))
+            return fail(KernelError::GeometryConstructionFailed,
+                        "the sweep produced a surface rather than a solid");
+
+        auto handle = std::make_shared<OcctShape>(swept);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return fail(KernelError::GeometryConstructionFailed,
+                    std::string("OCCT refused the sweep: ") +
+                        (failure.GetMessageString() != nullptr ? failure.GetMessageString()
+                                                               : "no message"));
+    }
+}
+
+ShapeResult OcctGeometryKernel::loftProfiles(
+    const std::vector<PlanarProfileDefinition>& profiles) {
+    // TWO OR MORE. A loft through one profile is not an extrusion by another
+    // name -- it has no second section to run to -- and answering with
+    // something is worse than saying so.
+    if (profiles.size() < 2)
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "a loft needs at least two profiles"};
+    for (const PlanarProfileDefinition& one : profiles) {
+        if (!IsValidProfileDefinition(one))
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "a loft profile is empty or degenerate"};
+        // HOLES ARE REFUSED, and said rather than dropped. ThruSections runs
+        // through WIRES, so there is nowhere for an inner loop to go: it would
+        // be silently ignored and the loft would come back solid where the user
+        // drew a hole. Lofting holes needs each section's inner loops paired up
+        // with the next section's, which is a decision this does not make yet.
+        if (!one.innerLoops.empty())
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "a loft profile cannot have holes yet: each section's holes "
+                               "would have to be paired with the next section's"};
+    }
+
+    try {
+        // isSolid, and NOT ruled: ruled joins the sections with straight
+        // segments, which is a different shape and a worse default -- a loft
+        // through three sections is normally wanted smooth.
+        BRepOffsetAPI_ThruSections generator(Standard_True, Standard_False,
+                                             Precision::Confusion());
+        for (const PlanarProfileDefinition& one : profiles) {
+            std::string error;
+            TopoDS_Wire wire;
+            if (!BuildWireOnPlane(one.plane, one.segments, true, wire, error))
+                return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                                   error.empty() ? "could not build a loft section" : error};
+            generator.AddWire(wire);
+        }
+        generator.Build();
+        if (!generator.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not loft through those sections"};
+
+        const TopoDS_Shape lofted = generator.Shape();
+        if (lofted.IsNull())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the loft produced no shape"};
+        auto handle = std::make_shared<OcctShape>(lofted);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused the loft: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
     }
 }
 
