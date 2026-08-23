@@ -4,6 +4,7 @@
 #include "Core/Parameter/Parameter.h"
 #include "Core/Recompute/RecomputeContext.h"
 #include <utility>
+#include <optional>
 #include <variant>
 
 namespace paramcad {
@@ -11,9 +12,11 @@ namespace paramcad {
 namespace {
 
 const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    const ObjectRegistry::ObjectRef* ref = registry.find(id);
-    if (ref == nullptr) return nullptr;
-    auto* const* parameter = std::get_if<Parameter*>(ref);
+    // The const overload yields const pointees (R2R4-M1); these resolvers
+    // already returned const pointers, so the projection matches their intent.
+    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
+    if (!ref) return nullptr;
+    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
     return parameter != nullptr ? *parameter : nullptr;
 }
 

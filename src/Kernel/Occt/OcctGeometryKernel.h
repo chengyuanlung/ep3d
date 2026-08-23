@@ -18,8 +18,19 @@ public:
     ShapeResult subtractShape(const KernelShape& base, const KernelShape& tool) override;
     ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
                                const Vec3& axisDirection, double angleRad) override;
-    ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) override;
-    ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) override;
+    FaceQueryResult resolveFace(const KernelShape& shape, const FaceQuery& query) override;
+
+    KernelShape tagCreatedFaces(const KernelShape& result, const KernelShape& base,
+                                std::uint64_t tag) override;
+
+    ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
+                            double radiusMm) override;
+    ShapeResult chamferEdges(const KernelShape& shape, const EdgeSelection& selection,
+                             double distanceMm) override;
+    ShapeResult mirrorShape(const KernelShape& shape, const Vec3& planeOriginMm,
+                            const Vec3& planeNormal) override;
+    ShapeResult translateShape(const KernelShape& shape, const Vec3& offsetMm) override;
+    ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) override;
 };
 
 } // namespace paramcad

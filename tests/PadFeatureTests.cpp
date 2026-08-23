@@ -201,7 +201,12 @@ TEST(PadFeatureTest, M4_PAD_021_RepairRecoversDeterministically) {
 }
 
 TEST(PadFeatureTest, M4_PAD_022_InvalidPadLengthsFailCleanly) {
-    for (double bad : {0.0, -5.0, std::numeric_limits<double>::quiet_NaN(),
+    // -5.0 LEFT THIS LIST at M17.8 (ADR-M17-031). A negative length is no
+    // longer invalid: it is a direction, and it pads to the other side of the
+    // sketch plane. What is still invalid is a length with no MAGNITUDE --
+    // zero, or anything that is not a finite number. See M17_PAD_030 below for
+    // what a negative one now does.
+    for (double bad : {0.0, std::numeric_limits<double>::quiet_NaN(),
                        std::numeric_limits<double>::infinity()}) {
         PadFixture fx;
         ASSERT_TRUE(fx.document.recompute().success);
@@ -212,6 +217,31 @@ TEST(PadFeatureTest, M4_PAD_022_InvalidPadLengthsFailCleanly) {
         EXPECT_EQ(fx.pad->state(), ComputeState::Failed);
         EXPECT_FALSE(fx.document.massProperties().valid);
     }
+}
+
+TEST(PadFeatureTest, M17_PAD_030_ANegativePadLengthBuildsOnTheOtherSideOfThePlane) {
+    // The direction a pad grows is the sketch's +normal. A sketch made ON A
+    // FACE has that normal pointing out of the solid (ADR-M17-028), which is
+    // what makes a pad on a face grow away from the part -- and it is also why
+    // there has to be a way to say "the other way" without moving the sketch.
+    PadFixture fx;
+    ASSERT_TRUE(fx.document.recompute().success);
+    const double volume = fx.document.massProperties().volumeMm3;
+    const Vec3 centre = fx.document.massProperties().centerOfMassMm;
+    ASSERT_GT(volume, 0.0);
+
+    ASSERT_TRUE(fx.document.setParameterValue(fx.length->id(), -20.0));
+    ASSERT_TRUE(fx.document.recompute().success) << "a negative length was refused";
+    EXPECT_EQ(fx.pad->state(), ComputeState::Valid);
+
+    // SAME SIZE. A solid built the other way is on the other side of the
+    // plane, not made of negative material -- a signed volume would travel
+    // straight out to the mass readout and the status bar.
+    EXPECT_NEAR(fx.document.massProperties().volumeMm3, volume, volume * 1e-9);
+    // ...and on the OTHER SIDE. The sketch is on world XY with normal +Z, so
+    // the centre of mass mirrors through z = 0.
+    EXPECT_NEAR(fx.document.massProperties().centerOfMassMm.z, -centre.z, 1e-9);
+    EXPECT_NEAR(fx.document.massProperties().centerOfMassMm.x, centre.x, 1e-9);
 }
 
 TEST(PadFeatureTest, M4_PAD_023_DeletingTheSketchFailsPadWithoutCrashing) {

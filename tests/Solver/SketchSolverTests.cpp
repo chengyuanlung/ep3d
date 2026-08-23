@@ -772,6 +772,249 @@ TEST(SketchSolverTest, M5_REV4_003_AContradictionIsNotBlamedOnTheIterationLimit)
     EXPECT_NE(r.message.find("contradictory"), std::string::npos) << r.message;
 }
 
+// --- M17.21: the arity table's own hole, and the residual that found it ------
+
+TEST(SketchSolverTest, M17_SLOT_001_EveryResidualKindDeclaresItsArity) {
+    // THE GUARD HAD STOPPED GUARDING, silently, for a third of the kinds.
+    //
+    // SlotsRequired() returned 0 for anything its switch had no case for, and 0
+    // is indistinguishable from "reads no variables": the checking loop simply
+    // did not run. Seven kinds were added after the table was written and none
+    // of them was ever checked for arity OR for packing -- by the very machinery
+    // whose comment promises that a future kind cannot quietly compute nonsense
+    // from whatever happens to be packed.
+    //
+    // Every kind, by walking the enum's full range rather than a list somebody
+    // has to remember to extend.
+    for (int raw = 0; raw <= static_cast<int>(SolveResidual::Kind::ArcTipV); ++raw) {
+        const auto kind = static_cast<SolveResidual::Kind>(raw);
+        EXPECT_GT(SlotsRequired(kind), 0) << "residual kind " << raw << " declares no arity";
+        EXPECT_LE(SlotsRequired(kind), SolveResidual::kMaxSlots) << "kind " << raw;
+        // ...and every slot it declares accepts SOMETHING, so a kind cannot pass
+        // the loop above while being unreachable in the one below.
+        for (int slot = 0; slot < SlotsRequired(kind); ++slot) {
+            bool any = false;
+            for (const auto component :
+                 {SolveVariable::Component::U, SolveVariable::Component::V,
+                  SolveVariable::Component::Radius, SolveVariable::Component::StartAngle,
+                  SolveVariable::Component::EndAngle})
+                any = any || SlotAccepts(kind, slot, component);
+            EXPECT_TRUE(any) << "kind " << raw << " slot " << slot << " accepts nothing";
+        }
+    }
+}
+
+TEST(SketchSolverTest, M17_SLOT_002_AMisPackedSymmetryIsNowRefusedToo) {
+    // SymmetricAcross was one of the seven the table had forgotten, so this
+    // exact problem -- u where v belongs -- used to be accepted and solved.
+    SketchSolveProblem p;
+    for (int entity = 1; entity <= 4; ++entity) {
+        p.variables.push_back(PointVar(entity, SolveVariable::Component::U));
+        p.variables.push_back(PointVar(entity, SolveVariable::Component::V));
+    }
+    p.initialValues = {0, 5, 0, -5, -10, 0, 10, 0};
+    SolveResidual bad;
+    bad.kind = SolveResidual::Kind::SymmetricAcross;
+    bad.sourceConstraint = static_cast<SketchConstraintId>(1);
+    for (int slot = 0; slot < 8; ++slot) bad.vars[static_cast<std::size_t>(slot)] = slot;
+    std::swap(bad.vars[0], bad.vars[1]); // a v where the formula reads a u
+    p.residuals = {bad};
+
+    GaussNewtonSketchSolver solver;
+    const SketchSolveResult r = solver.solve(p);
+    EXPECT_FALSE(r) << "a mis-packed symmetry was accepted";
+    EXPECT_EQ(r.status, SketchSolveStatus::InvalidInput);
+
+    // Packed properly it is fine, so the guard is refusing the swap and not the
+    // kind.
+    std::swap(bad.vars[0], bad.vars[1]);
+    p.residuals = {bad};
+    EXPECT_TRUE(solver.solve(p)) << solver.solve(p).message;
+}
+
+TEST(SketchSolverTest, M17_SLOT_003_AnArcTipTakesEITHERAngle) {
+    // The reason the table could not be a lookup. One formula serves both tips,
+    // and the angle slot holds the START angle for one and the END angle for
+    // the other -- so a single-answer table had to leave ArcTipU/V out, and
+    // leaving them out is what switched the guard off for them.
+    for (const auto kind : {SolveResidual::Kind::ArcTipU, SolveResidual::Kind::ArcTipV}) {
+        EXPECT_TRUE(SlotAccepts(kind, 3, SolveVariable::Component::StartAngle));
+        EXPECT_TRUE(SlotAccepts(kind, 3, SolveVariable::Component::EndAngle));
+        EXPECT_FALSE(SlotAccepts(kind, 3, SolveVariable::Component::Radius));
+        EXPECT_TRUE(SlotAccepts(kind, 2, SolveVariable::Component::Radius));
+    }
+}
+
+TEST(SketchSolverTest, M17_SLOT_004_TangentAtAPointREMOVESAFreedomWhereTheOldFormDidNot) {
+    // The finding itself, as arithmetic rather than as a shape.
+    //
+    // A line with one end pinned on a circle, and the circle fixed. Six
+    // variables; the pin and the fixed circle account for five, leaving ONE --
+    // the angle the line leaves at. Tangency has to take it.
+    //
+    // Asked as TangentLineCircle the DOF stays 1: the perpendicular distance
+    // from the centre cannot exceed the radius at a point already on the line,
+    // so the residual sits at a maximum and its gradient vanishes. Asked at the
+    // point, it goes to 0.
+    //
+    // THE STARTING CONFIGURATION IS THE POINT, and it took a failed version of
+    // this test to see why. Started well away from tangency the distance form
+    // has a perfectly good gradient and converges -- it reports DOF 0 and looks
+    // fine. It is exactly WHERE IT IS SATISFIED that it holds nothing, which is
+    // where a drawing tool always starts: the slot, the fillet and the polygon
+    // all lay their geometry down already correct. So this begins tangent, the
+    // way the tools do.
+    const auto build = [](SolveResidual::Kind kind, Vec2 far) {
+        SketchSolveProblem p;
+        p.variables = {PointVar(1, SolveVariable::Component::U),   // touch.u
+                       PointVar(1, SolveVariable::Component::V),   // touch.v
+                       PointVar(2, SolveVariable::Component::U),   // far.u
+                       PointVar(2, SolveVariable::Component::V),   // far.v
+                       PointVar(3, SolveVariable::Component::U),   // centre.u
+                       PointVar(3, SolveVariable::Component::V),   // centre.v
+                       PointVar(3, SolveVariable::Component::Radius)};
+        // Touch point at (10, 0) on a unit-10 circle centred at the origin; the
+        // far end starts somewhere plainly not tangent.
+        p.initialValues = {10.0, 0.0, far.x, far.y, 0.0, 0.0, 10.0};
+        p.residuals = {Fixed(SolveResidual::Kind::FixedU, 4, 0.0, 1),
+                       Fixed(SolveResidual::Kind::FixedV, 5, 0.0, 2),
+                       Fixed(SolveResidual::Kind::Radius, 6, 10.0, 3),
+                       Fixed(SolveResidual::Kind::FixedU, 0, 10.0, 4),
+                       Fixed(SolveResidual::Kind::FixedV, 1, 0.0, 5),
+                       Fixed(SolveResidual::Kind::Distance, 0, 6, 6)};
+        // The line's length, so the far end has exactly one freedom left.
+        SolveResidual length;
+        length.kind = SolveResidual::Kind::Distance;
+        length.vars = {0, 1, 2, 3, -1, -1, -1, -1};
+        length.target = 8.0;
+        length.sourceConstraint = static_cast<SketchConstraintId>(6);
+        p.residuals.back() = length;
+
+        SolveResidual tangent;
+        tangent.kind = kind;
+        tangent.vars = {0, 1, 2, 3, 4, 5, 6, -1};
+        tangent.sourceConstraint = static_cast<SketchConstraintId>(7);
+        p.residuals.push_back(tangent);
+        return p;
+    };
+
+    GaussNewtonSketchSolver solver;
+
+    // Drawn tangent, which is how every tool lays it down.
+    const Vec2 tangentStart{10.0, 8.0};
+    const SketchSolveResult old =
+        solver.solve(build(SolveResidual::Kind::TangentLineCircle, tangentStart));
+    ASSERT_TRUE(old) << old.message;
+    EXPECT_EQ(old.degreesOfFreedom, 1)
+        << "the distance form removed a freedom at the configuration it is satisfied in";
+
+    const SketchSolveResult now =
+        solver.solve(build(SolveResidual::Kind::TangentAtPoint, tangentStart));
+    ASSERT_TRUE(now) << now.message;
+    EXPECT_EQ(now.degreesOfFreedom, 0) << now.message;
+
+    // AND IT STILL PULLS. A constraint that only holds what is already right
+    // would satisfy the DOF check above and be useless: this one starts bent
+    // and has to straighten.
+    const SketchSolveResult pulled =
+        solver.solve(build(SolveResidual::Kind::TangentAtPoint, Vec2{14.0, 6.0}));
+    ASSERT_TRUE(pulled) << pulled.message;
+    EXPECT_EQ(pulled.degreesOfFreedom, 0) << pulled.message;
+    const double du = pulled.values[2] - pulled.values[0];
+    const double dv = pulled.values[3] - pulled.values[1];
+    const double ru = pulled.values[0] - pulled.values[4];
+    const double rv = pulled.values[1] - pulled.values[5];
+    EXPECT_NEAR(std::hypot(du, dv), 8.0, 1e-6);
+    EXPECT_NEAR((du * ru + dv * rv) / (std::hypot(du, dv) * std::hypot(ru, rv)), 0.0, 1e-9);
+}
+
+TEST(SketchSolverTest, M17_SLOT_005_TwoCurvesAtAPointHOLDWhereTheCentreDistanceDoesNot) {
+    // The same finding as M17_SLOT_004, for the pair rather than the line, and
+    // it is worth stating separately because the reason is different arithmetic
+    // reaching the same place.
+    //
+    // Two circles that SHARE a point already obey |r1-r2| <= |C1-C2| <= r1+r2 --
+    // the triangle inequality on the shared point. So the outer residual is at
+    // a maximum there and the inner one at a minimum, and BOTH have a vanishing
+    // gradient: near tangency each grows as the SQUARE of the angle between the
+    // two radii. Collinear radii measure that angle directly.
+    //
+    // One circle fixed, the other free in its centre only, touching it at a
+    // point pinned to both. One freedom left: the angle. Tangency has to take
+    // it, and only one of these three residuals does.
+    const auto build = [](SolveResidual::Kind kind, bool alreadyTangent) {
+        SketchSolveProblem p;
+        p.variables = {PointVar(1, SolveVariable::Component::U),        // 0 touch.u
+                       PointVar(1, SolveVariable::Component::V),        // 1 touch.v
+                       PointVar(2, SolveVariable::Component::U),        // 2 c1.u
+                       PointVar(2, SolveVariable::Component::V),        // 3 c1.v
+                       PointVar(3, SolveVariable::Component::U),        // 4 c2.u
+                       PointVar(3, SolveVariable::Component::V),        // 5 c2.v
+                       PointVar(2, SolveVariable::Component::Radius),   // 6 r1
+                       PointVar(3, SolveVariable::Component::Radius)};  // 7 r2
+        // c1 at the origin with r 10, the touch point at (10,0). The second
+        // circle has r 6 and its centre starts either straight out along the
+        // shared radius (tangent) or swung off it.
+        p.initialValues = {10.0, 0.0, 0.0, 0.0,
+                           alreadyTangent ? 16.0 : 14.0, alreadyTangent ? 0.0 : 5.0,
+                           10.0, 6.0};
+        p.residuals = {Fixed(SolveResidual::Kind::FixedU, 2, 0.0, 1),
+                       Fixed(SolveResidual::Kind::FixedV, 3, 0.0, 2),
+                       Fixed(SolveResidual::Kind::Radius, 6, 10.0, 3),
+                       Fixed(SolveResidual::Kind::Radius, 7, 6.0, 4),
+                       Fixed(SolveResidual::Kind::FixedU, 0, 10.0, 5),
+                       Fixed(SolveResidual::Kind::FixedV, 1, 0.0, 6)};
+        // The touch point is on the SECOND circle too -- which is what makes
+        // the centre-distance forms redundant rather than merely weak.
+        SolveResidual onSecond;
+        onSecond.kind = SolveResidual::Kind::PointOnCircle;
+        onSecond.vars = {0, 1, 4, 5, 7, -1, -1, -1};
+        onSecond.sourceConstraint = static_cast<SketchConstraintId>(7);
+        p.residuals.push_back(onSecond);
+
+        SolveResidual tangent;
+        tangent.sourceConstraint = static_cast<SketchConstraintId>(8);
+        tangent.kind = kind;
+        if (kind == SolveResidual::Kind::TangentCurvesAtPoint)
+            tangent.vars = {0, 1, 2, 3, 4, 5, 6, 7};
+        else
+            tangent.vars = {2, 3, 6, 4, 5, 7, -1, -1}; // (c1.u c1.v r1 c2.u c2.v r2)
+        p.residuals.push_back(tangent);
+        return p;
+    };
+
+    GaussNewtonSketchSolver solver;
+
+    // DRAWN TANGENT, which is where every tool starts.
+    const SketchSolveResult outer =
+        solver.solve(build(SolveResidual::Kind::TangentCirclesOuter, true));
+    ASSERT_TRUE(outer) << outer.message;
+    EXPECT_EQ(outer.degreesOfFreedom, 1) << "the centre-distance form held something after all";
+
+    const SketchSolveResult pinned =
+        solver.solve(build(SolveResidual::Kind::TangentCurvesAtPoint, true));
+    ASSERT_TRUE(pinned) << pinned.message;
+    EXPECT_EQ(pinned.degreesOfFreedom, 0) << pinned.message;
+
+    // AND IT PULLS: started off-tangent, it has to straighten the two radii out
+    // into one line.
+    const SketchSolveResult swung =
+        solver.solve(build(SolveResidual::Kind::TangentCurvesAtPoint, false));
+    ASSERT_TRUE(swung) << swung.message;
+    const double au = swung.values[0] - swung.values[2];
+    const double av = swung.values[1] - swung.values[3];
+    const double bu = swung.values[0] - swung.values[4];
+    const double bv = swung.values[1] - swung.values[5];
+    EXPECT_NEAR(std::fabs(au * bv - av * bu) / (std::hypot(au, av) * std::hypot(bu, bv)), 0.0,
+                1e-9)
+        << swung.message;
+    // ...to the EXTERNAL side it started on, not by flipping the circle through
+    // the touch point. Nothing in the residual forbids the other branch; what
+    // keeps it here is that a descent does not jump.
+    EXPECT_NEAR(std::hypot(swung.values[4] - swung.values[2], swung.values[5] - swung.values[3]),
+                16.0, 1e-6);
+}
+
 // --- Scale (spec 30: very small / large reasonable geometry) ---------------
 
 TEST(SketchSolverTest, M5_SCALE_001_SolvesAcrossFourOrdersOfMagnitude) {

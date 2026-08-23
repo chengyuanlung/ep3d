@@ -3,6 +3,8 @@
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Fakes/FakeGeometryKernel.h"
+#include "Support/SchemaVersionText.h"
+
 #include <gtest/gtest.h>
 #include <sstream>
 #include <string>
@@ -142,7 +144,7 @@ TEST(SerializationV3Test, M3_SER_004_ByteIdenticalRoundTrip) {
     // added sketch constraints. This document exercises only v3-era
     // features; the point of the assertion is byte-identical round-tripping
     // at whatever version is current, not that it is any particular number.
-    EXPECT_NE(firstSave.find("\"schemaVersion\": 8"), std::string::npos); // v8: M8.3 Fillet/Chamfer
+    EXPECT_NE(firstSave.find(paramcad::testing::CurrentSchemaVersionField()), std::string::npos);
     const LoadResult loaded = loadFromString(firstSave);
     ASSERT_TRUE(loaded) << loaded.message;
     EXPECT_EQ(saveToString(*loaded.document), firstSave);

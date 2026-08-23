@@ -1,6 +1,7 @@
 #include "Solver/GaussNewtonSketchSolver.h"
 
 #include <Eigen/Dense>
+#include <Eigen/SVD>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -55,6 +56,7 @@ double Evaluate(const SolveResidual& r, const Vec& x) {
         case SolveResidual::Kind::PointsEqualV:
         case SolveResidual::Kind::LineHorizontal:
         case SolveResidual::Kind::LineVertical:
+        case SolveResidual::Kind::RadiiEqual:
             return ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[0]);
 
         case SolveResidual::Kind::FixedU:
@@ -62,7 +64,45 @@ double Evaluate(const SolveResidual& r, const Vec& x) {
             return ValueAt(x, r.vars[0]) - r.target;
 
         case SolveResidual::Kind::Radius:
+        case SolveResidual::Kind::EllipseRotation:
             return ValueAt(x, r.vars[0]) - r.target;
+
+        case SolveResidual::Kind::TangentLineEllipse: {
+            // (p.u, p.v, q.u, q.v, c.u, c.v, a, b, rot)
+            //
+            // The line's UNIT NORMAL, rotated into the ellipse's own frame,
+            // and the signed distance from the centre to the line along it.
+            // Tangency is h^2 == a^2 nu^2 + b^2 nv^2 -- see the kind's comment
+            // in ISketchSolver.h for why this form and not |h| - R.
+            const double du = ValueAt(x, r.vars[2]) - ValueAt(x, r.vars[0]);
+            const double dv = ValueAt(x, r.vars[3]) - ValueAt(x, r.vars[1]);
+            const double length = std::sqrt(du * du + dv * dv);
+            const double a = ValueAt(x, r.vars[6]);
+            const double b = ValueAt(x, r.vars[7]);
+            // A line with no direction has no normal, and an ellipse with no
+            // extent has no tangent. Zero rather than a division: both are
+            // refused before they get here, and a NaN would poison the whole
+            // Jacobian rather than just this row.
+            if (length < kDegenerateSeparationMm || std::fabs(a) < kDegenerateSeparationMm ||
+                std::fabs(b) < kDegenerateSeparationMm)
+                return 0.0;
+            const double nu = -dv / length;
+            const double nv = du / length;
+            const double rot = ValueAt(x, r.vars[8]);
+            const double cosR = std::cos(rot);
+            const double sinR = std::sin(rot);
+            // Into the ellipse's frame. The normal is a DIRECTION, so it
+            // rotates by -rot and does not translate.
+            const double nMajor = nu * cosR + nv * sinR;
+            const double nMinor = -nu * sinR + nv * cosR;
+            // From the centre to the line, along the normal. Measured from the
+            // line's first end, which is a point on the line.
+            const double toCentreU = ValueAt(x, r.vars[4]) - ValueAt(x, r.vars[0]);
+            const double toCentreV = ValueAt(x, r.vars[5]) - ValueAt(x, r.vars[1]);
+            const double h = toCentreU * nu + toCentreV * nv;
+            const double reach = a * a * nMajor * nMajor + b * b * nMinor * nMinor;
+            return (h * h - reach) / (a * a + b * b);
+        }
 
         case SolveResidual::Kind::Distance:
         case SolveResidual::Kind::Length: {
@@ -109,6 +149,250 @@ double Evaluate(const SolveResidual& r, const Vec& x) {
             // the very fix that replaced the unbounded-loop hang.
             return WrapToPi(std::atan2(dvB, duB) - std::atan2(dvA, duA) -
                             WrapToPi(r.target));
+        }
+
+        case SolveResidual::Kind::PointsDeltaU:
+        case SolveResidual::Kind::PointsDeltaV:
+            // SIGNED: b - a - target, never |b - a| - target. The absolute
+            // form has no derivative at zero, which is exactly where a
+            // horizontal separation between two vertically-aligned points
+            // starts.
+            return ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[0]) - r.target;
+
+        case SolveResidual::Kind::LinesParallel:
+        case SolveResidual::Kind::LinesPerpendicular:
+        case SolveResidual::Kind::LengthsEqual: {
+            // (A.start.u, A.start.v, A.end.u, A.end.v, B.start.u, ...)
+            const double duA = ValueAt(x, r.vars[2]) - ValueAt(x, r.vars[0]);
+            const double dvA = ValueAt(x, r.vars[3]) - ValueAt(x, r.vars[1]);
+            const double duB = ValueAt(x, r.vars[6]) - ValueAt(x, r.vars[4]);
+            const double dvB = ValueAt(x, r.vars[7]) - ValueAt(x, r.vars[5]);
+            const double lengthA = std::sqrt(duA * duA + dvA * dvA);
+            const double lengthB = std::sqrt(duB * duB + dvB * dvB);
+            // LengthsEqual is in MILLIMETRES and needs no normalising -- a line
+            // of zero length is a legitimate thing for it to measure.
+            if (r.kind == SolveResidual::Kind::LengthsEqual) return lengthB - lengthA;
+            // The other two are NORMALISED by both lengths, so each is the sine
+            // or cosine of the angle between the lines: dimensionless, bounded
+            // by 1, and zero exactly at the relationship it names. The
+            // un-normalised cross and dot products have units of mm^2 and a
+            // magnitude that grows with the lines, so one tolerance could not
+            // serve a 1 mm pair and a 100 mm pair at once.
+            if (lengthA < kDegenerateSeparationMm || lengthB < kDegenerateSeparationMm)
+                return 0.0;
+            return r.kind == SolveResidual::Kind::LinesParallel
+                       ? (duA * dvB - dvA * duB) / (lengthA * lengthB)
+                       : (duA * duB + dvA * dvB) / (lengthA * lengthB);
+        }
+
+        case SolveResidual::Kind::MidpointU:
+        case SolveResidual::Kind::MidpointV:
+            // (p, start, end) in one component.
+            return ValueAt(x, r.vars[0]) -
+                   0.5 * (ValueAt(x, r.vars[1]) + ValueAt(x, r.vars[2]));
+
+        case SolveResidual::Kind::ArcTipU:
+        case SolveResidual::Kind::ArcTipV: {
+            // (tip, centre, radius, angle)
+            const double tip = ValueAt(x, r.vars[0]);
+            const double centre = ValueAt(x, r.vars[1]);
+            const double radius = ValueAt(x, r.vars[2]);
+            const double angle = ValueAt(x, r.vars[3]);
+            const double along = r.kind == SolveResidual::Kind::ArcTipU ? std::cos(angle)
+                                                                       : std::sin(angle);
+            return tip - (centre + radius * along);
+        }
+
+        case SolveResidual::Kind::EllipseTipU:
+        case SolveResidual::Kind::EllipseTipV: {
+            // (tip, centre, a, b, rot, t)
+            //
+            // A rotated ellipse MIXES the axes, so unlike the circular arc's
+            // tip these two are different equations rather than one with cos
+            // and sin swapped:
+            //
+            //   u: c.u + a cos t cos rot - b sin t sin rot
+            //   v: c.v + a cos t sin rot + b sin t cos rot
+            const double tip = ValueAt(x, r.vars[0]);
+            const double centre = ValueAt(x, r.vars[1]);
+            const double major = ValueAt(x, r.vars[2]);
+            const double minor = ValueAt(x, r.vars[3]);
+            const double rotation = ValueAt(x, r.vars[4]);
+            const double t = ValueAt(x, r.vars[5]);
+            const double along = major * std::cos(t);
+            const double across = minor * std::sin(t);
+            const double c = std::cos(rotation);
+            const double sn = std::sin(rotation);
+            const double offset = r.kind == SolveResidual::Kind::EllipseTipU
+                                      ? along * c - across * sn
+                                      : along * sn + across * c;
+            return tip - (centre + offset);
+        }
+
+        case SolveResidual::Kind::PointOnEllipseImplicit: {
+            // (p.u, p.v, c.u, c.v, a, b, rot)
+            const double du = ValueAt(x, r.vars[0]) - ValueAt(x, r.vars[2]);
+            const double dv = ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[3]);
+            const double major = ValueAt(x, r.vars[4]);
+            const double minor = ValueAt(x, r.vars[5]);
+            const double rotation = ValueAt(x, r.vars[6]);
+            if (std::fabs(major) < kDegenerateSeparationMm ||
+                std::fabs(minor) < kDegenerateSeparationMm)
+                return 0.0;
+            const double c = std::cos(rotation);
+            const double sn = std::sin(rotation);
+            // Into the ellipse's own frame.
+            const double along = (du * c + dv * sn) / major;
+            const double across = (-du * sn + dv * c) / minor;
+            // THE SQUARE ROOT FIRST, then minus one. The obvious form --
+            // (along^2 + across^2 - 1) -- is the same zero set and a much worse
+            // residual: it grows as the SQUARE of how far off the point is, so
+            // its gradient is enormous far away and its curvature dominates
+            // every step. Levenberg-Marquardt stalled on it from a start 30 mm
+            // off a 40x15 ellipse, having spent seven iterations rotating the
+            // ellipse instead of moving the point.
+            //
+            // Rooted, the quantity is "how many times the ellipse's own radius
+            // in this direction the point is", which grows LINEARLY -- and
+            // scaled by the mean radius it is comparable to the millimetres
+            // every other positional residual here is measured in, so one
+            // tolerance serves a 1 mm ellipse and a 100 mm one.
+            //
+            // It is still NOT the true distance to the ellipse -- that is the
+            // root of a quartic -- and it does not claim to be. It is zero
+            // exactly on the curve, which is what a residual has to be.
+            const double reach = std::sqrt(along * along + across * across);
+            // The CENTRE is the one place the direction is undefined. Zero
+            // there rather than a division; the point is pulled by whatever
+            // else holds it, and a NaN would poison the whole Jacobian.
+            if (reach < kDegenerateSeparationMm) return 0.0;
+            // THE RADIAL DISTANCE: how far the point is from where the ray out
+            // of the centre crosses the ellipse. `reach` is how many of that
+            // ray's own radii the point sits at, so `d/reach` IS that crossing's
+            // distance, and the difference is a length in millimetres.
+            //
+            // Scaling by the mean radius instead -- the previous version --
+            // measures the same zero set in units that are only millimetres for
+            // a circle. On a 40x15 ellipse it reads 31 for a point 12 mm off
+            // the curve, and the solver spent its whole budget crawling.
+            const double d = std::sqrt(du * du + dv * dv);
+            return d - d / reach;
+        }
+
+        case SolveResidual::Kind::SymmetricAcross:
+        case SolveResidual::Kind::SymmetricAlong: {
+            const double du = ValueAt(x, r.vars[6]) - ValueAt(x, r.vars[4]);
+            const double dv = ValueAt(x, r.vars[7]) - ValueAt(x, r.vars[5]);
+            const double length = std::sqrt(du * du + dv * dv);
+            // A mirror with no direction has no sides to be on. Zero rather
+            // than a division: the constraint is refused when the line is
+            // degenerate, and a NaN here would poison the whole Jacobian.
+            if (length < kDegenerateSeparationMm) return 0.0;
+            const double au = ValueAt(x, r.vars[0]) - ValueAt(x, r.vars[4]);
+            const double av = ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[5]);
+            const double bu = ValueAt(x, r.vars[2]) - ValueAt(x, r.vars[4]);
+            const double bv = ValueAt(x, r.vars[3]) - ValueAt(x, r.vars[5]);
+            if (r.kind == SolveResidual::Kind::SymmetricAcross) {
+                // Signed distances SUM to zero: same size, opposite sides. The
+                // difference would say "the same side", which is what a
+                // coincidence already says better.
+                return ((au * dv - av * du) + (bu * dv - bv * du)) / length;
+            }
+            // Square to the line: the two have the same projection ALONG it.
+            return ((bu - au) * du + (bv - av) * dv) / length;
+        }
+
+        case SolveResidual::Kind::PointLineDistance:
+        case SolveResidual::Kind::PointOnLine: {
+            // (p.u, p.v, a.u, a.v, b.u, b.v)
+            const double du = ValueAt(x, r.vars[4]) - ValueAt(x, r.vars[2]);
+            const double dv = ValueAt(x, r.vars[5]) - ValueAt(x, r.vars[3]);
+            const double pu = ValueAt(x, r.vars[0]) - ValueAt(x, r.vars[2]);
+            const double pv = ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[3]);
+            const double length = std::sqrt(du * du + dv * dv);
+            if (length < kDegenerateSeparationMm) return 0.0;
+            // Signed perpendicular distance, in mm -- the same units as every
+            // other positional residual, so one tolerance covers them all.
+            // `target` is 0 for PointOnLine, so ONE formula serves both and
+            // there is no second place for the sign convention to drift.
+            return (pu * dv - pv * du) / length - r.target;
+        }
+
+        case SolveResidual::Kind::PointOnCircle: {
+            // (p.u, p.v, c.u, c.v, r)
+            const double du = ValueAt(x, r.vars[0]) - ValueAt(x, r.vars[2]);
+            const double dv = ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[3]);
+            return std::sqrt(du * du + dv * dv) - ValueAt(x, r.vars[4]);
+        }
+
+        case SolveResidual::Kind::TangentLineCircle: {
+            // (a.u, a.v, b.u, b.v, c.u, c.v, r)
+            const double du = ValueAt(x, r.vars[2]) - ValueAt(x, r.vars[0]);
+            const double dv = ValueAt(x, r.vars[3]) - ValueAt(x, r.vars[1]);
+            const double cu = ValueAt(x, r.vars[4]) - ValueAt(x, r.vars[0]);
+            const double cv = ValueAt(x, r.vars[5]) - ValueAt(x, r.vars[1]);
+            const double length = std::sqrt(du * du + dv * dv);
+            if (length < kDegenerateSeparationMm) return 0.0;
+            const double distance = std::fabs(cu * dv - cv * du) / length;
+            return distance - ValueAt(x, r.vars[6]);
+        }
+
+        case SolveResidual::Kind::TangentAtPoint: {
+            // (touch.u, touch.v, far.u, far.v, c.u, c.v, r)
+            //
+            // PERPENDICULARITY, not distance. The touch point is already held
+            // on the curve by a coincidence, so what is left to say is that the
+            // line leaves it at a right angle to the radius -- and unlike the
+            // distance form above, that has somewhere to go when it is wrong.
+            const double du = ValueAt(x, r.vars[2]) - ValueAt(x, r.vars[0]);
+            const double dv = ValueAt(x, r.vars[3]) - ValueAt(x, r.vars[1]);
+            const double ru = ValueAt(x, r.vars[0]) - ValueAt(x, r.vars[4]);
+            const double rv = ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[5]);
+            const double length = std::sqrt(du * du + dv * dv);
+            const double radius = ValueAt(x, r.vars[6]);
+            // A line with no direction has no angle to make, and a circle with
+            // no radius has no tangent. Zero rather than a division: the
+            // constraint is refused before it gets here, and a NaN would poison
+            // the whole Jacobian rather than just this row.
+            if (length < kDegenerateSeparationMm || std::fabs(radius) < kDegenerateSeparationMm)
+                return 0.0;
+            return (du * ru + dv * rv) / (length * radius);
+        }
+
+        case SolveResidual::Kind::TangentCurvesAtPoint: {
+            // (touch.u, touch.v, c1.u, c1.v, c2.u, c2.v, r1, r2)
+            //
+            // COLLINEAR RADII, which is what tangency is once the touch point
+            // is known. The centre-distance forms below are true at the same
+            // configuration and hold nothing there, because they grow as the
+            // square of this angle rather than as the angle.
+            const double au = ValueAt(x, r.vars[0]) - ValueAt(x, r.vars[2]);
+            const double av = ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[3]);
+            const double bu = ValueAt(x, r.vars[0]) - ValueAt(x, r.vars[4]);
+            const double bv = ValueAt(x, r.vars[1]) - ValueAt(x, r.vars[5]);
+            const double r1 = ValueAt(x, r.vars[6]);
+            const double r2 = ValueAt(x, r.vars[7]);
+            // A curve with no radius has no tangent. Zero rather than a
+            // division, for the reason every other guard here gives: the
+            // constraint is refused before it arrives, and a NaN would poison
+            // the whole Jacobian instead of one row.
+            if (std::fabs(r1) < kDegenerateSeparationMm ||
+                std::fabs(r2) < kDegenerateSeparationMm)
+                return 0.0;
+            return (au * bv - av * bu) / (r1 * r2);
+        }
+
+        case SolveResidual::Kind::TangentCirclesOuter:
+        case SolveResidual::Kind::TangentCirclesInner: {
+            // (c1.u, c1.v, r1, c2.u, c2.v, r2)
+            const double du = ValueAt(x, r.vars[3]) - ValueAt(x, r.vars[0]);
+            const double dv = ValueAt(x, r.vars[4]) - ValueAt(x, r.vars[1]);
+            const double centres = std::sqrt(du * du + dv * dv);
+            const double r1 = ValueAt(x, r.vars[2]);
+            const double r2 = ValueAt(x, r.vars[5]);
+            return r.kind == SolveResidual::Kind::TangentCirclesOuter
+                       ? centres - (r1 + r2)
+                       : centres - std::fabs(r1 - r2);
         }
     }
     return 0.0;
@@ -180,6 +464,51 @@ int NumericalRank(const Mat& jacobian) {
     return static_cast<int>(qr.rank());
 }
 
+// WHICH variables the constraints did not pin down (M17.29).
+//
+// The rank above says how many freedoms are left. This says which ones, and it
+// has to be the SAME question or a sketch could report DOF 0 while an entity
+// was still coloured loose: a variable is free exactly when the Jacobian's null
+// space has a component along it, and the number of such directions IS the
+// nullity that the rank measures.
+//
+// An SVD rather than the QR used for the rank, because the rank only needs a
+// count and this needs the null space itself. Both use the same relative
+// threshold on the same matrix, so they agree by construction.
+//
+// The threshold is on the COLUMN of V, not on the singular value alone: a
+// variable with a tiny component in a null direction is not meaningfully free,
+// and rounding noise puts a tiny component almost everywhere.
+std::vector<bool> FreeVariables(const Mat& jacobian, int variableCount) {
+    std::vector<bool> free(static_cast<std::size_t>(variableCount), false);
+    if (variableCount == 0) return free;
+    if (jacobian.rows() == 0) {
+        // NOTHING CONSTRAINS ANYTHING, so everything is free. Not a special
+        // case so much as the honest reading of an empty constraint set -- and
+        // the SVD below has no columns to give.
+        free.assign(static_cast<std::size_t>(variableCount), true);
+        return free;
+    }
+
+    Eigen::JacobiSVD<Mat> svd(jacobian, Eigen::ComputeFullV);
+    const Vec singular = svd.singularValues();
+    const double largest = singular.size() > 0 ? singular(0) : 0.0;
+    // The same relative cut the rank uses, so "how many are free" and "which
+    // are free" cannot come to different answers.
+    const double cut = kSolveRankThreshold * std::max(largest, 1.0);
+
+    const Mat& v = svd.matrixV();
+    for (int column = 0; column < v.cols(); ++column) {
+        const bool nullDirection =
+            column >= singular.size() || singular(column) <= cut;
+        if (!nullDirection) continue;
+        for (int row = 0; row < v.rows() && row < variableCount; ++row)
+            if (std::fabs(v(row, column)) > 1e-6)
+                free[static_cast<std::size_t>(row)] = true;
+    }
+    return free;
+}
+
 // Constraints whose residuals are still violated, for diagnostics. Reported in
 // ascending id order so the message is deterministic.
 std::vector<SketchConstraintId> OffendersOf(const std::vector<SolveResidual>& residuals,
@@ -240,6 +569,12 @@ SketchSolveResult GaussNewtonSketchSolver::solve(const SketchSolveProblem& probl
         // wrong answer while reporting Solved -- which is exactly how the Angle
         // residual shipped broken and passed 444 tests.
         const int required = SlotsRequired(residual.kind);
+        // A KIND NOBODY DECLARED AN ARITY FOR. This used to be indistinguishable
+        // from "needs no variables": the loop below simply did not run, and the
+        // guard quietly stopped guarding. Seven kinds lived in that gap.
+        if (required == kUndeclaredArity)
+            return Failure(problem, SketchSolveStatus::InvalidInput,
+                           "a constraint uses an equation whose arity was never declared");
         for (int slot = 0; slot < required; ++slot) {
             const int index = residual.vars[static_cast<std::size_t>(slot)];
             if (index < 0 || index >= variableCount)
@@ -250,8 +585,8 @@ SketchSolveResult GaussNewtonSketchSolver::solve(const SketchSolveProblem& probl
             // Arity alone let a mis-ORDERED Distance through -- all four slots
             // filled and in range -- which then reported Solved with a tiny
             // residual and geometry wrong by millimetres.
-            if (problem.variables[static_cast<std::size_t>(index)].component !=
-                SlotComponent(residual.kind, slot))
+            if (!SlotAccepts(residual.kind, slot,
+                             problem.variables[static_cast<std::size_t>(index)].component))
                 return Failure(problem, SketchSolveStatus::InvalidInput,
                                "a constraint's variables are packed in the wrong order");
         }
@@ -298,7 +633,18 @@ SketchSolveResult GaussNewtonSketchSolver::solve(const SketchSolveProblem& probl
         return Failure(problem, SketchSolveStatus::InvalidInput,
                        "the initial configuration produces a non-finite residual");
 
-    double damping = 1e-6;
+    // DIMENSIONLESS, and multiplied by the size of J'J below.
+    //
+    // It used to be an absolute number added straight to the diagonal, which
+    // means nothing on its own: 1e-6 is heavy damping for a problem measured in
+    // microns and none at all for one measured in metres. Worse, it could not
+    // GROW enough. Under-constrained sketches are rank-deficient by
+    // construction, so J'J is singular and LDLT hands back a step along the
+    // null space that can be arbitrarily large; taming one needs damping
+    // comparable to J'J, and twelve tenfold increases from a decayed 1e-12
+    // could never reach it. A point constrained onto an ellipse stalled there
+    // with a perfectly good descent direction available.
+    double damping = 1e-9;
     int iteration = 0;
     bool stopEarly = false; // step size below tolerance, or no step accepted
 
@@ -306,7 +652,12 @@ SketchSolveResult GaussNewtonSketchSolver::solve(const SketchSolveProblem& probl
     // step is rejected. Plain Gauss-Newton diverges on rank-deficient systems,
     // which under-constrained sketches are BY CONSTRUCTION -- so the damping is
     // not a refinement here, it is what makes the ordinary case work.
-    for (; iteration < kSolveMaxIterations; ++iteration) {
+    // NO INCREMENT IN THE HEADER. There is one at the bottom of the body, and
+    // having both counted every pass TWICE: a solve that took three passes
+    // reported six, and the limit of 100 was really a limit of fifty. The
+    // second increment was added to stop the early exits skipping the header's
+    // -- the fix for that is to count in one place, not in two.
+    for (; iteration < kSolveMaxIterations;) {
         if (residuals.lpNorm<Eigen::Infinity>() <= kSolveResidualTolerance) break;
 
         ComputeJacobian(problem.residuals, x, jacobian);
@@ -317,10 +668,18 @@ SketchSolveResult GaussNewtonSketchSolver::solve(const SketchSolveProblem& probl
         const Mat jtj = jacobian.transpose() * jacobian;
         const Vec jtr = jacobian.transpose() * residuals;
 
+        // The SIZE of the normal equations, so the damping below is a fraction
+        // of them rather than a number in whatever units the sketch happens to
+        // be in.
+        const double normalScale = std::max(jtj.diagonal().maxCoeff(), 1e-12);
+
         bool stepAccepted = false;
-        for (int attempt = 0; attempt < 12 && !stepAccepted; ++attempt) {
+        // TWENTY-FOUR attempts, not twelve: the search has to be able to span
+        // from "no damping" to "so damped the step is a whisper", and each one
+        // is a tenfold increase.
+        for (int attempt = 0; attempt < 24 && !stepAccepted; ++attempt) {
             Mat damped = jtj;
-            damped.diagonal().array() += damping;
+            damped.diagonal().array() += damping * normalScale;
             const Vec step = damped.ldlt().solve(-jtr);
             if (!AllFinite(step)) {
                 damping *= 10.0;
@@ -355,9 +714,9 @@ SketchSolveResult GaussNewtonSketchSolver::solve(const SketchSolveProblem& probl
             }
         }
 
-        // Counted BEFORE the early-stop breaks: a solve that completed one
-        // accepted step reported 0 iterations because these exits skipped the
-        // increment the loop header performs.
+        // Counted BEFORE the early-stop breaks, and ONLY here: a solve that
+        // completed one accepted step used to report 0, because these exits
+        // skipped an increment that lived in the loop header.
         ++iteration;
         if (!stepAccepted) {
             stopEarly = true; // no damping value improved the residual
@@ -381,6 +740,7 @@ SketchSolveResult GaussNewtonSketchSolver::solve(const SketchSolveProblem& probl
     ComputeJacobian(problem.residuals, x, jacobian);
     const int rank = NumericalRank(jacobian);
     result.degreesOfFreedom = std::max(0, variableCount - rank);
+    result.variableIsFree = FreeVariables(jacobian, variableCount);
 
     const bool converged = result.maxResidual <= kSolveResidualTolerance;
     const bool redundant = rank < residualCount;
@@ -392,6 +752,10 @@ SketchSolveResult GaussNewtonSketchSolver::solve(const SketchSolveProblem& probl
         // a failed result carries kUnknownDegreesOfFreedom; only the Failure()
         // paths honoured it, and this one did not.
         result.degreesOfFreedom = kUnknownDegreesOfFreedom;
+        // ...and WHICH variables are free is unknown for the same reason. An
+        // empty list is the only honest answer; a stale one would colour the
+        // sketch as though the failed solve had measured something.
+        result.variableIsFree.clear();
         // Did not converge. Rank-deficient in the direction of the violation
         // means contradictory constraints; otherwise the solver simply failed
         // to get there. Borderline cases resolve toward Conflicting, because

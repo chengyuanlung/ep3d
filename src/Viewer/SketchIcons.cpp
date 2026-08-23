@@ -1,0 +1,922 @@
+#include "Viewer/SketchIcons.h"
+
+#include <QPainter>
+#include <QPainterPath>
+#include <QPen>
+#include <QPixmap>
+#include <QPolygonF>
+
+#include <array>
+#include <cmath>
+
+namespace paramcad::ui {
+namespace {
+
+// Every icon is drawn on this grid and then scaled, so one set of coordinates
+// serves 16 px and 48 px alike.
+constexpr double kGrid = 24.0;
+
+// The sizes a QIcon carries. Qt picks the nearest and scales only when it must,
+// which for line art is the difference between crisp and smeared.
+constexpr std::array<int, 5> kSizes{16, 20, 24, 32, 48};
+
+struct Ink {
+    QColor stroke;  // ordinary geometry
+    QColor accent;  // the relationship the icon is ABOUT
+    QColor subdue;  // construction and reference marks
+    QColor danger;  // destructive commands only
+};
+
+// Derived from the palette, never hard-coded -- the same rule
+// DesignTokens.h's presentationFor() follows, and for the same reason.
+Ink InkFor(const QPalette& palette) {
+    const QColor background = palette.color(QPalette::Window);
+    const double luminance = (0.299 * background.red() + 0.587 * background.green() +
+                              0.114 * background.blue()) /
+                             255.0;
+    const bool dark = luminance < 0.5;
+
+    Ink ink;
+    ink.stroke = palette.color(QPalette::ButtonText);
+    // Blue on light, a lifted blue on dark: the accent has to stay legible
+    // against the toolbar it sits on, not against a notional white.
+    ink.accent = dark ? QColor(0x6E, 0xA8, 0xFF) : QColor(0x1B, 0x5F, 0xC8);
+    ink.subdue = palette.color(QPalette::Disabled, QPalette::ButtonText);
+    ink.danger = dark ? QColor(0xE8, 0x7D, 0x7D) : QColor(0xB3, 0x2A, 0x2A);
+    return ink;
+}
+
+// A dot the same shape the canvas draws for a defined point.
+void Dot(QPainter& p, double x, double y, const QColor& colour, double radius = 1.7) {
+    p.save();
+    p.setPen(Qt::NoPen);
+    p.setBrush(colour);
+    p.drawEllipse(QPointF(x, y), radius, radius);
+    p.restore();
+}
+
+void Stroke(QPainter& p, const QColor& colour, double width = 1.6,
+            Qt::PenStyle style = Qt::SolidLine) {
+    QPen pen(colour, width, style, Qt::RoundCap, Qt::RoundJoin);
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+}
+
+// A small filled arrowhead, the same idea the dimension renderer uses.
+void Arrow(QPainter& p, QPointF tip, QPointF direction, const QColor& colour,
+           double length = 4.2, double halfWidth = 1.9) {
+    const double norm = std::hypot(direction.x(), direction.y());
+    if (!(norm > 1e-9)) return;
+    const QPointF unit(direction.x() / norm, direction.y() / norm);
+    const QPointF back(tip.x() - unit.x() * length, tip.y() - unit.y() * length);
+    const QPointF side(-unit.y() * halfWidth, unit.x() * halfWidth);
+    QPainterPath path;
+    path.moveTo(tip);
+    path.lineTo(back + side);
+    path.lineTo(back - side);
+    path.closeSubpath();
+    p.save();
+    p.setPen(Qt::NoPen);
+    p.setBrush(colour);
+    p.drawPath(path);
+    p.restore();
+}
+
+// The right-angle square that marks a perpendicular corner on a drawing.
+void RightAngleMark(QPainter& p, QPointF corner, QPointF alongA, QPointF alongB,
+                    const QColor& colour, double size = 4.0) {
+    const QPointF a(corner.x() + alongA.x() * size, corner.y() + alongA.y() * size);
+    const QPointF b(corner.x() + alongB.x() * size, corner.y() + alongB.y() * size);
+    const QPointF c(a.x() + alongB.x() * size, a.y() + alongB.y() * size);
+    Stroke(p, colour, 1.2);
+    p.drawLine(a, c);
+    p.drawLine(c, b);
+}
+
+void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
+    switch (icon) {
+    // --- Drawing tools ---------------------------------------------------
+    case SketchIcon::Select: {
+        // The pointer, filled so it reads at 16 px where an outline would not.
+        QPainterPath arrowPath;
+        arrowPath.moveTo(7.0, 4.0);
+        arrowPath.lineTo(7.0, 18.5);
+        arrowPath.lineTo(10.6, 15.0);
+        arrowPath.lineTo(13.0, 20.4);
+        arrowPath.lineTo(15.3, 19.3);
+        arrowPath.lineTo(12.9, 14.1);
+        arrowPath.lineTo(17.6, 13.6);
+        arrowPath.closeSubpath();
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.stroke);
+        p.drawPath(arrowPath);
+        break;
+    }
+    case SketchIcon::Line:
+        Stroke(p, ink.stroke);
+        p.drawLine(QPointF(4.5, 18.5), QPointF(19.5, 5.5));
+        Dot(p, 4.5, 18.5, ink.accent);
+        Dot(p, 19.5, 5.5, ink.accent);
+        break;
+    case SketchIcon::Rectangle:
+        Stroke(p, ink.stroke);
+        p.drawRect(QRectF(4.5, 6.5, 15.0, 11.0));
+        Dot(p, 4.5, 6.5, ink.accent);
+        Dot(p, 19.5, 17.5, ink.accent);
+        break;
+    case SketchIcon::Circle:
+        Stroke(p, ink.stroke);
+        p.drawEllipse(QPointF(12.0, 12.0), 7.5, 7.5);
+        Dot(p, 12.0, 12.0, ink.accent);
+        break;
+    case SketchIcon::Arc:
+        Stroke(p, ink.stroke);
+        // Centre-point arc: the tool takes centre, start, end -- so the icon
+        // shows all three, not just a bent line.
+        p.drawArc(QRectF(4.0, 6.0, 16.0, 16.0), 20 * 16, 140 * 16);
+        Dot(p, 12.0, 14.0, ink.subdue, 1.4);
+        Dot(p, 19.5, 11.3, ink.accent);
+        Dot(p, 4.5, 11.3, ink.accent);
+        break;
+    case SketchIcon::Point:
+        Stroke(p, ink.subdue, 1.2);
+        p.drawLine(QPointF(12.0, 5.0), QPointF(12.0, 19.0));
+        p.drawLine(QPointF(5.0, 12.0), QPointF(19.0, 12.0));
+        Dot(p, 12.0, 12.0, ink.accent, 2.6);
+        break;
+
+    // --- Geometric constraints -------------------------------------------
+    case SketchIcon::Coincident:
+        // Two things ARRIVING at one point, shown as two heads closing on a
+        // single dot.
+        //
+        // The first version drew two line ends meeting inside a ring, and in
+        // the toolbar it read as a handbag -- the ring closed the V into a
+        // shape. A screenshot is the only thing that could have said so.
+        Stroke(p, ink.stroke, 1.6);
+        p.drawLine(QPointF(3.0, 12.0), QPointF(7.6, 12.0));
+        p.drawLine(QPointF(21.0, 12.0), QPointF(16.4, 12.0));
+        Arrow(p, QPointF(9.0, 12.0), QPointF(1.0, 0.0), ink.stroke);
+        Arrow(p, QPointF(15.0, 12.0), QPointF(-1.0, 0.0), ink.stroke);
+        Dot(p, 12.0, 12.0, ink.accent, 3.0);
+        break;
+    case SketchIcon::Horizontal:
+        Stroke(p, ink.accent, 2.0);
+        p.drawLine(QPointF(4.0, 12.0), QPointF(20.0, 12.0));
+        Dot(p, 4.0, 12.0, ink.stroke);
+        Dot(p, 20.0, 12.0, ink.stroke);
+        Stroke(p, ink.subdue, 1.1, Qt::DashLine);
+        p.drawLine(QPointF(4.0, 18.5), QPointF(20.0, 18.5));
+        break;
+    case SketchIcon::Vertical:
+        Stroke(p, ink.accent, 2.0);
+        p.drawLine(QPointF(12.0, 4.0), QPointF(12.0, 20.0));
+        Dot(p, 12.0, 4.0, ink.stroke);
+        Dot(p, 12.0, 20.0, ink.stroke);
+        Stroke(p, ink.subdue, 1.1, Qt::DashLine);
+        p.drawLine(QPointF(5.5, 4.0), QPointF(5.5, 20.0));
+        break;
+    case SketchIcon::Fix: {
+        // A padlock. "Pinned where it is" needs a metaphor a first-time user
+        // already owns; a dot with decoration does not read as anything.
+        Stroke(p, ink.stroke, 1.6);
+        p.drawArc(QRectF(8.0, 4.5, 8.0, 9.0), 0, 180 * 16);
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        p.drawRoundedRect(QRectF(6.5, 11.0, 11.0, 8.5), 1.6, 1.6);
+        Dot(p, 12.0, 15.2, QColor(255, 255, 255, 220), 1.4);
+        break;
+    }
+    case SketchIcon::Parallel:
+        Stroke(p, ink.accent, 1.8);
+        p.drawLine(QPointF(5.0, 19.0), QPointF(12.0, 5.0));
+        p.drawLine(QPointF(12.0, 19.0), QPointF(19.0, 5.0));
+        break;
+    case SketchIcon::Perpendicular:
+        Stroke(p, ink.accent, 1.8);
+        p.drawLine(QPointF(6.0, 4.5), QPointF(6.0, 19.0));
+        p.drawLine(QPointF(6.0, 19.0), QPointF(20.0, 19.0));
+        RightAngleMark(p, QPointF(6.0, 19.0), QPointF(0.0, -1.0), QPointF(1.0, 0.0), ink.stroke);
+        break;
+    case SketchIcon::Equal:
+        // Two segments carrying the single tick a drawing uses for "same size".
+        Stroke(p, ink.stroke, 1.6);
+        p.drawLine(QPointF(4.5, 8.0), QPointF(19.5, 8.0));
+        p.drawLine(QPointF(4.5, 16.5), QPointF(19.5, 16.5));
+        Stroke(p, ink.accent, 1.8);
+        p.drawLine(QPointF(12.0, 5.4), QPointF(12.0, 10.6));
+        p.drawLine(QPointF(12.0, 13.9), QPointF(12.0, 19.1));
+        break;
+    case SketchIcon::Concentric:
+        Stroke(p, ink.stroke, 1.5);
+        p.drawEllipse(QPointF(12.0, 12.0), 8.0, 8.0);
+        Stroke(p, ink.accent, 1.5);
+        p.drawEllipse(QPointF(12.0, 12.0), 4.0, 4.0);
+        Dot(p, 12.0, 12.0, ink.accent, 1.5);
+        break;
+    case SketchIcon::Midpoint:
+        Stroke(p, ink.stroke, 1.6);
+        p.drawLine(QPointF(4.0, 12.0), QPointF(20.0, 12.0));
+        // Equal-length ticks either side say MIDpoint rather than on-the-line.
+        Stroke(p, ink.accent, 1.5);
+        p.drawLine(QPointF(8.0, 9.0), QPointF(8.0, 15.0));
+        p.drawLine(QPointF(16.0, 9.0), QPointF(16.0, 15.0));
+        Dot(p, 12.0, 12.0, ink.accent, 2.7);
+        break;
+    case SketchIcon::PointOnObject:
+        Stroke(p, ink.stroke, 1.6);
+        p.drawLine(QPointF(3.5, 17.5), QPointF(20.5, 7.5));
+        Dot(p, 12.0, 12.5, ink.accent, 2.9);
+        break;
+    case SketchIcon::Tangent:
+        Stroke(p, ink.stroke, 1.5);
+        p.drawEllipse(QPointF(12.0, 14.5), 6.5, 6.5);
+        Stroke(p, ink.accent, 1.8);
+        p.drawLine(QPointF(3.5, 8.0), QPointF(20.5, 8.0));
+        Dot(p, 12.0, 8.0, ink.accent, 2.0);
+        break;
+
+    // --- Dimensions -------------------------------------------------------
+    case SketchIcon::Dimension:
+        // The icon is the thing itself: extension lines, a dimension line and
+        // two outward arrowheads.
+        Stroke(p, ink.subdue, 1.2);
+        p.drawLine(QPointF(5.0, 7.0), QPointF(5.0, 19.5));
+        p.drawLine(QPointF(19.0, 7.0), QPointF(19.0, 19.5));
+        Stroke(p, ink.accent, 1.5);
+        p.drawLine(QPointF(5.0, 13.0), QPointF(19.0, 13.0));
+        Arrow(p, QPointF(5.0, 13.0), QPointF(-1.0, 0.0), ink.accent);
+        Arrow(p, QPointF(19.0, 13.0), QPointF(1.0, 0.0), ink.accent);
+        break;
+    case SketchIcon::Radius:
+        Stroke(p, ink.stroke, 1.5);
+        p.drawEllipse(QPointF(12.0, 12.0), 8.0, 8.0);
+        Stroke(p, ink.accent, 1.5);
+        p.drawLine(QPointF(12.0, 12.0), QPointF(17.7, 6.3));
+        Arrow(p, QPointF(17.7, 6.3), QPointF(1.0, -1.0), ink.accent);
+        Dot(p, 12.0, 12.0, ink.accent, 1.5);
+        break;
+    case SketchIcon::Diameter:
+        Stroke(p, ink.stroke, 1.5);
+        p.drawEllipse(QPointF(12.0, 12.0), 8.0, 8.0);
+        Stroke(p, ink.accent, 1.5);
+        p.drawLine(QPointF(6.3, 17.7), QPointF(17.7, 6.3));
+        Arrow(p, QPointF(17.7, 6.3), QPointF(1.0, -1.0), ink.accent);
+        Arrow(p, QPointF(6.3, 17.7), QPointF(-1.0, 1.0), ink.accent);
+        break;
+
+    case SketchIcon::AutoPlaceDimensions:
+        // A dimension line with a return arrow curling over it: put the values
+        // back where the layout wants them.
+        Stroke(p, ink.subdue, 1.1);
+        p.drawLine(QPointF(5.0, 12.5), QPointF(5.0, 20.0));
+        p.drawLine(QPointF(19.0, 12.5), QPointF(19.0, 20.0));
+        Stroke(p, ink.stroke, 1.4);
+        p.drawLine(QPointF(5.0, 17.0), QPointF(19.0, 17.0));
+        Arrow(p, QPointF(5.0, 17.0), QPointF(-1.0, 0.0), ink.stroke, 3.6, 1.6);
+        Arrow(p, QPointF(19.0, 17.0), QPointF(1.0, 0.0), ink.stroke, 3.6, 1.6);
+        Stroke(p, ink.accent, 1.7);
+        p.drawArc(QRectF(6.0, 3.0, 12.0, 11.0), 200 * 16, -230 * 16);
+        Arrow(p, QPointF(6.6, 6.2), QPointF(-0.5, -1.0), ink.accent, 4.0, 1.8);
+        break;
+
+    case SketchIcon::HorizontalDistance:
+        // A horizontal dimension line with a tick at each end, and the two
+        // POINTS it spans marked -- which is what distinguishes it from Length,
+        // whose subject is a line rather than a pair.
+        Stroke(p, ink.accent, 1.6);
+        p.drawLine(QPointF(4.5, 12.0), QPointF(19.5, 12.0));
+        p.drawLine(QPointF(4.5, 9.0), QPointF(4.5, 15.0));
+        p.drawLine(QPointF(19.5, 9.0), QPointF(19.5, 15.0));
+        Dot(p, 4.5, 19.0, ink.stroke, 2.0);
+        Dot(p, 19.5, 5.0, ink.stroke, 2.0);
+        break;
+    case SketchIcon::VerticalDistance:
+        Stroke(p, ink.accent, 1.6);
+        p.drawLine(QPointF(12.0, 4.5), QPointF(12.0, 19.5));
+        p.drawLine(QPointF(9.0, 4.5), QPointF(15.0, 4.5));
+        p.drawLine(QPointF(9.0, 19.5), QPointF(15.0, 19.5));
+        Dot(p, 5.0, 4.5, ink.stroke, 2.0);
+        Dot(p, 19.0, 19.5, ink.stroke, 2.0);
+        break;
+
+    case SketchIcon::PointLineDistance:
+        // A point with a PERPENDICULAR dropped to a line, and the little square
+        // that says the angle is a right angle -- which is the whole meaning of
+        // the dimension.
+        Stroke(p, ink.subdue, 1.5);
+        p.drawLine(QPointF(3.5, 19.0), QPointF(20.5, 19.0));
+        Stroke(p, ink.accent, 1.7);
+        p.drawLine(QPointF(12.0, 6.0), QPointF(12.0, 19.0));
+        p.drawRect(QRectF(12.0, 15.5, 3.5, 3.5));
+        Dot(p, 12.0, 6.0, ink.stroke, 2.2);
+        break;
+    case SketchIcon::Offset: {
+        // Two nested outlines: the shape, and a copy of it standing off. The
+        // copy is DASHED so the pair reads as "this one is derived from that
+        // one" rather than as two unrelated boxes.
+        Stroke(p, ink.stroke, 1.7);
+        p.drawRect(QRectF(4.0, 8.0, 10.0, 10.0));
+        QPen dashed(ink.accent, 1.5);
+        dashed.setStyle(Qt::DashLine);
+        p.setPen(dashed);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(7.5, 4.5, 13.0, 13.0));
+        break;
+    }
+
+    case SketchIcon::Trim: {
+        // A line crossed by another, with the cut-off piece DASHED: the picture
+        // of what the command does, not a pair of scissors that could mean any
+        // of five commands.
+        Stroke(p, ink.subdue, 1.5);
+        p.drawLine(QPointF(15.0, 3.5), QPointF(15.0, 20.5));
+        Stroke(p, ink.stroke, 1.9);
+        p.drawLine(QPointF(3.5, 12.0), QPointF(15.0, 12.0));
+        QPen dashed(ink.danger, 1.6);
+        dashed.setStyle(Qt::DashLine);
+        p.setPen(dashed);
+        p.setBrush(Qt::NoBrush);
+        p.drawLine(QPointF(15.0, 12.0), QPointF(21.0, 12.0));
+        break;
+    }
+
+    case SketchIcon::Extend: {
+        // Trim's mirror image: a line reaching a boundary, with the NEW piece
+        // dashed. Drawn as the opposite of Trim on purpose -- the two are
+        // opposites, and icons that look unrelated make the pair harder to
+        // learn than either alone.
+        Stroke(p, ink.subdue, 1.5);
+        p.drawLine(QPointF(20.0, 3.5), QPointF(20.0, 20.5));
+        Stroke(p, ink.stroke, 1.9);
+        p.drawLine(QPointF(3.5, 12.0), QPointF(12.0, 12.0));
+        QPen grown(ink.accent, 1.6);
+        grown.setStyle(Qt::DashLine);
+        p.setPen(grown);
+        p.setBrush(Qt::NoBrush);
+        p.drawLine(QPointF(12.0, 12.0), QPointF(20.0, 12.0));
+        break;
+    }
+    case SketchIcon::Chamfer:
+        // A corner with its point cut off, and the cut drawn heavier: the
+        // result of the command rather than a symbol for it.
+        Stroke(p, ink.subdue, 1.6);
+        p.drawLine(QPointF(4.0, 20.5), QPointF(4.0, 10.0));
+        p.drawLine(QPointF(20.5, 4.0), QPointF(10.0, 4.0));
+        Stroke(p, ink.accent, 2.1);
+        p.drawLine(QPointF(4.0, 10.0), QPointF(10.0, 4.0));
+        break;
+
+    case SketchIcon::Fillet: {
+        // Chamfer's twin: the same corner, rounded instead of cut. Drawn as a
+        // pair on purpose -- the two commands answer the same question and the
+        // icons should say so.
+        Stroke(p, ink.subdue, 1.6);
+        p.drawLine(QPointF(4.0, 20.5), QPointF(4.0, 10.0));
+        p.drawLine(QPointF(20.5, 4.0), QPointF(10.0, 4.0));
+        Stroke(p, ink.accent, 2.1);
+        p.drawArc(QRectF(4.0, 4.0, 12.0, 12.0), 180 * 16, -90 * 16);
+        break;
+    }
+    case SketchIcon::Symmetric:
+        // Two dots either side of an axis, with the axis drawn as a
+        // centreline: the relationship, not an object.
+        Stroke(p, ink.accent, 1.6);
+        p.drawLine(QPointF(12.0, 3.0), QPointF(12.0, 21.0));
+        Dot(p, 5.0, 12.0, ink.stroke, 2.6);
+        Dot(p, 19.0, 12.0, ink.stroke, 2.6);
+        break;
+    case SketchIcon::Mirror: {
+        // A shape and its reflection across the same axis, the copy DASHED --
+        // the same "this one is derived from that one" language Offset uses.
+        Stroke(p, ink.accent, 1.5);
+        p.drawLine(QPointF(12.0, 3.0), QPointF(12.0, 21.0));
+        Stroke(p, ink.stroke, 1.7);
+        p.drawLine(QPointF(4.0, 6.0), QPointF(9.5, 12.0));
+        p.drawLine(QPointF(9.5, 12.0), QPointF(4.0, 18.0));
+        QPen copy(ink.subdue, 1.5);
+        copy.setStyle(Qt::DashLine);
+        p.setPen(copy);
+        p.setBrush(Qt::NoBrush);
+        p.drawLine(QPointF(20.0, 6.0), QPointF(14.5, 12.0));
+        p.drawLine(QPointF(14.5, 12.0), QPointF(20.0, 18.0));
+        break;
+    }
+
+    // --- Sketch-mode commands --------------------------------------------
+    case SketchIcon::OriginPoint:
+        // Two AXES crossing at a marked corner -- the thing a draughtsman
+        // measures from. Deliberately NOT the Point icon with a decoration:
+        // that pair read as the same button at toolbar size, and the smoke test
+        // rejects two buttons sharing a fingerprint for exactly this reason.
+        Stroke(p, ink.subdue, 1.4);
+        p.drawLine(QPointF(6.0, 18.0), QPointF(20.5, 18.0));
+        p.drawLine(QPointF(6.0, 18.0), QPointF(6.0, 3.5));
+        Stroke(p, ink.accent, 1.7);
+        p.drawRect(QRectF(3.4, 15.4, 5.2, 5.2));
+        break;
+    case SketchIcon::Construction: {
+        // A DASHED line, which is exactly how construction geometry is drawn on
+        // the canvas. The icon and the result should be the same picture.
+        QPen dashed(ink.accent, 1.9);
+        dashed.setStyle(Qt::DashLine);
+        dashed.setCapStyle(Qt::RoundCap);
+        p.setPen(dashed);
+        p.setBrush(Qt::NoBrush);
+        p.drawLine(QPointF(3.5, 18.5), QPointF(20.5, 5.5));
+        Dot(p, 3.5, 18.5, ink.stroke, 2.0);
+        Dot(p, 20.5, 5.5, ink.stroke, 2.0);
+        break;
+    }
+    case SketchIcon::DeleteGeometry:
+        Stroke(p, ink.subdue, 1.5);
+        p.drawLine(QPointF(4.0, 18.0), QPointF(14.0, 6.5));
+        Stroke(p, ink.danger, 2.1);
+        p.drawLine(QPointF(13.0, 13.0), QPointF(20.5, 20.5));
+        p.drawLine(QPointF(20.5, 13.0), QPointF(13.0, 20.5));
+        break;
+    case SketchIcon::FitSketch: {
+        // Four corner brackets: the universal "fit to view".
+        Stroke(p, ink.stroke, 1.7);
+        const double a = 4.0;
+        const double b = 20.0;
+        const double t = 5.0;
+        p.drawLine(QPointF(a, a + t), QPointF(a, a));
+        p.drawLine(QPointF(a, a), QPointF(a + t, a));
+        p.drawLine(QPointF(b - t, a), QPointF(b, a));
+        p.drawLine(QPointF(b, a), QPointF(b, a + t));
+        p.drawLine(QPointF(b, b - t), QPointF(b, b));
+        p.drawLine(QPointF(b, b), QPointF(b - t, b));
+        p.drawLine(QPointF(a + t, b), QPointF(a, b));
+        p.drawLine(QPointF(a, b), QPointF(a, b - t));
+        Stroke(p, ink.accent, 1.4);
+        p.drawRect(QRectF(9.0, 9.5, 6.0, 5.0));
+        break;
+    }
+    case SketchIcon::NewSketch:
+    case SketchIcon::EditSketch:
+    case SketchIcon::FinishSketch: {
+        // A sketch PLANE seen in perspective, so all three read as one family
+        // and differ only by the mark on them.
+        QPainterPath plane;
+        plane.moveTo(3.0, 15.5);
+        plane.lineTo(10.5, 8.5);
+        plane.lineTo(21.0, 8.5);
+        plane.lineTo(13.5, 15.5);
+        plane.closeSubpath();
+        Stroke(p, ink.stroke, 1.4);
+        p.drawPath(plane);
+
+        if (icon == SketchIcon::NewSketch) {
+            Stroke(p, ink.accent, 2.0);
+            p.drawLine(QPointF(17.0, 14.0), QPointF(17.0, 21.0));
+            p.drawLine(QPointF(13.5, 17.5), QPointF(20.5, 17.5));
+        } else if (icon == SketchIcon::EditSketch) {
+            // A pencil across the plane.
+            Stroke(p, ink.accent, 1.9);
+            p.drawLine(QPointF(13.0, 21.0), QPointF(20.5, 13.5));
+            Stroke(p, ink.stroke, 1.4);
+            p.drawLine(QPointF(12.4, 21.6), QPointF(14.2, 20.2));
+        } else {
+            Stroke(p, ink.accent, 2.2);
+            p.drawLine(QPointF(13.5, 18.0), QPointF(16.2, 20.8));
+            p.drawLine(QPointF(16.2, 20.8), QPointF(21.0, 14.5));
+        }
+        break;
+    }
+
+    // --- Solid modelling ---------------------------------------------------
+    //
+    // All three say the same sentence in three tenses: here is a PROFILE, and
+    // here is what happens to it. The profile is drawn identically in each so
+    // the family reads as one idea, and only the action mark differs -- which
+    // is the part a user actually has to tell apart.
+    case SketchIcon::Pad: {
+        // A profile, and material growing UP out of it.
+        Stroke(p, ink.subdue, 1.4);
+        p.drawRect(QRectF(4.0, 14.0, 11.0, 6.0));
+        Stroke(p, ink.accent, 1.9);
+        p.drawLine(QPointF(9.5, 13.0), QPointF(9.5, 4.0));
+        p.drawLine(QPointF(9.5, 4.0), QPointF(6.5, 7.5));
+        p.drawLine(QPointF(9.5, 4.0), QPointF(12.5, 7.5));
+        break;
+    }
+    case SketchIcon::Pocket: {
+        // The same profile, with material going DOWN into it. Pad's arrow
+        // reversed, deliberately: the two commands are opposites and the icons
+        // should be too.
+        Stroke(p, ink.subdue, 1.4);
+        p.drawRect(QRectF(4.0, 14.0, 11.0, 6.0));
+        Stroke(p, ink.danger, 1.9);
+        p.drawLine(QPointF(9.5, 4.0), QPointF(9.5, 13.0));
+        p.drawLine(QPointF(9.5, 13.0), QPointF(6.5, 9.5));
+        p.drawLine(QPointF(9.5, 13.0), QPointF(12.5, 9.5));
+        break;
+    }
+    case SketchIcon::SketchOnFace: {
+        // A face seen at an angle, with a sketch drawn ON it. The parallelogram
+        // is the face; the accent square is the drawing lying in its plane, so
+        // it is skewed the same way -- an upright square would read as a
+        // sketch floating in front of the face rather than on it.
+        Stroke(p, ink.subdue, 1.4);
+        QPolygonF face;
+        face << QPointF(3.0, 9.0) << QPointF(13.0, 4.5) << QPointF(21.0, 10.0)
+             << QPointF(11.0, 15.5);
+        p.drawPolygon(face);
+        Stroke(p, ink.accent, 1.6);
+        QPolygonF drawn;
+        drawn << QPointF(8.5, 9.5) << QPointF(13.5, 7.25) << QPointF(17.0, 9.6)
+              << QPointF(12.0, 11.85);
+        p.drawPolygon(drawn);
+        break;
+    }
+    case SketchIcon::CenterRectangle: {
+        // The same rectangle the corner tool's icon draws, with the CENTRE
+        // marked -- the difference between the two tools is where you click,
+        // and the icons say exactly that much.
+        Stroke(p, ink.accent, 1.8);
+        p.drawRect(QRectF(4.0, 7.0, 16.0, 10.0));
+        Stroke(p, ink.subdue, 1.4);
+        p.drawLine(QPointF(9.0, 12.0), QPointF(15.0, 12.0));
+        p.drawLine(QPointF(12.0, 9.0), QPointF(12.0, 15.0));
+        break;
+    }
+    case SketchIcon::ThreePointCircle: {
+        Stroke(p, ink.accent, 1.8);
+        p.drawEllipse(QPointF(12.0, 12.0), 8.0, 8.0);
+        // The three points that define it, ON the rim -- which is the whole
+        // difference from the centre-and-radius circle.
+        Stroke(p, ink.subdue, 1.6);
+        p.setBrush(ink.subdue);
+        for (const QPointF& at : {QPointF(12.0, 4.0), QPointF(19.0, 16.0), QPointF(5.0, 16.0)})
+            p.drawEllipse(at, 1.6, 1.6);
+        p.setBrush(Qt::NoBrush);
+        break;
+    }
+    case SketchIcon::ThreePointArc: {
+        Stroke(p, ink.accent, 1.9);
+        p.drawArc(QRectF(4.0, 6.0, 16.0, 16.0), 20 * 16, 140 * 16);
+        Stroke(p, ink.subdue, 1.6);
+        p.setBrush(ink.subdue);
+        for (const QPointF& at : {QPointF(19.0, 11.0), QPointF(12.0, 6.0), QPointF(5.0, 11.0)})
+            p.drawEllipse(at, 1.6, 1.6);
+        p.setBrush(Qt::NoBrush);
+        break;
+    }
+    case SketchIcon::TangentArc: {
+        // A straight run, then an arc leaving it SMOOTHLY -- which is the whole
+        // idea, so the join is where the eye should land. The dot marks the end
+        // you click, because that is the one thing this tool needs and the one
+        // thing the picture cannot otherwise say.
+        Stroke(p, ink.subdue, 1.6);
+        p.drawLine(QPointF(3.0, 16.0), QPointF(12.0, 16.0));
+        Stroke(p, ink.accent, 1.9);
+        // Centred above the joint, so it leaves horizontally: tangent by
+        // construction rather than by a hand-picked bounding box.
+        p.drawArc(QRectF(4.0, 8.0, 16.0, 16.0), 180 * 16, -90 * 16);
+        Stroke(p, ink.subdue, 1.6);
+        p.setBrush(ink.subdue);
+        p.drawEllipse(QPointF(12.0, 16.0), 1.7, 1.7);
+        p.setBrush(Qt::NoBrush);
+        break;
+    }
+    case SketchIcon::Split: {
+        // One line, and a GAP where the cut is -- the gap is the whole idea, so
+        // it is what the eye lands on. The crossing line is drawn faint,
+        // because it is the cutter and it does not change.
+        Stroke(p, ink.subdue, 1.4);
+        p.drawLine(QPointF(12.0, 4.0), QPointF(12.0, 20.0));
+        Stroke(p, ink.accent, 2.0);
+        p.drawLine(QPointF(3.0, 12.0), QPointF(10.0, 12.0));
+        p.drawLine(QPointF(14.0, 12.0), QPointF(21.0, 12.0));
+        break;
+    }
+    case SketchIcon::Transform: {
+        // A shape and the same shape moved, with the arrow between them: the
+        // MOVE is the idea, and rotate and scale are the same idea with a
+        // different number, so one picture serves the whole command.
+        Stroke(p, ink.subdue, 1.4, Qt::DashLine);
+        p.drawRect(QRectF(3.0, 12.0, 8.0, 8.0));
+        Stroke(p, ink.accent, 1.8);
+        p.drawRect(QRectF(13.0, 4.0, 8.0, 8.0));
+        Stroke(p, ink.subdue, 1.3);
+        p.drawLine(QPointF(9.0, 12.0), QPointF(14.0, 7.0));
+        p.drawLine(QPointF(14.0, 7.0), QPointF(11.0, 7.5));
+        p.drawLine(QPointF(14.0, 7.0), QPointF(13.5, 10.0));
+        break;
+    }
+    case SketchIcon::Ellipse: {
+        // Wider than tall, and the two axes drawn faint: the LONG one is what
+        // the second click points at, and the icon is the only place that gets
+        // said before the tooltip is read.
+        Stroke(p, ink.accent, 1.8);
+        p.drawEllipse(QPointF(12.0, 12.0), 9.0, 5.5);
+        Stroke(p, ink.subdue, 1.0, Qt::DashLine);
+        p.drawLine(QPointF(3.0, 12.0), QPointF(21.0, 12.0));
+        p.drawLine(QPointF(12.0, 6.5), QPointF(12.0, 17.5));
+        break;
+    }
+    case SketchIcon::EllipticalArc: {
+        // The same ellipse with a piece of it: the accent is what gets drawn,
+        // the faint remainder is what does not.
+        Stroke(p, ink.subdue, 1.0, Qt::DotLine);
+        p.drawEllipse(QPointF(12.0, 12.0), 9.0, 5.5);
+        Stroke(p, ink.accent, 2.0);
+        p.drawArc(QRectF(3.0, 6.5, 18.0, 11.0), 0, 140 * 16);
+        break;
+    }
+    case SketchIcon::MajorAxisDimension: {
+        // The ellipse, faint, with the LONG axis dimensioned -- arrows on the
+        // wide way across. The pair with MinorAxisDimension differ in which
+        // way the arrows point, which is the whole difference between the two
+        // commands.
+        Stroke(p, ink.subdue, 1.2);
+        p.drawEllipse(QPointF(12.0, 12.0), 9.0, 5.5);
+        Stroke(p, ink.accent, 1.8);
+        p.drawLine(QPointF(3.0, 12.0), QPointF(21.0, 12.0));
+        p.drawLine(QPointF(3.0, 12.0), QPointF(6.5, 9.5));
+        p.drawLine(QPointF(3.0, 12.0), QPointF(6.5, 14.5));
+        p.drawLine(QPointF(21.0, 12.0), QPointF(17.5, 9.5));
+        p.drawLine(QPointF(21.0, 12.0), QPointF(17.5, 14.5));
+        break;
+    }
+    case SketchIcon::MinorAxisDimension: {
+        Stroke(p, ink.subdue, 1.2);
+        p.drawEllipse(QPointF(12.0, 12.0), 9.0, 5.5);
+        Stroke(p, ink.accent, 1.8);
+        p.drawLine(QPointF(12.0, 6.5), QPointF(12.0, 17.5));
+        p.drawLine(QPointF(12.0, 6.5), QPointF(9.5, 10.0));
+        p.drawLine(QPointF(12.0, 6.5), QPointF(14.5, 10.0));
+        p.drawLine(QPointF(12.0, 17.5), QPointF(9.5, 14.0));
+        p.drawLine(QPointF(12.0, 17.5), QPointF(14.5, 14.0));
+        break;
+    }
+    case SketchIcon::Spline: {
+        // An S-curve through three marked points: the POINTS are what the tool
+        // takes, and marking them is what tells it apart from an arc.
+        Stroke(p, ink.accent, 1.9);
+        QPainterPath path;
+        path.moveTo(3.0, 18.0);
+        path.cubicTo(7.0, 18.0, 8.0, 6.0, 12.0, 6.0);
+        path.cubicTo(16.0, 6.0, 17.0, 16.0, 21.0, 16.0);
+        p.drawPath(path);
+        Stroke(p, ink.subdue, 1.2);
+        p.setBrush(ink.subdue);
+        for (const QPointF& at : {QPointF(3.0, 18.0), QPointF(12.0, 6.0), QPointF(21.0, 16.0)})
+            p.drawEllipse(at, 1.5, 1.5);
+        p.setBrush(Qt::NoBrush);
+        break;
+    }
+    case SketchIcon::Polygon: {
+        // A hexagon, because six is the default and an icon that showed a
+        // different count than the tool draws would be teaching the wrong
+        // thing.
+        Stroke(p, ink.accent, 1.8);
+        QPolygonF hexagon;
+        for (int i = 0; i < 6; ++i) {
+            const double angle = 3.14159265358979323846 * (2.0 * i / 6.0);
+            hexagon << QPointF(12.0 + 8.0 * std::cos(angle), 12.0 + 8.0 * std::sin(angle));
+        }
+        p.drawPolygon(hexagon);
+        break;
+    }
+    case SketchIcon::Slot: {
+        // The outline itself: two sides and two round ends. The centre line is
+        // shown because that is what the first two clicks are.
+        Stroke(p, ink.accent, 1.8);
+        p.drawLine(QPointF(8.0, 8.0), QPointF(16.0, 8.0));
+        p.drawLine(QPointF(8.0, 16.0), QPointF(16.0, 16.0));
+        p.drawArc(QRectF(12.0, 8.0, 8.0, 8.0), 270 * 16, 180 * 16);
+        p.drawArc(QRectF(4.0, 8.0, 8.0, 8.0), 90 * 16, 180 * 16);
+        Stroke(p, ink.subdue, 1.0, Qt::DashLine);
+        p.drawLine(QPointF(8.0, 12.0), QPointF(16.0, 12.0));
+        break;
+    }
+    case SketchIcon::ReferenceDimension: {
+        // The same dimension line, with the BRACKETS the canvas draws around a
+        // reference value -- the icon teaches the convention rather than
+        // inventing a second symbol for it.
+        Stroke(p, ink.subdue, 1.2);
+        p.drawLine(QPointF(5.0, 7.0), QPointF(5.0, 17.0));
+        p.drawLine(QPointF(19.0, 7.0), QPointF(19.0, 17.0));
+        Stroke(p, ink.accent, 1.6);
+        p.drawLine(QPointF(5.0, 15.0), QPointF(19.0, 15.0));
+        // Brackets, big enough to read at 24 pixels.
+        p.drawArc(QRectF(4.0, 4.0, 6.0, 9.0), 90 * 16, 180 * 16);
+        p.drawArc(QRectF(14.0, 4.0, 6.0, 9.0), 270 * 16, 180 * 16);
+        break;
+    }
+    case SketchIcon::DimensionTool: {
+        // A dimension line with its two witness lines and both arrowheads --
+        // the thing the tool places, drawn as it is drawn on the canvas.
+        Stroke(p, ink.subdue, 1.2);
+        p.drawLine(QPointF(5.0, 6.0), QPointF(5.0, 17.0));
+        p.drawLine(QPointF(19.0, 6.0), QPointF(19.0, 17.0));
+        Stroke(p, ink.accent, 1.6);
+        p.drawLine(QPointF(5.0, 15.0), QPointF(19.0, 15.0));
+        p.drawLine(QPointF(5.0, 15.0), QPointF(8.0, 13.0));
+        p.drawLine(QPointF(5.0, 15.0), QPointF(8.0, 17.0));
+        p.drawLine(QPointF(19.0, 15.0), QPointF(16.0, 13.0));
+        p.drawLine(QPointF(19.0, 15.0), QPointF(16.0, 17.0));
+        break;
+    }
+    case SketchIcon::UseReference: {
+        // A dot-dashed reference edge, and a solid one being lifted off it.
+        // The stroke styles are the SAME two the canvas uses for reference and
+        // real geometry, so the icon teaches the convention rather than
+        // inventing a third symbol for it.
+        Stroke(p, ink.subdue, 1.4, Qt::DashDotLine);
+        p.drawLine(QPointF(3.0, 16.5), QPointF(21.0, 16.5));
+        Stroke(p, ink.accent, 2.0);
+        p.drawLine(QPointF(3.0, 8.5), QPointF(21.0, 8.5));
+        // The lift: a short arrow from the reference up to the copy.
+        Stroke(p, ink.accent, 1.5);
+        p.drawLine(QPointF(12.0, 15.0), QPointF(12.0, 10.5));
+        p.drawLine(QPointF(12.0, 10.5), QPointF(10.0, 12.5));
+        p.drawLine(QPointF(12.0, 10.5), QPointF(14.0, 12.5));
+        break;
+    }
+    case SketchIcon::Revolve: {
+        // A profile beside an AXIS, with a sweep arrow round it. The axis is
+        // dashed because that is how a centreline is drawn -- and, since
+        // ADR-M17-021, how the command finds it.
+        QPen axis(ink.subdue, 1.4);
+        axis.setStyle(Qt::DashLine);
+        p.setPen(axis);
+        p.setBrush(Qt::NoBrush);
+        p.drawLine(QPointF(5.0, 3.0), QPointF(5.0, 21.0));
+        Stroke(p, ink.stroke, 1.5);
+        p.drawRect(QRectF(9.0, 9.0, 6.0, 10.0));
+        Stroke(p, ink.accent, 1.7);
+        p.drawArc(QRectF(5.0, 2.5, 14.0, 9.0), 200 * 16, -170 * 16);
+        p.drawLine(QPointF(18.0, 8.0), QPointF(19.5, 4.5));
+        p.drawLine(QPointF(18.0, 8.0), QPointF(14.6, 6.6));
+        break;
+    }
+
+    // --- Document-level commands -----------------------------------------
+    case SketchIcon::Undo:
+    case SketchIcon::Redo: {
+        // A curved arrow, mirrored for Redo. The pair has to be legible as a
+        // PAIR and still tell which is which at 20 px -- so the two are exact
+        // mirrors rather than two different drawings, and the arrowhead is what
+        // carries the direction.
+        const bool undo = icon == SketchIcon::Undo;
+        const double dir = undo ? 1.0 : -1.0;
+        const double cx = 12.0;
+        QPainterPath arc;
+        // A three-quarter loop, open at the bottom on the side the arrow leaves.
+        arc.arcMoveTo(QRectF(5.0, 6.0, 14.0, 12.0), undo ? 200.0 : -20.0);
+        arc.arcTo(QRectF(5.0, 6.0, 14.0, 12.0), undo ? 200.0 : -20.0, undo ? -250.0 : 250.0);
+        Stroke(p, ink.stroke, 1.9);
+        p.drawPath(arc);
+
+        // The head, at the tail end of the sweep, pointing back down and in.
+        const double hx = cx - dir * 6.4;
+        const double hy = 15.6;
+        Stroke(p, ink.accent, 1.9);
+        p.drawLine(QPointF(hx, hy), QPointF(hx + dir * 0.4, hy - 5.4));
+        p.drawLine(QPointF(hx, hy), QPointF(hx + dir * 5.2, hy - 2.2));
+        break;
+    }
+    case SketchIcon::Recompute: {
+        // A closed loop of two arcs: "run it again". Deliberately a RING rather
+        // than the single curve Undo uses, so the two never read as each other.
+        Stroke(p, ink.stroke, 1.9);
+        p.drawArc(QRectF(5.0, 5.0, 14.0, 14.0), 30 * 16, 150 * 16);
+        p.drawArc(QRectF(5.0, 5.0, 14.0, 14.0), 210 * 16, 150 * 16);
+        Stroke(p, ink.accent, 1.9);
+        p.drawLine(QPointF(18.4, 9.4), QPointF(18.4, 14.0));
+        p.drawLine(QPointF(18.4, 9.4), QPointF(14.0, 9.4));
+        p.drawLine(QPointF(5.6, 14.6), QPointF(5.6, 10.0));
+        p.drawLine(QPointF(5.6, 14.6), QPointF(10.0, 14.6));
+        break;
+    }
+    case SketchIcon::Visibility: {
+        // An eye. Show/Hide is a visibility toggle, and no amount of geometry
+        // says "visible" the way an eye does.
+        QPainterPath eye;
+        eye.moveTo(3.5, 12.0);
+        eye.quadTo(12.0, 4.5, 20.5, 12.0);
+        eye.quadTo(12.0, 19.5, 3.5, 12.0);
+        Stroke(p, ink.stroke, 1.6);
+        p.drawPath(eye);
+        Dot(p, 12.0, 12.0, ink.accent, 2.6);
+        break;
+    }
+    }
+}
+
+} // namespace
+
+const char* SketchIconName(SketchIcon icon) noexcept {
+    switch (icon) {
+    case SketchIcon::Select: return "Select";
+    case SketchIcon::Line: return "Line";
+    case SketchIcon::Rectangle: return "Rectangle";
+    case SketchIcon::Circle: return "Circle";
+    case SketchIcon::Arc: return "Arc";
+    case SketchIcon::Point: return "Point";
+    case SketchIcon::Coincident: return "Coincident";
+    case SketchIcon::Horizontal: return "Horizontal";
+    case SketchIcon::Vertical: return "Vertical";
+    case SketchIcon::Fix: return "Fix";
+    case SketchIcon::Parallel: return "Parallel";
+    case SketchIcon::Perpendicular: return "Perpendicular";
+    case SketchIcon::Equal: return "Equal";
+    case SketchIcon::Concentric: return "Concentric";
+    case SketchIcon::Midpoint: return "Midpoint";
+    case SketchIcon::PointOnObject: return "PointOnObject";
+    case SketchIcon::Tangent: return "Tangent";
+    case SketchIcon::Dimension: return "Dimension";
+    case SketchIcon::Radius: return "Radius";
+    case SketchIcon::Diameter: return "Diameter";
+    case SketchIcon::AutoPlaceDimensions: return "AutoPlaceDimensions";
+    case SketchIcon::HorizontalDistance: return "HorizontalDistance";
+    case SketchIcon::VerticalDistance: return "VerticalDistance";
+    case SketchIcon::PointLineDistance: return "PointLineDistance";
+    case SketchIcon::Offset: return "Offset";
+    case SketchIcon::Trim: return "Trim";
+    case SketchIcon::Extend: return "Extend";
+    case SketchIcon::Chamfer: return "Chamfer";
+    case SketchIcon::Fillet: return "Fillet";
+    case SketchIcon::Symmetric: return "Symmetric";
+    case SketchIcon::Mirror: return "Mirror";
+    case SketchIcon::OriginPoint: return "OriginPoint";
+    case SketchIcon::Construction: return "Construction";
+    case SketchIcon::Pad: return "Pad";
+    case SketchIcon::Pocket: return "Pocket";
+    case SketchIcon::Revolve: return "Revolve";
+    case SketchIcon::SketchOnFace: return "SketchOnFace";
+    case SketchIcon::UseReference: return "UseReference";
+    case SketchIcon::CenterRectangle: return "CenterRectangle";
+    case SketchIcon::ThreePointCircle: return "ThreePointCircle";
+    case SketchIcon::ThreePointArc: return "ThreePointArc";
+    case SketchIcon::TangentArc: return "TangentArc";
+    case SketchIcon::Split: return "Split";
+    case SketchIcon::Transform: return "Transform";
+    case SketchIcon::Ellipse: return "Ellipse";
+    case SketchIcon::EllipticalArc: return "EllipticalArc";
+    case SketchIcon::MajorAxisDimension: return "MajorAxisDimension";
+    case SketchIcon::MinorAxisDimension: return "MinorAxisDimension";
+    case SketchIcon::Spline: return "Spline";
+    case SketchIcon::Polygon: return "Polygon";
+    case SketchIcon::DimensionTool: return "DimensionTool";
+    case SketchIcon::ReferenceDimension: return "ReferenceDimension";
+    case SketchIcon::Slot: return "Slot";
+    case SketchIcon::Undo: return "Undo";
+    case SketchIcon::Redo: return "Redo";
+    case SketchIcon::Recompute: return "Recompute";
+    case SketchIcon::Visibility: return "Visibility";
+    case SketchIcon::DeleteGeometry: return "DeleteGeometry";
+    case SketchIcon::FitSketch: return "FitSketch";
+    case SketchIcon::NewSketch: return "NewSketch";
+    case SketchIcon::EditSketch: return "EditSketch";
+    case SketchIcon::FinishSketch: return "FinishSketch";
+    }
+    return "Unknown";
+}
+
+const SketchIcon* AllSketchIcons(int* count) noexcept {
+    static const SketchIcon kAll[] = {
+        SketchIcon::Select,        SketchIcon::Line,          SketchIcon::Rectangle,
+        SketchIcon::Circle,        SketchIcon::Arc,           SketchIcon::Point,
+        SketchIcon::Coincident,    SketchIcon::Horizontal,    SketchIcon::Vertical,
+        SketchIcon::Fix,           SketchIcon::Parallel,      SketchIcon::Perpendicular,
+        SketchIcon::Equal,         SketchIcon::Concentric,    SketchIcon::Midpoint,
+        SketchIcon::PointOnObject, SketchIcon::Tangent,       SketchIcon::Dimension,
+        SketchIcon::Radius,        SketchIcon::Diameter,
+        SketchIcon::HorizontalDistance,                       SketchIcon::VerticalDistance,
+        SketchIcon::PointLineDistance,                        SketchIcon::Offset,
+        SketchIcon::Trim,      SketchIcon::Extend,       SketchIcon::Chamfer,
+        SketchIcon::Fillet,    SketchIcon::Symmetric,    SketchIcon::Mirror,
+        SketchIcon::AutoPlaceDimensions,
+        SketchIcon::OriginPoint,   SketchIcon::Construction,  SketchIcon::DeleteGeometry,
+        SketchIcon::FitSketch,     SketchIcon::NewSketch,     SketchIcon::EditSketch,
+        SketchIcon::FinishSketch,  SketchIcon::Undo,          SketchIcon::Redo,
+        SketchIcon::Recompute,     SketchIcon::Visibility,
+        SketchIcon::Pad,           SketchIcon::Pocket,        SketchIcon::Revolve};
+    if (count != nullptr) *count = static_cast<int>(sizeof(kAll) / sizeof(kAll[0]));
+    return kAll;
+}
+
+QIcon MakeSketchIcon(SketchIcon icon, const QPalette& palette) {
+    const Ink ink = InkFor(palette);
+    QIcon result;
+    for (const int size : kSizes) {
+        QPixmap pixmap(size, size);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        // ONE coordinate system for every size: the drawing is authored on a
+        // 24-unit grid and the scale does the rest, so a 48 px icon is the same
+        // artwork rather than a second one that drifted.
+        painter.scale(size / kGrid, size / kGrid);
+        PaintIcon(painter, icon, ink);
+        painter.end();
+        result.addPixmap(pixmap);
+    }
+    return result;
+}
+
+} // namespace paramcad::ui

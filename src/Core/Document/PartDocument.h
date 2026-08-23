@@ -5,16 +5,23 @@
 #include "Core/Dependency/DependencyGraph.h"
 #include "Core/Document/CadDocument.h"
 #include "Core/Document/ObjectRegistry.h"
+#include "Core/Expression/ExpressionTypes.h"
+#include "Core/Feature/TransformFeatures.h"
+#include "Core/Undo/UndoRecord.h"
 #include "Core/Material/Material.h"
 #include "Core/Parameter/ParameterManager.h"
 #include "Core/Physics/MassProperties.h"
 #include "Core/Physics/MassPropertiesNode.h"
 #include "Core/Recompute/DocumentRecomputeEngine.h"
 #include "Core/Recompute/RecomputeTypes.h"
+#include "Core/Geometry/MathTypes.h"
 #include "Core/Reference/ReferenceFrame.h"
 #include "Core/Sketch/Sketch.h"
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string_view>
+#include <string>
 #include <vector>
 
 namespace paramcad {
@@ -74,7 +81,66 @@ public:
     // Parameter's mutators went private (R1R3-M2): expression edits previously
     // had no facade path at all -- callers reached through parameters().items()
     // and bypassed dirty propagation.
-    bool setParameterExpression(ObjectId id, std::string expression);
+    //
+    // M11.2 -- this is now a VALIDATING facade, not a setter. An expression is
+    // parsed, evaluated once against the document's current parameter values,
+    // and its `#name` references become dependency-graph edges. Any failure
+    // leaves the document byte-for-byte unchanged and returns false, filling
+    // `error` (which carries a character POSITION, roadmap section 42.3.3) when
+    // one is supplied. Refused cases:
+    //
+    //   * the text does not parse;
+    //   * it references a name no parameter has, or an AMBIGUOUS name two
+    //     parameters share;
+    //   * it produces the wrong dimension for this parameter's unit, or the
+    //     unit has no expression dimension at all (ExpressionDimensionOf);
+    //   * the resulting edges would close a CYCLE -- the message names the
+    //     path.
+    //
+    // An empty (or all-whitespace) expression CLEARS: edges are removed and the
+    // parameter goes back to holding a literal value. That is the documented
+    // way to undo `#width / 2` without deleting the parameter.
+    bool setParameterExpression(ObjectId id, std::string expression,
+                                ExpressionError* error = nullptr);
+
+    // Parameters whose expression reads `parameterId`. Empty is exactly the
+    // condition under which the Parameter can be deleted, mirroring
+    // constraintsBindingParameter and ADR-M5-009: a named, shared,
+    // document-level object is REFUSED rather than cascaded, because silently
+    // breaking someone's formulas destroys more than was asked for.
+    std::vector<ObjectId> parametersReferencingParameter(ObjectId parameterId) const;
+
+    // Rebuild every expression's dependency edges from the stored text.
+    //
+    // The LOADER's counterpart to setParameterExpression: edges are not
+    // persisted (the graph is rebuilt on load), so a document whose parameters
+    // reference each other arrives with the text and none of the wiring, and a
+    // recompute would then evaluate them in the wrong order. Called ONCE, after
+    // every parameter is restored, so forward references resolve.
+    //
+    // Records NO undo step (ADR-M9-001: a loaded document starts with an empty
+    // history). `ok == false` means the file is not loadable as written; the
+    // loader refuses rather than opening a document that cannot be recomputed.
+    struct ExpressionWiringResult {
+        bool ok{true};
+        ObjectId parameterId{kInvalidObjectId};
+        std::string message;
+    };
+    ExpressionWiringResult rewireParameterExpressions();
+
+    // The same checks as rewireParameterExpressions, minus the wiring, minus
+    // the cycle (which only wiring can reveal). This is the SAVE-side net: a
+    // file whose stored expression cannot be resolved is one this loader would
+    // refuse, and a save that emits an unopenable document is worse than a save
+    // that fails (the precedent is validateSaveable's id-cap check).
+    ExpressionWiringResult validateParameterExpressions() const;
+
+    // Resolve `name` for expression evaluation. nullopt when no parameter has
+    // that name, when TWO do, or when the parameter's unit has no expression
+    // dimension -- three different reasons the caller cannot act on
+    // differently at this point, and which setParameterExpression distinguishes
+    // before an expression is ever stored.
+    std::optional<Quantity> resolveExpressionVariable(std::string_view name) const;
     // BREAKING vs M1: const-only. Use addParameter/setParameterValue/
     // removeObject for mutation (single registration path). Parameter's own
     // mutators are private since M8 round 3, so the Parameter* this hands out
@@ -87,14 +153,92 @@ public:
     Body& restoreBody(ObjectId id, std::string name);
     const std::vector<std::unique_ptr<Body>>& bodies() const noexcept { return bodies_; }
 
-    ReferenceFrame& addFrame(std::string name, ObjectId parentFrameId = kInvalidObjectId);
     // KNOWN OPEN DOOR (M8 round 3, R1R3-M2, recorded not fixed): constness
     // stops at the unique_ptr, so this leaks mutable ReferenceFrame* with a
     // public setLocalTransform. Inert today -- no derived state reads frames,
     // so nothing can go stale -- and closed the sketches()/bodies()/Parameter
     // way the day a consumer appears. Connectors are the same shape.
-    const std::vector<std::unique_ptr<ReferenceFrame>>& frames() const noexcept { return frames_; }
-    Connector& addConnector(std::string name, ConnectorRole role, ObjectId frameId);
+    // Const-correct since M10: the mutable-pointee door round 3 recorded as
+    // "inert -- and closed the day a consumer appears" is closed, because a
+    // sketch now reads its support frame and a transform changed behind the
+    // facade would leave the graph undirtied.
+    std::vector<const ReferenceFrame*> frames() const;
+    const ReferenceFrame* findFrame(ObjectId id) const noexcept;
+    // --- Connectors as first-class objects (M10.3, ADR-M10-004) -------------
+    //
+    // Registered and resolvable, whichever route created them (§18.1). A
+    // connector holds no geometry: it references a frame, and the frame answers
+    // where it is -- `connectorWorldTransform` is the composition of the two.
+    //
+    // Throws when `frameId` is not a frame of this document: a connector on
+    // nothing is a mate anchor that cannot be resolved, which is A03's failure
+    // mode rather than a recoverable state.
+    Connector& addConnector(std::string name, ConnectorRole role, ObjectId frameId,
+                            ConnectorOwner owner = ConnectorOwner::PartDefinition);
+    Connector& restoreConnector(ObjectId id, std::string name, ConnectorRole role,
+                                ObjectId frameId, ConnectorOwner owner);
+    std::vector<const Connector*> connectors() const;
+    const Connector* findConnector(ObjectId id) const noexcept;
+    // The connector's frame, composed to world. Identity for an unknown id.
+    Transform3D connectorWorldTransform(ObjectId connectorId) const noexcept;
+
+    // --- Reference frames as first-class objects (M10, ADR-M10-001) ---------
+    //
+    // Registered, graph-participating, undoable. `parentFrameId` may be
+    // kInvalidObjectId for a root frame.
+    //
+    // Throws std::runtime_error when the parent is not a frame of this
+    // document, or when the parent chain would CYCLE -- refused at the door
+    // rather than discovered by an unbounded walk at recompute time, which is
+    // the cost M9.1 measured on itself.
+    ReferenceFrame& addFrame(std::string name, ObjectId parentFrameId = kInvalidObjectId);
+    ReferenceFrame& restoreFrame(ObjectId id, std::string name, ObjectId parentFrameId,
+                                 const Transform3D& localTransform);
+
+    // Sets a frame's transform relative to its parent. Dirties the frame, which
+    // dirties every sketch it supports and every feature built on those, through
+    // the ordinary M2 machinery. False if the id is not a frame.
+    bool setFrameTransform(ObjectId frameId, const Transform3D& transform);
+    // Re-parents. Same refusals as addFrame; false if either id is wrong.
+    bool setFrameParent(ObjectId frameId, ObjectId parentFrameId);
+
+    // The frame's transform in PART-LOCAL world coordinates, COMPOSED from the
+    // parent chain (ADR-M10-002). Never stored: a cached world transform is two
+    // truths that disagree the moment a parent moves.
+    //
+    // Identity for an unknown id, which is the same answer a document with no
+    // frames gives, so a caller that never uses frames is unaffected.
+    Transform3D worldTransform(ObjectId frameId) const noexcept;
+
+    // --- Sketch on frame (M10.2, ADR-M10-003) -------------------------------
+    //
+    // Puts `sketchId` on `frameId`, wiring the frame -> sketch graph edge so a
+    // frame move dirties the sketch and everything built on it. Pass
+    // kInvalidObjectId to take the sketch off its frame and back onto its own
+    // embedded plane. False if either id is wrong.
+    bool setSketchSupportFrame(ObjectId sketchId, ObjectId frameId);
+    // The restore-path twin: records no undo step (ADR-M9-001).
+    bool restoreSketchSupportFrame(ObjectId sketchId, ObjectId frameId);
+    // The restore-path twin of setFrameParent: records no undo step.
+    bool restoreFrameParent(ObjectId frameId, ObjectId parentFrameId);
+
+    // The plane a sketch's (u,v) actually lives on: its support frame's WORLD
+    // transform when it has one, otherwise its own embedded SketchFrame.
+    //
+    // The one resolution site. A feature asks this rather than reading
+    // `sketch.frame()`, because reading the embedded frame directly is exactly
+    // how a sketch would silently stay at the origin after its frame moved.
+    SketchFrame effectiveSketchFrame(ObjectId sketchId) const noexcept;
+
+    // True when the sketch NAMES a support frame that is not in this document.
+    //
+    // Separate from `effectiveSketchFrame` because that function returns a
+    // value and a value cannot say "there is no answer". Without this, deleting
+    // a support frame made `worldTransform` return identity for the dead id and
+    // the sketch silently relocated to world XY -- geometry moving on its own,
+    // which is the geometric twin of the stale-result defect this project has
+    // fixed three times. Callers fail loudly on true (M10 gate I).
+    bool sketchSupportFrameIsMissing(ObjectId sketchId) const noexcept;
 
     // --- Material (dirty source, ADR-M3-005; mirrors Parameter's pattern) --
     Material& addMaterial(std::string name, double densityKgPerM3);
@@ -203,6 +347,24 @@ public:
     // something the document cannot see. Prefer editSketch.
     bool markSketchDirty(ObjectId sketchId);
 
+    // --- Sketch geometry through the facade (M12) --------------------------
+    //
+    // THE path for adding an entity once a USER can add one. `addSketch` hands
+    // back a mutable `Sketch&` and `Sketch::addLine` still works, but that path
+    // records no undo delta -- which was invisible while sketches were built in
+    // code and became the first defect a mouse-driven tool hits.
+    //
+    // Returns kInvalidSketchEntityId if the sketch id is unknown or the
+    // geometry is degenerate; in that case nothing is recorded and nothing is
+    // dirtied.
+    // `construction` creates it as construction geometry in ONE step, which is
+    // what a polygon's circumscribed circle needs (M17.17). Doing it by calling
+    // setSketchEntitiesConstruction afterwards is a trap: that facade opens a
+    // ScopedTransaction, and from inside a caller's open transaction its
+    // destructor commits the CALLER's.
+    SketchEntityId addSketchEntity(ObjectId sketchId, SketchGeometry geometry,
+                                   bool construction = false);
+
     // --- Sketch constraints (M5) -------------------------------------------
     // THE path for adding a constraint. Adds it to the sketch AND wires the
     // graph edge from any Parameter the constraint binds, so a dimension edit
@@ -228,6 +390,191 @@ public:
     // is the path callers should use -- the Parameter would otherwise keep
     // dirtying a sketch that no longer reads it.
     bool removeSketchEntity(ObjectId sketchId, SketchEntityId entityId);
+
+    // --- Dimension placement (M16) -----------------------------------------
+    //
+    // THE recording path for where a dimension's value sits. Passing no point
+    // puts it back on automatic placement.
+    //
+    // A drag must NOT call this per mouse move: it would push one delta per
+    // pixel into the open transaction. The canvas previews through
+    // `editSketch` and calls this ONCE on release, so the whole drag is one
+    // undo step (roadmap section 15: one user action = one undo).
+    // --- Dragging geometry under its constraints (M17) ----------------------
+    //
+    // A drag is one question asked repeatedly: "hold THIS point at the cursor
+    // and solve everything else". The pin is a pair of residuals appended to
+    // the problem, NOT a constraint added to the document -- a real Fix would
+    // have to be created and destroyed on every mouse move, would land on the
+    // undo stack, and would be visible in the constraint list while the mouse
+    // was down.
+    //
+    // The constraints decide what happens. A point on a line slides along it, a
+    // fully constrained sketch does not move, and a drag that would break the
+    // model simply does not converge -- all of that is the solver's answer, not
+    // a rule written here. What this must never do is move the geometry when
+    // the solve failed: `false` means nothing was touched.
+    //
+    // Records NOTHING and dirties NOTHING. A drag across the canvas is one
+    // action, and a thousand undo steps for it would be a history nobody can
+    // get back through -- the same reason dimension dragging previews
+    // (ADR-M16). `commitSketchDrag` is what makes it permanent.
+    // Returns the SOLVER'S verdict, not a bool.
+    //
+    // "It did not move" is not an answer a user can act on (roadmap 8). A
+    // conflicting drag, an under-constrained one and a reference the solver has
+    // no variable for are three different situations, and the status is what
+    // lets the canvas say which. Geometry is written only for a converged
+    // result; InvalidInput means the reference itself was undraggable.
+    SketchSolveStatus previewSketchDrag(ObjectId sketchId, const SketchElementRef& point,
+                                        Vec2 targetMm);
+
+    // Everything in the sketch, as it stands. Taken when a drag starts, so the
+    // drag can be committed as a delta or rolled back wholesale.
+    std::vector<std::pair<SketchEntityId, SketchGeometry>> sketchGeometrySnapshot(
+        ObjectId sketchId) const;
+
+    // Makes a drag permanent: one undo step carrying every entity that MOVED.
+    //
+    // Every entity, not just the one under the cursor -- a drag under
+    // constraints moves the neighbours too, and an undo that put back only the
+    // grabbed point would leave the sketch in a state the user never saw.
+    // Returns how many entities changed; 0 means nothing moved and nothing is
+    // recorded.
+    std::size_t commitSketchDrag(
+        ObjectId sketchId, const std::vector<std::pair<SketchEntityId, SketchGeometry>>& before,
+        const std::string& label);
+
+    // Puts a snapshot back without recording anything. Esc during a drag.
+    bool restoreSketchGeometry(
+        ObjectId sketchId, const std::vector<std::pair<SketchEntityId, SketchGeometry>>& before);
+
+    // Reshapes an entity in place, keeping its id and every constraint on it.
+    //
+    // This is what a trim, an extend or a chamfer setback is made of. The
+    // alternative -- delete and recreate -- issues a new id and cascades away
+    // every constraint the old one carried (ADR-M5-009), so a trimmed line
+    // would come back joined to nothing.
+    //
+    // Dirties the sketch: the shape feeds the profile and every feature
+    // downstream of it.
+    bool setSketchEntityGeometry(ObjectId sketchId, SketchEntityId entityId,
+                                 SketchGeometry geometry);
+
+    // Switches entities to or from construction geometry, as ONE undo step
+    // (roadmap 4.1.1).
+    //
+    // Takes a LIST because the command acts on a selection and a user who
+    // switched five lines expects one Ctrl+Z to bring all five back. Dirties
+    // the sketch: the flag changes what BuildProfile sees, so every feature
+    // downstream of this sketch has to be recomputed even though no coordinate
+    // moved. Returns how many actually changed.
+    std::size_t setSketchEntitiesConstruction(ObjectId sketchId,
+                                              const std::vector<SketchEntityId>& entityIds,
+                                              bool construction);
+
+    // Gives a sketch its projected reference underlay (M17.6, ADR-M17-029).
+    // Returns how many were accepted; degenerate geometry is refused entry.
+    //
+    // Through the FACADE like every other sketch mutation (UI spec 20), even
+    // though a reference has no graph consequence: the shell writing straight
+    // into a Sketch is the bypass this project has already had to close once,
+    // and "this particular write is harmless" is how the next one gets written.
+    //
+    // NOT an undo step, and consistent with the sketch itself -- creating a
+    // sketch is not undoable either, and an underlay that could be undone out
+    // from under its sketch would leave a face sketch that no longer knows
+    // what it was made on.
+    // Replaces WHICH edges a Fillet or Chamfer dresses, and DIRTIES it
+    // (M17.13, ADR-M17-035). False for an id that is not an edge-dressing
+    // feature.
+    //
+    // The dirtying is the whole reason this exists: the selection decides what
+    // the feature produces, so a change to it that left the graph clean would
+    // be skipped by the next recompute and the old shape would be handed back
+    // as current.
+    // Renames anything the tree shows a name for -- a sketch, a feature, a
+    // parameter, a body, the material (M17.16, ADR-M17-039). ONE undo step.
+    //
+    // REFUSES a duplicate, because names are how a user picks what to delete
+    // or edit -- and for a parameter a duplicate is a correctness problem, not
+    // a cosmetic one: expressions resolve by name and findByName answers with
+    // the first match (ADR-M17-038).
+    //
+    // Does NOT dirty anything. A name has no geometric consequence, and
+    // marking the object dirty would rebuild the whole chain below it to
+    // produce identical shapes.
+    struct RenameResult {
+        bool ok{false};
+        std::string message; // empty on success
+    };
+    RenameResult renameObject(ObjectId id, std::string name);
+
+    // The name the tree shows for an object, or empty for one that has none.
+    std::string objectName(ObjectId id) const;
+
+    // Publishes what a DRIVEN dimension measured (M17.19, ADR-M17-042).
+    //
+    // NOT an undo step, unlike setParameterValue: nobody typed this. It is a
+    // derived value, republished on every recompute, and recording it would
+    // fill the history with steps a user cannot recognise and undoing one
+    // would only be overwritten by the next solve.
+    //
+    // It also does NOT clear an expression, for the same reason -- but a
+    // driven dimension should not have one, and the panel refuses to give it
+    // one.
+    // Switches a dimension between DRIVING and MEASURING (M17.19,
+    // ADR-M17-042). One undo step, and it dirties the sketch: the problem the
+    // solver is given is a different problem afterwards.
+    bool setSketchConstraintDriven(ObjectId sketchId, SketchConstraintId constraintId,
+                                   bool driven);
+
+    bool setDrivenParameterValue(ObjectId parameterId, double value);
+
+    bool setFeatureEdgeSelection(ObjectId featureId, EdgeSelection selection);
+
+    // Makes a sketch TRACK a face instead of sitting on a frozen plane
+    // (M17.14, ADR-M17-036), and adds the graph edge that makes it true.
+    //
+    // The edge is the point. A tracked sketch depends on the feature whose
+    // face it is on: move the pad and the sketch must be re-resolved BEFORE
+    // anything downstream reads its plane. Setting the query without the edge
+    // would leave the sketch clean when the pad moved, so it would report the
+    // plane from before the move and every feature built on it would be built
+    // in the wrong place -- while every state in the model said it was fine.
+    //
+    // Refuses a query naming a feature that is not a solid, or one that would
+    // close a cycle (a sketch tracking a face of something built from itself).
+    bool setSketchTrackedFace(ObjectId sketchId, FaceQuery query);
+
+    std::size_t addSketchReferences(ObjectId sketchId,
+                                    const std::vector<SketchGeometry>& geometry);
+
+    bool setSketchDimensionPlacement(ObjectId sketchId, SketchConstraintId constraintId,
+                                     Vec2 labelMm);
+    bool clearSketchDimensionPlacement(ObjectId sketchId, SketchConstraintId constraintId);
+
+    // The LIVE half of a drag: moves a dimension's value without recording an
+    // undo step and WITHOUT dirtying the sketch.
+    //
+    // `editSketch` cannot serve here, and that difference is the whole reason
+    // this exists: editSketch marks the sketch dirty, which is right for
+    // geometry and wrong for a label. Using it for the drag preview made every
+    // mouse move stale the sketch and everything downstream of it -- the model
+    // tree read "Needs recompute" because a number had been slid four
+    // millimetres. Where a value SITS is not an input to anything.
+    //
+    // The recording, undoable move is `setSketchDimensionPlacement`, which the
+    // canvas calls once on release.
+    bool previewSketchDimensionPlacement(ObjectId sketchId, SketchConstraintId constraintId,
+                                         Vec2 labelMm);
+    bool previewClearSketchDimensionPlacement(ObjectId sketchId,
+                                              SketchConstraintId constraintId);
+
+    // THE recording path for how a dimension's value reads. A default-valued
+    // format clears any override.
+    bool setSketchDimensionFormat(ObjectId sketchId, SketchConstraintId constraintId,
+                                  const Sketch::DimensionFormat& format);
 
     // Constraints anywhere in this document that bind `parameterId`. Empty if
     // none do, which is exactly the condition under which the Parameter can be
@@ -298,6 +645,23 @@ public:
                                           ComputeState state, ObjectId baseFeatureId,
                                           ObjectId distanceParameterId, ObjectId materialId);
 
+    // --- Mirror / Pattern (M10.6, ADR-M9-006's deferral closed) -------------
+    // Consuming features like Pocket, so they inherit the whole chain: base by
+    // ObjectId, consumed once, suppression semantics, tail display. The frame
+    // supplies the mirror plane (its XY) and the pattern direction (its +X).
+    MirrorFeature& addMirrorFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                    ObjectId frameId);
+    MirrorFeature& restoreMirrorFeature(Body& body, ObjectId id, std::string name,
+                                        ComputeState state, ObjectId baseFeatureId,
+                                        ObjectId frameId, ObjectId materialId);
+    PatternFeature& addPatternFeature(Body& body, std::string name, ObjectId baseFeatureId,
+                                      ObjectId frameId, ObjectId countParameterId,
+                                      ObjectId spacingParameterId);
+    PatternFeature& restorePatternFeature(Body& body, ObjectId id, std::string name,
+                                          ComputeState state, ObjectId baseFeatureId,
+                                          ObjectId frameId, ObjectId countParameterId,
+                                          ObjectId spacingParameterId, ObjectId materialId);
+
     // Non-owning; the caller keeps the concrete kernel alive for every
     // subsequent recompute()/recomputeFrom() call (ADR-M3-003, mirrors
     // ADR-010's externally-owned IRecomputable lifetime pattern).
@@ -322,6 +686,92 @@ public:
     void setSketchSolver(ISketchSolver* solver) noexcept;
     ISketchSolver* sketchSolver() const noexcept { return sketchSolver_; }
 
+    // --- Feature activity: suppression and rollback (M9.3 / M9.4) -----------
+    //
+    // ONE concept for two features of the milestone, because the document
+    // treats them identically: an INACTIVE feature is not evaluated, not
+    // displayed, and not a candidate for the chain tail. It is inactive when it
+    // is Suppressed (the user turned it off) or when it lies beyond its body's
+    // rollback position (the user is looking at an earlier step).
+    //
+    // What inactive is NOT is *failed*. A failed feature's result is wrong or
+    // missing and the model is broken; an inactive one is exactly what the user
+    // asked for. M8's review round 1 found that treating a FAILED consumer as
+    // "not consuming" let the viewer show a healthy-looking wrong solid, and
+    // consumption became structural because of it. Suppression flips that back
+    // deliberately and only for the deliberate case -- the difference is the
+    // whole of ADR-M9-002.
+    bool isFeatureActive(ObjectId featureId) const noexcept;
+
+    // The nearest ACTIVE solid at or above `baseFeatureId` in the chain, or
+    // kInvalidObjectId when the chain runs out.
+    //
+    // This is how suppression "closes the chain" without rewriting anything:
+    // a consumer keeps its stored base reference for ever -- the reference is
+    // what the model says -- and resolution walks past inactive links at
+    // recompute time. Suppress the Pocket in Sketch -> Pad -> Pocket -> Fillet
+    // and the Fillet dresses the PAD; unsuppress it and the Fillet dresses the
+    // pocket again, with no edit to either feature (ADR-M9-002).
+    ObjectId activeChainBase(ObjectId baseFeatureId) const noexcept;
+
+    // --- Rollback position (M9.4, ADR-M9-004) -------------------------------
+    //
+    // `cut` is the number of features evaluated: 0 hides all of them,
+    // features().size() (or Body::kNoRollback) evaluates everything. Dirties
+    // what changed and re-points the mass source at the new tail. False if the
+    // id is not a Body in this document.
+    bool setRollbackPosition(ObjectId bodyId, std::size_t cut);
+    // The restore-path twin: same effect, records NO undo step. Deserialization
+    // is not a user edit, and a loaded document must start with an empty
+    // history rather than with the history of its own construction
+    // (ADR-M9-001, pinned by M9_UNDO_402).
+    bool restoreRollbackPosition(ObjectId bodyId, std::size_t cut);
+    std::size_t rollbackPosition(ObjectId bodyId) const noexcept;
+
+    // --- Undo / redo (M9.1, ADR-M9-001) -------------------------------------
+    //
+    // Every edit through this facade that CAN be replayed semantically becomes
+    // an undo record: parameter value and expression edits, and the addition or
+    // removal of a feature. Undo re-executes the inverse through this same
+    // facade, so the registry, the graph and the dirty set end up exactly where
+    // an equivalent hand edit would have left them -- and the geometry is
+    // whatever the next recompute derives, never a shape held in the history.
+    //
+    // Undo does NOT recompute, deliberately, exactly as `setParameterValue`
+    // does not. The caller decides when to rebuild, which is what lets a test
+    // (and the shell) prove selectivity by counters.
+    //
+    // NOT RECORDED, and why each is honest rather than lazy:
+    //   * `restore*` paths -- deserialization is not a user edit, and a loaded
+    //     document starts with an empty history rather than with someone
+    //     else's session's.
+    //   * removing a Body, Parameter, Sketch or Material, and removing a
+    //     feature that another feature CONSUMES. None of these can be replayed
+    //     faithfully yet, and a history that silently does the wrong thing is
+    //     worse than no history: these operations CLEAR both stacks. The
+    //     clearing is observable (`undoDepth()` drops to zero), so a UI can
+    //     tell the user rather than offering an undo that would lie.
+    void beginTransaction(std::string label);
+    // Closes the open transaction. An EMPTY transaction records nothing --
+    // "the user did something that changed nothing" must not consume an undo
+    // step. False if no transaction was open.
+    bool commitTransaction();
+    // Undoes everything recorded since `beginTransaction` and records NOTHING:
+    // the document is left as if the transaction had never started (M9 spec
+    // section 6). False if no transaction was open.
+    bool abortTransaction();
+    bool isTransactionOpen() const noexcept { return openTransaction_.has_value(); }
+
+    // False when there is nothing to undo/redo -- a no-op, never a corruption.
+    bool undo();
+    bool redo();
+    std::size_t undoDepth() const noexcept { return undoStack_.size(); }
+    std::size_t redoDepth() const noexcept { return redoStack_.size(); }
+    // What the next undo/redo would do, or empty. M9 spec section 4: a user
+    // must be able to tell what an undo will undo.
+    std::string nextUndoLabel() const;
+    std::string nextRedoLabel() const;
+
     // --- Recompute infrastructure facade -----------------------------------
     // Registers an externally owned recomputable (e.g. a test stub) and gives
     // it a graph node. The caller guarantees the object outlives its
@@ -342,6 +792,11 @@ public:
     // owning container (Parameter/Body; externally owned IRecomputables have
     // no owner step here). False if the id is not registered.
     bool removeObject(ObjectId id);
+    // The restore-path twin: removes recording NO undo step. Used by the loader
+    // to drop the constructor's auto-created Origin when the file supplies its
+    // own frames -- without it, every v10 load arrived with one undo step that
+    // would delete the document's Origin (ADR-M9-001; caught by gate H).
+    bool restoreRemoveObject(ObjectId id);
 
     // Const-only access; mutation goes through the facade above.
     const ObjectRegistry& objectRegistry() const noexcept { return registry_; }
@@ -362,10 +817,41 @@ private:
                            ObjectId depthParameterId, ObjectId materialId);
     void wireRevolveFeature(RevolveFeature& feature, ObjectId sketchId,
                             ObjectId angleParameterId, ObjectId materialId);
+    void wireTransformFeature(TransformFeature& feature, ObjectId baseFeatureId,
+                              ObjectId frameId, ObjectId countParameterId,
+                              ObjectId spacingParameterId, ObjectId materialId);
     void wireEdgeDressFeature(class EdgeDressFeature& feature, ObjectId baseFeatureId,
                               ObjectId sizeParameterId, ObjectId materialId);
     void wirePadFeature(PadFeature& feature, ObjectId sketchId, ObjectId lengthParameterId,
                        ObjectId materialId);
+
+    // The duplicate-id rule at the door, for EVERY restore path (round 4,
+    // R1R4-C1). Round 3 gave `restorePlaceholderFeature` a two-half check --
+    // registry plus an all-bodies feature scan -- and its own comment named
+    // the general fact: placeholders are unregistered, so a placeholder-held
+    // id is invisible to `registry_.contains` and therefore defeated every
+    // SIBLING guard too. The comment named it; nothing closed it. Restoring a
+    // Pad onto a placeholder's id left two features carrying one ObjectId in
+    // one Body, and the repair was worse than the disease -- `removeObject`
+    // resolved the Pad through the registry, unregistered it and dropped its
+    // graph node, then `Body::removeFeature` erased the FIRST match, the
+    // placeholder, leaving the Pad as an unregistered, graph-less orphan that
+    // saved and loaded cleanly as a healthy Pad. Silent divergence between
+    // memory and file, ADR-M8-008's unconstructible state constructed through
+    // the public facade alone.
+    //
+    // One helper, called before ANYTHING is stored, so a throw leaves no
+    // residue. `who` is the caller's own name, because the loader mirrors
+    // these strings and round-2/3 findings pin several of them word for word.
+    // Creates the Origin frame during construction, recording nothing.
+    void createOriginFrame();
+
+    void requireUnusedId(ObjectId id, const char* who) const;
+
+    // Refuses a parent that is not a frame, or that would close a loop
+    // (M10). Pass kInvalidObjectId as `frameId` when the frame does not exist
+    // yet -- a brand-new frame cannot be its own ancestor.
+    void requireAcyclicParent(ObjectId frameId, ObjectId parentFrameId) const;
 
     // The chain rule at the door (ADR-M8-001, amended by review round 1's
     // R1-C1/R1-M2): a consumer's base must be a SOLID feature of the SAME
@@ -394,6 +880,26 @@ private:
     // Demotes any Feature whose cached state() claims Valid while the graph
     // (the source of truth) disagrees. See the definition.
     void syncFeatureStatesFromGraph() noexcept;
+
+    // --- Expression plumbing (M11.2) ---------------------------------------
+    // The names an expression reads, or an empty list when it does not parse.
+    // Deliberately silent about parse failure: the callers that need the error
+    // have already produced it, and the ones that do not (edge teardown for a
+    // text that is being REPLACED) must not be blocked by it.
+    static std::vector<std::string> expressionVariableNames(const std::string& text);
+    // Resolve one name to a parameter. `ambiguous` is set when two parameters
+    // share the name -- distinct from "not found", because the fix differs.
+    const Parameter* findParameterByExpressionName(const std::string& name,
+                                                   bool& ambiguous) const;
+    // Drop the edges `text`'s references imply. No-op for names that no longer
+    // resolve; a removed prerequisite has already taken its edge with it.
+    // The parameter ids `text` reads. Names that do not resolve are skipped:
+    // a removed prerequisite has already taken its edge with it.
+    std::vector<ObjectId> expressionPrerequisites(const std::string& text) const;
+    void detachExpressionEdges(ObjectId parameterId, const std::string& text);
+    // "Width -> Height -> Width", for a cycle refusal message. Bounded by the
+    // node count; returns an empty string when no path exists.
+    std::string describeDependencyPath(ObjectId from, ObjectId to) const;
 
     // Mutable lookup, private so every edit goes through editSketch().
     Sketch* findSketchForEdit(ObjectId id) noexcept;
@@ -430,6 +936,27 @@ private:
     // Reconciling per pass makes the graph agree with the constraint set
     // whatever route a caller took, at the cost of one walk over the sketches.
     void reconcileAllSketchParameterEdges();
+
+    // Undo internals (M9.1). `applyingHistory_` is the re-entrancy guard: undo
+    // and redo drive the very facade methods that record, and without it the
+    // first undo would push its own inverse and the stack would oscillate.
+    // Writes a name with no validation and no undo record -- the shared tail
+    // of renameObject and of undo, so a replayed rename cannot take a path
+    // the original did not.
+    void applyName(ObjectId id, const std::string& name);
+
+    void recordDelta(UndoDelta delta, std::string label);
+    void recordFeatureAdded(const Body& body, const Feature& feature);
+    void applyDelta(const UndoDelta& delta, bool forward);
+    void clearHistory(const char* becauseOfWhat) noexcept;
+    // Re-points the mass source at the body's chain TAIL -- the last solid
+    // feature nothing else consumes -- or detaches it if the body has none.
+    void rewireMassPropertiesToTail(const Body& body);
+
+    std::vector<UndoRecord> undoStack_;
+    std::vector<UndoRecord> redoStack_;
+    std::optional<UndoRecord> openTransaction_;
+    bool applyingHistory_ = false;
 
     ParameterManager parameters_;
     std::vector<std::unique_ptr<Body>> bodies_;

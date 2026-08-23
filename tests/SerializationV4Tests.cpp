@@ -6,10 +6,13 @@
 // file.
 
 #include "Core/Document/PartDocument.h"
+#include "Core/Feature/BoxFeature.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Fakes/FakeGeometryKernel.h"
+#include "Support/SchemaVersionText.h"
+
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
@@ -65,7 +68,7 @@ struct PadDoc {
 // rather than producing files an older loader silently mis-reads.
 TEST(SerializationV4Test, M4_SER_001_SaveWritesTheCurrentSchemaVersion) {
     PadDoc doc;
-    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 8"), std::string::npos); // v8: M8.3 Fillet/Chamfer
+    EXPECT_NE(SaveToString(doc.document).find(paramcad::testing::CurrentSchemaVersionField()), std::string::npos);
 }
 
 TEST(SerializationV4Test, M4_SER_002_SketchAndEntityIdsSurvive) {
@@ -306,6 +309,222 @@ TEST(SerializationV4Test, M8_REV_342_RestorePlaceholderRefusesAnotherPlaceholder
                  std::runtime_error);
     std::ostringstream out;
     EXPECT_TRUE(savePartDocument(document, out));
+}
+
+// --- Round 4, R1R4-C1: the guard was one-directional ------------------------
+//
+// Round 3 closed the placeholder path and its own comment named the general
+// fact -- a placeholder is unregistered, so a placeholder-held id is invisible
+// to `registry_.contains` and defeated every SIBLING guard too -- but changed
+// no sibling. R1 built the consequence through public calls only: two features
+// carrying one ObjectId in one Body, a document that would not save, and a
+// "repair" that destroyed the wrong one and left the survivor unregistered,
+// graph-less and unremovable -- which then saved and loaded cleanly as a
+// healthy Pad. Every restore path now shares `requireUnusedId`.
+//
+// One test per path, because round 3 proved (R3R3-M1) that a fixture covering
+// SOME members of a set and a comment claiming it covers all of them is how
+// this project's tables drift.
+
+namespace {
+
+// The collision id is always a placeholder's -- the flavor that defeated the
+// registry-only guards. A registered-id collision was already refused before
+// round 4; these pin the half that was not.
+ObjectId PlaceholderIdIn(PartDocument& document, Body& body) {
+    return document.addPlaceholderFeature(body, "Ghost", "Widget").id();
+}
+
+} // namespace
+
+TEST(SerializationV4Test, M8_REV_351_EveryFeatureRestorePathRefusesAPlaceholdersId) {
+    PartDocument document{"Doc"};
+    Body& body = document.addBody("Body001");
+    Sketch& sketch = document.addSketch("Sketch001");
+    Parameter& length = document.addParameter("Length", 20.0, UnitType::Millimeter);
+    const ObjectId taken = PlaceholderIdIn(document, body);
+
+    EXPECT_THROW(document.restorePadFeature(body, taken, "Pad", ComputeState::Dirty,
+                                            sketch.id(), length.id(), kInvalidObjectId),
+                 std::runtime_error);
+    EXPECT_THROW(document.restoreBoxFeature(body, taken, "Box", ComputeState::Dirty, length.id(),
+                                            length.id(), length.id(), kInvalidObjectId),
+                 std::runtime_error);
+    EXPECT_THROW(document.restoreRevolveFeature(body, taken, "Rev", ComputeState::Dirty,
+                                                sketch.id(), SketchEntityId{1}, length.id(),
+                                                kInvalidObjectId),
+                 std::runtime_error);
+    EXPECT_THROW(document.restorePlaceholderFeature(body, taken, "Ghost2", ComputeState::Dirty,
+                                                    "Widget"),
+                 std::runtime_error);
+
+    // Exactly one feature still carries the id: nothing was half-built.
+    std::size_t carrying = 0;
+    for (const auto& feature : body.features())
+        if (feature->id() == taken) ++carrying;
+    EXPECT_EQ(carrying, 1u);
+}
+
+TEST(SerializationV4Test, M8_REV_352_ConsumingRestorePathsRefuseAPlaceholdersId) {
+    // The three consumers are separated because each also calls
+    // requireConsumableBase, and a guard that ran in the WRONG ORDER would
+    // report the base problem and mask the id collision.
+    PartDocument document{"Doc"};
+    Body& body = document.addBody("Body001");
+    Sketch& sketch = document.addSketch("Sketch001");
+    Parameter& length = document.addParameter("Length", 20.0, UnitType::Millimeter);
+    PadFeature& pad = document.addPadFeature(body, "Pad001", sketch.id(), length.id());
+    const ObjectId taken = PlaceholderIdIn(document, body);
+
+    EXPECT_THROW(document.restorePocketFeature(body, taken, "Pocket", ComputeState::Dirty,
+                                               pad.id(), sketch.id(), length.id(),
+                                               kInvalidObjectId),
+                 std::runtime_error);
+    EXPECT_THROW(document.restoreFilletFeature(body, taken, "Fillet", ComputeState::Dirty,
+                                               pad.id(), length.id(), kInvalidObjectId),
+                 std::runtime_error);
+    EXPECT_THROW(document.restoreChamferFeature(body, taken, "Chamfer", ComputeState::Dirty,
+                                                pad.id(), length.id(), kInvalidObjectId),
+                 std::runtime_error);
+    // The pad is still consumable -- no refused restore left a phantom consumer
+    // behind that would make the NEXT one fail for the wrong reason.
+    EXPECT_NO_THROW(document.addPocketFeature(body, "Pocket001", pad.id(), sketch.id(),
+                                              length.id()));
+}
+
+TEST(SerializationV4Test, M8_REV_353_NonFeatureRestorePathsRefuseAPlaceholdersId) {
+    PartDocument document{"Doc"};
+    Body& body = document.addBody("Body001");
+    const ObjectId taken = PlaceholderIdIn(document, body);
+
+    EXPECT_THROW(document.restoreParameter(taken, "P", 1.0, UnitType::Millimeter, "",
+                                           ParameterState::Valid),
+                 std::runtime_error);
+    EXPECT_THROW(document.restoreBody(taken, "Body002"), std::runtime_error);
+    EXPECT_THROW(document.restoreSketch(taken, "Sketch002", SketchFrame::WorldXY()),
+                 std::runtime_error);
+    // Nothing was half-built by any refusal.
+    EXPECT_EQ(document.bodies().size(), 1u);
+    EXPECT_EQ(document.sketches().size(), 0u);
+    std::ostringstream out;
+    EXPECT_TRUE(savePartDocument(document, out));
+}
+
+TEST(SerializationV4Test, M8_REV_355_RestorePathsRefuseTheDocumentsOwnId) {
+    // Round 4, R2R4-m1: the registry's THIRD blind spot. A PartDocument does
+    // not register itself, so its own id passed both halves of the guard --
+    // restoring anything onto it built cleanly and the document then refused to
+    // save, permanently, with the collision invisible.
+    PartDocument document{"Doc"};
+    Body& body = document.addBody("Body001");
+    const ObjectId taken = document.id();
+
+    EXPECT_THROW(document.restorePlaceholderFeature(body, taken, "Ghost", ComputeState::Dirty,
+                                                    "Widget"),
+                 std::runtime_error);
+    EXPECT_THROW(document.restoreBody(taken, "Body002"), std::runtime_error);
+    EXPECT_THROW(document.restoreSketch(taken, "Sketch001", SketchFrame::WorldXY()),
+                 std::runtime_error);
+    EXPECT_THROW(document.restoreParameter(taken, "P", 1.0, UnitType::Millimeter, "",
+                                           ParameterState::Valid),
+                 std::runtime_error);
+
+    // The document is still savable: every refusal happened before anything
+    // was stored.
+    std::ostringstream out;
+    EXPECT_TRUE(savePartDocument(document, out));
+}
+
+TEST(SerializationV4Test, M8_REV_354_RemoveObjectRemovesTheRightFeatureAlongsideAPlaceholder) {
+    // NOT a guard for the by-identity change, and named for what it does test.
+    //
+    // The other half of R1R4-C1: `Body::removeFeature` took an id and erased
+    // the FIRST match, so in a duplicate-id state removeObject unregistered one
+    // feature and destroyed a different one. `requireUnusedId` now makes that
+    // state unconstructible through the public API -- `Body::addFeature` is
+    // private with PartDocument as its only friend, and all eleven restore
+    // paths are guarded -- so reverting removeFeature to first-id-match fails
+    // NOTHING (round 4 mutation F, verified UNGUARDED and recorded as such).
+    // The by-identity form is defense in depth with no reachable failure, in
+    // the V8/X2 tradition of stating that plainly instead of claiming a pin.
+    //
+    // What this test does pin is the ordinary case that runs every day: a body
+    // holding a placeholder and a pad, removing the pad, and the placeholder
+    // surviving intact.
+    PartDocument document{"Doc"};
+    Body& body = document.addBody("Body001");
+    Sketch& sketch = document.addSketch("Sketch001");
+    Parameter& length = document.addParameter("Length", 20.0, UnitType::Millimeter);
+    document.addPlaceholderFeature(body, "Ghost", "Widget");
+    PadFeature& pad = document.addPadFeature(body, "Pad001", sketch.id(), length.id());
+    ASSERT_EQ(body.features().size(), 2u);
+
+    ASSERT_TRUE(document.removeObject(pad.id()));
+    ASSERT_EQ(body.features().size(), 1u);
+    // The PAD went; the placeholder stayed. Erasing by id could not tell them
+    // apart in the duplicate case, and this asserts the object, not the count.
+    EXPECT_EQ(body.features().front()->typeName(), "Widget");
+}
+
+// --- Round 4, R2R4-C1: the dependency edges nothing checked -----------------
+
+TEST(SerializationV4Test, M8_REV_361_ASaveRefusesAnEdgeTheLoaderCannotRead) {
+    // ADR-M3-008's named worst class, sixth recurrence, found by execution:
+    // the WRITER persists an edge whose prerequisite is a FEATURE and whose
+    // dependent is a parameter; the LOADER accepts parameter endpoints only.
+    // Four public facade calls produced a file that saved OK and would not load.
+    PartDocument document{"Doc"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+    Body& body = document.addBody("Body001");
+    Parameter& width = document.addParameter("Width", 100.0, UnitType::Millimeter);
+    Parameter& height = document.addParameter("Height", 50.0, UnitType::Millimeter);
+    Parameter& depth = document.addParameter("Depth", 20.0, UnitType::Millimeter);
+    BoxFeature& box =
+        document.addBoxFeature(body, "Box001", width.id(), height.id(), depth.id());
+    // An UNRELATED parameter: making the box's own Width depend on the box
+    // would be a cycle and is refused by the graph, which is correct and is
+    // not what this test is about.
+    Parameter& measured = document.addParameter("Measured", 0.0, UnitType::Millimeter);
+
+    // The document is savable before the edge exists...
+    {
+        std::ostringstream out;
+        ASSERT_TRUE(savePartDocument(document, out));
+    }
+
+    // ...and refused after, rather than writing bytes it could not read back.
+    ASSERT_TRUE(document.addDependency(measured.id(), box.id()));
+    std::ostringstream out;
+    const SaveResult saved = savePartDocument(document, out);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("could never be loaded back"), std::string::npos)
+        << saved.message;
+    EXPECT_NE(saved.message.find("dependency edge"), std::string::npos) << saved.message;
+
+    // And the refusal is the SAVE side doing its job, not a side effect: with
+    // the edge removed the document saves and loads again.
+    ASSERT_TRUE(document.removeDependency(measured.id(), box.id()));
+    std::ostringstream out2;
+    ASSERT_TRUE(savePartDocument(document, out2));
+    const LoadResult loaded = LoadFromString(out2.str());
+    EXPECT_TRUE(loaded) << loaded.message;
+}
+
+TEST(SerializationV4Test, M8_REV_362_ParameterToParameterEdgesStillRoundTrip) {
+    // The negative control: the check must refuse ONLY what the loader refuses.
+    // An ordinary parameter-to-parameter edge is the Option-A case the format
+    // exists to carry, and it must still save, load and arrive intact.
+    PartDocument document{"Doc"};
+    Parameter& a = document.addParameter("A", 1.0, UnitType::Millimeter);
+    Parameter& b = document.addParameter("B", 2.0, UnitType::Millimeter);
+    ASSERT_TRUE(document.addDependency(b.id(), a.id()));
+
+    std::ostringstream out;
+    ASSERT_TRUE(savePartDocument(document, out));
+    const LoadResult loaded = LoadFromString(out.str());
+    ASSERT_TRUE(loaded) << loaded.message;
+    EXPECT_EQ(loaded.document->dependencyGraph().dependentsOf(a.id()).size(), 1u);
 }
 
 } // namespace

@@ -2,11 +2,14 @@
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Parameter/Parameter.h"
+#include "Core/Document/PartDocument.h"
 #include "Core/Recompute/RecomputeContext.h"
 #include "Core/Sketch/Profile.h"
 #include "Core/Sketch/Sketch.h"
+#include <cstdint>
 #include <string>
 #include <utility>
+#include <optional>
 #include <variant>
 
 namespace paramcad {
@@ -14,16 +17,20 @@ namespace paramcad {
 namespace {
 
 const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    const ObjectRegistry::ObjectRef* ref = registry.find(id);
-    if (ref == nullptr) return nullptr;
-    auto* const* parameter = std::get_if<Parameter*>(ref);
+    // The const overload yields const pointees (R2R4-M1); these resolvers
+    // already returned const pointers, so the projection matches their intent.
+    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
+    if (!ref) return nullptr;
+    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
     return parameter != nullptr ? *parameter : nullptr;
 }
 
 const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
-    const ObjectRegistry::ObjectRef* ref = registry.find(id);
-    if (ref == nullptr) return nullptr;
-    auto* const* sketch = std::get_if<Sketch*>(ref);
+    // The const overload yields const pointees (R2R4-M1); these resolvers
+    // already returned const pointers, so the projection matches their intent.
+    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
+    if (!ref) return nullptr;
+    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
     return sketch != nullptr ? *sketch : nullptr;
 }
 
@@ -32,9 +39,11 @@ const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
 // can be pocketed, so tomorrow's Revolve is a legal base with no change here.
 const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
     if (id == kInvalidObjectId) return nullptr;
-    const ObjectRegistry::ObjectRef* ref = registry.find(id);
-    if (ref == nullptr) return nullptr;
-    auto* const* recomputable = std::get_if<IRecomputable*>(ref);
+    // The const overload yields const pointees (R2R4-M1); these resolvers
+    // already returned const pointers, so the projection matches their intent.
+    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
+    if (!ref) return nullptr;
+    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
     if (recomputable == nullptr) return nullptr;
     return dynamic_cast<const ISolidFeature*>(*recomputable);
 }
@@ -88,7 +97,22 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
     // integration test green because this check masks it. That is defense
     // in depth working, and it is stated here so no one reads GATE_E3 as a
     // barrier pin.
-    const ISolidFeature* base = resolveSolidFeature(context.registry, baseFeatureId_);
+    // THE BASE IS RESOLVED THROUGH ACTIVITY (M9.3/M9.4, ADR-M9-002).
+    //
+    // `activeChainBase` walks past links that are suppressed or rolled back, so
+    // suppressing a middle feature closes the chain over it: this feature then
+    // consumes what the suppressed one consumed. The STORED reference is never
+    // rewritten -- suppression is a state, not an edit, and the model still
+    // says what the user built.
+    //
+    // When the walk runs out (the base is inactive and consumes nothing) the
+    // answer is kInvalidObjectId and the checks below fail LOUDLY. That is
+    // required, not incidental: the base still holds its retained shape
+    // (ADR-M3-001), so resolving to it anyway would cut against geometry the
+    // user has switched off and produce a healthy-looking wrong solid -- the
+    // exact failure M8 gate E exists to prevent, reached from a new direction.
+    const ISolidFeature* base = resolveSolidFeature(
+        context.registry, context.document.activeChainBase(baseFeatureId_));
     if (base == nullptr)
         return fail("pocket base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
@@ -107,15 +131,29 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
     if (!profile) return fail("invalid pocket profile: " + profile.message);
 
     PlanarProfileDefinition definition;
-    if (!BuildKernelProfile(*sketch, profile.profile, definition))
+    // A support frame that is GONE fails loudly (M10 gate I). Falling back to
+    // the embedded plane would move the geometry back to world XY on its own,
+    // silently, which is exactly what a deleted reference must never do.
+    if (context.document.sketchSupportFrameIsMissing(sketch->id()))
+        return fail("pocket sketch's support frame is missing");
+    // The sketch's EFFECTIVE plane, which is its support frame's world
+    // transform when it has one (M10.2, ADR-M10-003). Reading `sketch->frame()`
+    // here instead would leave the geometry at the origin after the frame moved.
+    if (!BuildKernelProfile(*sketch, profile.profile,
+                            context.document.effectiveSketchFrame(sketch->id()), definition))
         return fail("pocket profile references an entity that is no longer in the sketch");
 
     // The tool grows along the sketch's +normal by Depth -- the SAME direction
     // Pad grows from the same plane (ADR-M8-002). A pocket sketched on the
     // pad's own plane therefore cuts INTO the material it sits on, and a depth
-    // equal to the pad's length cuts through. The extrude call itself rejects
-    // non-finite and non-positive depths with a diagnostic, so the dimension
-    // floor is enforced in exactly one place.
+    // equal to the pad's length cuts through.
+    //
+    // A NEGATIVE depth cuts the other way (M17.8, ADR-M17-031), and that is not
+    // an exotic case: a sketch made on a FACE has its normal pointing out of
+    // the solid, so that a pad grows away from the part (ADR-M17-028). From
+    // such a plane the default direction builds the tool OUTSIDE the material,
+    // and the cut removes nothing -- which is the failure checked for below.
+    // The extrude call enforces the magnitude floor in exactly one place.
     ShapeResult tool = context.kernel->extrudeProfile(definition, depth->value());
     if (!tool)
         return fail(tool.message.empty() ? "kernel failed to extrude the pocket tool"
@@ -130,7 +168,11 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
         return fail(result.message.empty() ? "kernel failed to cut the pocket" : result.message);
     if (!result.shape.isValid()) return fail("kernel returned an invalid cut result");
 
-    currentShape_ = std::move(result.shape);
+    // Against the BASE, so what gets recorded is the walls and floor the cut
+    // made -- and the base's own history is carried forward, so a chain
+    // accumulates a full account rather than only its last step.
+    currentShape_ = context.kernel->tagCreatedFaces(result.shape, base->currentShape(),
+                                                    static_cast<std::uint64_t>(id()));
     setState(ComputeState::Valid);
     return {RecomputeStatus::Success, {}};
 }

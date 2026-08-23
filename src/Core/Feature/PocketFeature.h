@@ -4,6 +4,7 @@
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
 #include "Core/Feature/IMaterialReferencing.h"
+#include "Core/Feature/ISketchConsuming.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
@@ -36,6 +37,7 @@ namespace paramcad {
 class PocketFeature final : public Feature,
                             public IRecomputable,
                             public ISolidFeature,
+                            public ISketchConsuming,
                             public IMaterialReferencing {
 public:
     PocketFeature(std::string name, ObjectId baseFeatureId, ObjectId sketchId,
@@ -49,6 +51,9 @@ public:
 
     ObjectId baseFeatureId() const noexcept { return baseFeatureId_; }
     ObjectId sketchId() const noexcept { return sketchId_; }
+    // ISketchConsuming: the same answer, asked the way code that does not know
+    // this type has to ask it.
+    ObjectId consumedSketchId() const noexcept override { return sketchId_; }
     ObjectId depthParameterId() const noexcept { return depthParameterId_; }
     ObjectId materialId() const noexcept override { return materialId_; }
     void clearMaterialReference() noexcept override { materialId_ = kInvalidObjectId; }

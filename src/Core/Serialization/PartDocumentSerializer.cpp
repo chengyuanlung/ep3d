@@ -3,6 +3,9 @@
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISolidFeature.h"
+#include "Core/Feature/FeatureSnapshot.h"
+#include "Core/Kernel/EdgeQuery.h"
+#include "Core/Kernel/FaceQuery.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Feature/RevolveFeature.h"
@@ -26,7 +29,87 @@ namespace paramcad {
 
 namespace {
 
-constexpr int kSchemaVersion = 8;           // v8 adds Fillet and Chamfer (M8.3)
+// One geometry value as JSON fields on `entry`.
+//
+// Extracted when projected reference geometry needed the SAME encoding
+// (M17.6). A reference IS a line, a circle, an arc or a point, so it is
+// written with the same keys -- and a second copy of this visit would be a
+// second format that could drift from the first, in a file the loader reads
+// with one parser.
+void WriteSketchGeometry(JsonValue& entry, const SketchGeometry& geometry) {
+    std::visit(
+        [&entry](const auto& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, SketchPoint>) {
+                entry.set("type", JsonValue::makeString("Point"));
+                entry.set("u", JsonValue::makeNumber(value.position.x));
+                entry.set("v", JsonValue::makeNumber(value.position.y));
+            } else if constexpr (std::is_same_v<T, SketchLine>) {
+                entry.set("type", JsonValue::makeString("Line"));
+                entry.set("u1", JsonValue::makeNumber(value.start.x));
+                entry.set("v1", JsonValue::makeNumber(value.start.y));
+                entry.set("u2", JsonValue::makeNumber(value.end.x));
+                entry.set("v2", JsonValue::makeNumber(value.end.y));
+            } else if constexpr (std::is_same_v<T, SketchCircle>) {
+                entry.set("type", JsonValue::makeString("Circle"));
+                entry.set("u", JsonValue::makeNumber(value.center.x));
+                entry.set("v", JsonValue::makeNumber(value.center.y));
+                entry.set("radiusMm", JsonValue::makeNumber(value.radiusMm));
+            } else if constexpr (std::is_same_v<T, SketchSpline>) {
+                entry.set("type", JsonValue::makeString("Spline"));
+                JsonValue points = JsonValue::makeArray();
+                for (const Vec2& point : value.points) {
+                    JsonValue one = JsonValue::makeObject();
+                    one.set("u", JsonValue::makeNumber(point.x));
+                    one.set("v", JsonValue::makeNumber(point.y));
+                    points.add(std::move(one));
+                }
+                entry.set("points", std::move(points));
+                // ALWAYS, including when false. Closed and open are different
+                // curves -- one is a loop on its own and the other has ends a
+                // profile chains through -- so a file that omitted it would
+                // load as the other shape rather than as a default.
+                entry.set("closed", JsonValue::makeBool(value.closed));
+            } else if constexpr (std::is_same_v<T, SketchEllipse> ||
+                                 std::is_same_v<T, SketchEllipticalArc>) {
+                entry.set("type",
+                          JsonValue::makeString(std::is_same_v<T, SketchEllipse>
+                                                    ? "Ellipse"
+                                                    : "EllipticalArc"));
+                entry.set("u", JsonValue::makeNumber(value.center.x));
+                entry.set("v", JsonValue::makeNumber(value.center.y));
+                entry.set("majorRadiusMm", JsonValue::makeNumber(value.majorRadiusMm));
+                entry.set("minorRadiusMm", JsonValue::makeNumber(value.minorRadiusMm));
+                entry.set("rotationRad", JsonValue::makeNumber(value.rotationRad));
+                if constexpr (std::is_same_v<T, SketchEllipticalArc>) {
+                    // PARAMETERS, and the key says so. Naming them
+                    // "startAngleRad" like the circular arc's would invite the
+                    // next reader to feed one to atan2, which is right at the
+                    // axes and wrong everywhere else.
+                    entry.set("startParamRad", JsonValue::makeNumber(value.startParamRad));
+                    entry.set("endParamRad", JsonValue::makeNumber(value.endParamRad));
+                    entry.set("counterClockwise", JsonValue::makeBool(value.counterClockwise));
+                }
+            } else {
+                static_assert(std::is_same_v<T, SketchArc>);
+                entry.set("type", JsonValue::makeString("Arc"));
+                entry.set("u", JsonValue::makeNumber(value.center.x));
+                entry.set("v", JsonValue::makeNumber(value.center.y));
+                entry.set("radiusMm", JsonValue::makeNumber(value.radiusMm));
+                entry.set("startAngleRad", JsonValue::makeNumber(value.startAngleRad));
+                entry.set("endAngleRad", JsonValue::makeNumber(value.endAngleRad));
+                entry.set("counterClockwise", JsonValue::makeBool(value.counterClockwise));
+            }
+        },
+        geometry);
+}
+
+
+constexpr int kSchemaVersion = 23;          // v23 adds splines (M17.26)
+// v15 added PointLineDistance (M17).
+// v14 added construction geometry (M17).
+// v13 added Horizontal/VerticalDistance (M17).
+// v12 added user-placed dimension positions (M16).
 constexpr int kMinSupportedSchemaVersion = 1; // v1 (no edges) and v2 files still load
 constexpr std::string_view kFormatName = "ParametricCAD";
 
@@ -41,6 +124,7 @@ const char* subElementName(SketchSubElement subElement) noexcept {
         case SketchSubElement::StartPoint: return "StartPoint";
         case SketchSubElement::EndPoint: return "EndPoint";
         case SketchSubElement::CenterPoint: return "CenterPoint";
+        case SketchSubElement::SplinePoint: return "SplinePoint";
     }
     return "Whole";
 }
@@ -50,6 +134,7 @@ std::optional<SketchSubElement> subElementFromString(const std::string& name) {
     if (name == "StartPoint") return SketchSubElement::StartPoint;
     if (name == "EndPoint") return SketchSubElement::EndPoint;
     if (name == "CenterPoint") return SketchSubElement::CenterPoint;
+    if (name == "SplinePoint") return SketchSubElement::SplinePoint;
     return std::nullopt;
 }
 
@@ -93,6 +178,55 @@ std::optional<ParameterState> parameterStateFromString(std::string_view text) {
     return std::nullopt;
 }
 
+// A Transform3D as seven numbers. Not a matrix: the stored form is the same
+// translation + quaternion the type carries, so a save/load cannot renormalise
+// or re-decompose it into something subtly different (M10, ADR-M10-002).
+JsonValue transformToJson(const Transform3D& transform) {
+    JsonValue out = JsonValue::makeObject();
+    out.set("tx", JsonValue::makeNumber(transform.translation.x));
+    out.set("ty", JsonValue::makeNumber(transform.translation.y));
+    out.set("tz", JsonValue::makeNumber(transform.translation.z));
+    out.set("qw", JsonValue::makeNumber(transform.rotation.w));
+    out.set("qx", JsonValue::makeNumber(transform.rotation.x));
+    out.set("qy", JsonValue::makeNumber(transform.rotation.y));
+    out.set("qz", JsonValue::makeNumber(transform.rotation.z));
+    return out;
+}
+
+std::string_view toString(ConnectorRole role) {
+    switch (role) {
+        case ConnectorRole::Generic: return "Generic";
+        case ConnectorRole::Mount: return "Mount";
+        case ConnectorRole::Shaft: return "Shaft";
+        case ConnectorRole::LinearGuide: return "LinearGuide";
+        case ConnectorRole::ToolFlange: return "ToolFlange";
+        case ConnectorRole::Electrical: return "Electrical";
+        case ConnectorRole::Pneumatic: return "Pneumatic";
+    }
+    return "Generic";
+}
+
+std::optional<ConnectorRole> connectorRoleFromString(std::string_view text) {
+    if (text == "Generic") return ConnectorRole::Generic;
+    if (text == "Mount") return ConnectorRole::Mount;
+    if (text == "Shaft") return ConnectorRole::Shaft;
+    if (text == "LinearGuide") return ConnectorRole::LinearGuide;
+    if (text == "ToolFlange") return ConnectorRole::ToolFlange;
+    if (text == "Electrical") return ConnectorRole::Electrical;
+    if (text == "Pneumatic") return ConnectorRole::Pneumatic;
+    return std::nullopt;
+}
+
+std::string_view toString(ConnectorOwner owner) {
+    return owner == ConnectorOwner::Assembly ? "Assembly" : "PartDefinition";
+}
+
+std::optional<ConnectorOwner> connectorOwnerFromString(std::string_view text) {
+    if (text == "PartDefinition") return ConnectorOwner::PartDefinition;
+    if (text == "Assembly") return ConnectorOwner::Assembly;
+    return std::nullopt;
+}
+
 std::string_view toString(ComputeState state) {
     switch (state) {
         case ComputeState::Valid: return "Valid";
@@ -118,6 +252,69 @@ std::string idToString(ObjectId id) {
     const auto result = std::to_chars(buffer, buffer + sizeof(buffer), id);
     return std::string(buffer, result.ptr);
 }
+
+// One face query as a JSON object (v19, M17.14).
+//
+// Shared by the sketch's `trackedFace` and by an EdgesOfFace selection,
+// because they hold the same thing -- and two encodings of one query is two
+// formats that can drift apart inside a single file.
+JsonValue WriteFaceQuery(const FaceQuery& query) {
+    JsonValue entry = JsonValue::makeObject();
+    if (query.createdBy.has_value())
+        entry.set("createdBy", JsonValue::makeString(idToString(*query.createdBy)));
+    const auto direction = [&entry](const char* key, Vec3 v) {
+        JsonValue value = JsonValue::makeObject();
+        value.set("x", JsonValue::makeNumber(v.x));
+        value.set("y", JsonValue::makeNumber(v.y));
+        value.set("z", JsonValue::makeNumber(v.z));
+        entry.set(key, std::move(value));
+    };
+    if (query.extremeTowards.has_value()) direction("extremeTowards", *query.extremeTowards);
+    if (query.facing.has_value()) direction("facing", *query.facing);
+    return entry;
+}
+
+// One edge query as a JSON object (v18, M17.12).
+//
+// By NAME, because the loader dispatches on it -- and a query written under a
+// name the loader does not know is not a forward-compatibility problem, it is
+// a fillet that silently reverts to every edge.
+JsonValue WriteEdgeQuery(const EdgeQuery& query) {
+    JsonValue entry = JsonValue::makeObject();
+    const auto direction = [&entry](Vec3 v) {
+        entry.set("x", JsonValue::makeNumber(v.x));
+        entry.set("y", JsonValue::makeNumber(v.y));
+        entry.set("z", JsonValue::makeNumber(v.z));
+    };
+    // EXHAUSTIVE by std::visit with if-constexpr, not an if/else chain ending
+    // in a bare `else`. The chain version was written when the variant had
+    // three alternatives; adding a fourth made the `else` reach for the wrong
+    // one and throw on save. A visit fails to COMPILE when an alternative has
+    // nowhere to go, which is where that failure belongs.
+    std::visit(
+        [&entry, &direction](const auto& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, AllEdges>) {
+                entry.set("type", JsonValue::makeString("AllEdges"));
+            } else if constexpr (std::is_same_v<T, EdgesOfExtremeFace>) {
+                entry.set("type", JsonValue::makeString("EdgesOfExtremeFace"));
+                direction(value.direction);
+            } else if constexpr (std::is_same_v<T, EdgesParallelTo>) {
+                entry.set("type", JsonValue::makeString("EdgesParallelTo"));
+                direction(value.direction);
+            } else if constexpr (std::is_same_v<T, EdgesCreatedBy>) {
+                entry.set("type", JsonValue::makeString("EdgesCreatedBy"));
+                entry.set("featureId", JsonValue::makeString(idToString(value.featureId)));
+            } else {
+                static_assert(std::is_same_v<T, EdgesOfFace>);
+                entry.set("type", JsonValue::makeString("EdgesOfFace"));
+                entry.set("face", WriteFaceQuery(value.face));
+            }
+        },
+        query);
+    return entry;
+}
+
 
 std::optional<ObjectId> idFromString(std::string_view text) {
     if (text.empty()) return std::nullopt;
@@ -179,6 +376,21 @@ JsonValue toJson(const PartDocument& document) {
         JsonValue bodyEntry = JsonValue::makeObject();
         bodyEntry.set("id", JsonValue::makeString(idToString(body->id())));
         bodyEntry.set("name", JsonValue::makeString(body->name()));
+        // v9 (ADR-M9-004): the rollback POSITION, which is document state --
+        // where the user is looking is part of the document, and reopening a
+        // part rolled back to step three at step three is the behaviour a user
+        // expects. Written only when it hides something, so a document nobody
+        // has rolled back is byte-identical to its v8 self apart from the
+        // version number.
+        //
+        // A COUNT, not a feature id: a position before the first feature and a
+        // position after the last one both have to be expressible and neither
+        // names a feature. That is not the ADR-M4-004 violation it might look
+        // like -- the count is not an identity, nothing references it, and the
+        // features it hides keep their own ids and their own order.
+        if (body->rollbackCut() < body->features().size())
+            bodyEntry.set("rollback",
+                          JsonValue::makeNumber(static_cast<double>(body->rollbackCut())));
         JsonValue features = JsonValue::makeArray();
         for (const auto& feature : body->features()) {
             featureIds.insert(feature->id());
@@ -227,8 +439,45 @@ JsonValue toJson(const PartDocument& document) {
                                  JsonValue::makeString(idToString(dress->baseFeatureId())));
                 featureEntry.set("sizeParameterId",
                                  JsonValue::makeString(idToString(dress->sizeParameterId())));
+                // v18: WHICH edges (M17.12). Written only when it is not the
+                // default, so every fillet anybody already has produces the
+                // bytes v17 produced -- and "absent" and "every edge" mean the
+                // same thing, with no third state for them to disagree about.
+                if (!IsAllEdges(dress->edgeSelection())) {
+                    JsonValue queries = JsonValue::makeArray();
+                    for (const EdgeQuery& query : dress->edgeSelection())
+                        queries.add(WriteEdgeQuery(query));
+                    featureEntry.set("edgeSelection", std::move(queries));
+                }
                 featureEntry.set("materialId",
                                  JsonValue::makeString(idToString(dress->materialId())));
+            } else if (const auto* pattern =
+                           dynamic_cast<const PatternFeature*>(feature.get())) {
+                // v10 (M10.6): the frame supplies the direction, and count and
+                // spacing are Parameters -- a pattern whose count cannot be
+                // driven is not parametric.
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(pattern->baseFeatureId())));
+                featureEntry.set("frameId",
+                                 JsonValue::makeString(idToString(pattern->frameId())));
+                featureEntry.set("countParameterId",
+                                 JsonValue::makeString(idToString(pattern->countParameterId())));
+                featureEntry.set(
+                    "spacingParameterId",
+                    JsonValue::makeString(idToString(pattern->spacingParameterId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(pattern->materialId())));
+            } else if (const auto* transform =
+                           dynamic_cast<const TransformFeature*>(feature.get())) {
+                // Mirror. AFTER Pattern, for the reason the dress branch is
+                // before its twins: a base-class test placed first swallows the
+                // derived type and silently drops its fields.
+                featureEntry.set("baseFeatureId",
+                                 JsonValue::makeString(idToString(transform->baseFeatureId())));
+                featureEntry.set("frameId",
+                                 JsonValue::makeString(idToString(transform->frameId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(transform->materialId())));
             } else if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
                 // v6 (ADR-M8-001): the chain reference is the base feature's
                 // ObjectId -- semantic, like every other reference here. The
@@ -275,45 +524,55 @@ JsonValue toJson(const PartDocument& document) {
         rotation.set("z", JsonValue::makeNumber(transform.rotation.z));
         frame.set("rotation", std::move(rotation));
         sketchEntry.set("frame", std::move(frame));
+        // v10 (M10.2, ADR-M10-003): the OPTIONAL support frame. Written only
+        // when the sketch has one, so a document with no frames is byte-
+        // identical to its v9 self apart from the version number and the two
+        // empty arrays. The embedded "frame" above stays either way -- it is
+        // the fallback, not dead weight.
+        if (sketch->supportFrameId() != kInvalidObjectId)
+            sketchEntry.set("supportFrameId",
+                            JsonValue::makeString(idToString(sketch->supportFrameId())));
+
+        // v19: the FACE this sketch follows (M17.14). Written only when there
+        // is one, so a sketch on a world plane is byte-identical to its v18
+        // self -- and absent means "the embedded frame is the whole story",
+        // which is what every sketch made before this said by omission.
+        if (sketch->trackedFace().has_value()) {
+            sketchEntry.set("trackedFace", WriteFaceQuery(*sketch->trackedFace()));
+        }
 
         JsonValue entities = JsonValue::makeArray();
         for (const SketchEntity& entity : sketch->entities()) {
             JsonValue entry = JsonValue::makeObject();
             entry.set("id", JsonValue::makeString(idToString(ToObjectId(entity.id))));
-            std::visit(
-                [&entry](const auto& geometry) {
-                    using T = std::decay_t<decltype(geometry)>;
-                    if constexpr (std::is_same_v<T, SketchPoint>) {
-                        entry.set("type", JsonValue::makeString("Point"));
-                        entry.set("u", JsonValue::makeNumber(geometry.position.x));
-                        entry.set("v", JsonValue::makeNumber(geometry.position.y));
-                    } else if constexpr (std::is_same_v<T, SketchLine>) {
-                        entry.set("type", JsonValue::makeString("Line"));
-                        entry.set("u1", JsonValue::makeNumber(geometry.start.x));
-                        entry.set("v1", JsonValue::makeNumber(geometry.start.y));
-                        entry.set("u2", JsonValue::makeNumber(geometry.end.x));
-                        entry.set("v2", JsonValue::makeNumber(geometry.end.y));
-                    } else if constexpr (std::is_same_v<T, SketchCircle>) {
-                        entry.set("type", JsonValue::makeString("Circle"));
-                        entry.set("u", JsonValue::makeNumber(geometry.center.x));
-                        entry.set("v", JsonValue::makeNumber(geometry.center.y));
-                        entry.set("radiusMm", JsonValue::makeNumber(geometry.radiusMm));
-                    } else {
-                        static_assert(std::is_same_v<T, SketchArc>);
-                        entry.set("type", JsonValue::makeString("Arc"));
-                        entry.set("u", JsonValue::makeNumber(geometry.center.x));
-                        entry.set("v", JsonValue::makeNumber(geometry.center.y));
-                        entry.set("radiusMm", JsonValue::makeNumber(geometry.radiusMm));
-                        entry.set("startAngleRad", JsonValue::makeNumber(geometry.startAngleRad));
-                        entry.set("endAngleRad", JsonValue::makeNumber(geometry.endAngleRad));
-                        entry.set("counterClockwise",
-                                  JsonValue::makeBool(geometry.counterClockwise));
-                    }
-                },
-                entity.geometry);
+            WriteSketchGeometry(entry, entity.geometry);
+            // v14. Written only when TRUE, so a sketch with no construction
+            // geometry produces the same bytes it did before the flag existed
+            // -- the absent field and `false` mean the same thing, and there is
+            // no third state for them to disagree about.
+            if (entity.construction) entry.set("construction", JsonValue::makeBool(true));
             entities.add(std::move(entry));
         }
         sketchEntry.set("entities", std::move(entities));
+
+        // v17: the projected reference underlay (M17.6, ADR-M17-029).
+        //
+        // Written ONLY when there is one, so a sketch with no underlay produces
+        // the bytes v16 produced. It is persisted for the same reason the
+        // sketch's plane is: both are frozen snapshots of the face the sketch
+        // was made on, and a user who saves, reopens and wants to trace one
+        // more edge would otherwise find the underlay gone with no way to get
+        // it back short of deleting the sketch and starting again.
+        if (!sketch->references().empty()) {
+            JsonValue references = JsonValue::makeArray();
+            for (const SketchReference& reference : sketch->references()) {
+                JsonValue entry = JsonValue::makeObject();
+                entry.set("id", JsonValue::makeString(idToString(ToObjectId(reference.id))));
+                WriteSketchGeometry(entry, reference.geometry);
+                references.add(std::move(entry));
+            }
+            sketchEntry.set("references", std::move(references));
+        }
 
         // Constraints (v5, ADR-M5-001; spec 17). Persisted: constraint id,
         // kind, entity/sub-element targets and the bound Parameter's ObjectId.
@@ -332,6 +591,12 @@ JsonValue toJson(const PartDocument& document) {
                 JsonValue target = JsonValue::makeObject();
                 target.set("entityId", JsonValue::makeString(idToString(ToObjectId(ref.entityId))));
                 target.set("subElement", JsonValue::makeString(subElementName(ref.subElement)));
+                // WRITTEN ONLY FOR A SPLINE POINT, which is the only
+                // sub-element it means anything for -- so every file written
+                // before M17.30 is byte-identical, and absent reads as 0 which
+                // is what they all meant.
+                if (ref.subElement == SketchSubElement::SplinePoint)
+                    target.set("index", JsonValue::makeNumber(ref.index));
                 entry.set(key, std::move(target));
             };
             const auto writeEntity = [&entry](const char* key, SketchEntityId id) {
@@ -349,7 +614,13 @@ JsonValue toJson(const PartDocument& document) {
                         writeEntity("line", c.line);
                     } else if constexpr (std::is_same_v<T, FixConstraint>) {
                         writeRef("target", c.target);
-                    } else if constexpr (std::is_same_v<T, DistanceConstraint>) {
+                    } else if constexpr (std::is_same_v<T, DistanceConstraint> ||
+                                         std::is_same_v<T, HorizontalDistanceConstraint> ||
+                                         std::is_same_v<T, VerticalDistanceConstraint>) {
+                        // The ORDER of a and b is part of what these mean: the
+                        // two axis-aligned kinds are signed, so swapping the
+                        // pair negates the value (see HorizontalDistance-
+                        // Constraint). Written as-is, never normalised.
                         writeRef("a", c.a);
                         writeRef("b", c.b);
                     } else if constexpr (std::is_same_v<T, LengthConstraint>) {
@@ -357,10 +628,61 @@ JsonValue toJson(const PartDocument& document) {
                     } else if constexpr (std::is_same_v<T, RadiusConstraint> ||
                                          std::is_same_v<T, DiameterConstraint>) {
                         writeEntity("curve", c.curve);
-                    } else {
-                        static_assert(std::is_same_v<T, AngleConstraint>);
+                    } else if constexpr (std::is_same_v<T, AngleConstraint> ||
+                                         std::is_same_v<T, ParallelConstraint> ||
+                                         std::is_same_v<T, PerpendicularConstraint>) {
                         writeEntity("lineA", c.lineA);
                         writeEntity("lineB", c.lineB);
+                    } else if constexpr (std::is_same_v<T, EqualConstraint>) {
+                        writeEntity("a", c.a);
+                        writeEntity("b", c.b);
+                    } else if constexpr (std::is_same_v<T, ConcentricConstraint>) {
+                        writeEntity("curveA", c.curveA);
+                        writeEntity("curveB", c.curveB);
+                    } else if constexpr (std::is_same_v<T, MidpointConstraint>) {
+                        writeRef("point", c.point);
+                        writeEntity("line", c.line);
+                    } else if constexpr (std::is_same_v<T, PointLineDistanceConstraint>) {
+                        writeRef("point", c.point);
+                        writeEntity("line", c.line);
+                    } else if constexpr (std::is_same_v<T, SymmetricConstraint>) {
+                        writeRef("a", c.a);
+                        writeRef("b", c.b);
+                        writeEntity("line", c.line);
+                    } else if constexpr (std::is_same_v<T, PointOnObjectConstraint>) {
+                        writeRef("point", c.point);
+                        writeEntity("target", c.target);
+                    } else if constexpr (std::is_same_v<T, EllipseRotationConstraint>) {
+                        writeEntity("curve", c.curve);
+                    } else if constexpr (std::is_same_v<T, EllipseAxisConstraint>) {
+                        writeEntity("curve", c.curve);
+                        // ALWAYS, including when false -- WHICH axis is part of
+                        // what the constraint means, not a default. A file that
+                        // omitted it would load as a dimension on the other
+                        // axis, which is a different model rather than a
+                        // missing field.
+                        entry.set("minor", JsonValue::makeBool(c.minor));
+                    } else {
+                        static_assert(std::is_same_v<T, TangentConstraint>);
+                        writeEntity("a", c.a);
+                        writeEntity("b", c.b);
+                        // Written ALWAYS, including when false. The branch is
+                        // part of what the constraint MEANS (see
+                        // TangentConstraint), so a file that omitted it would
+                        // load as a different model rather than as a default.
+                        entry.set("internal", JsonValue::makeBool(c.internal));
+                        // v21: WHERE they touch, when that is known.
+                        //
+                        // Written only when it IS known, unlike `internal`
+                        // above -- and the difference is not taste. `internal`
+                        // has no defensible default, so its absence is a
+                        // corrupt file. `at` has one: every tangency written
+                        // before v21 meant a line free to slide, which is
+                        // exactly what Whole says. Omitting it keeps those
+                        // files byte-identical and reloads them as what they
+                        // were, not as something new.
+                        if (c.at != SketchSubElement::Whole)
+                            entry.set("at", JsonValue::makeString(subElementName(c.at)));
                     }
                 },
                 constraint.data);
@@ -368,9 +690,45 @@ JsonValue toJson(const PartDocument& document) {
             const ObjectId parameterId = BoundParameterId(constraint.data);
             if (parameterId != kInvalidObjectId)
                 entry.set("parameterId", JsonValue::makeString(idToString(parameterId)));
+            // v20: a REFERENCE dimension measures instead of driving (M17.19).
+            // Written only when true, so every file written before this is
+            // byte-identical -- and absent means driving, which is what they
+            // all meant.
+            if (constraint.driven) entry.set("driven", JsonValue::makeBool(true));
             constraints.add(std::move(entry));
         }
         sketchEntry.set("constraints", std::move(constraints));
+
+        // Where the user dragged each dimension's value. Written ONLY for the
+        // dimensions that were actually moved: an automatically placed
+        // dimension has no position to preserve, and writing one would freeze
+        // today's layout rule into every file.
+        JsonValue placements = JsonValue::makeArray();
+        for (const Sketch::DimensionPlacement& placement : sketch->dimensionPlacements()) {
+            JsonValue entry = JsonValue::makeObject();
+            entry.set("constraintId",
+                      JsonValue::makeString(idToString(ToObjectId(placement.constraintId))));
+            entry.set("u", JsonValue::makeNumber(placement.labelMm.x));
+            entry.set("v", JsonValue::makeNumber(placement.labelMm.y));
+            placements.add(std::move(entry));
+        }
+        sketchEntry.set("dimensionPlacements", std::move(placements));
+
+        // How each dimension's value reads. Same rule as placements: written
+        // only where it differs from the default, so a plain drawing carries
+        // no format records at all.
+        JsonValue formats = JsonValue::makeArray();
+        for (const Sketch::DimensionFormat& format : sketch->dimensionFormats()) {
+            JsonValue entry = JsonValue::makeObject();
+            entry.set("constraintId",
+                      JsonValue::makeString(idToString(ToObjectId(format.constraintId))));
+            entry.set("prefix", JsonValue::makeString(format.prefix));
+            entry.set("suffix", JsonValue::makeString(format.suffix));
+            entry.set("plusTolerance", JsonValue::makeNumber(format.plusTolerance));
+            entry.set("minusTolerance", JsonValue::makeNumber(format.minusTolerance));
+            formats.add(std::move(entry));
+        }
+        sketchEntry.set("dimensionFormats", std::move(formats));
         sketches.add(std::move(sketchEntry));
     }
     root.set("sketches", std::move(sketches));
@@ -402,6 +760,33 @@ JsonValue toJson(const PartDocument& document) {
             dependencies.add(std::move(edge));
         }
     }
+    // v10: frames and connectors (M10). The Origin frame is written like any
+    // other -- ADR-009 D6's "re-created fresh on load" is superseded, because a
+    // frame the user moved has to survive a save, and a re-created Origin would
+    // silently discard that move.
+    JsonValue frames = JsonValue::makeArray();
+    for (const ReferenceFrame* frame : document.frames()) {
+        JsonValue entry = JsonValue::makeObject();
+        entry.set("id", JsonValue::makeString(idToString(frame->id())));
+        entry.set("name", JsonValue::makeString(frame->name()));
+        entry.set("parentFrameId", JsonValue::makeString(idToString(frame->parentFrameId())));
+        entry.set("transform", transformToJson(frame->localTransform()));
+        frames.add(std::move(entry));
+    }
+    root.set("frames", std::move(frames));
+
+    JsonValue connectors = JsonValue::makeArray();
+    for (const Connector* connector : document.connectors()) {
+        JsonValue entry = JsonValue::makeObject();
+        entry.set("id", JsonValue::makeString(idToString(connector->id())));
+        entry.set("name", JsonValue::makeString(connector->name()));
+        entry.set("role", JsonValue::makeString(std::string(toString(connector->role()))));
+        entry.set("frameId", JsonValue::makeString(idToString(connector->frameId())));
+        entry.set("owner", JsonValue::makeString(std::string(toString(connector->owner()))));
+        connectors.add(std::move(entry));
+    }
+    root.set("connectors", std::move(connectors));
+
     root.set("dependencies", std::move(dependencies));
     return root;
 }
@@ -434,6 +819,214 @@ const JsonValue* requireField(const JsonValue& object, std::string_view key,
     }
     return field;
 }
+
+// The inverse of WriteSketchGeometry, sharing its keys by construction.
+//
+// Returns false and fills `err` rather than throwing, matching the style of
+// every other reader here. Extracted for the same reason as the writer: the
+// references array (M17.6) is read with this exact parser, so the two arrays
+// cannot come to disagree about what a "Line" is.
+bool ReadSketchGeometry(const JsonValue& entry, const std::string& context, FieldError& err,
+                        SketchGeometry& out) {
+    const JsonValue* typeField = requireField(entry, "type", JsonType::String, context, err);
+    if (typeField == nullptr) return false;
+    const std::string type = typeField->asString();
+
+    double u = 0.0, v = 0.0, u2 = 0.0, v2 = 0.0, radius = 0.0;
+    double startAngle = 0.0, endAngle = 0.0;
+    const auto num = [&](const char* key, double& value) -> bool {
+        const JsonValue* field = requireField(entry, key, JsonType::Number, context, err);
+        if (field == nullptr) return false;
+        value = field->asNumber();
+        return true;
+    };
+
+    if (type == "Point") {
+        if (!num("u", u) || !num("v", v)) return false;
+        out = SketchPoint{Vec2{u, v}};
+        return true;
+    }
+    if (type == "Line") {
+        if (!num("u1", u) || !num("v1", v) || !num("u2", u2) || !num("v2", v2)) return false;
+        out = SketchLine{Vec2{u, v}, Vec2{u2, v2}};
+        return true;
+    }
+    if (type == "Circle") {
+        if (!num("u", u) || !num("v", v) || !num("radiusMm", radius)) return false;
+        out = SketchCircle{Vec2{u, v}, radius};
+        return true;
+    }
+    if (type == "Arc") {
+        if (!num("u", u) || !num("v", v) || !num("radiusMm", radius) ||
+            !num("startAngleRad", startAngle) || !num("endAngleRad", endAngle))
+            return false;
+        const JsonValue* ccw = requireField(entry, "counterClockwise", JsonType::Bool, context,
+                                            err);
+        if (ccw == nullptr) return false;
+        out = SketchArc{Vec2{u, v}, radius, startAngle, endAngle, ccw->asBool()};
+        return true;
+    }
+    if (type == "Spline") {
+        const JsonValue* points = requireField(entry, "points", JsonType::Array, context, err);
+        if (points == nullptr) return false;
+        SketchSpline spline;
+        std::size_t index = 0;
+        for (const JsonValue& one : points->items()) {
+            const std::string where = context + ".points[" + std::to_string(index++) + "]";
+            if (one.type() != JsonType::Object) {
+                err = fieldError(SerializationError::InvalidFieldType, where + ": not an object");
+                return false;
+            }
+            const JsonValue* pu = requireField(one, "u", JsonType::Number, where, err);
+            if (pu == nullptr) return false;
+            const JsonValue* pv = requireField(one, "v", JsonType::Number, where, err);
+            if (pv == nullptr) return false;
+            spline.points.push_back(Vec2{pu->asNumber(), pv->asNumber()});
+        }
+        const JsonValue* closed = requireField(entry, "closed", JsonType::Bool, context, err);
+        if (closed == nullptr) return false;
+        spline.closed = closed->asBool();
+        out = std::move(spline);
+        return true;
+    }
+    if (type == "Ellipse" || type == "EllipticalArc") {
+        double major = 0.0, minor = 0.0, rotation = 0.0;
+        if (!num("u", u) || !num("v", v) || !num("majorRadiusMm", major) ||
+            !num("minorRadiusMm", minor) || !num("rotationRad", rotation))
+            return false;
+        if (type == "Ellipse") {
+            out = SketchEllipse{Vec2{u, v}, major, minor, rotation};
+            return true;
+        }
+        double startParam = 0.0, endParam = 0.0;
+        if (!num("startParamRad", startParam) || !num("endParamRad", endParam)) return false;
+        const JsonValue* ccw = requireField(entry, "counterClockwise", JsonType::Bool, context,
+                                            err);
+        if (ccw == nullptr) return false;
+        out = SketchEllipticalArc{Vec2{u, v},  major,      minor,
+                                  rotation,    startParam, endParam,
+                                  ccw->asBool()};
+        return true;
+    }
+    err = fieldError(SerializationError::InvalidEnumValue,
+                     context + ": unknown sketch entity type '" + type + "'");
+    return false;
+}
+
+// The inverse of WriteFaceQuery, shared by the sketch's trackedFace and by an
+// EdgesOfFace selection for the same reason the writer is.
+//
+// An EMPTY query is refused: it matches every face, so it names none, and a
+// holder of one would fail on every recompute from now on with nothing to fix.
+bool ReadFaceQuery(const JsonValue& entry, const std::string& context, FieldError& err,
+                   FaceQuery& out) {
+    if (entry.type() != JsonType::Object) {
+        err = fieldError(SerializationError::InvalidFieldType, context + ": not an object");
+        return false;
+    }
+    FaceQuery query;
+    if (const JsonValue* owner = entry.find("createdBy")) {
+        if (owner->type() != JsonType::String) {
+            err = fieldError(SerializationError::InvalidFieldType,
+                             context + ".createdBy is not a string");
+            return false;
+        }
+        const auto ownerId = idFromString(owner->asString());
+        if (!ownerId || *ownerId == kInvalidObjectId || *ownerId > kMaxObjectId) {
+            err = fieldError(SerializationError::InvalidFieldType,
+                             context + ".createdBy is not a valid ObjectId");
+            return false;
+        }
+        query.createdBy = *ownerId;
+    }
+    const auto readDirection = [&](const char* key, std::optional<Vec3>& into) -> bool {
+        const JsonValue* field = entry.find(key);
+        if (field == nullptr) return true; // absent is fine; this is a conjunction
+        const JsonValue* x = field->type() == JsonType::Object ? field->find("x") : nullptr;
+        const JsonValue* y = field->type() == JsonType::Object ? field->find("y") : nullptr;
+        const JsonValue* z = field->type() == JsonType::Object ? field->find("z") : nullptr;
+        if (x == nullptr || y == nullptr || z == nullptr || x->type() != JsonType::Number ||
+            y->type() != JsonType::Number || z->type() != JsonType::Number) {
+            err = fieldError(SerializationError::InvalidFieldType,
+                             context + "." + key + " needs numeric x, y and z");
+            return false;
+        }
+        into = Vec3{x->asNumber(), y->asNumber(), z->asNumber()};
+        return true;
+    };
+    if (!readDirection("extremeTowards", query.extremeTowards)) return false;
+    if (!readDirection("facing", query.facing)) return false;
+    if (query.empty()) {
+        err = fieldError(SerializationError::InvalidFieldType, context + " names no face");
+        return false;
+    }
+    out = query;
+    return true;
+}
+
+// The inverse of WriteEdgeQuery. Returns false and fills `err` rather than
+// throwing, like every other reader here.
+bool ReadEdgeQuery(const JsonValue& entry, const std::string& context, FieldError& err,
+                   EdgeQuery& out) {
+    const JsonValue* typeField = requireField(entry, "type", JsonType::String, context, err);
+    if (typeField == nullptr) return false;
+    const std::string type = typeField->asString();
+    if (type == "AllEdges") {
+        out = AllEdges{};
+        return true;
+    }
+
+    // Read BEFORE the direction fields, because this query has none: asking
+    // for x/y/z first would refuse a perfectly good record for missing
+    // something it never had.
+    if (type == "EdgesOfFace") {
+        const JsonValue* faceField = entry.find("face");
+        if (faceField == nullptr) {
+            err = fieldError(SerializationError::MissingField, context + ": missing 'face'");
+            return false;
+        }
+        FaceQuery face;
+        if (!ReadFaceQuery(*faceField, context + ".face", err, face)) return false;
+        out = EdgesOfFace{face};
+        return true;
+    }
+    if (type == "EdgesCreatedBy") {
+        const JsonValue* idField =
+            requireField(entry, "featureId", JsonType::String, context, err);
+        if (idField == nullptr) return false;
+        const auto featureId = idFromString(idField->asString());
+        if (!featureId || *featureId > kMaxObjectId) {
+            err = fieldError(SerializationError::InvalidFieldType,
+                             context + ".featureId: not a valid decimal ObjectId string");
+            return false;
+        }
+        out = EdgesCreatedBy{*featureId};
+        return true;
+    }
+
+    Vec3 direction{};
+    const auto num = [&](const char* key, double& value) -> bool {
+        const JsonValue* field = requireField(entry, key, JsonType::Number, context, err);
+        if (field == nullptr) return false;
+        value = field->asNumber();
+        return true;
+    };
+    if (!num("x", direction.x) || !num("y", direction.y) || !num("z", direction.z)) return false;
+
+    if (type == "EdgesOfExtremeFace") {
+        out = EdgesOfExtremeFace{direction};
+        return true;
+    }
+    if (type == "EdgesParallelTo") {
+        out = EdgesParallelTo{direction};
+        return true;
+    }
+    err = fieldError(SerializationError::InvalidEnumValue,
+                     context + ": unknown edge query type '" + type + "'");
+    return false;
+}
+
+
 
 std::optional<ObjectId> requireIdField(const JsonValue& object, const std::string& context,
                                        FieldError& err) {
@@ -469,8 +1062,9 @@ LoadResult loadFailure(SerializationError error, std::string message) {
 // round-trips as a concrete chain base, so dropping one fails a test the day
 // it happens. When a milestone adds an ISolidFeature type, its name goes
 // here, and only here.
-constexpr std::string_view kSolidFeatureTypeNames[] = {"Box",     "Pad",    "Pocket",
-                                                       "Revolve", "Fillet", "Chamfer"};
+constexpr std::string_view kSolidFeatureTypeNames[] = {"Box",     "Pad",     "Pocket",
+                                                       "Revolve", "Fillet",  "Chamfer",
+                                                       "Mirror",  "Pattern"};
 
 bool IsSolidFeatureTypeName(std::string_view name) {
     for (const std::string_view solid : kSolidFeatureTypeNames)
@@ -489,9 +1083,21 @@ bool IsSolidFeatureTypeName(std::string_view name) {
 // decides "does this type consume a base" by name; the save side asks the
 // consumedSolidId() capability. An inline || chain here was the same drift
 // shape the solid table fixed. Each member's loader checks are pinned:
-// Pocket by M8_SER_003, Fillet/Chamfer by M8_SER_203, uniqueness by
-// M8_REV_304. When a milestone adds a consuming type, its name goes here.
-constexpr std::string_view kConsumingFeatureTypeNames[] = {"Pocket", "Fillet", "Chamfer"};
+// Pocket by M8_SER_003, Fillet by M8_SER_203, Chamfer by M8_SER_205,
+// uniqueness by M8_REV_304.
+//
+// "Fillet/Chamfer by M8_SER_203" is what this comment said until round 4, and
+// it was FALSE -- 203 swaps Pad and Fillet, nothing swapped Fillet and Chamfer,
+// and dropping "Chamfer" survived every shipped test. Both R1 and R2 found it
+// independently (R1R4-M2 / R2R4-M2). It is R3R3-M1's finding -- a table pinned
+// for only some of its members, with a comment claiming all of them --
+// reproduced inside the commit that fixed it, in the table that commit added.
+//
+// So: when a milestone adds a consuming type, its name goes here AND it gets a
+// test that puts its record BEFORE the base it consumes. A member with no such
+// test is not pinned, whatever this comment says.
+constexpr std::string_view kConsumingFeatureTypeNames[] = {"Pocket", "Fillet", "Chamfer",
+                                                          "Mirror", "Pattern"};
 
 bool IsConsumingFeatureTypeName(std::string_view name) {
     for (const std::string_view consumer : kConsumingFeatureTypeNames)
@@ -558,6 +1164,21 @@ SaveResult validateSaveable(const PartDocument& document) {
         if (const SaveResult bad = capCheck(parameter->id(), "a parameter"); !bad) return bad;
         if (const SaveResult bad = uniqueCheck(parameter->id(), "a parameter"); !bad) return bad;
     }
+    // Every stored expression must still resolve (M11.2).
+    //
+    // The facade refuses an expression that does not, and refuses to delete a
+    // parameter another expression reads -- so no current route produces one.
+    // This is the ADR-M3-008 backstop, the same shape as the id-uniqueness net
+    // above: a save that emits a document this loader would refuse is worse
+    // than a save that fails, because the user finds out later and has nothing
+    // left to recover from.
+    if (const PartDocument::ExpressionWiringResult bad =
+            document.validateParameterExpressions();
+        !bad.ok) {
+        return SaveResult{SerializationError::UnknownDependencyId,
+                          bad.message +
+                              "; the resulting file could never be loaded back"};
+    }
     for (const auto& body : document.bodies()) {
         if (const SaveResult bad = capCheck(body->id(), "a body"); !bad) return bad;
         if (const SaveResult bad = uniqueCheck(body->id(), "a body"); !bad) return bad;
@@ -620,11 +1241,21 @@ SaveResult validateSaveable(const PartDocument& document) {
     // placeholder, silently dropping the solid.
     for (const auto& body : document.bodies()) {
         for (const auto& feature : body->features()) {
-            if (dynamic_cast<const BoxFeature*>(feature.get()) != nullptr) continue;
-            if (dynamic_cast<const PadFeature*>(feature.get()) != nullptr) continue;
-            if (dynamic_cast<const PocketFeature*>(feature.get()) != nullptr) continue;
-            if (dynamic_cast<const RevolveFeature*>(feature.get()) != nullptr) continue;
-            if (dynamic_cast<const EdgeDressFeature*>(feature.get()) != nullptr) continue;
+            // ASK WHAT IT IS, do not enumerate what it is not (ADR-M3-007).
+            //
+            // This was a list of five `dynamic_cast`s -- every concrete type
+            // known at the time -- and M10.6 walked straight into it: adding
+            // MirrorFeature made a perfectly real Mirror look like "a
+            // placeholder carrying a reserved name", and a document containing
+            // one could not be saved. That is the drift shape review rounds 3
+            // and 4 each found in a TABLE, here in a cast chain, and it is a
+            // FIFTH registration site ADR-M9-006's list of four did not name.
+            //
+            // The check only ever meant "a PlaceholderFeature whose type name
+            // collides with a reserved one", so it now asks exactly that. One
+            // question that cannot drift, instead of a list that has to grow
+            // with every feature type anyone adds.
+            if (dynamic_cast<const PlaceholderFeature*>(feature.get()) == nullptr) continue;
             const std::string_view typeName = feature->typeName();
             if (!IsSolidFeatureTypeName(typeName)) continue;
             return SaveResult{SerializationError::InvalidFieldType,
@@ -819,12 +1450,83 @@ SaveResult validateSaveable(const PartDocument& document) {
                                   " is not a parameter in this document"};
         }
     }
+
+    // A sketch's support frame must exist (M10 gate I). Same rule, same reason
+    // as every other reference checked here: the loader refuses a support id it
+    // cannot resolve, so a save that wrote one would be ADR-M3-008's class
+    // again -- and a document whose geometry has nowhere to live must not
+    // overwrite the last good file.
+    for (const Sketch* sketch : document.sketches()) {
+        const ObjectId supportId = sketch->supportFrameId();
+        if (supportId == kInvalidObjectId) continue;
+        if (document.findFrame(supportId) != nullptr) continue;
+        return SaveResult{SerializationError::UnknownDependencyId,
+                          "sketch " + idToString(sketch->id()) + " (" + sketch->name() +
+                              "): support frame id " + idToString(supportId) +
+                              " is not a reference frame in this document"};
+    }
+
+    // The Option-A dependency edges, which nothing checked at all (round 4,
+    // R2R4-C1 -- ADR-M3-008's named worst class, SIXTH recurrence).
+    //
+    // The asymmetry: the WRITER persists any edge whose endpoints are both
+    // persisted ids {parameters, bodies, features} and whose DEPENDENT is not a
+    // feature (feature-owned edges are Option B, re-derived from semantic id
+    // fields). The LOADER accepts an endpoint only if it is a PARAMETER. So an
+    // edge whose prerequisite is a FEATURE and whose dependent is a parameter --
+    // `addDependency(parameterId, featureId)`, four public facade calls, no
+    // private access -- was written by the saver and refused by the loader that
+    // read it back. `validateSaveable`, extended in round 3 precisely as this
+    // net, never walked the graph.
+    //
+    // Refused rather than silently dropped: dropping the edge would make save
+    // and load both "succeed" and produce a DIFFERENT document, which is the
+    // failure mode R2R4-m3 records for the other direction. Refusing is the
+    // ADR-M3-008 contract -- a file the loader would reject is not savable.
+    //
+    // NOT a decision that such an edge is meaningless: a driven/reference
+    // dimension (roadmap section 7) is precisely a Parameter that depends on
+    // geometry, so the day EP3D has one, the LOADER grows to accept feature
+    // endpoints and this check narrows with it. Until then the format cannot
+    // carry it, and the honest answer is to say so at save time.
+    {
+        std::unordered_set<ObjectId> persistedIds = parameterIds;
+        std::unordered_set<ObjectId> featureIds;
+        for (const auto& body : document.bodies()) {
+            persistedIds.insert(body->id());
+            for (const auto& feature : body->features()) {
+                persistedIds.insert(feature->id());
+                featureIds.insert(feature->id());
+            }
+        }
+        const DependencyGraph& graph = document.dependencyGraph();
+        for (ObjectId prerequisite : graph.nodes()) {
+            if (persistedIds.count(prerequisite) == 0) continue;
+            for (ObjectId dependent : graph.dependentsOf(prerequisite)) {
+                if (persistedIds.count(dependent) == 0) continue;
+                if (featureIds.count(dependent) != 0) continue; // Option B, not written
+                // Exactly the loader's acceptance rule, endpoint for endpoint.
+                for (ObjectId endpointId : {prerequisite, dependent}) {
+                    if (parameterIds.count(endpointId) != 0) continue;
+                    return SaveResult{SerializationError::UnknownDependencyId,
+                                      "dependency edge " + idToString(prerequisite) + " -> " +
+                                          idToString(dependent) + ": id " +
+                                          idToString(endpointId) +
+                                          " is not a parameter, and this format's dependency "
+                                          "records carry parameter endpoints only, so the "
+                                          "resulting file could never be loaded back"};
+                }
+            }
+        }
+    }
     return SaveResult{};
 }
 
 } // namespace
 
 // --- public API -------------------------------------------------------------
+
+int CurrentSchemaVersion() noexcept { return kSchemaVersion; }
 
 SaveResult savePartDocument(const PartDocument& document, std::ostream& out) {
     if (const SaveResult invalid = validateSaveable(document); !invalid) return invalid;
@@ -927,34 +1629,24 @@ LoadResult loadPartDocument(std::istream& in) {
         std::string expression;
         ParameterState state;
     };
-    struct FeatureData {
-        ObjectId id;
-        std::string name;
-        std::string type;
-        ComputeState state;
-        // Box-specific (ADR-M3-005; only meaningful when type == "Box").
-        ObjectId widthParameterId = kInvalidObjectId;
-        ObjectId heightParameterId = kInvalidObjectId;
-        ObjectId depthParameterId = kInvalidObjectId;
-        ObjectId materialId = kInvalidObjectId; // kInvalidObjectId == "no material"
-        // Pad-specific (v4, ADR-M4-004; only meaningful when type == "Pad").
-        ObjectId sketchId = kInvalidObjectId;
-        ObjectId lengthParameterId = kInvalidObjectId;
-        // Pocket-specific (v6, ADR-M8-001; only meaningful when type == "Pocket").
-        // depthParameterId is SHARED with the Box block above -- one slot, only
-        // ever meaningful for the type the record declares, like every other
-        // per-type field here.
-        ObjectId baseFeatureId = kInvalidObjectId;
-        // Revolve-specific (v7, ADR-M8-005; only meaningful when type == "Revolve").
-        ObjectId axisEntityId = kInvalidObjectId;
-        ObjectId angleParameterId = kInvalidObjectId;
-        // Fillet/Chamfer-specific (v8, ADR-M8-006).
-        ObjectId sizeParameterId = kInvalidObjectId;
-    };
+    // The LOADER'S feature record IS FeatureSnapshot (M17.13, ADR-M17-035).
+    //
+    // There used to be a second struct here with the same eighteen fields, and
+    // eighteen lines further down copying one into the other. That is this
+    // project's oldest recurring defect wearing its plainest clothes: two
+    // things that must agree, a hand-written copy between them, and each side
+    // tested on its own. Adding a nineteenth field to one and not the other
+    // loses it silently on load -- which is exactly how `boundary` was lost
+    // between FacePlane and PickedFace, one milestone ago.
+    //
+    // One struct cannot disagree with itself, and it cannot forget a field
+    // added to it later.
+    using FeatureData = FeatureSnapshot;
     struct BodyData {
         ObjectId id;
         std::string name;
         std::vector<FeatureData> features;
+        std::size_t rollback = Body::kNoRollback;
     };
     struct MaterialData {
         ObjectId id;
@@ -1054,6 +1746,118 @@ LoadResult loadPartDocument(std::istream& in) {
                                     contact};
     }
 
+    struct FrameData {
+        ObjectId id;
+        std::string name;
+        ObjectId parentFrameId = kInvalidObjectId;
+        Transform3D transform;
+    };
+    struct ConnectorData {
+        ObjectId id;
+        std::string name;
+        ConnectorRole role = ConnectorRole::Generic;
+        ObjectId frameId = kInvalidObjectId;
+        ConnectorOwner owner = ConnectorOwner::PartDefinition;
+    };
+    std::vector<FrameData> frameData;
+    std::vector<ConnectorData> connectorData;
+
+    // v10 frames. Absent in every earlier file, which is why this is not a
+    // required field: those documents get the Origin frame the constructor
+    // makes, exactly as they always did.
+    if (const JsonValue* framesField = root.find("frames")) {
+        if (framesField->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'frames' is not an array");
+        for (std::size_t i = 0; i < framesField->items().size(); ++i) {
+            const JsonValue& entry = framesField->items()[i];
+            const std::string context = "frames[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            const auto id = requireIdField(entry, context, err);
+            if (!id.has_value()) return loadFailure(err.error, err.message);
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+
+            FrameData frame{*id, name->asString(), kInvalidObjectId, Transform3D{}};
+            if (const JsonValue* parent = entry.find("parentFrameId")) {
+                if (parent->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'parentFrameId' is not a string");
+                const auto parsed = idFromString(parent->asString());
+                if (parsed.has_value()) frame.parentFrameId = *parsed;
+            }
+            if (const JsonValue* transform = entry.find("transform")) {
+                if (transform->type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'transform' is not an object");
+                const auto number = [&](const char* key, double& out) {
+                    const JsonValue* field = transform->find(key);
+                    if (field == nullptr || field->type() != JsonType::Number) return false;
+                    out = field->asNumber();
+                    return true;
+                };
+                Transform3D t;
+                if (!number("tx", t.translation.x) || !number("ty", t.translation.y) ||
+                    !number("tz", t.translation.z) || !number("qw", t.rotation.w) ||
+                    !number("qx", t.rotation.x) || !number("qy", t.rotation.y) ||
+                    !number("qz", t.rotation.z))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": 'transform' is missing a numeric component");
+                frame.transform = t;
+            }
+            frameData.push_back(std::move(frame));
+        }
+    }
+
+    if (const JsonValue* connectorsField = root.find("connectors")) {
+        if (connectorsField->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'connectors' is not an array");
+        for (std::size_t i = 0; i < connectorsField->items().size(); ++i) {
+            const JsonValue& entry = connectorsField->items()[i];
+            const std::string context = "connectors[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            const auto id = requireIdField(entry, context, err);
+            if (!id.has_value()) return loadFailure(err.error, err.message);
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            const JsonValue* role = requireField(entry, "role", JsonType::String, context, err);
+            if (role == nullptr) return loadFailure(err.error, err.message);
+            const auto roleValue = connectorRoleFromString(role->asString());
+            if (!roleValue.has_value())
+                return loadFailure(SerializationError::InvalidEnumValue,
+                                   context + ": unknown connector role '" + role->asString() +
+                                       "'");
+            const JsonValue* frameId =
+                requireField(entry, "frameId", JsonType::String, context, err);
+            if (frameId == nullptr) return loadFailure(err.error, err.message);
+            const auto frameValue = idFromString(frameId->asString());
+            if (!frameValue.has_value())
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'frameId' is not a valid ObjectId");
+            ConnectorOwner owner = ConnectorOwner::PartDefinition;
+            if (const JsonValue* ownerField = entry.find("owner")) {
+                if (ownerField->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'owner' is not a string");
+                const auto parsed = connectorOwnerFromString(ownerField->asString());
+                if (!parsed.has_value())
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       context + ": unknown connector owner '" +
+                                           ownerField->asString() + "'");
+                owner = *parsed;
+            }
+            connectorData.push_back(
+                ConnectorData{*id, name->asString(), *roleValue, *frameValue, owner});
+        }
+    }
+
     std::vector<BodyData> bodyData;
     for (std::size_t i = 0; i < bodies->items().size(); ++i) {
         const JsonValue& entry = bodies->items()[i];
@@ -1069,7 +1873,19 @@ LoadResult loadPartDocument(std::istream& in) {
         const JsonValue* features = requireField(entry, "features", JsonType::Array, context, err);
         if (features == nullptr) return loadFailure(err.error, err.message);
 
-        BodyData body{*id, bodyName->asString(), {}};
+        BodyData body{*id, bodyName->asString(), {}, Body::kNoRollback};
+        // Absent means "evaluate everything", which is what every file written
+        // before v9 means and what most v9 files mean too.
+        if (const JsonValue* rollback = entry.find("rollback")) {
+            if (rollback->type() != JsonType::Number)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'rollback' is not a number");
+            const double value = rollback->asNumber();
+            if (value < 0.0 || value != static_cast<double>(static_cast<long long>(value)))
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'rollback' is not a whole count");
+            body.rollback = static_cast<std::size_t>(value);
+        }
         for (std::size_t j = 0; j < features->items().size(); ++j) {
             const JsonValue& featureEntry = features->items()[j];
             const std::string featureContext = context + ".features[" + std::to_string(j) + "]";
@@ -1099,7 +1915,7 @@ LoadResult loadPartDocument(std::istream& in) {
 
             FeatureData featureData{*featureId, featureName->asString(), featureType->asString(),
                                     *stateValue};
-            if (featureData.type == "Box") {
+            if (featureData.typeName == "Box") {
                 // Feature type dispatch (which concrete type to construct) is
                 // keyed by this string, not dynamic_cast probing
                 // (ADR-M3-005).
@@ -1146,7 +1962,7 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.heightParameterId = *heightId;
                 featureData.depthParameterId = *depthId;
                 featureData.materialId = *boxMaterialId;
-            } else if (featureData.type == "Pad") {
+            } else if (featureData.typeName == "Pad") {
                 const JsonValue* sketchField = requireField(featureEntry, "sketchId",
                                                             JsonType::String, featureContext, err);
                 if (sketchField == nullptr) return loadFailure(err.error, err.message);
@@ -1182,7 +1998,7 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.sketchId = *sketchRef;
                 featureData.lengthParameterId = *lengthRef;
                 featureData.materialId = *padMaterialId;
-            } else if (featureData.type == "Pocket") {
+            } else if (featureData.typeName == "Pocket") {
                 const JsonValue* baseField = requireField(featureEntry, "baseFeatureId",
                                                           JsonType::String, featureContext, err);
                 if (baseField == nullptr) return loadFailure(err.error, err.message);
@@ -1224,7 +2040,7 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.sketchId = *sketchRef;
                 featureData.depthParameterId = *depthRef;
                 featureData.materialId = *pocketMaterialId;
-            } else if (featureData.type == "Revolve") {
+            } else if (featureData.typeName == "Revolve") {
                 const JsonValue* sketchField = requireField(featureEntry, "sketchId",
                                                             JsonType::String, featureContext, err);
                 if (sketchField == nullptr) return loadFailure(err.error, err.message);
@@ -1266,7 +2082,59 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.axisEntityId = *axisRef;
                 featureData.angleParameterId = *angleRef;
                 featureData.materialId = *revolveMaterialId;
-            } else if (featureData.type == "Fillet" || featureData.type == "Chamfer") {
+            } else if (featureData.typeName == "Mirror" || featureData.typeName == "Pattern") {
+                // v10 (M10.6). Validated like every other reference the loader
+                // reads: a base that is an earlier solid of this body (checked
+                // by the chain walk), a FRAME that exists, and -- for a pattern
+                // -- two Parameters. The save side mirrors all of it, so a file
+                // that would be refused here is never written (ADR-M3-008).
+                const JsonValue* baseField =
+                    requireField(featureEntry, "baseFeatureId", JsonType::String, featureContext,
+                                 err);
+                if (baseField == nullptr) return loadFailure(err.error, err.message);
+                const auto baseRef = idFromString(baseField->asString());
+                if (!baseRef.has_value())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": 'baseFeatureId' is not an ObjectId");
+                const JsonValue* frameField =
+                    requireField(featureEntry, "frameId", JsonType::String, featureContext, err);
+                if (frameField == nullptr) return loadFailure(err.error, err.message);
+                const auto frameRef = idFromString(frameField->asString());
+                if (!frameRef.has_value())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": 'frameId' is not an ObjectId");
+                featureData.baseFeatureId = *baseRef;
+                featureData.frameId = *frameRef;
+                if (featureData.typeName == "Pattern") {
+                    const JsonValue* countField = requireField(
+                        featureEntry, "countParameterId", JsonType::String, featureContext, err);
+                    if (countField == nullptr) return loadFailure(err.error, err.message);
+                    const auto countRef = idFromString(countField->asString());
+                    const JsonValue* spacingField =
+                        requireField(featureEntry, "spacingParameterId", JsonType::String,
+                                     featureContext, err);
+                    if (spacingField == nullptr) return loadFailure(err.error, err.message);
+                    const auto spacingRef = idFromString(spacingField->asString());
+                    if (!countRef.has_value() || !spacingRef.has_value())
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext +
+                                               ": a pattern parameter id is not an ObjectId");
+                    if (parameterIds.count(*countRef) == 0 ||
+                        parameterIds.count(*spacingRef) == 0)
+                        return loadFailure(SerializationError::UnknownDependencyId,
+                                           featureContext +
+                                               ": a pattern parameter id is not a parameter in "
+                                               "this document");
+                    featureData.countParameterId = *countRef;
+                    featureData.spacingParameterId = *spacingRef;
+                }
+                if (const JsonValue* materialField = featureEntry.find("materialId")) {
+                    if (materialField->type() == JsonType::String) {
+                        const auto materialRef = idFromString(materialField->asString());
+                        if (materialRef.has_value()) featureData.materialId = *materialRef;
+                    }
+                }
+            } else if (featureData.typeName == "Fillet" || featureData.typeName == "Chamfer") {
                 const JsonValue* baseField = requireField(featureEntry, "baseFeatureId",
                                                           JsonType::String, featureContext, err);
                 if (baseField == nullptr) return loadFailure(err.error, err.message);
@@ -1301,6 +2169,39 @@ LoadResult loadPartDocument(std::istream& in) {
                 }
                 featureData.baseFeatureId = *baseRef;
                 featureData.sizeParameterId = *sizeRef;
+
+                // v18, OPTIONAL: absent means every edge, which is what every
+                // file written before this says by omission. A wrong TYPE is
+                // still refused -- reading a malformed selection as "all"
+                // would turn a corrupt file into a quietly different solid.
+                if (const JsonValue* queries = featureEntry.find("edgeSelection")) {
+                    if (queries->type() != JsonType::Array)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext +
+                                               ".edgeSelection: expected an array");
+                    EdgeSelection selection;
+                    for (std::size_t q = 0; q < queries->items().size(); ++q) {
+                        const std::string queryContext =
+                            featureContext + ".edgeSelection[" + std::to_string(q) + "]";
+                        const JsonValue& entry = queries->items()[q];
+                        if (entry.type() != JsonType::Object)
+                            return loadFailure(SerializationError::InvalidFieldType,
+                                               queryContext + ": entry is not an object");
+                        EdgeQuery query;
+                        if (!ReadEdgeQuery(entry, queryContext, err, query))
+                            return loadFailure(err.error, err.message);
+                        selection.push_back(query);
+                    }
+                    // An EMPTY array is refused rather than read as "every
+                    // edge": they are opposite solids, and a file that says
+                    // "nothing" must not come back saying "everything".
+                    if (selection.empty())
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext +
+                                               ".edgeSelection: an empty selection names no "
+                                               "edge and is not the same as every edge");
+                    featureData.edgeSelection = std::move(selection);
+                }
                 featureData.materialId = *dressMaterialId;
             }
 
@@ -1315,10 +2216,23 @@ LoadResult loadPartDocument(std::istream& in) {
     struct SketchEntityData {
         SketchEntityId id{kInvalidSketchEntityId};
         SketchGeometry geometry{};
+        bool construction{false};
     };
     struct SketchConstraintData_ {
         SketchConstraintId id{kInvalidSketchConstraintId};
         SketchConstraintData data{};
+        bool driven = false; // v20, optional
+    };
+    struct SketchPlacementData {
+        SketchConstraintId constraintId{kInvalidSketchConstraintId};
+        Vec2 labelMm{};
+    };
+    struct SketchFormatData {
+        SketchConstraintId constraintId{kInvalidSketchConstraintId};
+        std::string prefix;
+        std::string suffix;
+        double plusTolerance{0.0};
+        double minusTolerance{0.0};
     };
     struct SketchData {
         ObjectId id;
@@ -1326,6 +2240,11 @@ LoadResult loadPartDocument(std::istream& in) {
         Transform3D transform;
         std::vector<SketchEntityData> entities;
         std::vector<SketchConstraintData_> constraints;
+        ObjectId supportFrameId = kInvalidObjectId; // v10, optional
+        std::optional<FaceQuery> trackedFace;       // v19, optional
+        std::vector<SketchPlacementData> placements; // v12, optional
+        std::vector<SketchFormatData> formats;       // v12, optional
+        std::vector<SketchReference> references;      // v17, optional
     };
     std::vector<SketchData> sketchData;
     std::unordered_set<ObjectId> sketchIds;
@@ -1400,49 +2319,57 @@ LoadResult loadPartDocument(std::istream& in) {
                                        entityContext + ": duplicate sketch entity id " +
                                            idToString(*entityId));
 
-                const JsonValue* typeField =
-                    requireField(entityEntry, "type", JsonType::String, entityContext, err);
-                if (typeField == nullptr) return loadFailure(err.error, err.message);
-                const std::string entityType = typeField->asString();
-
-                double u = 0.0, v = 0.0, u2 = 0.0, v2 = 0.0, radius = 0.0;
-                double startAngle = 0.0, endAngle = 0.0;
-                const auto num = [&](const char* key, double& out) -> bool {
-                    const JsonValue* field =
-                        requireField(entityEntry, key, JsonType::Number, entityContext, err);
-                    if (field == nullptr) return false;
-                    out = field->asNumber();
-                    return true;
-                };
-
                 SketchEntityData entity;
                 entity.id = static_cast<SketchEntityId>(*entityId);
-                if (entityType == "Point") {
-                    if (!num("u", u) || !num("v", v)) return loadFailure(err.error, err.message);
-                    entity.geometry = SketchPoint{Vec2{u, v}};
-                } else if (entityType == "Line") {
-                    if (!num("u1", u) || !num("v1", v) || !num("u2", u2) || !num("v2", v2))
-                        return loadFailure(err.error, err.message);
-                    entity.geometry = SketchLine{Vec2{u, v}, Vec2{u2, v2}};
-                } else if (entityType == "Circle") {
-                    if (!num("u", u) || !num("v", v) || !num("radiusMm", radius))
-                        return loadFailure(err.error, err.message);
-                    entity.geometry = SketchCircle{Vec2{u, v}, radius};
-                } else if (entityType == "Arc") {
-                    if (!num("u", u) || !num("v", v) || !num("radiusMm", radius) ||
-                        !num("startAngleRad", startAngle) || !num("endAngleRad", endAngle))
-                        return loadFailure(err.error, err.message);
-                    const JsonValue* ccwField = requireField(entityEntry, "counterClockwise",
-                                                             JsonType::Bool, entityContext, err);
-                    if (ccwField == nullptr) return loadFailure(err.error, err.message);
-                    entity.geometry =
-                        SketchArc{Vec2{u, v}, radius, startAngle, endAngle, ccwField->asBool()};
-                } else {
-                    return loadFailure(SerializationError::InvalidEnumValue,
-                                       entityContext + ": unknown sketch entity type '" +
-                                           entityType + "'");
+                if (!ReadSketchGeometry(entityEntry, entityContext, err, entity.geometry))
+                    return loadFailure(err.error, err.message);
+                // v14, and OPTIONAL: absent means false, which is what every
+                // file written before v14 says by omission. A wrong TYPE is
+                // still refused -- silently treating a string as false would
+                // turn a corrupt file into a quietly different model.
+                if (const JsonValue* construction = entityEntry.find("construction")) {
+                    if (construction->type() != JsonType::Bool)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           entityContext + ".construction: expected a boolean");
+                    entity.construction = construction->asBool();
                 }
                 data.entities.push_back(std::move(entity));
+            }
+
+            // References (v17). OPTIONAL, exactly as constraints are: every
+            // file written before v17 simply has no such array, and a sketch
+            // with no underlay is what it always was.
+            const JsonValue* referencesField = entry.find("references");
+            if (referencesField != nullptr) {
+                if (referencesField->type() != JsonType::Array)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'references' has the wrong JSON type");
+                std::unordered_set<ObjectId> referenceIdsInSketch;
+                for (std::size_t j = 0; j < referencesField->items().size(); ++j) {
+                    const std::string rc = context + ".references[" + std::to_string(j) + "]";
+                    const JsonValue& re = referencesField->items()[j];
+                    if (re.type() != JsonType::Object)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           rc + ": entry is not an object");
+                    const auto referenceId = requireIdField(re, rc, err);
+                    if (!referenceId) return loadFailure(err.error, err.message);
+                    if (*referenceId > kMaxObjectId)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           rc + ": reference id exceeds the id cap");
+                    // Scoped to the sketch, exactly like entity and constraint
+                    // ids. A duplicate is refused rather than merged: two
+                    // references with one id is a file whose author's intent
+                    // cannot be recovered.
+                    if (!referenceIdsInSketch.insert(*referenceId).second)
+                        return loadFailure(SerializationError::DuplicateId,
+                                           rc + ": duplicate sketch reference id " +
+                                               idToString(*referenceId));
+                    SketchReference reference;
+                    reference.id = static_cast<SketchReferenceId>(*referenceId);
+                    if (!ReadSketchGeometry(re, rc, err, reference.geometry))
+                        return loadFailure(err.error, err.message);
+                    data.references.push_back(std::move(reference));
+                }
             }
 
             // Constraints (v5). OPTIONAL: a v4 file has no such array and must
@@ -1547,7 +2474,30 @@ LoadResult loadPartDocument(std::istream& in) {
                                          "'";
                             return SketchElementRef{};
                         }
-                        return SketchElementRef{static_cast<SketchEntityId>(*id), *sub};
+                        // The INDEX, and only where it means something. Absent
+                        // is 0, which is what every file written before M17.30
+                        // meant -- but present-and-broken is an error, because
+                        // a spline point that quietly became point 0 would be a
+                        // constraint on a different point than the one saved.
+                        int index = 0;
+                        if (const JsonValue* indexField = field->find("index")) {
+                            if (indexField->type() != JsonType::Number) {
+                                refError = true;
+                                refCode = SerializationError::InvalidFieldType;
+                                refMessage = cc + ": field '" + key + ".index' is not a number";
+                                return SketchElementRef{};
+                            }
+                            const double raw = indexField->asNumber();
+                            if (raw < 0.0 || raw != std::floor(raw) || raw > 1e6) {
+                                refError = true;
+                                refCode = SerializationError::InvalidFieldType;
+                                refMessage = cc + ": field '" + key +
+                                             ".index' is not a whole point number";
+                                return SketchElementRef{};
+                            }
+                            index = static_cast<int>(raw);
+                        }
+                        return SketchElementRef{static_cast<SketchEntityId>(*id), *sub, index};
                     };
                     // The bound Parameter must exist in this file. parameterIds
                     // was built before any sketch was parsed.
@@ -1595,38 +2545,270 @@ LoadResult loadPartDocument(std::istream& in) {
                         DistanceConstraint c;
                         c.a = elementRef("a");
                         c.b = elementRef("b");
-                        c.parameterId = parameterRef();
+                        parsed.data = c;
+                    } else if (kind == "HorizontalDistance") {
+                        HorizontalDistanceConstraint c;
+                        c.a = elementRef("a");
+                        c.b = elementRef("b");
+                        parsed.data = c;
+                    } else if (kind == "VerticalDistance") {
+                        VerticalDistanceConstraint c;
+                        c.a = elementRef("a");
+                        c.b = elementRef("b");
+                        parsed.data = c;
+                    } else if (kind == "Symmetric") {
+                        SymmetricConstraint c;
+                        c.a = elementRef("a");
+                        c.b = elementRef("b");
+                        c.line = entityRef("line");
+                        parsed.data = c;
+                    } else if (kind == "PointLineDistance") {
+                        PointLineDistanceConstraint c;
+                        c.point = elementRef("point");
+                        c.line = entityRef("line");
                         parsed.data = c;
                     } else if (kind == "Length") {
                         LengthConstraint c;
                         c.line = entityRef("line");
-                        c.parameterId = parameterRef();
                         parsed.data = c;
                     } else if (kind == "Radius") {
                         RadiusConstraint c;
                         c.curve = entityRef("curve");
-                        c.parameterId = parameterRef();
                         parsed.data = c;
                     } else if (kind == "Diameter") {
                         DiameterConstraint c;
                         c.curve = entityRef("curve");
-                        c.parameterId = parameterRef();
                         parsed.data = c;
                     } else if (kind == "Angle") {
                         AngleConstraint c;
                         c.lineA = entityRef("lineA");
                         c.lineB = entityRef("lineB");
-                        c.parameterId = parameterRef();
+                        parsed.data = c;
+                    } else if (kind == "Parallel") {
+                        ParallelConstraint c;
+                        c.lineA = entityRef("lineA");
+                        c.lineB = entityRef("lineB");
+                        parsed.data = c;
+                    } else if (kind == "Perpendicular") {
+                        PerpendicularConstraint c;
+                        c.lineA = entityRef("lineA");
+                        c.lineB = entityRef("lineB");
+                        parsed.data = c;
+                    } else if (kind == "Equal") {
+                        EqualConstraint c;
+                        c.a = entityRef("a");
+                        c.b = entityRef("b");
+                        parsed.data = c;
+                    } else if (kind == "Concentric") {
+                        ConcentricConstraint c;
+                        c.curveA = entityRef("curveA");
+                        c.curveB = entityRef("curveB");
+                        parsed.data = c;
+                    } else if (kind == "Midpoint") {
+                        MidpointConstraint c;
+                        c.point = elementRef("point");
+                        c.line = entityRef("line");
+                        parsed.data = c;
+                    } else if (kind == "PointOnObject") {
+                        PointOnObjectConstraint c;
+                        c.point = elementRef("point");
+                        c.target = entityRef("target");
+                        parsed.data = c;
+                    } else if (kind == "EllipseRotation") {
+                        EllipseRotationConstraint c;
+                        c.curve = entityRef("curve");
+                        parsed.data = c;
+                    } else if (kind == "MajorAxis" || kind == "MinorAxis") {
+                        EllipseAxisConstraint c;
+                        c.curve = entityRef("curve");
+                        // REQUIRED, like Tangent's `internal` and for the same
+                        // reason: defaulting it would turn a truncated file
+                        // into a valid document dimensioning the OTHER axis.
+                        const JsonValue* minor =
+                            requireField(ce, "minor", JsonType::Bool, cc, err);
+                        if (minor == nullptr) return loadFailure(err.error, err.message);
+                        c.minor = minor->asBool();
+                        parsed.data = c;
+                    } else if (kind == "Tangent") {
+                        TangentConstraint c;
+                        c.a = entityRef("a");
+                        c.b = entityRef("b");
+                        // REQUIRED, not defaulted. Defaulting it would turn a
+                        // truncated file into a valid document describing the
+                        // OTHER tangency, silently.
+                        const JsonValue* internal =
+                            requireField(ce, "internal", JsonType::Bool, cc, err);
+                        if (internal == nullptr) return loadFailure(err.error, err.message);
+                        c.internal = internal->asBool();
+                        // v21, OPTIONAL: absent means a line free to slide,
+                        // which is what every file before v21 meant. Present
+                        // and unreadable is still an error -- a tangency that
+                        // quietly forgot WHERE it holds is the rank-deficient
+                        // case again, and it would look fine until the sketch
+                        // kinked.
+                        if (const JsonValue* at = ce.find("at")) {
+                            if (at->type() != JsonType::String)
+                                return loadFailure(SerializationError::InvalidFieldType,
+                                                   cc + ".at: expected a string");
+                            const auto part = subElementFromString(at->asString());
+                            if (!part.has_value())
+                                return loadFailure(SerializationError::InvalidEnumValue,
+                                                   cc + ".at: unknown sub-element '" +
+                                                       at->asString() + "'");
+                            c.at = *part;
+                        }
                         parsed.data = c;
                     } else {
                         return loadFailure(SerializationError::InvalidEnumValue,
                                            cc + ": unknown sketch constraint type '" + kind + "'");
                     }
+                    // THE BOUND PARAMETER, for every dimensional kind, HERE.
+                    //
+                    // It used to be a line inside each kind's own branch --
+                    // eight copies of the same statement, and a ninth and tenth
+                    // that were never written when M17.25 added the ellipse's
+                    // axis and orientation dimensions. Those two constraints
+                    // saved perfectly and came back bound to nothing, so a file
+                    // that solved before it was written refused to solve after
+                    // it was read, naming a constraint id and no cause.
+                    //
+                    // The WRITER was already generic (BoundParameterId). This is
+                    // the same list read the other way, so the two cannot
+                    // disagree about which kinds have one.
+                    if (IsDimensional(parsed.data)) {
+                        const ObjectId bound = parameterRef();
+                        VisitBoundParameter(parsed.data,
+                                            [bound](ObjectId& id) { id = bound; });
+                    }
+
                     if (refError) return loadFailure(refCode, refMessage);
+                    // v20, OPTIONAL: absent means DRIVING, which is what every file
+                    // written before this said by omission. A wrong TYPE is refused --
+                    // reading a string as false would turn a corrupt file into a sketch
+                    // with one more constraint than its author drew.
+                    if (const JsonValue* driven = ce.find("driven")) {
+                        if (driven->type() != JsonType::Bool)
+                            return loadFailure(SerializationError::InvalidFieldType,
+                                               cc + ".driven: expected a boolean");
+                        parsed.driven = driven->asBool();
+                    }
                     data.constraints.push_back(std::move(parsed));
                 }
             }
 
+            // v12: where the user dragged each dimension's value.
+            //
+            // OPTIONAL, and absent in every file written before v12 -- those
+            // documents simply place every dimension automatically, which is
+            // exactly what they did when they were written. A missing array is
+            // therefore not an error; a malformed one is.
+            const JsonValue* placementsField = entry.find("dimensionPlacements");
+            if (placementsField != nullptr) {
+                if (placementsField->type() != JsonType::Array)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context +
+                                           ": field 'dimensionPlacements' has the wrong JSON "
+                                           "type");
+                for (std::size_t pi = 0; pi < placementsField->items().size(); ++pi) {
+                    const JsonValue& pv = placementsField->items()[pi];
+                    const std::string pc =
+                        context + ": dimensionPlacement " + std::to_string(pi);
+                    if (pv.type() != JsonType::Object)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           pc + " is not an object");
+                    const JsonValue* idField =
+                        requireField(pv, "constraintId", JsonType::String, pc, err);
+                    const JsonValue* uField = requireField(pv, "u", JsonType::Number, pc, err);
+                    const JsonValue* vField = requireField(pv, "v", JsonType::Number, pc, err);
+                    if (idField == nullptr || uField == nullptr || vField == nullptr)
+                        return loadFailure(err.error, err.message);
+                    const auto placedId = idFromString(idField->asString());
+                    if (!placedId || *placedId == kInvalidObjectId || *placedId > kMaxObjectId)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           pc + ": 'constraintId' is not a valid id");
+                    if (!std::isfinite(uField->asNumber()) || !std::isfinite(vField->asNumber()))
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           pc + ": position is not a finite point");
+                    SketchPlacementData placement;
+                    placement.constraintId = static_cast<SketchConstraintId>(*placedId);
+                    placement.labelMm = Vec2{uField->asNumber(), vField->asNumber()};
+                    data.placements.push_back(placement);
+                }
+            }
+
+            // v12: how each dimension's value reads. Optional, for the same
+            // reason the placements array is.
+            const JsonValue* formatsField = entry.find("dimensionFormats");
+            if (formatsField != nullptr) {
+                if (formatsField->type() != JsonType::Array)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context +
+                                           ": field 'dimensionFormats' has the wrong JSON type");
+                for (std::size_t fi = 0; fi < formatsField->items().size(); ++fi) {
+                    const JsonValue& fv = formatsField->items()[fi];
+                    const std::string fc =
+                        context + ": dimensionFormat " + std::to_string(fi);
+                    if (fv.type() != JsonType::Object)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           fc + " is not an object");
+                    const JsonValue* idField =
+                        requireField(fv, "constraintId", JsonType::String, fc, err);
+                    const JsonValue* prefixField =
+                        requireField(fv, "prefix", JsonType::String, fc, err);
+                    const JsonValue* suffixField =
+                        requireField(fv, "suffix", JsonType::String, fc, err);
+                    const JsonValue* plusField =
+                        requireField(fv, "plusTolerance", JsonType::Number, fc, err);
+                    const JsonValue* minusField =
+                        requireField(fv, "minusTolerance", JsonType::Number, fc, err);
+                    if (idField == nullptr || prefixField == nullptr || suffixField == nullptr ||
+                        plusField == nullptr || minusField == nullptr)
+                        return loadFailure(err.error, err.message);
+                    const auto formattedId = idFromString(idField->asString());
+                    if (!formattedId || *formattedId == kInvalidObjectId ||
+                        *formattedId > kMaxObjectId)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           fc + ": 'constraintId' is not a valid id");
+                    if (!std::isfinite(plusField->asNumber()) ||
+                        !std::isfinite(minusField->asNumber()))
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           fc + ": a tolerance is not a finite number");
+                    SketchFormatData format;
+                    format.constraintId = static_cast<SketchConstraintId>(*formattedId);
+                    format.prefix = prefixField->asString();
+                    format.suffix = suffixField->asString();
+                    format.plusTolerance = plusField->asNumber();
+                    format.minusTolerance = minusField->asNumber();
+                    data.formats.push_back(std::move(format));
+                }
+            }
+
+            // v10, OPTIONAL: absent means the sketch uses its own embedded
+            // plane, which is every pre-M10 file.
+            if (const JsonValue* support = entry.find("supportFrameId")) {
+                if (support->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'supportFrameId' is not a string");
+                const auto parsed = idFromString(support->asString());
+                if (!parsed.has_value() || *parsed == kInvalidObjectId || *parsed > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context +
+                                           ": field 'supportFrameId' is not a valid ObjectId");
+                data.supportFrameId = *parsed;
+            }
+
+            // v19, OPTIONAL: the face this sketch follows (M17.14). Absent
+            // means the embedded frame is the whole story, which is every file
+            // written before this and every sketch on a world plane.
+            if (const JsonValue* tracked = entry.find("trackedFace")) {
+                if (tracked->type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'trackedFace' is not an object");
+                FaceQuery query;
+                if (!ReadFaceQuery(*tracked, context + ".trackedFace", err, query))
+                    return loadFailure(err.error, err.message);
+                data.trackedFace = query;
+            }
             sketchData.push_back(std::move(data));
         }
     }
@@ -1636,7 +2818,7 @@ LoadResult loadPartDocument(std::istream& in) {
     // have been savable either (ADR-M3-008).
     for (const auto& body : bodyData) {
         for (const auto& feature : body.features) {
-            if (feature.type != "Pad") continue;
+            if (feature.typeName != "Pad") continue;
             if (sketchIds.count(feature.sketchId) == 0)
                 return loadFailure(SerializationError::UnknownDependencyId,
                                    "feature " + idToString(feature.id) + ": pad sketch id " +
@@ -1659,15 +2841,15 @@ LoadResult loadPartDocument(std::istream& in) {
         std::unordered_set<ObjectId> earlierSolids;
         std::unordered_set<ObjectId> consumedBases;
         for (const auto& feature : body.features) {
-            const bool consumes = IsConsumingFeatureTypeName(feature.type);
-            if (feature.type == "Pocket" && sketchIds.count(feature.sketchId) == 0)
+            const bool consumes = IsConsumingFeatureTypeName(feature.typeName);
+            if (feature.typeName == "Pocket" && sketchIds.count(feature.sketchId) == 0)
                 return loadFailure(SerializationError::UnknownDependencyId,
                                    "feature " + idToString(feature.id) +
                                        ": pocket sketch id " + idToString(feature.sketchId) +
                                        " is not a sketch in this document");
             if (consumes) {
                 const std::string noun =
-                    feature.type == "Pocket" ? "pocket" : "fillet/chamfer";
+                    feature.typeName == "Pocket" ? "pocket" : "fillet/chamfer";
                 if (earlierSolids.count(feature.baseFeatureId) == 0)
                     return loadFailure(SerializationError::UnknownDependencyId,
                                        "feature " + idToString(feature.id) + ": " + noun +
@@ -1682,7 +2864,7 @@ LoadResult loadPartDocument(std::istream& in) {
                                            " is already consumed by an earlier feature; a "
                                            "solid may be consumed once (ADR-M8-008)");
             }
-            if (IsSolidFeatureTypeName(feature.type)) earlierSolids.insert(feature.id);
+            if (IsSolidFeatureTypeName(feature.typeName)) earlierSolids.insert(feature.id);
         }
     }
 
@@ -1692,7 +2874,7 @@ LoadResult loadPartDocument(std::istream& in) {
     // written (ADR-M3-008).
     for (const auto& body : bodyData) {
         for (const auto& feature : body.features) {
-            if (feature.type != "Revolve") continue;
+            if (feature.typeName != "Revolve") continue;
             const auto sketchIt =
                 std::find_if(sketchData.begin(), sketchData.end(),
                              [&](const auto& sk) { return sk.id == feature.sketchId; });
@@ -1844,21 +3026,109 @@ LoadResult loadPartDocument(std::istream& in) {
         document->restoreParameter(parameter.id, std::move(parameter.name), parameter.value,
                                    parameter.unit, std::move(parameter.expression),
                                    parameter.state);
+    // Expression edges are NOT persisted -- the graph is rebuilt on load -- so
+    // they are re-derived here, ONCE, after every parameter exists. Doing it
+    // inside restoreParameter would refuse every forward reference, since the
+    // file lists parameters in document order and an expression may legally
+    // read one written later.
+    //
+    // A failure means the file is not loadable as written: refused, rather than
+    // opening a document whose parameters would evaluate in the wrong order or
+    // not at all. This records no undo step (ADR-M9-001).
+    if (const PartDocument::ExpressionWiringResult wiring =
+            document->rewireParameterExpressions();
+        !wiring.ok) {
+        return loadFailure(SerializationError::InvalidDependency, wiring.message);
+    }
     if (materialData.has_value()) {
         document->restoreMaterial(materialData->id, std::move(materialData->name),
                                   materialData->densityKgPerM3, materialData->elasticModulusPa,
                                   materialData->poissonRatio, materialData->yieldStrengthPa,
                                   materialData->contact);
     }
+    // Frames BEFORE sketches: a sketch's support reference is a graph edge to
+    // its frame, so the frame has to be a node already. Parents before
+    // children within the frame list is guaranteed by writing them in document
+    // order, and restoreFrame refuses a parent it cannot see -- so a
+    // hand-written file with the order reversed is refused rather than silently
+    // losing the hierarchy.
+    // WHO OWNS THE ORIGIN ON LOAD (v10). The constructor always makes one, and
+    // a v10 file carries its own -- so restoring naively gave the loaded
+    // document TWO frames named "Origin", one of them with an id no reference
+    // in the file points at. Caught by the byte-identical round-trip tests,
+    // which is what they are for.
+    //
+    // The file wins when it has frames: those are the ones every
+    // `supportFrameId` refers to. A pre-v10 file has no frames array at all,
+    // and keeps the constructor's Origin exactly as it always did -- so old
+    // documents load byte-for-byte the way they did before M10.
+    if (!frameData.empty())
+        for (const ReferenceFrame* existing : document->frames())
+            document->restoreRemoveObject(existing->id());
+    // TWO PASSES, because file order does not guarantee parents first. The
+    // first version of this comment claimed it did -- "guaranteed by writing
+    // them in document order" -- and gate H refuted it immediately: frames are
+    // written in CREATION order, and re-parenting a frame under one created
+    // later puts the child first. Creating them all parentless and then wiring
+    // the hierarchy is order-independent, and the cycle check still runs on the
+    // second pass, so a cyclic file is still refused.
+    for (auto& frame : frameData)
+        document->restoreFrame(frame.id, std::move(frame.name), kInvalidObjectId,
+                               frame.transform);
+    for (const auto& frame : frameData)
+        if (frame.parentFrameId != kInvalidObjectId)
+            document->restoreFrameParent(frame.id, frame.parentFrameId);
+    for (auto& connector : connectorData)
+        document->restoreConnector(connector.id, std::move(connector.name), connector.role,
+                                   connector.frameId, connector.owner);
+
     // Sketches first: restorePadFeature wires an edge to its Sketch node, so
     // the sketch must already exist in the registry and graph.
     for (auto& sketch : sketchData) {
         Sketch& restoredSketch = document->restoreSketch(sketch.id, std::move(sketch.name),
                                                          SketchFrame{sketch.transform});
-        for (auto& entity : sketch.entities)
+        for (auto& entity : sketch.entities) {
             restoredSketch.restoreEntity(entity.id, std::move(entity.geometry));
-        for (auto& constraint : sketch.constraints)
-            restoredSketch.restoreConstraint(constraint.id, std::move(constraint.data));
+            if (entity.construction) restoredSketch.setEntityConstruction(entity.id, true);
+        }
+        for (auto& constraint : sketch.constraints) {
+            const SketchConstraintId restoredId = constraint.id;
+            const bool restoredDriven = constraint.driven;
+            restoredSketch.restoreConstraint(restoredId, std::move(constraint.data));
+            // v20. Applied through the SKETCH rather than the document facade:
+            // this is a restore, not an edit, and the facade's version records
+            // an undo step for something the user did not just do.
+            if (restoredDriven) restoredSketch.setConstraintDriven(restoredId, true);
+        }
+        // The underlay (v17). Restored like entities -- id kept, generator
+        // advanced -- and deliberately NOT validated against the entities: a
+        // reference is a frozen picture of a face, and it is allowed to have
+        // nothing left in common with what the user has since drawn.
+        for (auto& reference : sketch.references)
+            restoredSketch.restoreReference(reference.id, std::move(reference.geometry));
+        // AFTER the constraints, then swept. A placement naming a constraint
+        // the file does not contain describes nothing, and keeping it would
+        // let it re-attach itself to whatever later reused that id.
+        for (const auto& placement : sketch.placements)
+            restoredSketch.restoreDimensionPlacement(placement.constraintId, placement.labelMm);
+        for (const auto& format : sketch.formats) {
+            Sketch::DimensionFormat restored;
+            restored.constraintId = format.constraintId;
+            restored.prefix = format.prefix;
+            restored.suffix = format.suffix;
+            restored.plusTolerance = format.plusTolerance;
+            restored.minusTolerance = format.minusTolerance;
+            restoredSketch.restoreDimensionFormat(restored);
+        }
+        restoredSketch.dropPlacementsWithoutConstraints();
+        // v10: back onto its support frame, recording no undo step.
+        if (sketch.supportFrameId != kInvalidObjectId)
+            document->restoreSketchSupportFrame(restoredSketch.id(), sketch.supportFrameId);
+        // v19's tracked face is applied LATER -- see after the feature loop.
+        // The facade refuses a query naming a feature that does not exist yet,
+        // and features are restored after sketches, so applying it here
+        // dropped it SILENTLY on every load. The file said the sketch followed
+        // a face; the loaded document said it did not.
 
         // Parameter -> Sketch edges are OPTION B: re-derived from the
         // constraints, never written to the file (ADR-012's split, ADR-M5-008's
@@ -1874,39 +3144,39 @@ LoadResult loadPartDocument(std::istream& in) {
     for (auto& body : bodyData) {
         Body& restored = document->restoreBody(body.id, std::move(body.name));
         for (auto& feature : body.features) {
-            if (feature.type == "Box") {
-                document->restoreBoxFeature(restored, feature.id, std::move(feature.name),
-                                            feature.state, feature.widthParameterId,
-                                            feature.heightParameterId, feature.depthParameterId,
-                                            feature.materialId);
-            } else if (feature.type == "Pad") {
-                document->restorePadFeature(restored, feature.id, std::move(feature.name),
-                                            feature.state, feature.sketchId,
-                                            feature.lengthParameterId, feature.materialId);
-            } else if (feature.type == "Pocket") {
-                document->restorePocketFeature(restored, feature.id, std::move(feature.name),
-                                               feature.state, feature.baseFeatureId,
-                                               feature.sketchId, feature.depthParameterId,
-                                               feature.materialId);
-            } else if (feature.type == "Revolve") {
-                document->restoreRevolveFeature(
-                    restored, feature.id, std::move(feature.name), feature.state,
-                    feature.sketchId, static_cast<SketchEntityId>(feature.axisEntityId),
-                    feature.angleParameterId, feature.materialId);
-            } else if (feature.type == "Fillet") {
-                document->restoreFilletFeature(restored, feature.id, std::move(feature.name),
-                                               feature.state, feature.baseFeatureId,
-                                               feature.sizeParameterId, feature.materialId);
-            } else if (feature.type == "Chamfer") {
-                document->restoreChamferFeature(restored, feature.id, std::move(feature.name),
-                                                feature.state, feature.baseFeatureId,
-                                                feature.sizeParameterId, feature.materialId);
-            } else {
-                document->restorePlaceholderFeature(restored, feature.id,
-                                                    std::move(feature.name), feature.state,
-                                                    std::move(feature.type));
-            }
+            // ONE dispatch, shared with M9's undo history (FeatureSnapshot.h).
+            // This block used to be the loader's own per-type `if` chain, a
+            // second copy of knowledge the save side above already holds; undo
+            // needed the same knowledge a third time, and a third copy is
+            // exactly this project's second recurring defect class. The chain
+            // moved into `RestoreFeatureFromSnapshot` and both callers use it.
+            RestoreFeatureFromSnapshot(*document, restored, feature);
         }
+        // v19: the tracked faces, now that the features they name exist
+        // (M17.14). Through the FACADE, so the graph edge comes with them: a
+        // restored sketch holding the query with no dependency on the feature
+        // would be clean when that feature moved, and would report the plane
+        // from before -- the defect tracking exists to remove, reintroduced by
+        // the loader.
+        //
+        // A REFUSAL FAILS THE LOAD. A file whose sketch says it follows a face
+        // that cannot be followed is a file that would behave differently from
+        // what it says, and dropping the tracking quietly is how it would.
+        for (const auto& sketch : sketchData) {
+            if (!sketch.trackedFace.has_value()) continue;
+            if (!document->setSketchTrackedFace(sketch.id, *sketch.trackedFace))
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   "sketch " + idToString(sketch.id) +
+                                       ": its trackedFace names a feature that is not a solid, "
+                                       "or one that would depend on this sketch");
+        }
+
+        // AFTER the features exist, so the position can be clamped against a
+        // real count rather than a promised one, and so a file claiming a
+        // rollback past the end of its own feature list simply evaluates
+        // everything instead of being refused -- the position is a view, and a
+        // view that has drifted is not a corrupt document.
+        document->restoreRollbackPosition(restored.id(), body.rollback);
     }
     for (const EdgeData& edge : edgeData) {
         const GraphResult applied = document->addDependency(edge.dependent, edge.prerequisite);

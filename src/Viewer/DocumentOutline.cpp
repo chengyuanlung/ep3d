@@ -1,8 +1,13 @@
 #include "Viewer/DocumentOutline.h"
+#include <set>
+#include <map>
+#include "Core/Feature/ISketchConsuming.h"
 
 #include "Core/Body/Body.h"
 #include "Core/Dependency/DependencyGraph.h"
 #include "Core/Document/PartDocument.h"
+#include "Core/Reference/ReferenceFrame.h"
+#include "Core/Connector/Connector.h"
 #include "Core/Feature/Feature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISolidFeature.h"
@@ -29,6 +34,19 @@ namespace {
 
 // Fixed-precision formatting so numeric columns line up and a value never
 // silently changes width as it changes magnitude (UI spec 4: tabular digits).
+std::string_view RoleName(ConnectorRole role) {
+    switch (role) {
+        case ConnectorRole::Generic: return "Generic";
+        case ConnectorRole::Mount: return "Mount";
+        case ConnectorRole::Shaft: return "Shaft";
+        case ConnectorRole::LinearGuide: return "Linear guide";
+        case ConnectorRole::ToolFlange: return "Tool flange";
+        case ConnectorRole::Electrical: return "Electrical";
+        case ConnectorRole::Pneumatic: return "Pneumatic";
+    }
+    return "Generic";
+}
+
 std::string Number(double value, int decimals = 3) {
     char buffer[64];
     std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
@@ -44,6 +62,52 @@ const char* UnitLabel(UnitType unit) noexcept {
         case UnitType::KilogramPerCubicMeter: return "kg/m^3";
         case UnitType::Unitless: return "";
     }
+    // Unreachable for a valid UnitType. Present because MSVC cannot see that
+    // the switch is exhaustive, and a warning left standing is one nobody
+    // reads the next time.
+    return "";
+}
+
+// A row that WRITES a parameter.
+//
+// EVERY editable value row is built here, and that is the point. The five
+// call sites below used to spell the aggregate out by hand with seven
+// initialisers, which left `field` at its default of PropertyField::None --
+// and an editable row with no field is a SILENT no-op: the cell accepts the
+// typing, ApplyPropertyEdit answers "that row is not editable", and the model
+// never changes. A Pad whose Length could be retyped without the solid ever
+// getting taller shipped that way. A factory cannot forget an argument it
+// does not take.
+// The direction row: a checkbox over the SIGN of an extrusion parameter.
+//
+// `numericValue` carries the current value so the widget can tick the box
+// without going back to the document, and the displayed text says the same
+// thing in words -- a checkbox with no label reads as nothing in a screenshot,
+// and this project does not let one channel carry a fact on its own (A06).
+PropertyRow ReversedRow(std::string group, const Parameter& parameter) {
+    return PropertyRow{std::move(group),
+                       "Reversed",
+                       parameter.value() < 0.0 ? "yes" : "no",
+                       "",
+                       true,
+                       parameter.id(),
+                       parameter.value(),
+                       PropertyField::Reversed};
+}
+
+// The object's own name, editable (M17.16).
+//
+// Through a factory for the same reason EditableValueRow exists: the seven-
+// argument aggregate leaves `field` at None, and an editable row with no field
+// is a cell that accepts typing and changes nothing (ADR-M17-027).
+PropertyRow NameRow(ObjectId objectId, const std::string& name) {
+    return PropertyRow{"General", "Name", name, "", true, objectId, 0.0, PropertyField::Name};
+}
+
+PropertyRow EditableValueRow(std::string group, std::string label, const Parameter& parameter) {
+    return PropertyRow{std::move(group),  std::move(label), Number(parameter.value()),
+                       UnitLabel(parameter.unit()), true, parameter.id(), parameter.value(),
+                       PropertyField::Value};
 }
 
 // The row text for one constraint. A dimensional constraint shows its
@@ -205,7 +269,54 @@ OutlineNode DocumentOutline::build(const std::set<ObjectId>& hiddenIds) const {
     }
     if (!parameters.children.empty()) root.children.push_back(std::move(parameters));
 
-    for (const Sketch* sketch : document.sketches()) {
+    // Frames, in HIERARCHY order (M10.5): a frame's children nest under it, so
+    // the tree shows the parent chain the world transform is composed from
+    // rather than a flat list that hides it. Connectors nest under the frame
+    // they are on, because a connector IS that frame plus meaning
+    // (ADR-M10-004) and listing them apart would invite the reader to think
+    // they have a position of their own.
+    const std::function<OutlineNode(const ReferenceFrame*)> buildFrame =
+        [&](const ReferenceFrame* frame) {
+            OutlineNode node;
+            node.id = frame->id();
+            node.name = frame->name();
+            node.typeLabel = "Frame";
+            node.kind = OutlineKind::Frame;
+            node.state = stateOf(frame->id());
+            for (const Connector* connector : document.connectors()) {
+                if (connector->frameId() != frame->id()) continue;
+                OutlineNode child;
+                child.id = connector->id();
+                child.name = connector->name();
+                child.typeLabel = "Connector";
+                child.kind = OutlineKind::Connector;
+                node.children.push_back(std::move(child));
+            }
+            for (const ReferenceFrame* candidate : document.frames())
+                if (candidate->parentFrameId() == frame->id())
+                    node.children.push_back(buildFrame(candidate));
+            return node;
+        };
+    OutlineNode frames;
+    frames.name = "Frames";
+    frames.typeLabel = "Group";
+    frames.kind = OutlineKind::Other;
+    for (const ReferenceFrame* frame : document.frames())
+        if (frame->parentFrameId() == kInvalidObjectId)
+            frames.children.push_back(buildFrame(frame));
+    if (!frames.children.empty()) root.children.push_back(std::move(frames));
+
+    // --- The history, as ONE chronological spine (M17.10, ADR-M17-033) ------
+    //
+    // Sketches used to be listed together and then every feature after them, so
+    // a user who sketched on a face and padded it three times got three
+    // sketches in a row followed by three pads: the ORDER was gone, and nothing
+    // said which sketch made which pad. Both facts are in the model; the tree
+    // simply was not showing them.
+    //
+    // The two builders below make the nodes; the emit loop decides where they
+    // go.
+    const auto buildSketchNode = [&](const Sketch* sketch) {
         OutlineNode node;
         node.id = sketch->id();
         node.name = sketch->name();
@@ -265,25 +376,81 @@ OutlineNode DocumentOutline::build(const std::set<ObjectId>& hiddenIds) const {
             node.children.push_back(std::move(child));
         }
 
-        root.children.push_back(std::move(node));
-    }
+        return node;
+    };
 
-    for (const auto& body : document.bodies()) {
+    const auto buildFeatureNode = [&](const Feature* feature) {
+        OutlineNode node;
+        node.id = feature->id();
+        node.name = feature->name();
+        node.typeLabel = std::string(feature->typeName());
+        node.kind = dynamic_cast<const ISolidFeature*>(feature) != nullptr ? OutlineKind::Solid
+                                                                          : OutlineKind::Other;
+        node.state = stateOf(feature->id());
+        if (node.state == OutlineState::Blocked) node.diagnostic = blockedBy(feature->id());
+        // Hidden is reported only when the object is otherwise fine: "hidden"
+        // must never mask "failed" (UI spec 11).
+        if (node.state == OutlineState::Valid && hiddenIds.count(feature->id()) != 0)
+            node.state = OutlineState::Hidden;
+        return node;
+    };
+
+    // WHICH SKETCH each feature is built from, asked by capability so a fourth
+    // sketch-consuming feature is absorbed without editing this (ADR-M17-033).
+    //
+    // A sketch with MORE THAN ONE consumer is deliberately not absorbed. Nesting
+    // it under one of them would say it belongs to that feature, which is false
+    // for the other -- and the user would have no way to reach the relationship
+    // the tree chose to hide. It stays on the spine, visibly belonging to
+    // neither.
+    std::map<ObjectId, ObjectId> absorbedBy; // sketch -> its single consumer
+    std::set<ObjectId> sharedSketches;
+    for (const auto& body : document.bodies())
         for (const auto& feature : body->features()) {
-            OutlineNode node;
-            node.id = feature->id();
-            node.name = feature->name();
-            node.typeLabel = std::string(feature->typeName());
-            node.kind = dynamic_cast<const ISolidFeature*>(feature.get()) != nullptr
-                            ? OutlineKind::Solid
-                            : OutlineKind::Other;
-            node.state = stateOf(feature->id());
-            if (node.state == OutlineState::Blocked) node.diagnostic = blockedBy(feature->id());
-            // Hidden is reported only when the object is otherwise fine:
-            // "hidden" must never mask "failed" (UI spec 11).
-            if (node.state == OutlineState::Valid && hiddenIds.count(feature->id()) != 0)
-                node.state = OutlineState::Hidden;
+            const auto* consumer = dynamic_cast<const ISketchConsuming*>(feature.get());
+            if (consumer == nullptr) continue;
+            const ObjectId sketchId = consumer->consumedSketchId();
+            if (sketchId == kInvalidObjectId) continue;
+            if (!absorbedBy.emplace(sketchId, feature->id()).second)
+                sharedSketches.insert(sketchId);
+        }
+    for (ObjectId shared : sharedSketches) absorbedBy.erase(shared);
+
+    // CHRONOLOGICAL, by ObjectId. Every id in this document came from the one
+    // ObjectIdGenerator, so id order IS creation order -- including after a
+    // reload, because restore keeps each id and advances the generator past it.
+    // Sorting by id therefore needs no timestamp stored anywhere, and cannot
+    // disagree with the order things were actually made in.
+    std::vector<ObjectId> history;
+    for (const Sketch* sketch : document.sketches()) history.push_back(sketch->id());
+    for (const auto& body : document.bodies())
+        for (const auto& feature : body->features()) history.push_back(feature->id());
+    std::sort(history.begin(), history.end());
+
+    for (ObjectId id : history) {
+        if (const Sketch* sketch = document.findSketch(id)) {
+            if (absorbedBy.count(id) != 0) continue; // shown under its feature below
+            root.children.push_back(buildSketchNode(sketch));
+            continue;
+        }
+        for (const auto& body : document.bodies()) {
+            const Feature* found = nullptr;
+            for (const auto& feature : body->features())
+                if (feature->id() == id) found = feature.get();
+            if (found == nullptr) continue;
+            OutlineNode node = buildFeatureNode(found);
+            // ABSORBED: the sketch is drawn INSIDE the feature that consumed
+            // it, which is the one place a user can read the lineage without
+            // opening a dependency dialog.
+            const auto* consumer = dynamic_cast<const ISketchConsuming*>(found);
+            if (consumer != nullptr) {
+                const auto absorbed = absorbedBy.find(consumer->consumedSketchId());
+                if (absorbed != absorbedBy.end() && absorbed->second == id)
+                    if (const Sketch* sketch = document.findSketch(absorbed->first))
+                        node.children.push_back(buildSketchNode(sketch));
+            }
             root.children.push_back(std::move(node));
+            break;
         }
     }
 
@@ -309,11 +476,27 @@ OutlineNode DocumentOutline::build(const std::set<ObjectId>& hiddenIds) const {
 
     // Roll child states up so the root row summarises the document instead of
     // permanently reading "Not computed" (raised as a Major by UI review).
+    //
+    // ONLY INTO ROWS THAT HAVE NO STATE OF THEIR OWN. A container -- the root,
+    // Parameters, Frames -- is Normal because there is nothing to compute about
+    // it, and a summary is the only thing it can usefully say. A feature is
+    // different: its state is a FACT about that feature, and a summary of what
+    // is underneath it must not overwrite that fact.
+    //
+    // This became load-bearing when sketches were absorbed into the features
+    // that consume them (M17.10, ADR-M17-033). A Pad whose sketch has a
+    // conflicting dimension is BLOCKED -- it never ran, and the thing that
+    // broke is the sketch. With the sketch now a child, the old rule rolled
+    // Failed upward and the Pad reported that IT had failed: the exact
+    // distinction M5_DEF_012 exists to protect, destroyed for exactly the case
+    // it was written for, and pointing the user at the wrong object.
     const std::function<OutlineState(OutlineNode&)> rollUp =
         [&](OutlineNode& node) -> OutlineState {
         OutlineState worst = node.state;
         for (OutlineNode& child : node.children) worst = WorstOf(worst, rollUp(child));
-        if (!node.children.empty()) node.state = worst;
+        if (!node.children.empty() && node.state == OutlineState::Normal) node.state = worst;
+        // The WORST is still what travels upward, whether or not this row took
+        // it: a container above a blocked feature must still summarise it.
         return worst;
     };
     rollUp(root);
@@ -327,18 +510,43 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
 
     for (const auto& parameter : document.parameters().items()) {
         if (parameter->id() != id) continue;
-        rows.push_back(PropertyRow{"General", "Name", parameter->name(), "", false,
-                                   kInvalidObjectId, 0.0});
+        const bool driven = !parameter->expression().empty();
+
+        rows.push_back(NameRow(parameter->id(), parameter->name()));
+
+        // TWO ROWS, NOT ONE FIELD WITH TWO MODES (M11.3).
+        //
+        // The reference model puts the expression and its result in a single
+        // box that shows one or the other depending on whether it has focus.
+        // A table cell has nowhere to put a mode indicator, so the same trick
+        // here would mean a number that silently is not the thing you can edit.
+        // Two rows keep both facts visible at all times, and each says plainly
+        // whether it can be typed into.
+        //
+        // The value row is READ-ONLY while an expression drives it: typing a
+        // number there would clear the expression (ADR-M11-006), and a cell
+        // that quietly deletes a formula is not an edit a user asked for. The
+        // Expression row is where that is done, by clearing it.
         rows.push_back(PropertyRow{"Value", "Value", Number(parameter->value()),
-                                   UnitLabel(parameter->unit()), true, parameter->id(),
-                                   parameter->value()});
+                                   UnitLabel(parameter->unit()), !driven, parameter->id(),
+                                   parameter->value(),
+                                   driven ? PropertyField::None : PropertyField::Value});
+
+        // Always present, even when empty -- an editable row that only appears
+        // once you already know it exists is not discoverable (roadmap 42.3.1).
+        // Only for units an expression can produce; for the others the row
+        // would be an invitation the facade refuses.
+        if (ExpressionDimensionOf(parameter->unit()).has_value()) {
+            rows.push_back(PropertyRow{"Value", "Expression", parameter->expression(), "",
+                                       true, parameter->id(), 0.0,
+                                       PropertyField::Expression});
+        }
         return rows;
     }
 
     for (const Sketch* sketch : document.sketches()) {
         if (sketch->id() != id) continue;
-        rows.push_back(PropertyRow{"General", "Name", sketch->name(), "", false,
-                                   kInvalidObjectId, 0.0});
+        rows.push_back(NameRow(sketch->id(), sketch->name()));
         rows.push_back(PropertyRow{"General", "Entities",
                                    std::to_string(sketch->entities().size()), "", false,
                                    kInvalidObjectId, 0.0});
@@ -352,6 +560,19 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
         // "Solve status", not "Status": the Profile group already has a row
         // called "Status", and a panel showing two rows with the same label is
         // ambiguous to a user reading it, not just to a test looking it up.
+        // Which plane this sketch actually lives on (M10.2). Named, not an id:
+        // "(its own plane)" is the honest answer for a sketch with no support
+        // frame, and it is a different answer from "Origin".
+        if (sketch->supportFrameId() == kInvalidObjectId) {
+            rows.push_back(PropertyRow{"Placement", "Support", "(its own plane)", "", false,
+                                       kInvalidObjectId, 0.0});
+        } else {
+            const ReferenceFrame* support = document.findFrame(sketch->supportFrameId());
+            rows.push_back(PropertyRow{"Placement", "Support",
+                                       support != nullptr ? support->name()
+                                                          : std::string("(missing frame)"),
+                                       "", false, kInvalidObjectId, 0.0});
+        }
         rows.push_back(PropertyRow{"Constraints", "Solve status",
                                    solveStatusLabel(sketch->solveStatus()), "", false,
                                    kInvalidObjectId, 0.0});
@@ -417,9 +638,7 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
         if (parameterId != kInvalidObjectId) {
             const Parameter* parameter = document.parameters().findById(parameterId);
             if (parameter != nullptr) {
-                rows.push_back(PropertyRow{"Dimension", "Value", Number(parameter->value()),
-                                           UnitLabel(parameter->unit()), true, parameter->id(),
-                                           parameter->value()});
+                rows.push_back(EditableValueRow("Dimension", "Value", *parameter));
                 rows.push_back(PropertyRow{"Dimension", "Parameter", parameter->name(), "", false,
                                            kInvalidObjectId, 0.0});
             } else {
@@ -446,11 +665,64 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
         return rows;
     }
 
+    // A frame's rows: its own local transform, EDITABLE where it is a plain
+    // number, plus the composed world position, which is read-only because it
+    // is derived (ADR-M10-002 -- a world transform is never stored, so it is
+    // never typed either).
+    for (const ReferenceFrame* frame : document.frames()) {
+        if (frame->id() != id) continue;
+        rows.push_back(PropertyRow{"General", "Name", frame->name(), "", false,
+                                   kInvalidObjectId, 0.0});
+        rows.push_back(PropertyRow{"General", "Type", "Frame", "", false, kInvalidObjectId, 0.0});
+        const Transform3D& local = frame->localTransform();
+        rows.push_back(PropertyRow{"Local", "X", Number(local.translation.x), "mm", false,
+                                   kInvalidObjectId, 0.0});
+        rows.push_back(PropertyRow{"Local", "Y", Number(local.translation.y), "mm", false,
+                                   kInvalidObjectId, 0.0});
+        rows.push_back(PropertyRow{"Local", "Z", Number(local.translation.z), "mm", false,
+                                   kInvalidObjectId, 0.0});
+        const Transform3D world = document.worldTransform(frame->id());
+        rows.push_back(PropertyRow{"World", "X", Number(world.translation.x), "mm", false,
+                                   kInvalidObjectId, 0.0});
+        rows.push_back(PropertyRow{"World", "Y", Number(world.translation.y), "mm", false,
+                                   kInvalidObjectId, 0.0});
+        rows.push_back(PropertyRow{"World", "Z", Number(world.translation.z), "mm", false,
+                                   kInvalidObjectId, 0.0});
+        if (frame->parentFrameId() != kInvalidObjectId) {
+            const ReferenceFrame* parent = document.findFrame(frame->parentFrameId());
+            rows.push_back(PropertyRow{"Hierarchy", "Parent",
+                                       parent != nullptr ? parent->name() : std::string("(gone)"),
+                                       "", false, kInvalidObjectId, 0.0});
+        }
+        return rows;
+    }
+
+    for (const Connector* connector : document.connectors()) {
+        if (connector->id() != id) continue;
+        rows.push_back(PropertyRow{"General", "Name", connector->name(), "", false,
+                                   kInvalidObjectId, 0.0});
+        rows.push_back(PropertyRow{"General", "Type", "Connector", "", false, kInvalidObjectId,
+                                   0.0});
+        rows.push_back(PropertyRow{"General", "Role", std::string(RoleName(connector->role())),
+                                   "", false, kInvalidObjectId, 0.0});
+        const ReferenceFrame* frame = document.findFrame(connector->frameId());
+        rows.push_back(PropertyRow{"Frame", "On frame",
+                                   frame != nullptr ? frame->name() : std::string("(gone)"), "",
+                                   false, kInvalidObjectId, 0.0});
+        const Transform3D world = document.connectorWorldTransform(connector->id());
+        rows.push_back(PropertyRow{"World", "X", Number(world.translation.x), "mm", false,
+                                   kInvalidObjectId, 0.0});
+        rows.push_back(PropertyRow{"World", "Y", Number(world.translation.y), "mm", false,
+                                   kInvalidObjectId, 0.0});
+        rows.push_back(PropertyRow{"World", "Z", Number(world.translation.z), "mm", false,
+                                   kInvalidObjectId, 0.0});
+        return rows;
+    }
+
     for (const auto& body : document.bodies()) {
         for (const auto& feature : body->features()) {
             if (feature->id() != id) continue;
-            rows.push_back(PropertyRow{"General", "Name", feature->name(), "", false,
-                                       kInvalidObjectId, 0.0});
+            rows.push_back(NameRow(feature->id(), feature->name()));
             rows.push_back(PropertyRow{"General", "Type", std::string(feature->typeName()), "",
                                        false, kInvalidObjectId, 0.0});
 
@@ -460,9 +732,12 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
             if (const auto* pad = dynamic_cast<const PadFeature*>(feature.get())) {
                 for (const auto& parameter : document.parameters().items()) {
                     if (parameter->id() != pad->lengthParameterId()) continue;
-                    rows.push_back(PropertyRow{"Geometry", "Length", Number(parameter->value()),
-                                               UnitLabel(parameter->unit()), true,
-                                               parameter->id(), parameter->value()});
+                    rows.push_back(EditableValueRow("Geometry", "Length", *parameter));
+                    // Which way it grows. A pad from a sketch made ON A FACE
+                    // grows away from the part, because that sketch's normal
+                    // points out of it (ADR-M17-028) -- so "the other way" is
+                    // an ordinary thing to want, not an edge case.
+                    rows.push_back(ReversedRow("Geometry", *parameter));
                 }
             }
 
@@ -472,9 +747,11 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
             if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
                 for (const auto& parameter : document.parameters().items()) {
                     if (parameter->id() != pocket->depthParameterId()) continue;
-                    rows.push_back(PropertyRow{"Geometry", "Depth", Number(parameter->value()),
-                                               UnitLabel(parameter->unit()), true,
-                                               parameter->id(), parameter->value()});
+                    rows.push_back(EditableValueRow("Geometry", "Depth", *parameter));
+                    // A pocket from a face sketch MUST be reversed to cut into
+                    // the material: the default direction builds its tool
+                    // outside the solid and removes nothing (ADR-M17-031).
+                    rows.push_back(ReversedRow("Geometry", *parameter));
                 }
                 rows.push_back(PropertyRow{"Chain", "Base feature",
                                            std::to_string(pocket->baseFeatureId()), "", false,
@@ -486,10 +763,8 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
                 const bool isFillet = dress->typeName() == "Fillet";
                 for (const auto& parameter : document.parameters().items()) {
                     if (parameter->id() != dress->sizeParameterId()) continue;
-                    rows.push_back(PropertyRow{"Geometry", isFillet ? "Radius" : "Distance",
-                                               Number(parameter->value()),
-                                               UnitLabel(parameter->unit()), true,
-                                               parameter->id(), parameter->value()});
+                    rows.push_back(
+                        EditableValueRow("Geometry", isFillet ? "Radius" : "Distance", *parameter));
                 }
                 rows.push_back(PropertyRow{"Chain", "Base feature",
                                            std::to_string(dress->baseFeatureId()), "", false,
@@ -500,9 +775,7 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
             if (const auto* revolve = dynamic_cast<const RevolveFeature*>(feature.get())) {
                 for (const auto& parameter : document.parameters().items()) {
                     if (parameter->id() != revolve->angleParameterId()) continue;
-                    rows.push_back(PropertyRow{"Geometry", "Angle", Number(parameter->value()),
-                                               UnitLabel(parameter->unit()), true,
-                                               parameter->id(), parameter->value()});
+                    rows.push_back(EditableValueRow("Geometry", "Angle", *parameter));
                 }
             }
 
@@ -525,8 +798,7 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
     }
 
     if (document.material() && document.material()->id() == id) {
-        rows.push_back(PropertyRow{"General", "Name", document.material()->name(), "", false,
-                                   kInvalidObjectId, 0.0});
+        rows.push_back(NameRow(document.material()->id(), document.material()->name()));
         rows.push_back(PropertyRow{"Physical", "Density",
                                    Number(document.material()->density(), 1), "kg/m^3", false,
                                    kInvalidObjectId, 0.0});

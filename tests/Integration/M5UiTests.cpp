@@ -763,7 +763,8 @@ TEST(M5Ui, M5_DEF_012_APadBlockedByItsSketchSaysSoAndNamesTheCause) {
     // The sketch is the one that actually failed.
     EXPECT_EQ(sketches.front().state, OutlineState::Failed);
     // The Pad is BLOCKED, and says by what.
-    EXPECT_EQ(solids.front().state, OutlineState::Blocked);
+    EXPECT_EQ(solids.front().state, OutlineState::Blocked)
+        << solids.front().name << " diagnostic: " << solids.front().diagnostic;
     EXPECT_NE(solids.front().diagnostic.find("Sketch001"), std::string::npos)
         << solids.front().diagnostic;
     // Blocked and Failed are distinguishable without colour.

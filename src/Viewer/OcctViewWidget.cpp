@@ -3,11 +3,20 @@
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/Feature.h"
 #include "Core/Feature/ISolidFeature.h"
+#include "Core/Sketch/Profile.h"
+#include "Core/Sketch/Sketch.h"
+#include "Kernel/Occt/OcctFaceQuery.h"
+#include "Kernel/Occt/OcctSketchWireframe.h"
 #include "Kernel/Occt/OcctShape.h"
 #include "Viewer/DocumentPresenter.h"
 
+#include <cmath>
+
 #include <Aspect_Handle.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopoDS_Shape.hxx>
 #include <Quantity_Color.hxx>
+#include <Quantity_NameOfColor.hxx>
 #include <WNT_Window.hxx>
 #include <QMouseEvent>
 #include <QPoint>
@@ -64,15 +73,31 @@ void OcctViewWidget::setPresenter(DocumentPresenter* presenter) {
     refreshFromDocument();
 }
 
+void OcctViewWidget::setSolidDisplay(SolidDisplay mode) {
+    if (solidDisplay_ == mode) return;
+    solidDisplay_ = mode;
+    if (context_.IsNull()) return; // chosen before the view exists; applies at first refresh
+    const Standard_Integer aisMode = mode == SolidDisplay::Shaded ? AIS_Shaded : AIS_WireFrame;
+    for (const Handle(AIS_Shape)& presentation : solidPresentations_)
+        context_->SetDisplayMode(presentation, aisMode, Standard_False);
+    if (!view_.IsNull()) view_->Redraw();
+}
+
 void OcctViewWidget::clearPresentations() {
     if (context_.IsNull()) return;
     for (const Handle(AIS_Shape)& presentation : presentations_)
         context_->Remove(presentation, Standard_False);
     presentations_.clear();
+    solidPresentations_.clear();
     // The map is rebuilt wholesale rather than patched: a presentation that no
     // longer exists must not remain resolvable to a document object.
     presentationToObject_.clear();
     selectedObjectId_ = kInvalidObjectId;
+    // A face belonging to a presentation that is gone is not a face any more.
+    // Leaving it behind is how "Sketch on face" stays enabled after the solid
+    // it referred to has been deleted.
+    pickedFace_ = PickedFace{};
+    displayedSketches_ = 0;
 }
 
 void OcctViewWidget::refreshFromDocument() {
@@ -104,9 +129,70 @@ void OcctViewWidget::refreshFromDocument() {
         Handle(AIS_Shape) presentation = new AIS_Shape(occtShape->shape());
         // AIS_Shape defaults to wireframe; a CAD viewer showing a solid as
         // yellow edges is not showing a solid. AIS_Shaded is display mode 1.
-        context_->Display(presentation, AIS_Shaded, 0, Standard_False);
+        // FACES are what is selectable, not the whole solid (M17.5, superseding
+        // the "whole-object selection only" half of ADR-M4-004).
+        //
+        // Object selection is NOT lost by this: SelectedInteractive() still
+        // resolves a picked face back to its AIS_Shape, and that is what the
+        // ObjectId lookup below uses. What changes is that the pick also knows
+        // WHICH face -- which is the whole of what sketching on a face needs.
+        context_->Display(presentation,
+                          solidDisplay_ == SolidDisplay::Shaded ? AIS_Shaded : AIS_WireFrame,
+                          AIS_Shape::SelectionMode(TopAbs_FACE), Standard_False);
+        presentations_.push_back(presentation);
+        solidPresentations_.push_back(presentation);
+        presentationToObject_[presentation.get()] = id;
+    }
+
+    // --- Sketches, drawn where they actually are (M17.7, ADR-M17-030) -------
+    //
+    // After Finish Sketch the user looks at the part, and until now the sketch
+    // simply was not there -- it existed only on the 2D canvas, so nothing in
+    // the part view showed where it sat relative to anything else.
+    //
+    // Drawn as a WIREFRAME and in a distinct colour, because a sketch is not a
+    // solid and must not read as one. The colour is not the only channel: a
+    // sketch has no faces, so it is visibly a set of curves however it is
+    // shaded.
+    for (ObjectId id : presenter_->displayableSketches()) {
+        const Sketch* sketch = document.findSketch(id);
+        if (sketch == nullptr) continue;
+        // A support frame that is GONE means the sketch's plane is unknown, and
+        // PadFeature already refuses to build on one (M10 gate I). Drawing it
+        // at its embedded fallback plane would put the outline somewhere the
+        // model does not think it is -- the silent-relocation defect that gate
+        // exists to prevent, wearing display clothes.
+        if (document.sketchSupportFrameIsMissing(id)) continue;
+
+        std::vector<SketchGeometry> geometry;
+        geometry.reserve(sketch->entities().size());
+        // The user's own geometry, construction included: a centreline IS part
+        // of the sketch, and a 3D view that showed only some of it would leave
+        // the user hunting for the line they are sure they drew.
+        //
+        // The projected reference underlay is deliberately NOT here. It is a
+        // copy of edges the solid already draws, so in 3D it would land exactly
+        // on top of them and fight for the same pixels while adding nothing.
+        for (const SketchEntity& entity : sketch->entities())
+            geometry.push_back(entity.geometry);
+
+        const SketchWireframe wireframe = BuildSketchWireframe(
+            geometry, PlaneOfSketchFrame(document.effectiveSketchFrame(id)));
+        if (!wireframe.shape.isValid()) continue;
+        const auto* occtShape = dynamic_cast<const OcctShape*>(wireframe.shape.handle());
+        if (occtShape == nullptr) continue;
+
+        Handle(AIS_Shape) presentation = new AIS_Shape(occtShape->shape());
+        presentation->SetColor(Quantity_NOC_ORANGE2);
+        presentation->SetWidth(2.0);
+        // AIS_WireFrame (display mode 0) and WHOLE-OBJECT selection: a sketch
+        // has no face to pick, so the face mode the solids use above would make
+        // it unselectable. Clicking it selects the sketch, which is what makes
+        // "Edit Selected Sketch" reachable from the part view.
+        context_->Display(presentation, AIS_WireFrame, 0, Standard_False);
         presentations_.push_back(presentation);
         presentationToObject_[presentation.get()] = id;
+        ++displayedSketches_;
     }
 
     view_->Redraw();
@@ -185,6 +271,52 @@ QPoint OcctViewWidget::toDevicePixels(const QPointF& logical) const {
                   static_cast<int>(logical.y() * ratio));
 }
 
+void OcctViewWidget::readPickedFace() {
+    pickedFace_ = PickedFace{};
+    if (!context_->HasSelectedShape()) return;
+
+    // The whole answer, assigned whole. PlaneOfFace reads the plane AND the
+    // face's boundary (M17_FQ_002); this used to copy the four scalar fields
+    // across into a second struct and leave the boundary behind, which is why
+    // sketching on a face projected nothing while every test passed. There is
+    // one struct now, so there is nothing here to get wrong.
+    pickedFace_ = PlaneOfFace(context_->SelectedShape());
+
+    // WHICH FEATURE made it (M17.13). PlaneOfFace sees a bare face and has no
+    // owner to ask; the owner is resolvable here, because the same click
+    // already told us which presentation was hit. Without this a pocket floor
+    // is a face nothing can name, and picking it is refused.
+    if (pickedFace_.planar && presenter_ != nullptr &&
+        selectedObjectId_ != kInvalidObjectId) {
+        PartDocument& document = presenter_->document();
+        for (const auto& body : document.bodies())
+            for (const auto& feature : body->features()) {
+                if (feature->id() != selectedObjectId_) continue;
+                const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get());
+                if (solid == nullptr) continue;
+                for (const FacePlane& face : FacesOf(solid->currentShape())) {
+                    if (!face.planar || face.createdBy == 0) continue;
+                    // Matched by plane, which is all a bare face and an owned
+                    // one have in common -- and enough, because two distinct
+                    // faces of one solid do not share a plane AND a normal
+                    // unless the solid is degenerate.
+                    const Vec3 d{face.point.x - pickedFace_.point.x,
+                                 face.point.y - pickedFace_.point.y,
+                                 face.point.z - pickedFace_.point.z};
+                    const double along = d.x * pickedFace_.normal.x +
+                                         d.y * pickedFace_.normal.y +
+                                         d.z * pickedFace_.normal.z;
+                    const double facing = face.normal.x * pickedFace_.normal.x +
+                                          face.normal.y * pickedFace_.normal.y +
+                                          face.normal.z * pickedFace_.normal.z;
+                    if (std::fabs(along) > 1e-6 || facing < 0.999) continue;
+                    pickedFace_.createdBy = face.createdBy;
+                    break;
+                }
+            }
+    }
+}
+
 void OcctViewWidget::mousePressEvent(QMouseEvent* event) {
     initializeViewer();
     const QPoint device = toDevicePixels(event->position());
@@ -192,16 +324,16 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event) {
     lastY_ = device.y();
 
     if (event->button() == Qt::LeftButton) {
-        // Whole-object selection only; persistent face/edge selection is
-        // explicitly out of scope (ADR-M4-004).
         context_->MoveTo(lastX_, lastY_, view_, Standard_True);
         context_->SelectDetected();
         selectedObjectId_ = kInvalidObjectId;
+        pickedFace_ = PickedFace{};
         for (context_->InitSelected(); context_->MoreSelected(); context_->NextSelected()) {
             const Handle(AIS_InteractiveObject) picked = context_->SelectedInteractive();
             if (picked.IsNull()) continue;
             const auto it = presentationToObject_.find(picked.get());
             if (it != presentationToObject_.end()) selectedObjectId_ = it->second;
+            readPickedFace();
         }
         view_->Redraw();
         emit selectionChanged(static_cast<qulonglong>(selectedObjectId_));

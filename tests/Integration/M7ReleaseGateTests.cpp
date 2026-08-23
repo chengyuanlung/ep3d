@@ -806,13 +806,28 @@ public:
         ++revolveCallCount;
         return inner.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);
     }
-    ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) override {
+    ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
+                            double radiusMm) override {
         ++filletCallCount;
-        return inner.filletAllEdges(shape, radiusMm);
+        return inner.filletEdges(shape, AllEdgesSelection(), radiusMm);
     }
-    ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) override {
+    ShapeResult chamferEdges(const KernelShape& shape, const EdgeSelection& selection,
+                             double distanceMm) override {
         ++chamferCallCount;
-        return inner.chamferAllEdges(shape, distanceMm);
+        return inner.chamferEdges(shape, AllEdgesSelection(), distanceMm);
+    }
+    // M10.6 verbs. Forwarded, uncounted: these suites predate them and none
+    // of their gates is about mirroring, so counting would add a member every
+    // fixture has to ignore.
+    ShapeResult mirrorShape(const KernelShape& shape, const Vec3& planeOriginMm,
+                            const Vec3& planeNormal) override {
+        return inner.mirrorShape(shape, planeOriginMm, planeNormal);
+    }
+    ShapeResult translateShape(const KernelShape& shape, const Vec3& offsetMm) override {
+        return inner.translateShape(shape, offsetMm);
+    }
+    ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) override {
+        return inner.fuseShapes(a, b);
     }
     int extrudes = 0;
     int massCalls = 0;

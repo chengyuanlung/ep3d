@@ -159,17 +159,23 @@ TEST(ProfileTest, M4_PROFILE_011_OpenLoopRejected) {
     EXPECT_FALSE(result.message.empty());
 }
 
-TEST(ProfileTest, M4_PROFILE_012_DisconnectedComponentsRejected) {
+TEST(ProfileTest, M4_PROFILE_012_SideBySideLoopsAreRejected) {
     Sketch sketch{"Sketch001"};
     AddRectangle(sketch);
-    // A second, separate closed triangle far away.
+    // A second, separate closed triangle far away -- BESIDE the rectangle, not
+    // inside it.
     sketch.addLine(Vec2{500, 500}, Vec2{600, 500});
     sketch.addLine(Vec2{600, 500}, Vec2{550, 580});
     sketch.addLine(Vec2{550, 580}, Vec2{500, 500});
 
     const ProfileResult result = BuildProfile(sketch);
     EXPECT_FALSE(result);
-    EXPECT_EQ(result.error, ProfileError::Disconnected);
+    // NotNested since M17, not Disconnected: several loops are now ordinary --
+    // a hole is made of them. What is still refused is loops that are not
+    // nested, because "two solids" is a different thing from "one with a hole"
+    // and neither may be guessed at.
+    EXPECT_EQ(result.error, ProfileError::NotNested);
+    EXPECT_NE(result.message.find("outer boundary"), std::string::npos) << result.message;
 }
 
 TEST(ProfileTest, M4_PROFILE_013_BranchRejected) {
@@ -210,7 +216,17 @@ TEST(ProfileTest, M4_PROFILE_016_DegenerateGeometryRejectedOnRestorePath) {
     // validator re-checks.
     Sketch sketch{"Sketch001"};
     AddRectangle(sketch);
-    ASSERT_TRUE(sketch.restoreEntity(SketchEntityId{999001},
+    // The id is ALLOCATED, never a constant. `SketchEntityId` draws from the
+    // process-global `ObjectIdGenerator`, and `restoreEntity` calls
+    // `AdvancePast`, so a literal like 999001 shoves the counter into that
+    // neighbourhood for every test that runs after this one in the same
+    // process. M4_PROFILE_022 used the constant 999010 and failed
+    // intermittently under `--gtest_shuffle` for exactly that reason: once
+    // these restore-path tests had pushed the counter to 999009, its own
+    // `addArc`/`addLine` were HANDED 999009 and 999010, and the restore then
+    // collided with the entity the test had just created. ObjectId.h's own
+    // comment names this bug class; the tests were the ones reintroducing it.
+    ASSERT_TRUE(sketch.restoreEntity(NextSketchEntityId(),
                                      SketchLine{Vec2{7, 7}, Vec2{7, 7}}));
 
     const ProfileResult result = BuildProfile(sketch);
@@ -220,7 +236,7 @@ TEST(ProfileTest, M4_PROFILE_016_DegenerateGeometryRejectedOnRestorePath) {
 
 TEST(ProfileTest, M4_PROFILE_017_InvalidRadiusRejectedOnRestorePath) {
     Sketch sketch{"Sketch001"};
-    ASSERT_TRUE(sketch.restoreEntity(SketchEntityId{999002}, SketchCircle{Vec2{0, 0}, -5.0}));
+    ASSERT_TRUE(sketch.restoreEntity(NextSketchEntityId(), SketchCircle{Vec2{0, 0}, -5.0}));
     const ProfileResult result = BuildProfile(sketch);
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error, ProfileError::InvalidGeometry);
@@ -231,33 +247,104 @@ TEST(ProfileTest, M4_PROFILE_018_NonFiniteCoordinatesRejectedOnRestorePath) {
     const double inf = std::numeric_limits<double>::infinity();
 
     Sketch withNan{"A"};
-    ASSERT_TRUE(withNan.restoreEntity(SketchEntityId{999003},
+    ASSERT_TRUE(withNan.restoreEntity(NextSketchEntityId(),
                                       SketchLine{Vec2{0, 0}, Vec2{nan, 5}}));
     EXPECT_EQ(BuildProfile(withNan).error, ProfileError::InvalidGeometry);
 
     Sketch withInf{"B"};
-    ASSERT_TRUE(withInf.restoreEntity(SketchEntityId{999004},
+    ASSERT_TRUE(withInf.restoreEntity(NextSketchEntityId(),
                                       SketchLine{Vec2{0, 0}, Vec2{inf, 5}}));
     EXPECT_EQ(BuildProfile(withInf).error, ProfileError::InvalidGeometry);
 }
 
-TEST(ProfileTest, M4_PROFILE_019_CircleCannotBeMixedWithOtherCurves) {
+TEST(ProfileTest, M17_PROFILE_019_ACircleInsideARectangleIsAHOLE) {
     Sketch sketch{"Sketch001"};
     AddRectangle(sketch);
-    sketch.addCircle(Vec2{50, 25}, 5.0); // a hole -- deferred to a later milestone
+    const SketchEntityId hole = sketch.addCircle(Vec2{50, 25}, 5.0);
+
+    // The commonest profile in mechanical CAD, and M4 refused it outright.
+    const ProfileResult result = BuildProfile(sketch);
+    ASSERT_TRUE(static_cast<bool>(result)) << result.message;
+    EXPECT_EQ(result.profile.outer.entities.size(), 4u);
+    ASSERT_EQ(result.profile.inners.size(), 1u);
+    ASSERT_EQ(result.profile.inners.front().entities.size(), 1u);
+    // The CIRCLE is the hole, decided by containment rather than by which was
+    // drawn first or which has fewer entities.
+    EXPECT_EQ(result.profile.inners.front().entities.front().entityId, hole);
+}
+
+TEST(ProfileTest, M17_PROFILE_019B_TheOUTERLoopIsTheCONTAININGOneNotTheFirst) {
+    Sketch sketch{"Sketch001"};
+    // The hole FIRST, so draw order and id order both point the wrong way.
+    const SketchEntityId hole = sketch.addCircle(Vec2{50, 25}, 5.0);
+    AddRectangle(sketch);
+
+    const ProfileResult result = BuildProfile(sketch);
+    ASSERT_TRUE(static_cast<bool>(result)) << result.message;
+    EXPECT_EQ(result.profile.outer.entities.size(), 4u);
+    ASSERT_EQ(result.profile.inners.size(), 1u);
+    EXPECT_EQ(result.profile.inners.front().entities.front().entityId, hole);
+}
+
+TEST(ProfileTest, M17_PROFILE_019C_SeveralHolesAreAllKept) {
+    Sketch sketch{"Sketch001"};
+    AddRectangle(sketch);
+    sketch.addCircle(Vec2{25, 25}, 4.0);
+    sketch.addCircle(Vec2{50, 25}, 4.0);
+    sketch.addCircle(Vec2{75, 25}, 4.0);
+
+    const ProfileResult result = BuildProfile(sketch);
+    ASSERT_TRUE(static_cast<bool>(result)) << result.message;
+    EXPECT_EQ(result.profile.inners.size(), 3u);
+}
+
+TEST(ProfileTest, M17_PROFILE_019D_AHoleInsideAHoleIsRefused) {
+    Sketch sketch{"Sketch001"};
+    AddRectangle(sketch);
+    sketch.addCircle(Vec2{50, 25}, 10.0);
+    sketch.addCircle(Vec2{50, 25}, 4.0); // an ISLAND inside that hole
 
     const ProfileResult result = BuildProfile(sketch);
     EXPECT_FALSE(result);
-    EXPECT_EQ(result.error, ProfileError::NotChainable);
+    EXPECT_EQ(result.error, ProfileError::NotNested);
+    // An island is a second solid REGION; building it as a plain hole would
+    // quietly lose it, so it is named rather than silently dropped.
+    EXPECT_NE(result.message.find("island"), std::string::npos) << result.message;
 }
 
-TEST(ProfileTest, M4_PROFILE_020_TwoCirclesRejected) {
+TEST(ProfileTest, M17_PROFILE_019E_LoopsThatCROSSAreRefused) {
+    Sketch sketch{"Sketch001"};
+    AddRectangle(sketch);                  // 0,0 to 100,50
+    sketch.addCircle(Vec2{100, 25}, 20.0); // straddles the right-hand edge
+
+    const ProfileResult result = BuildProfile(sketch);
+    EXPECT_FALSE(result);
+    // Half in and half out is neither a hole nor a second boundary, and
+    // choosing a reading would be inventing the user's intent.
+    EXPECT_EQ(result.error, ProfileError::SelfIntersecting);
+}
+
+TEST(ProfileTest, M4_PROFILE_020_TwoSeparateCirclesAreRejected) {
     Sketch sketch{"Sketch001"};
     sketch.addCircle(Vec2{0, 0}, 10.0);
     sketch.addCircle(Vec2{50, 0}, 10.0);
     const ProfileResult result = BuildProfile(sketch);
     EXPECT_FALSE(result);
-    EXPECT_EQ(result.error, ProfileError::NotChainable);
+    // Side by side: two solids, not one with a hole.
+    EXPECT_EQ(result.error, ProfileError::NotNested);
+}
+
+TEST(ProfileTest, M17_PROFILE_020B_ACircleInsideACircleIsARing) {
+    Sketch sketch{"Sketch001"};
+    const SketchEntityId outer = sketch.addCircle(Vec2{0, 0}, 20.0);
+    const SketchEntityId inner = sketch.addCircle(Vec2{0, 0}, 8.0);
+
+    const ProfileResult result = BuildProfile(sketch);
+    ASSERT_TRUE(static_cast<bool>(result)) << result.message;
+    ASSERT_EQ(result.profile.outer.entities.size(), 1u);
+    EXPECT_EQ(result.profile.outer.entities.front().entityId, outer);
+    ASSERT_EQ(result.profile.inners.size(), 1u);
+    EXPECT_EQ(result.profile.inners.front().entities.front().entityId, inner);
 }
 
 TEST(ProfileTest, M4_PROFILE_021_ArcAndChordSharingEndpointsAreNotDuplicates) {
@@ -282,7 +369,9 @@ TEST(ProfileTest, M4_PROFILE_022_IdenticalArcsAreDuplicates) {
     Sketch sketch{"Sketch001"};
     sketch.addArc(Vec2{0, 0}, 10.0, 0.0, kPi, true);
     sketch.addLine(Vec2{-10, 0}, Vec2{10, 0});
-    ASSERT_TRUE(sketch.restoreEntity(SketchEntityId{999010},
+    // Allocated, not a constant -- see M4_PROFILE_016. This exact line used
+    // the literal 999010 and was the intermittent shuffle failure.
+    ASSERT_TRUE(sketch.restoreEntity(NextSketchEntityId(),
                                      SketchArc{Vec2{0, 0}, 10.0, 0.0, kPi, true}));
 
     const ProfileResult result = BuildProfile(sketch);

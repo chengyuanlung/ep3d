@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <string>
 #include <utility>
+#include <optional>
 #include <variant>
 
 namespace paramcad {
@@ -24,20 +25,24 @@ namespace {
 // dynamic_cast, never UB on mismatch: a registered IRecomputable that produces
 // no solid (e.g. a test stub reusing this id space) yields a controlled
 // nullptr.
-ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
+const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
     if (id == kInvalidObjectId) return nullptr;
-    const ObjectRegistry::ObjectRef* ref = registry.find(id);
-    if (ref == nullptr) return nullptr;
-    auto* const* recomputable = std::get_if<IRecomputable*>(ref);
+    // The const overload yields const pointees (R2R4-M1); these resolvers
+    // already returned const pointers, so the projection matches their intent.
+    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
+    if (!ref) return nullptr;
+    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
     if (recomputable == nullptr) return nullptr;
-    return dynamic_cast<ISolidFeature*>(*recomputable);
+    return dynamic_cast<const ISolidFeature*>(*recomputable);
 }
 
-Material* resolveMaterial(const ObjectRegistry& registry, ObjectId id) {
+const Material* resolveMaterial(const ObjectRegistry& registry, ObjectId id) {
     if (id == kInvalidObjectId) return nullptr;
-    const ObjectRegistry::ObjectRef* ref = registry.find(id);
-    if (ref == nullptr) return nullptr;
-    auto* const* material = std::get_if<Material*>(ref);
+    // The const overload yields const pointees (R2R4-M1); these resolvers
+    // already returned const pointers, so the projection matches their intent.
+    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
+    if (!ref) return nullptr;
+    auto* const* material = std::get_if<const Material*>(&*ref);
     return material != nullptr ? *material : nullptr;
 }
 
@@ -66,7 +71,7 @@ RecomputeResult MassPropertiesNode::failAndMarkStale(const RecomputeContext& con
 }
 
 RecomputeResult MassPropertiesNode::recompute(const RecomputeContext& context) {
-    ISolidFeature* box = resolveSolidFeature(context.registry, boxFeatureId_);
+    const ISolidFeature* box = resolveSolidFeature(context.registry, boxFeatureId_);
     if (box == nullptr) return failAndMarkStale(context, "no solid feature configured");
 
     // Defense in depth (ADR-M3-004): the graph normally blocks this node with
@@ -83,7 +88,7 @@ RecomputeResult MassPropertiesNode::recompute(const RecomputeContext& context) {
     // fail. No material assigned behaves like density == 0.
     double densityKgPerM3 = 0.0;
     if (materialId_ != kInvalidObjectId) {
-        Material* material = resolveMaterial(context.registry, materialId_);
+        const Material* material = resolveMaterial(context.registry, materialId_);
         if (material == nullptr) return failAndMarkStale(context, "material not found");
         densityKgPerM3 = material->density();
     }

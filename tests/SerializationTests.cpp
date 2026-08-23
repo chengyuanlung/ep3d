@@ -6,6 +6,8 @@
 #include "Core/Body/Body.h"
 #include "Core/Serialization/JsonValue.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
+#include "Support/SchemaVersionText.h"
+
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
@@ -15,6 +17,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -52,7 +55,14 @@ TEST(SerializationTests, RoundTripPreservesAllFields) {
     PartDocument original("RoundTrip");
     Parameter& width = original.addParameter("Width", 120.0, UnitType::Millimeter);
     Parameter& depth = original.addParameter("Depth", 60.5, UnitType::Millimeter);
-    ASSERT_TRUE(original.setParameterExpression(depth.id(), "Width / 2")); // as data; state -> Dirty
+    // M11.2 CHANGED THIS LINE'S CONTRACT. It used to read "Width / 2" and the
+    // comment said "as data": setParameterExpression stored any string, because
+    // nothing evaluated it. It now parses, resolves and wires, so an expression
+    // that is not one is refused -- and `Width` without the `#` is a function
+    // name, not a reference. The subject of this test (every field round-trips)
+    // is unchanged and is now STRONGER: the stored text also has to survive as
+    // a working reference to the Width parameter above.
+    ASSERT_TRUE(original.setParameterExpression(depth.id(), "#Width / 2")); // state -> Dirty
     ASSERT_EQ(depth.state(), ParameterState::Dirty);
 
     Body& body = original.addBody("Body001");
@@ -86,7 +96,7 @@ TEST(SerializationTests, RoundTripPreservesAllFields) {
     EXPECT_EQ(depthCopy.name(), "Depth");
     EXPECT_EQ(depthCopy.value(), 60.5);
     EXPECT_EQ(depthCopy.unit(), UnitType::Millimeter);
-    EXPECT_EQ(depthCopy.expression(), "Width / 2");
+    EXPECT_EQ(depthCopy.expression(), "#Width / 2");
     EXPECT_EQ(depthCopy.state(), ParameterState::Dirty);
 
     // Bodies and features.
@@ -151,7 +161,11 @@ TEST(SerializationTests, HeaderValidationErrors) {
     EXPECT_EQ(result.document, nullptr);
 
     std::string futureVersion = kMinimalDocument;
-    futureVersion.replace(futureVersion.find("\"schemaVersion\": 1"), 18, "\"schemaVersion\": 9");
+    // MUST stay above kSchemaVersion. It was 9 until M9.4 shipped v9, at which
+    // point this test started asserting that a perfectly loadable file is
+    // refused -- a version bump is exactly when a "too new" fixture rots.
+    futureVersion.replace(futureVersion.find("\"schemaVersion\": 1"), 18,
+                          "\"schemaVersion\": 99");
     result = loadFromString(futureVersion);
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error, SerializationError::UnsupportedSchemaVersion);
@@ -299,7 +313,10 @@ TEST(SerializationTests, SuppressedFeatureStateRoundTrips) {
     PartDocument original("Suppress");
     Body& body = original.addBody("Body001");
     PlaceholderFeature& pad = original.addPlaceholderFeature(body, "Pad001", "Placeholder");
-    pad.setSuppressed(true);
+    // Through the facade: Feature's mutators are private since round 4's
+    // R1R4-M1, and this call is also the regression for R1R4-m1 -- the facade
+    // now writes the feature's own state, not just the graph node.
+    ASSERT_TRUE(original.setSuppressed(pad.id(), true));
     ASSERT_EQ(pad.state(), ComputeState::Suppressed);
 
     const LoadResult loaded = loadFromString(saveToString(original));
@@ -537,12 +554,24 @@ TEST(SerializationTests, SpecialCharacterStringsRoundTrip) {
     EXPECT_EQ(saveToString(*loaded.document), firstSave);
 }
 
+// M11.2 CHANGED THE FIXTURE, NOT THE SUBJECT.
+//
+// This test's parameter used to carry the expression "bad / 0" -- chosen only
+// because the field was opaque and any string would do. It is no longer opaque:
+// the loader refuses a file whose expression cannot be parsed or resolved, so
+// that fixture now describes a document this format cannot represent.
+//
+// The subject -- a FAILED state survives save and load -- is unchanged, and
+// Failed-with-an-expression is still perfectly representable: an expression
+// that parses and resolves can still fail at EVALUATION time (see
+// M11_WIRE_147, which round-trips exactly that document). The fixture now uses
+// an expression that parses, and the state stays Failed.
 TEST(SerializationTests, FailedStatesRoundTrip) {
     const std::string text = R"({
       "format": "ParametricCAD", "schemaVersion": 1, "documentType": "Part",
       "id": "4101", "name": "Failures",
       "parameters": [ {"id": "4102", "name": "W", "value": 1.0,
-                       "unit": "Millimeter", "expression": "bad / 0", "state": "Failed"} ],
+                       "unit": "Millimeter", "expression": "1mm + 1mm", "state": "Failed"} ],
       "bodies": [ {"id": "4103", "name": "Body001",
                    "features": [ {"id": "4104", "name": "Pad001", "type": "Placeholder",
                                   "state": "Failed"} ]} ]
@@ -761,7 +790,7 @@ TEST(SerializationV2Test, M2_SER_001_StableIdsSurviveRoundTrip) {
     // Save always writes the CURRENT schema version (v5 as of M5), even
     // though this document only exercises v2-era features (parameters +
     // generic dependency edges, no Material/BoxFeature).
-    EXPECT_NE(saved.find("\"schemaVersion\": 8"), std::string::npos); // v8: M8.3 Fillet/Chamfer
+    EXPECT_NE(saved.find(paramcad::testing::CurrentSchemaVersionField()), std::string::npos);
     const LoadResult loaded = loadFromString(saved);
     ASSERT_TRUE(loaded) << loaded.message;
     EXPECT_EQ(loaded.document->id(), original.id());
@@ -811,20 +840,27 @@ TEST(SerializationV2Test, M2_SER_003_ObjectRegistryRebuiltAfterLoad) {
     EXPECT_TRUE(registry.contains(body.id()));
 
     // Lookup resolves the loaded document's own runtime objects.
-    const ObjectRegistry::ObjectRef* parameterRef = registry.find(parameter.id());
-    ASSERT_NE(parameterRef, nullptr);
-    EXPECT_EQ(std::get<Parameter*>(*parameterRef),
+    const std::optional<ObjectRegistry::ConstObjectRef> parameterRef =
+        registry.find(parameter.id());
+    ASSERT_TRUE(parameterRef.has_value());
+    EXPECT_EQ(std::get<const Parameter*>(*parameterRef),
               loaded.document->parameters().findById(parameter.id()));
-    const ObjectRegistry::ObjectRef* bodyRef = registry.find(body.id());
-    ASSERT_NE(bodyRef, nullptr);
-    EXPECT_EQ(std::get<Body*>(*bodyRef), loaded.document->bodies()[0].get());
+    const std::optional<ObjectRegistry::ConstObjectRef> bodyRef = registry.find(body.id());
+    ASSERT_TRUE(bodyRef.has_value());
+    EXPECT_EQ(std::get<const Body*>(*bodyRef), loaded.document->bodies()[0].get());
 }
 
 TEST(SerializationV2Test, M2_SER_004_V1FileStillLoads) {
     // kMinimalDocument is schema v1 (no dependencies array).
     const LoadResult minimal = loadFromString(kMinimalDocument);
     ASSERT_TRUE(minimal) << minimal.message;
-    EXPECT_EQ(minimal.document->dependencyGraph().nodeCount(), 0u);
+    // ONE node, not zero: since M10 the Origin frame is a graph participant,
+    // because moving a frame has to dirty whatever it supports (ADR-M10-001).
+    // The number changed for a reason and is asserted rather than relaxed --
+    // "at least one" would stop noticing the day something else joins.
+    EXPECT_EQ(minimal.document->dependencyGraph().nodeCount(), 1u);
+    ASSERT_EQ(minimal.document->frames().size(), 1u);
+    EXPECT_EQ(minimal.document->frames().front()->name(), "Origin");
 
     // A v1 file with a parameter: the parameter gets a graph node (Dirty).
     std::string v1WithParameter = kMinimalDocument;
@@ -1001,7 +1037,15 @@ TEST(GeneratorLimitChild, SavingIsRefusedOnceTheGeneratorHasPassedTheCap) {
 TEST(GeneratorLimitChild, EveryIdClassIsRefusedAtSaveOnceItPassesTheCap) {
     if (!DrivenByParent()) GTEST_SKIP() << "driven by GeneratorLimit.RunsInItsOwnProcess";
 
-    // All five documents, and everything whose id must stay legal, first.
+    // Round 4 (R2R4-M3 / R3R4-M1, found independently): this test claimed to
+    // reach "all seven branches"; `validateSaveable` has EIGHT `capCheck`
+    // sites, and it reached FIVE. The document, body and material branches were
+    // reached by nothing -- deleting body and material left all 793 executing
+    // tests green while an over-cap Body and an over-cap Material each saved OK
+    // and then load-refused. All eight are below, one document each.
+    //
+    // The DOCUMENT branch needs its document CONSTRUCTED after the advance, so
+    // it is built further down rather than here.
     PartDocument forParameter{"capParameter"};
     PartDocument forFeature{"capFeature"};
     PartDocument forSketch{"capSketch"};
@@ -1012,6 +1056,8 @@ TEST(GeneratorLimitChild, EveryIdClassIsRefusedAtSaveOnceItPassesTheCap) {
     Sketch& constraintSketch = forConstraint.addSketch("s");
     const SketchEntityId constrained = constraintSketch.addLine(Vec2{0, 0}, Vec2{100, 0});
     Parameter& length = forConstraint.addParameter("L", 100.0, UnitType::Millimeter);
+    PartDocument forBody{"capBody"};
+    PartDocument forMaterial{"capMaterial"};
     Body& featureBody = forFeature.addBody("Body001");
     Parameter& padLength = forFeature.addParameter("PadLength", 20.0, UnitType::Millimeter);
     Sketch& padSketch = forFeature.addSketch("PadSketch");
@@ -1053,6 +1099,26 @@ TEST(GeneratorLimitChild, EveryIdClassIsRefusedAtSaveOnceItPassesTheCap) {
     saved = refusalFor(forConstraint);
     EXPECT_FALSE(saved);
     EXPECT_NE(saved.message.find("a sketch constraint"), std::string::npos) << saved.message;
+
+    forBody.addBody("late");
+    saved = refusalFor(forBody);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("a body"), std::string::npos) << saved.message;
+
+    forMaterial.addMaterial("Aluminium", 2700.0);
+    saved = refusalFor(forMaterial);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("the material"), std::string::npos) << saved.message;
+
+    // The document's OWN id: constructed here, after the advance, because a
+    // PartDocument takes its id from the generator at construction. This is the
+    // branch R2-M1 was originally written about, and the branch whose test
+    // silently stopped answering when the fixture grew a sketch (whose branch
+    // fires first).
+    PartDocument forDocument{"capDocument"};
+    saved = refusalFor(forDocument);
+    EXPECT_FALSE(saved);
+    EXPECT_NE(saved.message.find("the document"), std::string::npos) << saved.message;
 
     // Written last: the parent reads it as proof the child ran rather than
     // skipped, and it must not appear if any assertion above aborted.

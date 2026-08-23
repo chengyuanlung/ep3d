@@ -4,6 +4,7 @@
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
 #include "Core/Feature/IMaterialReferencing.h"
+#include "Core/Feature/ISketchConsuming.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
@@ -41,6 +42,7 @@ namespace paramcad {
 class RevolveFeature final : public Feature,
                              public IRecomputable,
                              public ISolidFeature,
+                             public ISketchConsuming,
                              public IMaterialReferencing {
 public:
     RevolveFeature(std::string name, ObjectId sketchId, SketchEntityId axisEntityId,
@@ -53,6 +55,9 @@ public:
     std::string_view typeName() const noexcept override { return "Revolve"; }
 
     ObjectId sketchId() const noexcept { return sketchId_; }
+    // ISketchConsuming: the same answer, asked the way code that does not know
+    // this type has to ask it.
+    ObjectId consumedSketchId() const noexcept override { return sketchId_; }
     SketchEntityId axisEntityId() const noexcept { return axisEntityId_; }
     ObjectId angleParameterId() const noexcept { return angleParameterId_; }
     ObjectId materialId() const noexcept override { return materialId_; }

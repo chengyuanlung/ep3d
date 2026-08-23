@@ -2,6 +2,8 @@
 
 #include "Core/Geometry/MathTypes.h"
 
+#include <optional>
+
 namespace paramcad {
 
 // The support plane a Sketch's (u,v) coordinates live on (ADR-M4-002).
@@ -35,6 +37,37 @@ public:
     // Frame rotated by `angleRad` about the given unit axis, then translated.
     // The axis is normalized internally; a degenerate axis yields no rotation.
     static SketchFrame Rotated(Vec3 axis, double angleRad, Vec3 origin = Vec3{}) noexcept;
+
+    // Frame lying on an arbitrary plane: +u along `uAxis`, +z along `normal`,
+    // origin at `origin` (M17.5, sketch-on-face).
+    //
+    // `uAxis` is ORTHOGONALISED against the normal rather than trusted, because
+    // the two come from different sources -- a kernel face supplies the normal,
+    // and the u direction is a convention chosen alongside it. Feeding a basis
+    // that is a degree off square into the quaternion would produce a frame
+    // that is not a rotation, and every (u,v) on the sketch would land slightly
+    // off the plane it claims to be on.
+    //
+    // REFUSES rather than guesses when the basis is degenerate -- zero-length,
+    // parallel, or non-finite. There is no defensible plane to fall back to,
+    // and world XY is the one answer guaranteed to put the geometry somewhere
+    // the user did not pick.
+    static std::optional<SketchFrame> FromBasis(Vec3 origin, Vec3 uAxis, Vec3 normal) noexcept;
+
+    // The frame a sketch gets when it is made ON A FACE (M17.14).
+    //
+    // THE conversion site for that convention, shared by the command that
+    // creates such a sketch and by the recompute that re-resolves it when the
+    // face moves. Two copies would be two answers to "which way is up on this
+    // face", and the sketch would jump the first time it was rebuilt.
+    //
+    //   origin: the part origin projected onto the plane -- stable under the
+    //           edits a parametric model is for, unlike the face's centre.
+    //   v:      as close to world +Z as the plane allows, so "up" on a
+    //           vertical face is up in the world. On a horizontal face there
+    //           is no such direction, and u is world +X -- which makes the top
+    //           of a box read exactly like the world XY plane.
+    static std::optional<SketchFrame> OnFace(Vec3 pointOnPlane, Vec3 normal) noexcept;
 
     const Transform3D& transform() const noexcept { return transform_; }
     void setTransform(const Transform3D& transform) noexcept { transform_ = transform; }

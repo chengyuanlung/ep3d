@@ -16,6 +16,7 @@
 #include <cmath>
 #include <utility>
 #include <algorithm>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -744,6 +745,126 @@ TEST(M7_REV2_M3, RepeatedReconstructionDoesNotAccumulateWithAnyRecogniserDisable
     bare.placeFix = false;
     bare.reconstructExplicitDimensions = false;
     runThreeTimes(bare);
+}
+
+
+// --- Round 4, R2R4-M4: the fingerprint's CONTENT ----------------------------
+//
+// Its EXISTENCE was pinned by one test; its contents by nothing. A reviewer
+// deleted four separate field contributions -- a line endpoint, the entity id,
+// a circle radius, an arc start angle -- and all 645 tests stayed green. The
+// shipped code had already fallen into that gap: `SketchArc::counterClockwise`
+// was never mixed at all, while the function's comment claimed "bit-identical
+// geometry".
+//
+// FIXED ENTITY IDS are what make this discriminate, and the first version of
+// this test did not have them: building each variant in a fresh document gave
+// it fresh ids, so every row differed by the ID contribution alone and dropping
+// the circle radius still passed. Caught by mutating the very line the test
+// claims to pin -- which is the only way this class of defect is ever caught.
+// `restoreEntity` puts a chosen id back, so baseline and twin differ in exactly
+// one field and nothing else.
+
+TEST(M7ReviewFinding, M7_REV4_M4_EveryGeometryFieldChangesTheFingerprint) {
+    constexpr SketchEntityId kLine{9001};
+    constexpr SketchEntityId kCircle{9002};
+    constexpr SketchEntityId kArc{9003};
+    constexpr SketchEntityId kPoint{9004};
+
+    const SketchLine baseLine{Vec2{0, 0}, Vec2{100, 50}};
+    const SketchCircle baseCircle{Vec2{10, 20}, 5.0};
+    const SketchArc baseArc{Vec2{30, 40}, 7.0, 0.25, 1.75, true};
+    const SketchPoint basePoint{Vec2{60, 70}};
+
+    // Every sketch below carries the SAME four ids, so the only thing that can
+    // move the fingerprint is the geometry.
+    const auto fingerprintOf = [&](SketchGeometry line, SketchGeometry circle,
+                                   SketchGeometry arc, SketchGeometry point) {
+        PartDocument document{"FP"};
+        Sketch& sketch = document.addSketch("S");
+        EXPECT_TRUE(sketch.restoreEntity(kLine, std::move(line)));
+        EXPECT_TRUE(sketch.restoreEntity(kCircle, std::move(circle)));
+        EXPECT_TRUE(sketch.restoreEntity(kArc, std::move(arc)));
+        EXPECT_TRUE(sketch.restoreEntity(kPoint, std::move(point)));
+        return FingerprintSketch(sketch);
+    };
+
+    const std::uint64_t base = fingerprintOf(baseLine, baseCircle, baseArc, basePoint);
+
+    // Two identical drawings with identical ids MUST agree -- otherwise every
+    // row below would "pass" on noise, which is exactly how the first version
+    // of this test fooled itself.
+    ASSERT_EQ(fingerprintOf(baseLine, baseCircle, baseArc, basePoint), base)
+        << "the fingerprint is not a function of the drawing alone";
+
+    const auto differs = [&](const char* what, std::uint64_t other) {
+        EXPECT_NE(other, base)
+            << "changing the " << what << " left the fingerprint unchanged, so a plan built "
+               "for one drawing would validate against the other";
+    };
+
+    SketchLine line = baseLine;
+    line.start.x = 1.0;
+    differs("line start x", fingerprintOf(line, baseCircle, baseArc, basePoint));
+    line = baseLine;
+    line.start.y = 1.0;
+    differs("line start y", fingerprintOf(line, baseCircle, baseArc, basePoint));
+    line = baseLine;
+    line.end.x = 101.0;
+    differs("line end x", fingerprintOf(line, baseCircle, baseArc, basePoint));
+    line = baseLine;
+    line.end.y = 51.0;
+    differs("line end y", fingerprintOf(line, baseCircle, baseArc, basePoint));
+
+    SketchCircle circle = baseCircle;
+    circle.center.x = 11.0;
+    differs("circle centre x", fingerprintOf(baseLine, circle, baseArc, basePoint));
+    circle = baseCircle;
+    circle.center.y = 21.0;
+    differs("circle centre y", fingerprintOf(baseLine, circle, baseArc, basePoint));
+    circle = baseCircle;
+    circle.radiusMm = 6.0;
+    differs("circle radius", fingerprintOf(baseLine, circle, baseArc, basePoint));
+
+    SketchArc arc = baseArc;
+    arc.center.x = 31.0;
+    differs("arc centre x", fingerprintOf(baseLine, baseCircle, arc, basePoint));
+    arc = baseArc;
+    arc.center.y = 41.0;
+    differs("arc centre y", fingerprintOf(baseLine, baseCircle, arc, basePoint));
+    arc = baseArc;
+    arc.radiusMm = 8.0;
+    differs("arc radius", fingerprintOf(baseLine, baseCircle, arc, basePoint));
+    arc = baseArc;
+    arc.startAngleRad = 0.26;
+    differs("arc start angle", fingerprintOf(baseLine, baseCircle, arc, basePoint));
+    arc = baseArc;
+    arc.endAngleRad = 1.76;
+    differs("arc end angle", fingerprintOf(baseLine, baseCircle, arc, basePoint));
+    arc = baseArc;
+    arc.counterClockwise = false; // THE field the shipped code never mixed
+    differs("arc direction", fingerprintOf(baseLine, baseCircle, arc, basePoint));
+
+    SketchPoint point = basePoint;
+    point.position.x = 61.0;
+    differs("point x", fingerprintOf(baseLine, baseCircle, baseArc, point));
+    point = basePoint;
+    point.position.y = 71.0;
+    differs("point y", fingerprintOf(baseLine, baseCircle, baseArc, point));
+
+    // The ID contribution, isolated: the same four curves under a different id.
+    {
+        PartDocument document{"FP"};
+        Sketch& sketch = document.addSketch("S");
+        // Any id other than kLine proves the point; ALLOCATE it rather than
+        // inventing a constant the global generator can also hand out.
+        ASSERT_TRUE(sketch.restoreEntity(NextSketchEntityId(), baseLine));
+        ASSERT_TRUE(sketch.restoreEntity(kCircle, baseCircle));
+        ASSERT_TRUE(sketch.restoreEntity(kArc, baseArc));
+        ASSERT_TRUE(sketch.restoreEntity(kPoint, basePoint));
+        EXPECT_NE(FingerprintSketch(sketch), base)
+            << "the entity id is not contributing to the fingerprint";
+    }
 }
 
 } // namespace

@@ -637,7 +637,12 @@ ReconstructionPlan AnalyzeForReconstruction(const PartDocument& document, Object
 }
 
 std::uint64_t FingerprintSketch(const Sketch& sketch) {
-    // FNV-1a over every entity id and every coordinate. Not cryptographic and
+    // FNV-1a over every entity id and every field of its geometry.
+    //
+    // "every coordinate" is what this said until round 4, and the wording was
+    // load-bearing in the wrong direction: it let a non-coordinate geometric
+    // field (the arc's direction flag) look out of scope. Every field that
+    // changes WHICH CURVE the entity is belongs here. Not cryptographic and
     // does not need to be: it separates documents, and an adversary who can
     // hand-craft a colliding sketch can equally well hand-craft the plan.
     // Doubles are hashed by their exact bit pattern, so "the same drawing"
@@ -676,6 +681,14 @@ std::uint64_t FingerprintSketch(const Sketch& sketch) {
             mixDouble(arc->radiusMm);
             mixDouble(arc->startAngleRad);
             mixDouble(arc->endAngleRad);
+            // The direction flag is GEOMETRY, not a label: it selects which of
+            // the two arcs between these angles the entity actually is. Omitted
+            // until round 4 (R2R4-M4) while the comment above claimed
+            // "bit-identical geometry" -- and reachable, because removeEntity
+            // followed by restoreEntity puts the SAME id back with the opposite
+            // direction, so a plan built for one arc validated against the
+            // other.
+            mix(arc->counterClockwise ? 1ULL : 0ULL);
         } else if (const auto* point = std::get_if<SketchPoint>(&entity.geometry)) {
             mix(4);
             mixDouble(point->position.x);
@@ -733,12 +746,16 @@ PlanValidation ValidatePlanAgainstDocument(const PartDocument& document,
         const auto pointFor = [&](const SketchElementRef& ref) -> std::optional<Vec2> {
             const SketchEntity* entity = sketch->findEntity(ref.entityId);
             if (entity == nullptr) return std::nullopt;
-            switch (ref.subElement) {
-                case SketchSubElement::StartPoint: return StartPointOf(entity->geometry);
-                case SketchSubElement::EndPoint: return EndPointOf(entity->geometry);
-                case SketchSubElement::CenterPoint: return MidPointOf(entity->geometry);
-                default: return std::nullopt;
-            }
+            // THROUGH THE ONE LOOKUP, so a plan that names a spline point is
+            // checked against that point rather than skipped. A `default:`
+            // here answered "no such point" for every kind added after it,
+            // which turns a validation into a silent pass.
+            //
+            // MidPointOf, not the centre: for a line this predicate has always
+            // meant its middle, and the constraint plan was recorded that way.
+            if (ref.subElement == SketchSubElement::CenterPoint)
+                return MidPointOf(entity->geometry);
+            return PointOfSubElement(entity->geometry, ref.subElement, ref.index);
         };
 
         if (const auto* horizontal = std::get_if<HorizontalConstraint>(&planned.data)) {

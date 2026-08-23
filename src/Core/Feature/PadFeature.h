@@ -4,6 +4,7 @@
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
 #include "Core/Feature/IMaterialReferencing.h"
+#include "Core/Feature/ISketchConsuming.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
@@ -25,6 +26,7 @@ namespace paramcad {
 class PadFeature final : public Feature,
                         public IRecomputable,
                         public ISolidFeature,
+                        public ISketchConsuming,
                         public IMaterialReferencing {
 public:
     PadFeature(std::string name, ObjectId sketchId, ObjectId lengthParameterId,
@@ -39,6 +41,9 @@ public:
     std::string_view typeName() const noexcept override { return "Pad"; }
 
     ObjectId sketchId() const noexcept { return sketchId_; }
+    // ISketchConsuming: the same answer, asked the way code that does not know
+    // this type has to ask it.
+    ObjectId consumedSketchId() const noexcept override { return sketchId_; }
     ObjectId lengthParameterId() const noexcept { return lengthParameterId_; }
     ObjectId materialId() const noexcept override { return materialId_; }
     void clearMaterialReference() noexcept override { materialId_ = kInvalidObjectId; }

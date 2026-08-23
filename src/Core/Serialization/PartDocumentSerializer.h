@@ -39,6 +39,17 @@ namespace paramcad {
 // their exact enumerator-name strings.
 // Stateless free functions; no exceptions cross this API.
 
+// The schema version SaveDocument stamps, and the newest one LoadDocument will
+// accept.
+//
+// Exported so a test can say "relabel this as one version older" without
+// spelling out the current number -- a literal that lived in five suites and
+// turned all of them red at every bump, for reasons that had nothing to do with
+// what any of them tests. ONE test still pins the literal on purpose: a bump
+// nobody noticed is worth an alarm, and a constant compared against itself is
+// not one.
+int CurrentSchemaVersion() noexcept;
+
 enum class SerializationError {
     None,
     FileNotFound,

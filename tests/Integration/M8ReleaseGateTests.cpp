@@ -64,13 +64,28 @@ public:
         ++revolveCallCount;
         return inner_.revolveProfile(profile, axisOriginMm, axisDirection, angleRad);
     }
-    ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) override {
+    ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
+                            double radiusMm) override {
         ++filletCallCount;
-        return inner_.filletAllEdges(shape, radiusMm);
+        return inner_.filletEdges(shape, selection, radiusMm);
     }
-    ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) override {
+    ShapeResult chamferEdges(const KernelShape& shape, const EdgeSelection& selection,
+                             double distanceMm) override {
         ++chamferCallCount;
-        return inner_.chamferAllEdges(shape, distanceMm);
+        return inner_.chamferEdges(shape, selection, distanceMm);
+    }
+    // M10.6 verbs. Forwarded, uncounted: these suites predate them and none
+    // of their gates is about mirroring, so counting would add a member every
+    // fixture has to ignore.
+    ShapeResult mirrorShape(const KernelShape& shape, const Vec3& planeOriginMm,
+                            const Vec3& planeNormal) override {
+        return inner_.mirrorShape(shape, planeOriginMm, planeNormal);
+    }
+    ShapeResult translateShape(const KernelShape& shape, const Vec3& offsetMm) override {
+        return inner_.translateShape(shape, offsetMm);
+    }
+    ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) override {
+        return inner_.fuseShapes(a, b);
     }
     int extrudes = 0;
     int subtracts = 0;
@@ -228,7 +243,11 @@ TEST(M8ReleaseGate, GATE_E_InvalidDepthFailsThePocketOnlyAndRecovers) {
     ASSERT_TRUE(fx.document.recompute().success);
     const double good = fx.volume();
 
-    for (double bad : {0.0, -5.0, std::numeric_limits<double>::quiet_NaN()}) {
+    // -5.0 LEFT THIS LIST at M17.8: a negative depth is a DIRECTION and cuts
+    // the other way (ADR-M17-031), which is a perfectly good pocket and not a
+    // failure to isolate. Zero and NaN are what still have no magnitude, and
+    // isolating THEIR failure is what this gate is about.
+    for (double bad : {0.0, std::numeric_limits<double>::quiet_NaN()}) {
         ASSERT_TRUE(fx.document.setParameterValue(fx.depth->id(), bad));
         fx.document.recompute();
         // The pocket fails; the BASE stays valid -- failure never travels
@@ -258,7 +277,12 @@ TEST(M8ReleaseGate, GATE_E2_APocketNeverCutsAFailedBasesRetainedShape) {
     // shape (ADR-M3-001/004 keeps it byte-for-byte). The base is present,
     // resolvable, and carrying a perfectly usable-looking stale solid: the one
     // situation where cutting would produce a current-looking wrong part.
-    ASSERT_TRUE(fx.document.setParameterValue(fx.padLength->id(), -1.0));
+    // 0.0, not a negative value: since M17.8 a negative length is a
+    // DIRECTION and builds a perfectly good solid on the other side of the
+    // plane (ADR-M17-031). Zero is what still has no magnitude, and failing
+    // the feature is what this gate needs -- the value is the lever, not the
+    // subject.
+    ASSERT_TRUE(fx.document.setParameterValue(fx.padLength->id(), 0.0));
     const DocumentRecomputeReport report = fx.document.recompute();
     EXPECT_FALSE(report.success);
     ASSERT_EQ(fx.pad->state(), ComputeState::Failed);
@@ -380,7 +404,12 @@ TEST(M8ReleaseGate, GATE_H_PresenterShowsOnlyTheChainTail) {
     // the part had healed. The pocket keeps its retained shape but is not
     // Valid, so nothing in this body displays; stale is visible as absence,
     // never as a healthy-looking wrong solid.
-    ASSERT_TRUE(fx.document.setParameterValue(fx.depth->id(), -1.0));
+    // 0.0, not a negative value: since M17.8 a negative length is a
+    // DIRECTION and builds a perfectly good solid on the other side of the
+    // plane (ADR-M17-031). Zero is what still has no magnitude, and failing
+    // the feature is what this gate needs -- the value is the lever, not the
+    // subject.
+    ASSERT_TRUE(fx.document.setParameterValue(fx.depth->id(), 0.0));
     fx.document.recompute();
     EXPECT_EQ(fx.pocket->state(), ComputeState::Failed);
     const std::vector<ObjectId> afterFailure = presenter.displayableSolids();
@@ -855,7 +884,12 @@ TEST(M8ReleaseGate, GATE_E3_APersistedFailureStillBlocksThePocketOnALaterEdit) {
     // and EdgeRewireAcrossFailedPrerequisite (list completed in round 3).
     ChainFixture fx;
     ASSERT_TRUE(fx.document.recompute().success);
-    ASSERT_TRUE(fx.document.setParameterValue(fx.padLength->id(), -1.0));
+    // 0.0, not a negative value: since M17.8 a negative length is a
+    // DIRECTION and builds a perfectly good solid on the other side of the
+    // plane (ADR-M17-031). Zero is what still has no magnitude, and failing
+    // the feature is what this gate needs -- the value is the lever, not the
+    // subject.
+    ASSERT_TRUE(fx.document.setParameterValue(fx.padLength->id(), 0.0));
     EXPECT_FALSE(fx.document.recompute().success);
     ASSERT_EQ(fx.pad->state(), ComputeState::Failed);
 

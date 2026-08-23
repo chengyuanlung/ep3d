@@ -27,8 +27,15 @@ add_library(ParametricCADCore
     src/Core/Feature/RevolveFeature.cpp
     src/Core/Feature/EdgeDressFeatures.cpp
     src/Core/Feature/PlaceholderFeature.cpp
+    src/Core/Feature/FeatureSnapshot.cpp
+    src/Core/Feature/TransformFeatures.cpp
+    src/Core/Edit/FeatureEditSession.cpp
+    src/Core/Geometry/Transform.cpp
     src/Core/Kernel/KernelShape.cpp
     src/Core/Kernel/ProfileDefinition.cpp
+    src/Core/Kernel/EdgeQuery.cpp
+    src/Core/Kernel/FaceQuery.cpp
+    src/Core/Measure/SketchMeasure.cpp
     src/Core/Physics/MassPropertiesNode.cpp
     src/Core/Serialization/JsonValue.cpp
     src/Core/Serialization/PartDocumentSerializer.cpp
@@ -44,6 +51,9 @@ add_library(ParametricCADCore
     src/Core/Sketch/SketchFrame.cpp
     src/Core/Sketch/SketchTypes.cpp
     src/Core/Connector/Connector.cpp
+    src/Core/Expression/ExpressionTypes.cpp
+    src/Core/Expression/ExpressionParser.cpp
+    src/Core/Expression/ExpressionEvaluator.cpp
 )
 
 target_include_directories(ParametricCADCore PUBLIC src)
@@ -85,6 +95,10 @@ endif()
 if(PARAMCAD_BUILD_KERNEL_OCCT AND OpenCASCADE_FOUND)
     add_library(ParametricCADKernelOcct
         src/Kernel/Occt/OcctGeometryKernel.cpp
+        src/Kernel/Occt/OcctFaceQuery.cpp
+        src/Kernel/Occt/OcctSketchWireframe.cpp
+        src/Kernel/Occt/OcctSplineCurve.cpp
+        src/Kernel/Occt/OcctProvenance.cpp
     )
     target_include_directories(ParametricCADKernelOcct PRIVATE ${OpenCASCADE_INCLUDE_DIR})
     target_link_libraries(ParametricCADKernelOcct
@@ -192,6 +206,10 @@ option(PARAMCAD_BUILD_VIEWER "Build the Qt viewer" ON)
 add_library(ParametricCADViewerCore
     src/Viewer/DocumentPresenter.cpp
     src/Viewer/DocumentOutline.cpp
+    src/Viewer/PropertyEditing.cpp
+    src/Viewer/SketchCanvas.cpp
+    src/Viewer/SketchCommands.cpp
+    src/Viewer/FaceSketch.cpp
 )
 target_include_directories(ParametricCADViewerCore PUBLIC src)
 target_link_libraries(ParametricCADViewerCore PUBLIC ParametricCADCore)
@@ -200,8 +218,55 @@ if(MSVC)
     target_compile_options(ParametricCADViewerCore PRIVATE /utf-8)
 endif()
 
+# --- The headless command line (M17.27) --------------------------------------
+#
+# ParametricCADViewerCore is Qt-free -- it is the sketch MODEL and the commands,
+# not the widgets -- so the script interpreter and the `ep3d` binary link
+# against it and need no Qt at all. That is what makes this runnable in CI, in
+# a container, and over ssh, which "the viewer with a flag" would not be.
+add_library(ParametricCADCli src/Cli/SketchScript.cpp)
+target_include_directories(ParametricCADCli PUBLIC src)
+target_link_libraries(ParametricCADCli PUBLIC ParametricCADViewerCore)
+target_compile_features(ParametricCADCli PUBLIC cxx_std_20)
+if(MSVC)
+    target_compile_options(ParametricCADCli PRIVATE /utf-8)
+endif()
+
+if(TARGET ParametricCADKernelOcct)
+    add_executable(ep3d tools/Ep3dCli.cpp tools/Ep3dConnect.cpp)
+    target_include_directories(ep3d PRIVATE tools)
+    if(WIN32)
+        target_link_libraries(ep3d PRIVATE ws2_32)
+    endif()
+    target_link_libraries(ep3d PRIVATE ParametricCADCli ParametricCADSolver
+                          ParametricCADKernelOcct)
+    if(MSVC)
+        target_compile_options(ep3d PRIVATE /utf-8)
+    endif()
+
+    # RUN THE REAL BINARY ON THE REAL SCRIPT, in CI.
+    #
+    # CliScriptTests drives the interpreter directly, which is the right place
+    # for the behaviour -- but it cannot say whether the EXE parses its own
+    # arguments, finds the file, or exits with the code a build system reads.
+    # Those are exactly the things --selftest exists for on the viewer side,
+    # and they went wrong three times there.
+    if(BUILD_TESTING)
+        add_test(NAME Ep3dCli_WorkedExample
+                 COMMAND ep3d --script
+                         ${CMAKE_CURRENT_SOURCE_DIR}/examples/spline-and-ellipse.ep3ds
+                         --out ${CMAKE_CURRENT_BINARY_DIR}/cli-example.ep3d)
+        # ...and a script that fails must FAIL, or a green CI means nothing.
+        add_test(NAME Ep3dCli_RefusesAnUnknownTool
+                 COMMAND ep3d --script
+                         ${CMAKE_CURRENT_SOURCE_DIR}/examples/bad-tool.ep3ds)
+        set_tests_properties(Ep3dCli_RefusesAnUnknownTool PROPERTIES WILL_FAIL TRUE)
+    endif()
+endif()
+
 if(PARAMCAD_BUILD_VIEWER)
-    find_package(Qt6 CONFIG QUIET COMPONENTS Core Gui Widgets
+    # Network joins for the script server (M17.28), which is loopback-only.
+    find_package(Qt6 CONFIG QUIET COMPONENTS Core Gui Widgets Network
         NO_CMAKE_PACKAGE_REGISTRY
         NO_CMAKE_SYSTEM_PACKAGE_REGISTRY
     )
@@ -213,11 +278,15 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
         src/Viewer/main.cpp
         src/Viewer/MainWindow.cpp
         src/Viewer/OcctViewWidget.cpp
+        src/Viewer/SketchCanvasWidget.cpp
+        src/Viewer/SketchIcons.cpp
+        src/Viewer/ScriptServer.cpp
     )
     target_include_directories(ParametricCADViewer PRIVATE src ${OpenCASCADE_INCLUDE_DIR})
     target_link_libraries(ParametricCADViewer
         PRIVATE ParametricCADCore ParametricCADViewerCore ParametricCADKernelOcct
-                Qt6::Core Qt6::Gui Qt6::Widgets
+                ParametricCADCli
+                Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network
                 ${OpenCASCADE_LIBRARIES}
     )
     # The viewer is an APPLICATION, so it is allowed to name a concrete solver
@@ -266,7 +335,21 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
         # solved, under-constrained and conflicting paths unexercised in the
         # running program -- and those are exactly the states spec 18's UI
         # requirements are about.
-        foreach(sample m5-rectangle m5-underconstrained m5-conflict m5-circle m8-chain)
+        # m8-revolve and m8-dress carry the other three M8 feature kinds into
+        # the running shell. Without them Revolve, Fillet and Chamfer -- three
+        # of the four features M8 spec 4 requires -- were unreachable from the
+        # application, so owner UI validation could only ever have covered the
+        # pocket.
+        # EVERY sample the binary accepts, checked against parseSample's own
+        # list (M17.13). Three -- m4-circle-r10, m4-circle-r20 and
+        # m4-failed-profile -- were reachable from the command line and never
+        # run by anything: a state the application can be in that nothing ever
+        # entered. A sample nobody runs is a sample nobody notices breaking,
+        # and this suite exists precisely because unexercised states are where
+        # this project's defects live.
+        foreach(sample m4-circle-r10 m4-circle-r20 m4-failed-profile
+                       m5-rectangle m5-underconstrained m5-conflict m5-circle m8-chain
+                       m8-revolve m8-dress m10-frame m11-expression m12-sketch)
             add_test(NAME ViewerSmokeTest_${sample}
                      COMMAND ParametricCADViewer --selftest --sample ${sample})
             set_tests_properties(ViewerSmokeTest_${sample} PROPERTIES TIMEOUT 60)
@@ -324,6 +407,9 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
             # one: mixed.dxf carries no dimensions and dimensioned_rectangle
             # reconstructs both, so the skip-diagnostic row never rendered once
             # in CI and deleting the loop that draws it left all 15 viewer
+            # (the count AS OF `9e0c399`, the commit this describes; there are
+            # 21 registered now -- a historical count, dated, because round 4
+            # had to check whether it was stale)
             # smoke tests green. This file's width dimension states 250 against
             # 99.5 mm of geometry, so it is refused and the height is kept.
             add_test(NAME ViewerSmokeTest_ImportsWithASkippedDimension
@@ -427,6 +513,15 @@ if(PARAMCAD_BUILD_TESTS)
         tests/SerializationV6Tests.cpp
         tests/SerializationV7Tests.cpp
         tests/SerializationV8Tests.cpp
+        tests/ExpressionTests.cpp
+        tests/ExpressionWiringTests.cpp
+        tests/PropertyEditingTests.cpp
+        tests/FaceSketchTests.cpp
+        tests/SketchCanvasTests.cpp
+        tests/SketchMeasureTests.cpp
+        tests/SerializationV11Tests.cpp
+        tests/SerializationV12Tests.cpp
+        tests/SerializationV13Tests.cpp
         # LAST, and the comment above says why. M7 added its five files BELOW
         # this line and broke the rule the comment states in capitals: three
         # M7 persistence tests then ran against a generator already advanced to
@@ -506,9 +601,21 @@ if(PARAMCAD_BUILD_TESTS)
         add_executable(ParametricCADSolverTests
             tests/Solver/SketchSolverTests.cpp
             tests/Solver/SketchConstraintTests.cpp
+            # M12: the sketch UI's decision layer with a REAL solver behind it.
+            # It links ParametricCADViewerCore, which is Qt-free -- the UI's
+            # DOF and conflict reporting cannot be tested against a default
+            # value, and no widget is needed to test it.
+            tests/Solver/SketchCanvasSolveTests.cpp
+            # M13: the seven geometric constraints. They are Core types with
+            # Core residuals, but only a real solver can show that a residual
+            # drives the relationship it is named after.
+            tests/Solver/SketchGeometricConstraintTests.cpp
+            # M17.6: projected reference geometry and the Use tool.
+            tests/Solver/ReferenceGeometryTests.cpp
         )
         target_link_libraries(ParametricCADSolverTests
-            PRIVATE ParametricCADCore ParametricCADSolver GTest::gtest_main
+            PRIVATE ParametricCADCore ParametricCADSolver ParametricCADViewerCore
+                    GTest::gtest_main
         )
         if(MSVC)
             target_compile_options(ParametricCADSolverTests PRIVATE /utf-8)
@@ -527,6 +634,9 @@ if(PARAMCAD_BUILD_TESTS)
         add_executable(ParametricCADKernelOcctTests
             tests/Kernel/OcctGeometryKernelTests.cpp
             tests/Kernel/OcctExtrudeTests.cpp
+            tests/Kernel/OcctFaceQueryTests.cpp
+            tests/Kernel/OcctSketchWireframeTests.cpp
+            tests/Kernel/OcctEdgeQueryTests.cpp
             tests/Kernel/OcctBooleanTests.cpp
             tests/Kernel/OcctRevolveTests.cpp
             tests/Kernel/OcctFilletChamferTests.cpp
@@ -606,13 +716,17 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Integration/M5AdversarialTests.cpp
             tests/Integration/M7ReleaseGateTests.cpp
             tests/Integration/M8ReleaseGateTests.cpp
+            tests/Integration/M17FaceSketchTests.cpp
+            tests/Integration/M9ReleaseGateTests.cpp
+            tests/Integration/M10ReleaseGateTests.cpp
+            tests/Integration/CliScriptTests.cpp
         )
         # ViewerCore joins so the UI's decisions can be checked against a REAL
         # solve. Faking solver output would make those tests agree with a stub
         # rather than with the solver the user runs.
         target_link_libraries(ParametricCADIntegrationTests
             PRIVATE ParametricCADCore ParametricCADSolver ParametricCADKernelOcct
-                    ParametricCADViewerCore GTest::gtest_main
+                    ParametricCADViewerCore ParametricCADCli GTest::gtest_main
         )
         if(MSVC)
             target_compile_options(ParametricCADIntegrationTests PRIVATE /utf-8)
@@ -621,3 +735,17 @@ if(PARAMCAD_BUILD_TESTS)
         paramcad_add_whole_suite_test(ParametricCADIntegrationTests)
     endif()
 endif()
+# The generator for the worked example under examples/.
+#
+# EXCLUDE_FROM_ALL: it is a tool, not a product target. Build it by name when
+# the example needs regenerating:
+#
+#   cmake --build build --config Debug --target MakeExampleEp3d
+#   ./build/Debug/MakeExampleEp3d.exe
+#
+# It writes the file, reads it straight back and re-solves it, so a broken
+# example cannot be produced silently -- which is how it found the loader that
+# was dropping an ellipse dimension's Parameter (ADR-M17-050).
+add_executable(MakeExampleEp3d EXCLUDE_FROM_ALL tools/MakeExampleEp3d.cpp)
+target_link_libraries(MakeExampleEp3d PRIVATE ParametricCADCore ParametricCADSolver
+                      ParametricCADKernelOcct)

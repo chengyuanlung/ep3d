@@ -48,9 +48,20 @@ std::string EntityFingerprint(const SketchEntity& entity) {
                 out << "L " << g.start.x << ' ' << g.start.y << ' ' << g.end.x << ' ' << g.end.y;
             } else if constexpr (std::is_same_v<T, SketchCircle>) {
                 out << "C " << g.center.x << ' ' << g.center.y << ' ' << g.radiusMm;
-            } else {
+            } else if constexpr (std::is_same_v<T, SketchArc>) {
                 out << "A " << g.center.x << ' ' << g.center.y << ' ' << g.radiusMm << ' '
                     << g.startAngleRad << ' ' << g.endAngleRad << ' ' << g.counterClockwise;
+            } else if constexpr (std::is_same_v<T, SketchEllipse>) {
+                out << "E " << g.center.x << ' ' << g.center.y << ' ' << g.majorRadiusMm << ' '
+                    << g.minorRadiusMm << ' ' << g.rotationRad;
+            } else if constexpr (std::is_same_v<T, SketchSpline>) {
+                out << (g.closed ? "SC" : "S") << ' ' << g.points.size();
+                for (const Vec2& point : g.points) out << ' ' << point.x << ' ' << point.y;
+            } else {
+                static_assert(std::is_same_v<T, SketchEllipticalArc>);
+                out << "EA " << g.center.x << ' ' << g.center.y << ' ' << g.majorRadiusMm << ' '
+                    << g.minorRadiusMm << ' ' << g.rotationRad << ' ' << g.startParamRad << ' '
+                    << g.endParamRad << ' ' << g.counterClockwise;
             }
         },
         entity.geometry);
@@ -1489,6 +1500,13 @@ TEST(M6DxfImport, M6_TRANSACTION_001_AnEmptyImportLeavesNoSketchBehind) {
     // was -- no orphan sketch, no registry entry, no graph node.
     PartDocument document{"Empty"};
     const std::size_t before = document.sketches().size();
+    // RELATIVE, not an absolute count. This asserted `== 1u` -- the
+    // MassPropertiesNode -- until M10 registered the Origin frame and made it
+    // 2. The property being tested is "the failed import left nothing behind",
+    // and a before/after comparison says exactly that, while an absolute
+    // number says it only until the next milestone registers something. The
+    // same file already uses this form elsewhere.
+    const std::size_t registryBefore = document.objectRegistry().size();
 
     ImportedSketchGeometry nothing;
     nothing.skipped.push_back(ImportedSkip{ImportSkipReason::UnsupportedEntity, "SPLINE",
@@ -1498,7 +1516,7 @@ TEST(M6DxfImport, M6_TRANSACTION_001_AnEmptyImportLeavesNoSketchBehind) {
     EXPECT_FALSE(result);
     EXPECT_FALSE(result.message.empty());
     EXPECT_EQ(document.sketches().size(), before) << "a failed import left a sketch behind";
-    EXPECT_EQ(document.objectRegistry().size(), 1u)
+    EXPECT_EQ(document.objectRegistry().size(), registryBefore)
         << "a failed import left an orphan registry entry";
 }
 

@@ -5,11 +5,13 @@
 #include "Core/Feature/Feature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISolidFeature.h"
+#include "Core/Kernel/EdgeQuery.h"
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace paramcad {
 
@@ -22,11 +24,13 @@ namespace paramcad {
 // parallel kinds; here the parallelism is enforced by a shared base class,
 // so a guard added to one cannot be forgotten on the other.
 //
-// ALL edges, deliberately (ADR-M8-006). Selective edges need an edge the
-// document can NAME, and the only name available today is an OCCT explorer
-// position -- transient topology, which ADR-M4-004 forbids as identity.
-// Selection waits for the roadmap's selection architecture; nothing here
-// pre-decides its shape.
+// WHICH edges is an EdgeSelection -- a query, answered again on every rebuild
+// (M17.12, ADR-M17-034), which is what M8's "selection waits for the
+// architecture" was waiting for. The feature holds the sentence, never an
+// edge and never an index into one: transient topology as identity is what
+// ADR-M4-004 forbids, and it is also simply wrong the first time a parameter
+// changes. The default is every edge, so M8's behaviour and every file
+// written before this are unchanged.
 //
 // Chain semantics are Pocket's exactly: base by ObjectId through
 // ISolidFeature, no cached upstream geometry, consumedSolidId() declares the
@@ -40,6 +44,8 @@ public:
 
     ObjectId baseFeatureId() const noexcept { return baseFeatureId_; }
     ObjectId sizeParameterId() const noexcept { return sizeParameterId_; }
+
+    const EdgeSelection& edgeSelection() const noexcept { return edgeSelection_; }
     ObjectId materialId() const noexcept override { return materialId_; }
     void clearMaterialReference() noexcept override { materialId_ = kInvalidObjectId; }
     void setMaterialReference(ObjectId materialId) noexcept override {
@@ -63,13 +69,30 @@ protected:
     // The one point of divergence: which kernel verb, and what to call the
     // size in a diagnostic.
     virtual ShapeResult applyDress(IGeometryKernel& kernel, const KernelShape& base,
-                                   double sizeMm) const = 0;
+                                   const EdgeSelection& selection, double sizeMm) const = 0;
     virtual const char* dressNoun() const noexcept = 0;
 
 private:
+    // Replaces WHICH edges are dressed -- PRIVATE, with PartDocument as the
+    // only caller (M17.13, ADR-M17-035).
+    //
+    // Changing the selection changes what this feature produces, so the graph
+    // has to be told; setting it directly leaves the feature clean and the
+    // next recompute skips it, handing back the shape from the previous
+    // selection while the model says otherwise. That is not hypothetical: the
+    // first version of this was public, and a test that set three different
+    // selections got three identical solids.
+    //
+    // "Only the document should call it" was a comment in
+    // IMaterialReferencing once, and a comment enforces nothing. Now the
+    // compiler says it, through the same NVI shape.
+    friend class PartDocument;
+    void setEdgeSelection(EdgeSelection selection) { edgeSelection_ = std::move(selection); }
+
     ObjectId baseFeatureId_;
     ObjectId sizeParameterId_;
     ObjectId materialId_;
+    EdgeSelection edgeSelection_ = AllEdgesSelection();
     KernelShape currentShape_;
 };
 
@@ -86,7 +109,7 @@ public:
 
 protected:
     ShapeResult applyDress(IGeometryKernel& kernel, const KernelShape& base,
-                           double sizeMm) const override;
+                           const EdgeSelection& selection, double sizeMm) const override;
     const char* dressNoun() const noexcept override { return "fillet"; }
 };
 
@@ -103,7 +126,7 @@ public:
 
 protected:
     ShapeResult applyDress(IGeometryKernel& kernel, const KernelShape& base,
-                           double sizeMm) const override;
+                           const EdgeSelection& selection, double sizeMm) const override;
     const char* dressNoun() const noexcept override { return "chamfer"; }
 };
 

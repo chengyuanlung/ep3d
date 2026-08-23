@@ -110,7 +110,9 @@ TEST(SketchConstraintTest, M5_ID_002_DuplicateRestoredConstraintIdRejected) {
 
 TEST(SketchConstraintTest, M5_ID_003_ConstraintReferencingAnUnknownEntityIsRejected) {
     RectangleSketch fx;
-    EXPECT_EQ(fx.sketch->addConstraint(HorizontalConstraint{SketchEntityId{987654}}),
+    // A FRESHLY allocated id is the only id guaranteed absent from the
+    // sketch. A literal is merely absent today.
+    EXPECT_EQ(fx.sketch->addConstraint(HorizontalConstraint{NextSketchEntityId()}),
               kInvalidSketchConstraintId);
     EXPECT_TRUE(fx.sketch->constraints().empty());
 }

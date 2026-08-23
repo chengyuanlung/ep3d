@@ -194,7 +194,7 @@ std::vector<ObjectId> DependencyGraph::topologicalOrder() const {
     return order;
 }
 
-RecomputeReport DependencyGraph::recompute(const ComputeFn& fn) {
+RecomputeReport DependencyGraph::recompute(const ComputeFn& fn, const SkipFn& skip) {
     assert(fn && "DependencyGraph::recompute: null compute function");
     RecomputeReport report;
     if (!fn) return report;
@@ -221,6 +221,12 @@ RecomputeReport DependencyGraph::recompute(const ComputeFn& fn) {
         const bool isTouched = node->state == ComputeState::Dirty || upstreamTouched;
         if (isTouched) touched.insert(id);
 
+        if (skip && skip(id)) {
+            // Outside the evaluated region this pass. Not invoked, state
+            // untouched, and it does NOT pass an upstream failure on: nothing
+            // ran here, so there is no result to be wrong.
+            continue;
+        }
         if (node->state == ComputeState::Suppressed) {
             // Never invoked, stays Suppressed; failure passes through.
             if (upstreamFailed) failing.insert(id);

@@ -32,7 +32,8 @@ enum class OutlineState {
 // icons and grouping; it is NOT a type discriminator for behaviour -- code that
 // needs behaviour asks for a capability (ADR-M3-007).
 enum class OutlineKind {
-    Document, Parameter, Sketch, Constraint, Solid, MassProperties, Material, Other
+    Document, Parameter, Sketch, Constraint, Solid, MassProperties, Material,
+    Frame, Connector, Other
 };
 
 struct OutlineNode {
@@ -50,6 +51,34 @@ struct OutlineNode {
 // `unitLabel` is separate from `value` on purpose: UI spec 8 makes a wrong or
 // missing unit a Critical defect, and a formatter that bakes the unit into the
 // value string cannot be checked for that.
+// Which editable thing a row writes to (M11.3).
+//
+// A parameter now has TWO editable aspects -- its literal value and the
+// expression that may drive it -- and the commit handler cannot tell them apart
+// from the id alone. Naming the field is what keeps the panel from guessing.
+enum class PropertyField {
+    None,       // not editable
+    Value,      // a plain number
+    Expression, // expression text; empty clears it
+    // A CHECKBOX over the SIGN of the same parameter (M17.8, ADR-M17-031).
+    //
+    // Not a second stored value. A pad or pocket already carries its direction
+    // in the sign of its length: negative builds on the other side of the
+    // sketch plane. A separate `reversed` flag would be a second truth about
+    // one fact, and the two would eventually disagree -- a stored flag saying
+    // "reversed" over a length the user had since typed a minus sign into is a
+    // feature that points the way neither of them asked for.
+    //
+    // So this row READS the sign and WRITES the sign. There is one fact, shown
+    // in the form a user can act on: "-5 mm deep" is an odd thing to read, and
+    // a ticked Reversed box is not.
+    Reversed,
+    // The object's own NAME (M17.16, ADR-M17-039). `parameterId` on such a row
+    // carries the OBJECT's id, not a parameter's -- the field has always meant
+    // "what to write", and a name is written to the thing itself.
+    Name
+};
+
 struct PropertyRow {
     std::string group;      // "General", "Geometry", "Material", ...
     std::string label;
@@ -58,6 +87,9 @@ struct PropertyRow {
     bool editable{false};
     ObjectId parameterId{kInvalidObjectId}; // set when editable: what to write
     double numericValue{0.0};
+    // Defaulted, so every existing 7-argument aggregate initialisation of this
+    // struct keeps compiling and keeps meaning what it meant.
+    PropertyField field{PropertyField::None};
 };
 
 // Builds the tree and property views of a document. Free of Qt and of OCCT, so

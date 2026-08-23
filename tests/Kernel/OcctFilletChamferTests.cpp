@@ -1,4 +1,4 @@
-// M8.3: filletAllEdges / chamferAllEdges at the kernel boundary, against real
+// M8.3: fillet / chamfer at the kernel boundary, against real
 // OCCT, with hand-computed volumes.
 //
 // FILLET oracle -- the Minkowski rounded box. Filleting every edge of a
@@ -21,6 +21,7 @@
 
 #include "Kernel/Occt/OcctGeometryKernel.h"
 #include <gtest/gtest.h>
+#include <cstdio>
 #include <cmath>
 
 namespace {
@@ -63,7 +64,7 @@ TEST(M8OcctFilletChamfer, GATE_FA_FilletedBoxMatchesTheMinkowskiOracle) {
     // 100 x 50 x 20 box as a prism, filleted r=2 on all 12 edges.
     ShapeResult box = kernel.extrudeProfile(RectangleProfile(0, 0, 100, 50), 20.0);
     ASSERT_TRUE(box) << box.message;
-    ShapeResult rounded = kernel.filletAllEdges(box.shape, 2.0);
+    ShapeResult rounded = kernel.filletEdges(box.shape, AllEdgesSelection(), 2.0);
     ASSERT_TRUE(rounded) << rounded.message;
 
     // Inner 96x46x16 = 70656; slabs 2*2*(96*46+96*16+46*16) = 26752;
@@ -79,7 +80,7 @@ TEST(M8OcctFilletChamfer, GATE_CA_ChamferedCylinderMatchesThePappusOracle) {
     // Cylinder r=20, h=40, both rim edges chamfered c=2.
     ShapeResult cylinder = kernel.extrudeProfile(CircleProfile(0, 0, 20.0), 40.0);
     ASSERT_TRUE(cylinder) << cylinder.message;
-    ShapeResult chamfered = kernel.chamferAllEdges(cylinder.shape, 2.0);
+    ShapeResult chamfered = kernel.chamferEdges(cylinder.shape, AllEdgesSelection(), 2.0);
     ASSERT_TRUE(chamfered) << chamfered.message;
 
     // Removed per rim: 2*pi*(20 - 2/3)*(4/2) = 2*pi*(58/3)*2. Two rims.
@@ -92,8 +93,8 @@ TEST(M8OcctFilletChamfer, FilletAndChamferOfTheSameSizeDiffer) {
     OcctGeometryKernel kernel;
     ShapeResult cylinder = kernel.extrudeProfile(CircleProfile(0, 0, 20.0), 40.0);
     ASSERT_TRUE(cylinder) << cylinder.message;
-    ShapeResult filleted = kernel.filletAllEdges(cylinder.shape, 2.0);
-    ShapeResult chamfered = kernel.chamferAllEdges(cylinder.shape, 2.0);
+    ShapeResult filleted = kernel.filletEdges(cylinder.shape, AllEdgesSelection(), 2.0);
+    ShapeResult chamfered = kernel.chamferEdges(cylinder.shape, AllEdgesSelection(), 2.0);
     ASSERT_TRUE(filleted) << filleted.message;
     ASSERT_TRUE(chamfered) << chamfered.message;
 
@@ -125,14 +126,14 @@ TEST(M8OcctFilletChamfer, AnImpossibleSizeIsRefusedNotCorrupted) {
 
     // Radius 15 > half the 20mm thickness: the rounds collide. OCCT must fail
     // it cleanly, and the input must remain intact.
-    ShapeResult refused = kernel.filletAllEdges(box.shape, 15.0);
+    ShapeResult refused = kernel.filletEdges(box.shape, AllEdgesSelection(), 15.0);
     EXPECT_FALSE(refused);
     EXPECT_NEAR(VolumeOf(kernel, box.shape), 100000.0, 1e-6);
 
     // And the plain invalid values.
     for (double bad : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN()}) {
-        EXPECT_FALSE(kernel.filletAllEdges(box.shape, bad));
-        EXPECT_FALSE(kernel.chamferAllEdges(box.shape, bad));
+        EXPECT_FALSE(kernel.filletEdges(box.shape, AllEdgesSelection(), bad));
+        EXPECT_FALSE(kernel.chamferEdges(box.shape, AllEdgesSelection(), bad));
     }
 }
 
@@ -148,9 +149,10 @@ TEST(M8OcctFilletChamfer, M8_REV_331_AnImpossibleChamferDistanceIsRefusedNotCorr
 
     // Distance 15 at 45 degrees from both faces of a 20mm slab: the bevels
     // collide. Refused cleanly, input intact.
-    ShapeResult refused = kernel.chamferAllEdges(box.shape, 15.0);
+    ShapeResult refused = kernel.chamferEdges(box.shape, AllEdgesSelection(), 15.0);
     EXPECT_FALSE(refused);
     EXPECT_NEAR(VolumeOf(kernel, box.shape), 100000.0, 1e-6);
 }
+
 
 } // namespace

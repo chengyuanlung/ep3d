@@ -263,14 +263,30 @@ ReconstructionResult ReconstructSketch(PartDocument& document, ObjectId sketchId
 
 // --- Idempotence (spec 25) --------------------------------------------------
 //
-// True when this sketch already carries reconstructed constraints, judged by
-// NATIVE state -- dimensional constraints bound to Parameters -- rather than by
-// a provenance flag, so it stays true after save/load and cannot be defeated by
-// a document that never recorded provenance.
+// True when this sketch already carries ANY constraint, judged by NATIVE state
+// rather than by a provenance flag, so it stays true after save/load and cannot
+// be defeated by a document that never recorded provenance.
 //
-// M7.1's contract: re-running reconstruction on an already-reconstructed sketch
-// is refused rather than duplicated, so the Width/Width_2/Width_3 accumulation
-// spec 25 forbids cannot happen by accident.
+// "Any constraint", not "dimensional constraints bound to Parameters", and the
+// difference is the whole point of M7 review round 2's R1-M3: every narrower
+// proxy for "reconstruction has run here" can be switched off by a SUPPORTED
+// option, and `placeFix=false` switched off the previous one, re-opening the
+// Width/Width_2/Width_3 accumulation this exists to prevent.
+//
+// The stated cost, unchanged: a HAND-CONSTRAINED sketch can no longer be
+// reconstructed from a drawing. That is M7.1's refuse-don't-merge contract
+// rather than a regression, and it is the price of a proxy no option can
+// disable.
+//
+// The name is wider than the predicate for the same reason -- it answers "has
+// anything already constrained this sketch", which is the question the caller
+// needs. This paragraph exists because until round 4 (R3R4-M4) the contract
+// above still described the OLD predicate: the fix documented itself in the
+// .cpp and left the header -- the thing a caller actually reads -- false.
+//
+// M7.1's contract: re-running reconstruction on an already-constrained sketch
+// is refused rather than duplicated, so the accumulation spec 25 forbids
+// cannot happen by accident.
 bool SketchAlreadyReconstructed(const PartDocument& document, ObjectId sketchId);
 
 } // namespace paramcad

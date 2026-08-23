@@ -14,8 +14,11 @@
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Fakes/FakeGeometryKernel.h"
+#include "Support/SchemaVersionText.h"
+
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -133,7 +136,7 @@ const Sketch& OnlySketch(const PartDocument& document) {
 // NAME must not keep asserting the value the body no longer does).
 TEST(SerializationV5Test, M5_SER_001_SchemaVersionIsPinned) {
     ConstrainedDoc doc;
-    EXPECT_NE(SaveToString(doc.document).find("\"schemaVersion\": 8"), std::string::npos); // v8: M8.3 Fillet/Chamfer
+    EXPECT_NE(SaveToString(doc.document).find(paramcad::testing::CurrentSchemaVersionField()), std::string::npos);
 }
 
 TEST(SerializationV5Test, M5_SER_002_AllNineConstraintKindsSurviveRoundTrip) {
@@ -268,20 +271,29 @@ TEST(SerializationV5Test, M5_SER_008_V4FileWithoutConstraintsStillLoads) {
 
     // Strip every constraints array and claim v4 -- exactly the shape of a file
     // written before M5 existed.
-    const std::size_t versionPos = saved.find("\"schemaVersion\": 8");
-    ASSERT_NE(versionPos, std::string::npos); // v8: M8.3 Fillet/Chamfer -- update on every bump
-    saved.replace(versionPos, 18, "\"schemaVersion\": 4");
-    for (;;) {
-        const std::size_t start = saved.find("\"constraints\": [");
-        if (start == std::string::npos) break;
-        const std::size_t end = saved.find(']', start);
-        ASSERT_NE(end, std::string::npos);
-        saved.erase(start, end - start + 1);
-        // Remove the now-trailing comma/whitespace the erase left behind.
-        std::size_t comma = saved.find_last_not_of(" \t\r\n", start - 1);
-        if (comma != std::string::npos && saved[comma] == ',') saved.erase(comma, 1);
-        comma = saved.find_first_not_of(" \t\r\n", start > comma ? comma : start);
-        if (comma != std::string::npos && saved[comma] == ',') saved.erase(comma, 1);
+    const std::size_t versionPos = saved.find(paramcad::testing::CurrentSchemaVersionField());
+    ASSERT_NE(versionPos, std::string::npos);
+    saved = paramcad::testing::WithSchemaVersion(saved, 4);
+    // ...along with every array a v4 writer did not know about. Stripping only
+    // `constraints` used to be enough; once v12 began writing
+    // `dimensionPlacements` and `dimensionFormats` right after it, the crude
+    // comma repair below left a dangling separator and the LOADER refused the
+    // file as malformed JSON -- a red result that said nothing about the
+    // backward compatibility this test is actually for.
+    for (const char* key : {"\"constraints\": [", "\"dimensionPlacements\": [",
+                            "\"dimensionFormats\": ["}) {
+        for (;;) {
+            const std::size_t start = saved.find(key);
+            if (start == std::string::npos) break;
+            const std::size_t end = saved.find(']', start);
+            ASSERT_NE(end, std::string::npos);
+            saved.erase(start, end - start + 1);
+            // Remove the now-trailing comma/whitespace the erase left behind.
+            std::size_t comma = saved.find_last_not_of(" \t\r\n", start - 1);
+            if (comma != std::string::npos && saved[comma] == ',') saved.erase(comma, 1);
+            comma = saved.find_first_not_of(" \t\r\n", start > comma ? comma : start);
+            if (comma != std::string::npos && saved[comma] == ',') saved.erase(comma, 1);
+        }
     }
 
     const LoadResult loaded = LoadFromString(saved);
@@ -514,9 +526,10 @@ TEST(SerializationV5Test, M5_SER_015_LoadAdvancesTheGeneratorPastSketchEntityAnd
     // The sketch is genuinely registered -- resolvable as a Sketch, not as
     // whatever object collided with it.
     const Sketch& after = OnlySketch(*loaded.document);
-    const ObjectRegistry::ObjectRef* ref = loaded.document->objectRegistry().find(after.id());
-    ASSERT_NE(ref, nullptr) << "the sketch is not in the registry at all";
-    EXPECT_TRUE(std::holds_alternative<Sketch*>(*ref))
+    const std::optional<ObjectRegistry::ConstObjectRef> ref =
+        loaded.document->objectRegistry().find(after.id());
+    ASSERT_TRUE(ref.has_value()) << "the sketch is not in the registry at all";
+    EXPECT_TRUE(std::holds_alternative<const Sketch*>(*ref))
         << "the sketch's id resolves to some other object";
     EXPECT_EQ(after.constraints().size(), doc.sketch->constraints().size());
 }
@@ -541,7 +554,7 @@ TEST(SerializationV5Test, M5_DELETE_007_RemovingABodyUnhooksItsFeatures) {
 
     ASSERT_TRUE(doc.document.removeObject(bodyId));
 
-    EXPECT_EQ(doc.document.objectRegistry().find(padId), nullptr)
+    EXPECT_FALSE(doc.document.objectRegistry().find(padId).has_value())
         << "a destroyed feature is still resolvable";
     EXPECT_FALSE(doc.document.dependencyGraph().hasNode(padId))
         << "a destroyed feature is still a graph node";
@@ -601,12 +614,15 @@ TEST(SerializationV5Test, M5_REV3_011_RestoringADuplicateMaterialIdDoesNotFreeTh
     EXPECT_EQ(document.material(), &original);
     EXPECT_EQ(document.material()->name(), "Steel");
     EXPECT_DOUBLE_EQ(document.material()->density(), 7850.0);
-    const ObjectRegistry::ObjectRef* ref = document.objectRegistry().find(id);
-    ASSERT_NE(ref, nullptr);
-    ASSERT_TRUE(std::holds_alternative<Material*>(*ref));
-    // The registered handle is the LIVE material, not a freed address.
-    EXPECT_EQ(*std::get_if<Material*>(ref), document.material());
-    EXPECT_DOUBLE_EQ((*std::get_if<Material*>(ref))->density(), 7850.0);
+    const std::optional<ObjectRegistry::ConstObjectRef> ref =
+        document.objectRegistry().find(id);
+    ASSERT_TRUE(ref.has_value());
+    ASSERT_TRUE(std::holds_alternative<const Material*>(*ref));
+    // The registered handle is the LIVE material, not a freed address. It is
+    // also const now (R2R4-M1): a reviewer doubled a density through exactly
+    // this handle, taken from a const document.
+    EXPECT_EQ(*std::get_if<const Material*>(&*ref), document.material());
+    EXPECT_DOUBLE_EQ((*std::get_if<const Material*>(&*ref))->density(), 7850.0);
 }
 
 TEST(SerializationV5Test, M5_REV3_012_RestoringADuplicateBodyOrFeatureIdIsRefused) {

@@ -9,6 +9,9 @@
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
+#include "Core/Sketch/Sketch.h"
+#include "Core/Body/Body.h"
+#include "Core/Parameter/Parameter.h"
 #include "Fakes/FakeGeometryKernel.h"
 #include "Viewer/DocumentOutline.h"
 #include "Viewer/DocumentPresenter.h"
@@ -193,3 +196,70 @@ TEST(ViewerPresenterTest, M4_VIEW_007_NonSolidFeaturesAreNotDisplayable) {
 }
 
 } // namespace
+
+// --- M17.7: sketches are part of the picture ---------------------------------
+
+TEST(ViewerPresenterTest, M17_VIEW_020_SketchesAreListedForThePartView) {
+    // Reported by the owner: after Finish Sketch the sketch was not in the part
+    // view at all. It existed only on the 2D canvas -- so nothing showed where
+    // it sat relative to anything else, which is the whole reason it has a
+    // plane.
+    PartDocument document{"SketchViewDoc"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    sketch.addLine(Vec2{0, 0}, Vec2{40, 0});
+    DocumentPresenter presenter{document};
+
+    const std::vector<ObjectId> ids = presenter.displayableSketches();
+    ASSERT_EQ(ids.size(), 1u);
+    EXPECT_EQ(ids.front(), sketch.id());
+}
+
+TEST(ViewerPresenterTest, M17_VIEW_021_AnEmptySketchIsNotAThingToDraw) {
+    // A scene object a user can select and cannot see is worse than nothing.
+    PartDocument document{"SketchViewDoc"};
+    document.addSketch("Sketch001");
+    DocumentPresenter presenter{document};
+    EXPECT_TRUE(presenter.displayableSketches().empty());
+}
+
+TEST(ViewerPresenterTest, M17_VIEW_022_HidingASketchStopsItBeingDrawnAndNothingElse) {
+    // Visibility is VIEW state (ADR-M4-014): Ctrl+H on a sketch must work
+    // exactly as it does on a solid, and must not touch the document.
+    PartDocument document{"SketchViewDoc"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    sketch.addLine(Vec2{0, 0}, Vec2{40, 0});
+    DocumentPresenter presenter{document};
+
+    presenter.setHidden(sketch.id(), true);
+    EXPECT_TRUE(presenter.displayableSketches().empty());
+    // Still in the document, still solvable, still saved.
+    EXPECT_NE(document.findSketch(sketch.id()), nullptr);
+    EXPECT_EQ(document.sketches().size(), 1u);
+
+    presenter.setHidden(sketch.id(), false);
+    EXPECT_EQ(presenter.displayableSketches().size(), 1u);
+}
+
+TEST(ViewerPresenterTest, M17_VIEW_023_ASketchConsumedByAPadIsSTILLDrawn) {
+    // Deliberately unlike a consumed SOLID, which is dropped because drawing it
+    // would overlay two versions of the same material and visually erase its
+    // successor's pocket. A sketch and the solid grown from it are different
+    // things: seeing the outline on the face is how a user checks the pad did
+    // what they meant. Ctrl+H is the switch for anyone who disagrees.
+    PartDocument document{"SketchViewDoc"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+    Parameter& length = document.addParameter("PadLength", 10.0, UnitType::Millimeter);
+    Sketch& sketch = document.addSketch("Sketch001");
+    sketch.addLine(Vec2{0, 0}, Vec2{40, 0});
+    sketch.addLine(Vec2{40, 0}, Vec2{40, 30});
+    sketch.addLine(Vec2{40, 30}, Vec2{0, 30});
+    sketch.addLine(Vec2{0, 30}, Vec2{0, 0});
+    Body& body = document.addBody("Body001");
+    document.addPadFeature(body, "Pad001", sketch.id(), length.id());
+    ASSERT_TRUE(document.recompute().success);
+
+    DocumentPresenter presenter{document};
+    ASSERT_EQ(presenter.displayableSketches().size(), 1u);
+    EXPECT_EQ(presenter.displayableSketches().front(), sketch.id());
+}

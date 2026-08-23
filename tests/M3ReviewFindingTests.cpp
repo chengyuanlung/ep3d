@@ -161,7 +161,7 @@ TEST(M3ReviewFindingTest, MAJOR3_RemovingBoxFeatureDetachesItFromItsBody) {
     ASSERT_EQ(fx.document.bodies().size(), 1u);
     EXPECT_TRUE(fx.document.bodies().front()->features().empty())
         << "removeObject reported success but the body still owns the feature";
-    EXPECT_EQ(fx.document.objectRegistry().find(boxId), nullptr);
+    EXPECT_FALSE(fx.document.objectRegistry().find(boxId).has_value());
 }
 
 TEST(M3ReviewFindingTest, MAJOR3_RemovedBoxFeatureDoesNotBreakLaterRecomputes) {

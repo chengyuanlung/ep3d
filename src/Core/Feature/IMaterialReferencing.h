@@ -21,15 +21,24 @@ public:
 
     virtual ObjectId materialId() const noexcept = 0;
 
+private:
+    // "Only PartDocument calls it" was a comment, and a comment enforces
+    // nothing -- round 4's R1R4-M1 re-pointed a feature's material through a
+    // `const PartDocument&` and made the document unsaveable. Now the compiler
+    // says it. Access is checked against the STATIC type at the call site, so
+    // the concrete overrides are private too; overriding a private virtual is
+    // legal and is exactly the NVI shape this wants.
+    friend class PartDocument;
+
     // Called when the referenced Material is removed from the document. The
     // reference becomes kInvalidObjectId -- "no material assigned", an ordinary
     // and valid state (ADR-M3-004: density 0) -- rather than a dangling id.
     virtual void clearMaterialReference() noexcept = 0;
 
-    // Points this feature at a Material. Only PartDocument calls it, so the
-    // graph edge and the mass-properties source are rewired in the same step;
-    // a feature that could be re-pointed on its own would leave the graph
-    // describing a dependency the document no longer has.
+    // Points this feature at a Material, so the graph edge and the
+    // mass-properties source are rewired in the same step; a feature that could
+    // be re-pointed on its own would leave the graph describing a dependency
+    // the document no longer has.
     virtual void setMaterialReference(ObjectId materialId) noexcept = 0;
 };
 

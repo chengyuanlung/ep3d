@@ -7,18 +7,35 @@
 
 #include "Core/Document/PartDocument.h"
 #include "Core/Physics/MassProperties.h"
+#include "Core/Reconstruction/SketchReconstructor.h"
 #include "Core/Sketch/Profile.h"
 #include "Core/Sketch/Sketch.h"
+#include "Core/Reference/ReferenceFrame.h"
+#include "Core/Connector/Connector.h"
 #include "Core/Feature/PadFeature.h"
+#include "Core/Feature/RevolveFeature.h"
+#include "Core/Feature/EdgeDressFeatures.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
 #include "Solver/GaussNewtonSketchSolver.h"
 #include "Viewer/DocumentOutline.h"
 #include "Viewer/DocumentPresenter.h"
 #include "Viewer/MainWindow.h"
+#include "Viewer/ScriptServer.h"
+
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QHostAddress>
+#include <QMessageBox>
+#include <QTcpSocket>
+#include "Viewer/SketchCanvasWidget.h"
 #include "Viewer/OcctViewWidget.h"
 
 #include <QApplication>
+#include <QFile>
+#include <QDir>
 #include <QColor>
+#include <QCoreApplication>
+#include <QKeyEvent>
 #include <QPalette>
 #include <QString>
 #include <QTimer>
@@ -29,6 +46,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <vector>
+#include <string>
 
 using namespace paramcad;
 
@@ -59,7 +78,35 @@ enum class Sample {
     // editable in the running shell. Creation DIALOGS are deferred to M9 with
     // the edit-transaction work (ADR-M8-007); what M8 ships is the chain
     // reachable, displayed as its tail, and driven by panel edits.
-    M8Chain           // Pad 100x50x20 minus Pocket 20x30x10 = 94000 mm^3
+    M8Chain,          // Pad 100x50x20 minus Pocket 20x30x10 = 94000 mm^3
+    // M8.2 and M8.3 shipped Revolve, Fillet and Chamfer -- three of the four
+    // features M8 spec 4 REQUIRES -- with no way to reach any of them in the
+    // running application. Owner UI validation could therefore cover a quarter
+    // of the milestone. These two samples close that: the same chain machinery,
+    // the same panel, three more feature kinds.
+    M8Revolve,        // Annulus: profile x in [10,30], v in [0,50] about x=0
+    M8Dress,          // Pad 100x50x20 with every edge filleted r=2
+    // M10: the same 100x50x20 pad, but SUPPORTED BY A FRAME that is offset and
+    // rotated. Volume is identical to m8-chain's pad -- the point is WHERE the
+    // solid is, which is why the selftest checks the centre of mass and the
+    // owner checklist asks what is on screen.
+    M10Frame,
+    // M11.3: a parameter DRIVEN BY AN EXPRESSION, reachable in the running
+    // shell. The pad length is `#PadBase / 2`, so the solid on screen is
+    // evidence the expression was evaluated -- and the panel has an Expression
+    // row a user can actually type into. Without this sample every part of
+    // M11 was unreachable from the application, which is the exact position
+    // M8.2/M8.3 were in before m8-revolve and m8-dress existed.
+    M11Expression,
+    // M12: the same M4 rectangle and pad, present ONLY so the selftest has a
+    // document to open a NEW sketch inside. The sample's own geometry is not
+    // what it proves -- the drawing, dimensioning and constraining the
+    // selftest then performs through the shell is.
+    //
+    // It exists for the reason m8-revolve and m11-expression exist: a
+    // milestone whose UI is unreachable from the running application can only
+    // ever be owner-validated in the quarter of it that has a sample.
+    M12Sketch
 };
 
 bool IsM5(Sample sample) noexcept {
@@ -75,6 +122,12 @@ struct DemoModel {
     Parameter* width = nullptr;   // M5 samples only
     Parameter* height = nullptr;  // M5 samples only
     PadFeature* pad = nullptr;
+    // The sample's base-capable solid -- the pad for every sample that has one,
+    // the revolve for the one that does not. Selection, the panel-fit sweep and
+    // the `empty`/`pad-selected` scenarios all need SOME feature to name, and
+    // naming `pad` unconditionally would dereference null the moment a sample
+    // ships without one.
+    Feature* baseSolid = nullptr;
     ObjectId sketchId = kInvalidObjectId;
 
     explicit DemoModel(Sample sample) {
@@ -91,6 +144,88 @@ struct DemoModel {
         Sketch& sketch = document.addSketch("Sketch001");
         sketchId = sketch.id();
 
+        // M8.2 in the shell. The profile and axis are the release gate's own
+        // fixture (GATE_RB): a 20 x 50 rectangle at x in [10,30] revolved a
+        // full turn about the sketch line at x = 0, giving the annulus
+        // pi*(30^2 - 10^2)*50 = 40000*pi. The v extent is 50 and not 40 for the
+        // reason GATE_RB records -- at 40 the correct annulus and the volume an
+        // axis-resolved-by-position bug produces are equal by coincidence.
+        if (sample == Sample::M8Revolve) {
+            // The axis is added FIRST here and the gate proves order does not
+            // matter; what the sample must show is that the axis line is
+            // construction geometry, not a profile edge.
+            const SketchEntityId axis = sketch.addLine(Vec2{0, -5}, Vec2{0, 55});
+            sketch.addLine(Vec2{10, 0}, Vec2{30, 0});
+            sketch.addLine(Vec2{30, 0}, Vec2{30, 50});
+            sketch.addLine(Vec2{30, 50}, Vec2{10, 50});
+            sketch.addLine(Vec2{10, 50}, Vec2{10, 0});
+            Parameter& angle =
+                document.addParameter("RevolveAngle", 2.0 * 3.14159265358979323846,
+                                      UnitType::Radian);
+            Body& body = document.addBody("Body001");
+            baseSolid = &document.addRevolveFeature(body, "Revolve001", sketch.id(), axis,
+                                                   angle.id());
+            return;
+        }
+
+        // M8.3 in the shell: the dress chain Sketch -> Pad -> Fillet. Every
+        // edge of the 100 x 50 x 20 pad rounded at r = 2, which is the
+        // Minkowski oracle GATE_FB checks:
+        //   96*46*16 + 2*2*(96*46 + 46*16 + 96*16) + pi*4*(96+46+16) + (4/3)*pi*8
+        if (sample == Sample::M8Dress) {
+            buildConstrainedRectangle(sketch, Sample::M5Rectangle);
+            Parameter& radius = document.addParameter("FilletRadius", 2.0, UnitType::Millimeter);
+            Body& body = document.addBody("Body001");
+            pad = &document.addPadFeature(body, "Pad001", sketch.id(), padLength->id());
+            baseSolid = pad;
+            document.addFilletFeature(body, "Fillet001", pad->id(), radius.id());
+            return;
+        }
+
+        // M10 in the shell: a frame hierarchy carrying a sketch. The root is
+        // lifted +30 in Z and the child is rotated 90 degrees about X, so the
+        // pad lands somewhere only the frame chain can put it -- the volume
+        // stays 100000 and the centre of mass is the discriminator.
+        if (sample == Sample::M10Frame) {
+            ReferenceFrame& root = document.addFrame("Root");
+            ReferenceFrame& plate = document.addFrame("PlateFrame", root.id());
+            Transform3D lifted;
+            lifted.translation = Vec3{0.0, 0.0, 30.0};
+            document.setFrameTransform(root.id(), lifted);
+            Transform3D turned;
+            turned.rotation = Quaternion{std::cos(0.25 * 3.14159265358979323846),
+                                         std::sin(0.25 * 3.14159265358979323846), 0.0, 0.0};
+            document.setFrameTransform(plate.id(), turned);
+            document.addConnector("MountPoint", ConnectorRole::Mount, plate.id());
+
+            sketch.addLine(Vec2{0, 0}, Vec2{100, 0});
+            sketch.addLine(Vec2{100, 0}, Vec2{100, 50});
+            sketch.addLine(Vec2{100, 50}, Vec2{0, 50});
+            sketch.addLine(Vec2{0, 50}, Vec2{0, 0});
+            document.setSketchSupportFrame(sketch.id(), plate.id());
+
+            Body& body = document.addBody("Body001");
+            pad = &document.addPadFeature(body, "Pad001", sketch.id(), padLength->id());
+            baseSolid = pad;
+            return;
+        }
+
+        if (sample == Sample::M11Expression) {
+            // PadBase = 40, PadLength = #PadBase / 2 = 20, on the 100 x 50
+            // rectangle -> 100000 mm^3, the same oracle every other sample
+            // uses. The number is reached by EVALUATION, not by assignment:
+            // padLength is created at 999 so that seeing 100000 proves the
+            // expression ran, exactly as the M5 samples draw off-size geometry
+            // so that seeing 100 x 50 proves the solver ran.
+            document.setParameterValue(padLength->id(), 999.0);
+            document.addParameter("PadBase", 40.0, UnitType::Millimeter);
+            document.setParameterExpression(padLength->id(), "#PadBase / 2");
+            buildConstrainedRectangle(sketch, Sample::M5Rectangle);
+            Body& body = document.addBody("Body001");
+            pad = &document.addPadFeature(body, "Pad001", sketch.id(), padLength->id());
+            baseSolid = pad;
+            return;
+        }
         if (sample == Sample::M8Chain) {
             buildConstrainedRectangle(sketch, Sample::M5Rectangle);
             Sketch& pocketSketch = document.addSketch("PocketSketch");
@@ -101,6 +236,7 @@ struct DemoModel {
             Parameter& depth = document.addParameter("PocketDepth", 10.0, UnitType::Millimeter);
             Body& body = document.addBody("Body001");
             pad = &document.addPadFeature(body, "Pad001", sketch.id(), padLength->id());
+            baseSolid = pad;
             document.addPocketFeature(body, "Pocket001", pad->id(), pocketSketch.id(),
                                       depth.id());
             return;
@@ -121,6 +257,7 @@ struct DemoModel {
 
         Body& body = document.addBody("Body001");
         pad = &document.addPadFeature(body, "Pad001", sketch.id(), padLength->id());
+        baseSolid = pad;
     }
 
 private:
@@ -199,6 +336,11 @@ Sample SampleFromName(const char* name) {
     if (std::strcmp(name, "m5-conflict") == 0) return Sample::M5Conflict;
     if (std::strcmp(name, "m5-circle") == 0) return Sample::M5Circle;
     if (std::strcmp(name, "m8-chain") == 0) return Sample::M8Chain;
+    if (std::strcmp(name, "m8-revolve") == 0) return Sample::M8Revolve;
+    if (std::strcmp(name, "m8-dress") == 0) return Sample::M8Dress;
+    if (std::strcmp(name, "m10-frame") == 0) return Sample::M10Frame;
+    if (std::strcmp(name, "m11-expression") == 0) return Sample::M11Expression;
+    if (std::strcmp(name, "m12-sketch") == 0) return Sample::M12Sketch;
     // An unknown name is an ERROR, not a fallback. Falling back to the M4
     // rectangle and still printing SELFTEST OK meant a typo in CI silently
     // downgraded an M5 gate to an M4 smoke test that passes.
@@ -228,7 +370,29 @@ int main(int argc, char** argv) {
     // mock-ups. Each name matches a UI-0xx entry in the self-validation report.
     const char* scenario = nullptr;
     const char* sampleName = nullptr;
+    // Where to write a PNG of the sketch canvas, for looking at what was drawn.
+    // Dimension rendering is the one part of this UI whose correctness is a
+    // JUDGEMENT -- geometry tests can say an arrowhead exists and points the
+    // right way, and still not tell anyone whether the result reads as a
+    // drawing.
+    const char* screenshotPath = nullptr;
     const char* importPath = nullptr;
+    // THE SCRIPT SOCKET IS ON BY DEFAULT (M17.28).
+    //
+    // It was a flag first, and that was wrong twice over: a GUI application has
+    // no console, so a bind failure closed the window with the reason written
+    // to a stream nobody could see -- and even when it worked, the only way to
+    // know was to have typed the flag. A feature you must know about in advance
+    // and cannot tell is running is a feature nobody uses.
+    //
+    // What makes on-by-default defensible is that it is LOOPBACK ONLY and never
+    // invisible: the title bar carries the port for as long as it is open, and
+    // --no-listen turns it off. It is still a local process that can drive this
+    // one into saving files, which is why the title says so.
+    //
+    // `--listen PORT` asks for a particular number; 0 means "any free port".
+    bool listenDisabled = false;
+    int listenPort = 5310;
     // Accepts BOTH `--flag value` and `--flag=value`.
     //
     // Matching only the separate-token form meant `--sample=m5-circle` failed
@@ -256,6 +420,24 @@ int main(int argc, char** argv) {
             // sibling, ADR-M5-025).
             if (value == nullptr || value[0] == '\0') gUnknownSample = true;
             else importPath = value;
+        }
+        if (const char* value = valueFor(i, "--screenshot", present); present) {
+            if (value == nullptr || *value == '\0') {
+                std::fprintf(stderr, "--screenshot needs a file path\n");
+                return 2;
+            }
+            screenshotPath = value;
+        }
+        if (std::strcmp(argv[i], "--no-listen") == 0) listenDisabled = true;
+        if (const char* value = valueFor(i, "--listen", present); present) {
+            // The PORT is optional: `--listen` alone takes the default. A
+            // following token that is not a number belongs to the next flag.
+            if (value != nullptr && value[0] != '\0') {
+                char* end = nullptr;
+                const long parsed = std::strtol(value, &end, 10);
+                if (end != nullptr && *end == '\0' && parsed >= 0 && parsed <= 65535)
+                    listenPort = static_cast<int>(parsed);
+            }
         }
         if (const char* value = valueFor(i, "--sample", present); present) {
             // An EMPTY or MISSING value is an error, not a silent default.
@@ -288,7 +470,8 @@ int main(int argc, char** argv) {
         if (arg[0] != '-' || arg[1] != '-') continue;
         static const char* const kKnownFlags[] = {
             "--scenario", "--import", "--sample", "--expect-from-source",
-            "--expect-skipped", "--dark", "--selftest"};
+            "--expect-skipped", "--dark", "--selftest", "--screenshot", "--listen",
+            "--no-listen"};
         bool known = false;
         for (const char* flag : kKnownFlags) {
             const std::size_t length = std::strlen(flag);
@@ -342,7 +525,7 @@ int main(int argc, char** argv) {
                 sketch.removeEntity(last);
             });
         } else if (std::strcmp(scenario, "empty") == 0) {
-            model->document.removeObject(model->pad->id());
+            model->document.removeObject(model->baseSolid->id());
         } else if (std::strcmp(scenario, "long-length") == 0) {
             model->document.setParameterValue(model->padLength->id(), 137.5);
         }
@@ -369,9 +552,53 @@ int main(int argc, char** argv) {
 
     // Selection scenarios need the window to exist first.
     if (scenario != nullptr && std::strcmp(scenario, "pad-selected") == 0)
-        window.selectObject(model->pad->id());
+        window.selectObject(model->baseSolid->id());
     if (scenario != nullptr && std::strcmp(scenario, "sketch-selected") == 0)
         window.selectObject(model->document.sketches().front()->id());
+
+    // --- The script socket (M17.28) -----------------------------------------
+    //
+    // LOOPBACK ONLY. This executes commands that create, modify and save files;
+    // bound anywhere reachable it would be an unauthenticated command service.
+    // ScriptServer has no flag to widen it, and this is the only call site.
+    std::unique_ptr<ScriptServer> scriptServer;
+    if (!listenDisabled) {
+        scriptServer = std::make_unique<ScriptServer>(model->document, [&window]() {
+            // The WINDOW, after every exchange. A socket that edited the
+            // document while the view showed the old one would be worse than no
+            // socket: the user would be looking at a lie.
+            window.refreshAll();
+        });
+        QString listenError;
+        // A BUSY PORT MUST NEVER STOP EP3D STARTING.
+        //
+        // This began as fprintf-then-exit(2), which was survivable while the
+        // socket was opt-in and is not now: a second copy of EP3D would refuse
+        // to open at all because the first one holds 5310, with the reason
+        // written to a stream a GUI application does not have. So a taken port
+        // falls back to any free one -- the FIRST instance keeps the
+        // well-known number, which is also what makes `ep3d --connect` with no
+        // argument predictable.
+        if (!scriptServer->listen(static_cast<quint16>(listenPort), &listenError) &&
+            !scriptServer->listen(0, &listenError)) {
+            // Both refused: something is wrong with sockets on this machine,
+            // not with the port. Say so and carry on WITHOUT the socket rather
+            // than not opening -- a CAD program whose windows will not appear
+            // because a network feature failed is the wrong trade.
+            std::fprintf(stderr, "could not open a script socket: %s\n",
+                         listenError.toStdString().c_str());
+            scriptServer.reset();
+        }
+        if (scriptServer) {
+            // BOTH: the TITLE BAR for whoever is looking at the window -- which
+            // is the only place a GUI application can say anything -- and
+            // stdout for whoever launched from a terminal, because with a
+            // fallback port the caller cannot know the number otherwise.
+            window.showScriptPort(scriptServer->port());
+            std::printf("listening on 127.0.0.1:%u\n", scriptServer->port());
+            std::fflush(stdout);
+        }
+    }
 
     if (!selfTest) return app.exec();
 
@@ -415,6 +642,14 @@ int main(int argc, char** argv) {
         if (built == Sample::M5Circle) expectedVolume = kPi * 400.0 * 20.0;
         // Pad minus pocket: 100*50*20 - 20*30*10 (M8 chain).
         if (built == Sample::M8Chain) expectedVolume = 94000.0;
+        // The M10 frame sample is the same 100 x 50 x 20 pad, moved -- so the
+        // volume oracle is the default 100000 and the CENTRE OF MASS is what
+        // this sample actually proves. Asserted below.
+        // pi*(30^2 - 10^2)*50, the annulus of a full revolution (M8.2).
+        if (built == Sample::M8Revolve) expectedVolume = kPi * 40000.0;
+        // The Minkowski rounded box, r = 2 on a 100 x 50 x 20 pad (M8.3).
+        if (built == Sample::M8Dress)
+            expectedVolume = 70656.0 + 26752.0 + 632.0 * kPi + (4.0 / 3.0) * kPi * 8.0;
         // The M5 rectangle solves to the SAME 100 x 50 the M4 one is drawn at,
         // padded 20 -- which is the point: the solved result must match the
         // analytical oracle, not merely be self-consistent.
@@ -451,6 +686,72 @@ int main(int argc, char** argv) {
             if (std::fabs(mp.volumeMm3 - expectedVolume) >
                 1e-6 * std::max(1.0, expectedVolume))
                 fail("volume does not match the sample's analytical value");
+        }
+
+        // M11.3: THE EXPRESSION UI, CHECKED AT THE WIDGET.
+        //
+        // Every assertion below reads the property TABLE, not the model. That
+        // is the whole of M6.14's lesson: `propertiesOf()` returned ten correct
+        // rows while the user saw ten labels and no values, and every
+        // data-level test agreed with the model. ApplyPropertyEdit is unit
+        // tested; what only a running window can answer is whether any of it
+        // reaches the screen.
+        if (built == Sample::M11Expression) {
+            window.selectObject(model->padLength->id());
+
+            if (!window.hasPropertyRow("Expression"))
+                fail("the property panel has no Expression row for a parameter");
+            if (window.displayedPropertyValue("Expression") != "#PadBase / 2")
+                fail("the panel is not showing the expression that drives the value");
+            // 20, not 999: the panel shows the EVALUATED value.
+            if (window.displayedPropertyValue("Value").rfind("20", 0) != 0)
+                fail("the panel is not showing the value the expression produced");
+            // A driven value must not be typeable -- editing it would silently
+            // delete the formula (ADR-M11-006).
+            const QString refusedValue = window.editPropertyByLabel("Value", QStringLiteral("5"));
+            if (!refusedValue.contains(QStringLiteral("not editable")))
+                fail("the value row is editable while an expression drives it");
+            // And it must SAY why, naming the expression.
+            if (window.displayedPropertyTooltip("Value").find("#PadBase / 2") == std::string::npos)
+                fail("the value row does not say what drives it");
+
+            // A REFUSED expression: the message carries a column, the typed
+            // text survives in the cell, and the caret rendering is delivered.
+            const QString refused =
+                window.editPropertyByLabel("Expression", QStringLiteral("#PadBase / #Nope"));
+            if (!refused.contains(QStringLiteral("col ")))
+                fail("a refused expression did not report a column");
+            if (window.displayedPropertyValue("Expression") != "#PadBase / #Nope")
+                fail("a refused expression lost the text the user typed");
+            const std::string tip = window.displayedPropertyTooltip("Expression");
+            if (tip.find('^') == std::string::npos)
+                fail("the refused expression has no caret rendering in its tooltip");
+            if (tip.find("Nope") == std::string::npos)
+                fail("the refused expression's tooltip does not name the problem");
+            // The document is untouched by a refusal.
+            if (model->padLength->expression() != "#PadBase / 2")
+                fail("a refused expression changed the document");
+
+            // A GOOD edit: the value follows, and the panel says so.
+            const QString accepted =
+                window.editPropertyByLabel("Expression", QStringLiteral("#PadBase / 4"));
+            if (accepted.isEmpty()) fail("an accepted expression produced no status line");
+            if (window.displayedPropertyValue("Expression") != "#PadBase / 4")
+                fail("the panel did not adopt the accepted expression");
+            if (window.displayedPropertyValue("Value").rfind("10", 0) != 0)
+                fail("the value did not follow the new expression");
+            if (std::fabs(model->document.massProperties().volumeMm3 - 50000.0) > 1e-6)
+                fail("the solid did not rebuild from the edited expression");
+
+            // CLEARING gives the value row back.
+            window.editPropertyByLabel("Expression", QString());
+            if (!window.displayedPropertyValue("Expression").empty())
+                fail("clearing the expression left text behind");
+            const QString typed = window.editPropertyByLabel("Value", QStringLiteral("30"));
+            if (typed.contains(QStringLiteral("not editable")))
+                fail("the value row is still locked after the expression was cleared");
+            if (window.displayedPropertyValue("Value").rfind("30", 0) != 0)
+                fail("a plain value typed after clearing did not take");
         }
 
         // M5: the solver actually ran and the UI can say what happened.
@@ -565,7 +866,9 @@ int main(int argc, char** argv) {
                 // Asserting `!empty()` was worthless: independent review swapped
                 // the "From source" and "Inferred" counts, deleted every skip
                 // diagnostic row, and hard-coded the panel-fit guard to true --
-                // and all 13 viewer smoke tests stayed green through each.
+                // and all 13 viewer smoke tests stayed green through each
+                // (the count at the time of that review; 21 are registered
+                // now -- historical, and dated for that reason).
                 //
                 // The expected numbers depend on the file, so they come from
                 // the report and are cross-checked against the panel: the panel
@@ -593,9 +896,31 @@ int main(int argc, char** argv) {
                 // Every skip must be READABLE, not merely present: a row whose
                 // value column is nine characters wide delivers three different
                 // diagnostics as three identical strings.
-                if (!report->skipped.empty() &&
-                    window.displayedPropertyValue("Skipped item").empty())
-                    fail("items were skipped but no diagnostic row is shown");
+                //
+                // EXACT, against the report's own composed string -- the same
+                // discipline the three counts above already use, and the
+                // discipline this row was missing (round 4, R3R4-M3). Asserting
+                // only `!empty()` here let a reviewer hard-code every skip
+                // detail to the literal "42" with all 19 viewer smokes and all
+                // 797 ctest entries green. That is the THIRD appearance of the
+                // non-emptiness class -- penalised in M7 round 1, fixed for the
+                // m8-chain rows in M8 round 1, and reintroduced by the very fix
+                // written to close M7 round 2's R3-M4 -- sitting directly under
+                // a comment condemning it.
+                if (!report->skipped.empty()) {
+                    const ReconstructionSkip& first = report->skipped.front();
+                    std::string expected =
+                        std::string(ReconstructionSkipReasonName(first.reason)) + ": " +
+                        first.detail;
+                    if (!first.sourceRef.empty())
+                        expected += " (source " + first.sourceRef + ")";
+                    const std::string shown = window.displayedPropertyValue("Skipped item");
+                    if (shown.empty())
+                        fail("items were skipped but no diagnostic row is shown");
+                    else if (shown != expected)
+                        fail("the skip diagnostic row does not show what the report says was "
+                             "skipped");
+                }
                 }
             }
             // The tree must SHOW it -- an import the model tree does not list
@@ -610,6 +935,25 @@ int main(int argc, char** argv) {
                 };
             count(root);
             if (sketchRows < 2) fail("the imported sketch is not in the model tree");
+
+            // PROVENANCE DOES NOT OUTLIVE ITS SKETCH (round 4, R3R4-M2).
+            //
+            // The erase path shipped with no caller a test could reach and no
+            // test at all: a reviewer replaced `pruneProvenance`'s whole body
+            // with `return;` and nothing failed anywhere. Removing the imported
+            // sketch and refreshing must drop its report -- ids come from the
+            // FILE on a later load, so a surviving entry would eventually be
+            // read as belonging to an unrelated sketch that reused the number.
+            if (!model->document.sketches().empty()) {
+                const ObjectId importedSketch = model->document.sketches().back()->id();
+                if (window.reconstructionReportFor(importedSketch) != nullptr) {
+                    if (!model->document.removeObject(importedSketch))
+                        fail("the imported sketch could not be removed");
+                    window.refreshAll();
+                    if (window.reconstructionReportFor(importedSketch) != nullptr)
+                        fail("the reconstruction report outlived the sketch it describes");
+                }
+            }
         }
 
         // M8 chain: the viewer shows the TAIL only, and the pocket's Depth is
@@ -636,9 +980,202 @@ int main(int argc, char** argv) {
             }
         }
 
+        // M8.2 in the shell: a revolve is base-capable, so it is the tail
+        // itself and carries NO "Base feature" row -- the absence is part of
+        // what distinguishes it from a consumer and is asserted as such.
+        if (sampleBuilt == Sample::M8Revolve) {
+            if (presenter.displayableSolids().size() != 1)
+                fail("the revolve sample does not display exactly one solid");
+            window.selectObject(model->baseSolid->id());
+            if (window.displayedPropertyValue("Type") != "Revolve")
+                fail("the revolve's Type row does not say Revolve");
+            // 2*pi in the panel's fixed 3-decimal format, in the Parameter's
+            // own unit. EXACT, for round 1's R3-M2 reason.
+            if (window.displayedPropertyValue("Angle") != "6.283")
+                fail("the revolve's Angle row does not show the sample's 6.283 rad");
+            if (!window.displayedPropertyValue("Base feature").empty())
+                fail("a base-capable revolve is claiming to consume something");
+        }
+
+        // M8.3 in the shell: the dress chain. The fillet is the tail, it
+        // consumes THE PAD by id, and its editable row is a Radius in mm.
+        if (sampleBuilt == Sample::M8Dress) {
+            if (presenter.displayableSolids().size() != 1)
+                fail("the dress chain does not display exactly its tail");
+            window.selectObject(presenter.displayableSolids().front());
+            if (window.displayedPropertyValue("Type") != "Fillet")
+                fail("the dress chain's tail is not the Fillet");
+            if (window.displayedPropertyValue("Radius") != "2.000")
+                fail("the fillet's Radius row does not show the sample's 2.000");
+            if (window.displayedPropertyValue("Base feature") !=
+                std::to_string(model->pad->id()))
+                fail("the fillet's Base feature row does not name the pad");
+        }
+
+        // M9.5: the history commands, driven THROUGH THE SHELL.
+        //
+        // M9's undo machinery was complete and unreachable from the running
+        // application until these existed -- the shape M8 was caught in when
+        // three of its four required features had no sample. So this runs the
+        // commands the menu items run, and asserts what the USER is told as
+        // well as what the model does.
+        if (sampleBuilt == Sample::M8Chain) {
+            const double before = model->document.massProperties().volumeMm3;
+
+            // An edit, then Undo, then Redo -- through the window.
+            if (!model->document.setParameterValue(model->pad->lengthParameterId(), 40.0))
+                fail("the pad length could not be edited");
+            window.refreshAll();
+            const QString undone = window.undoCommand();
+            if (undone != QStringLiteral("Undone"))
+                fail("Undo did not report that it undid anything");
+            if (std::fabs(model->document.massProperties().volumeMm3 - before) > 1e-6)
+                fail("Undo did not restore the volume the document started at");
+            if (window.redoCommand() != QStringLiteral("Redone"))
+                fail("Redo did not report that it redid anything");
+            if (window.undoCommand() != QStringLiteral("Undone"))
+                fail("the second Undo did not run");
+
+            // Suppress the tail: the pad becomes the displayed solid.
+            const ObjectId tail = presenter.displayableSolids().front();
+            window.selectObject(tail);
+            if (window.toggleSuppressSelected() != QStringLiteral("Feature suppressed"))
+                fail("Suppress did not report suppressing anything");
+            if (presenter.displayableSolids().size() != 1)
+                fail("suppressing the tail left the body with no displayable solid");
+            if (presenter.displayableSolids().front() == tail)
+                fail("the suppressed feature is still the one being displayed");
+            window.selectObject(tail);
+            if (window.toggleSuppressSelected() != QStringLiteral("Feature unsuppressed"))
+                fail("Unsuppress did not report unsuppressing anything");
+            if (presenter.displayableSolids().front() != tail)
+                fail("unsuppressing did not restore the tail");
+
+            // Roll back to the first feature, then forward again.
+            window.selectObject(model->pad->id());
+            if (window.rollbackToSelected() != QStringLiteral("Rolled back to step 1"))
+                fail("Roll Back did not report the step it rolled back to");
+            if (presenter.displayableSolids().size() != 1 ||
+                presenter.displayableSolids().front() != model->pad->id())
+                fail("rolling back to the pad did not leave the pad as what is drawn");
+            if (window.rollForwardToEnd() != QStringLiteral("Rolled forward to the end"))
+                fail("Roll Forward did not report running");
+            if (presenter.displayableSolids().front() == model->pad->id())
+                fail("rolling forward did not bring the pocket back as the tail");
+
+            // A command with nothing to do SAYS SO rather than doing nothing
+            // silently -- the user has to be able to tell the two apart.
+            //
+            // Checked on the REDO stack, not by draining the undo stack to
+            // zero. Draining it would undo the fixture's own feature additions,
+            // which DESTROYS the features -- and `model->pad` is a raw pointer
+            // into them, so everything after this block would be reading freed
+            // memory. A redo that recreates a feature builds a NEW object with
+            // the same ObjectId; identity survives, addresses do not. Anyone
+            // writing a test around undo needs to know that, so it is written
+            // here rather than learned from a crash.
+            while (model->document.redoDepth() > 0) window.redoCommand();
+            if (window.redoCommand() != QStringLiteral("Nothing to redo"))
+                fail("an empty redo stack did not say so");
+            if (std::fabs(model->document.massProperties().volumeMm3 - before) > 1e-6)
+                fail("the history commands did not leave the part as they found it");
+
+            // M9.5 FEATURE CREATION, closing ADR-M8-007's deferral. A fillet on
+            // the current solid, created from the menu command, then undone --
+            // and the undo must take the RADIUS PARAMETER with it, which is the
+            // whole reason parameter creation became an undo delta.
+            const std::size_t parametersBefore = model->document.parameters().items().size();
+            const std::size_t featuresBefore =
+                model->document.bodies().front()->features().size();
+            const QString created = window.insertFilletOnTail();
+            if (!created.startsWith(QStringLiteral("Fillet created")))
+                fail("Insert Fillet did not report creating anything");
+            if (model->document.bodies().front()->features().size() != featuresBefore + 1)
+                fail("Insert Fillet did not add a feature");
+            if (model->document.parameters().items().size() != parametersBefore + 1)
+                fail("Insert Fillet did not add its Radius parameter");
+            if (model->document.massProperties().volumeMm3 >= before)
+                fail("the fillet did not remove material");
+            // ONE undo step for parameter AND feature together.
+            if (window.undoCommand() != QStringLiteral("Undone"))
+                fail("the created fillet could not be undone");
+            if (model->document.bodies().front()->features().size() != featuresBefore)
+                fail("undoing the creation left the feature behind");
+            if (model->document.parameters().items().size() != parametersBefore)
+                fail("undoing the creation left an orphan parameter behind");
+            if (std::fabs(model->document.massProperties().volumeMm3 - before) > 1e-6)
+                fail("undoing the creation did not restore the part");
+
+            // A FILLET THAT CANNOT BE BUILT SAYS SO (ADR-M17-022, extended to
+            // Fillet and Chamfer at M17.11).
+            //
+            // These two were still answering "Fillet created" whatever the
+            // kernel did, months after Pad, Pocket and Revolve stopped. A
+            // radius the geometry cannot take is the ordinary way to meet it:
+            // the command reported success over a solid that had not changed.
+            //
+            // The part is squeezed to 2 mm and the default 2 mm radius then has
+            // nowhere to go. Restored immediately afterwards, because every
+            // check below this one shares the same document.
+            if (model->padLength != nullptr) {
+                const double keep = model->padLength->value();
+                if (model->document.setParameterValue(model->padLength->id(), 2.0)) {
+                    model->document.recompute();
+                    const QString refused = window.insertFilletOnTail();
+                    if (refused.startsWith(QStringLiteral("Fillet created")))
+                        fail(("a fillet the kernel refused was reported as created: " +
+                              refused.toStdString())
+                                 .c_str());
+                    if (!refused.contains(QStringLiteral("could not be built")))
+                        fail("the refused fillet did not say what went wrong");
+                    window.undoCommand();
+                }
+                model->document.setParameterValue(model->padLength->id(), keep);
+                model->document.recompute();
+                window.refreshAll();
+            }
+        }
+
+        // M10: the solid is where the FRAME puts it, and the tree and panel say
+        // so. Volume cannot discriminate this sample -- that is deliberate.
+        if (sampleBuilt == Sample::M10Frame) {
+            const MassProperties& mp = model->document.massProperties();
+            if (!mp.valid) fail("the frame-supported pad produced no mass properties");
+            // Root lifts +30 Z; the child turns 90 degrees about X, sending the
+            // local centroid (50, 25, 10) to (50, -10, 25); the root's lift then
+            // adds 30 in Z. Hand-computed, not read back.
+            if (std::fabs(mp.centerOfMassMm.x - 50.0) > 1e-6 ||
+                std::fabs(mp.centerOfMassMm.y + 10.0) > 1e-6 ||
+                std::fabs(mp.centerOfMassMm.z - 55.0) > 1e-6)
+                fail("the solid is not where its support frame puts it");
+
+            // The tree lists the frames, nested, with the connector under the
+            // frame it is on.
+            const DocumentOutline outline(model->document);
+            const OutlineNode root = outline.build();
+            std::size_t frameRows = 0;
+            std::size_t connectorRows = 0;
+            const std::function<void(const OutlineNode&)> count =
+                [&](const OutlineNode& node) {
+                    if (node.kind == OutlineKind::Frame) ++frameRows;
+                    if (node.kind == OutlineKind::Connector) ++connectorRows;
+                    for (const OutlineNode& child : node.children) count(child);
+                };
+            count(root);
+            if (frameRows != 3) fail("the model tree does not list Origin, Root and PlateFrame");
+            if (connectorRows != 1) fail("the connector is not in the model tree");
+
+            // And the panel says where the frame IS, composed -- the world row
+            // is the one a user reads to know whether the part moved.
+            window.selectObject(model->document.frames().back()->id());
+            if (window.displayedPropertyValue("Type") != "Frame")
+                fail("the frame's Type row does not say Frame");
+        }
+
         // Selection round-trips through the shell by ObjectId.
-        window.selectObject(model->pad->id());
-        if (window.selectedObjectId() != model->pad->id()) fail("selection did not round-trip");
+        window.selectObject(model->baseSolid->id());
+        if (window.selectedObjectId() != model->baseSolid->id())
+            fail("selection did not round-trip");
 
         // The panel must stay readable for EVERY selectable object, not only
         // the imported sketch the defect happened to be found on.
@@ -650,7 +1187,7 @@ int main(int argc, char** argv) {
         // DXF path would have left the same defect reachable from samples that
         // run on every build -- the third-leg-of-the-triple shape this project
         // has now found in three review rounds.
-        window.selectObject(model->pad->id());
+        window.selectObject(model->baseSolid->id());
         if (!window.propertyPanelFitsItsPanel())
             fail("the Pad property panel is wider than its dock, so values are "
                  "pushed out of sight");
@@ -664,6 +1201,2134 @@ int main(int argc, char** argv) {
             if (!window.propertyPanelFitsItsPanel())
                 fail("a Sketch property panel is wider than its dock, so values "
                      "are pushed out of sight");
+        }
+        // ...and every FEATURE, not only the base solid. M8 added four feature
+        // kinds with new row groups ("Chain / Base feature", "Geometry /
+        // Angle", "Geometry / Radius"); a sweep that stopped at the pad would
+        // have left the M6.14 defect class reachable from every one of them.
+        for (const auto& body : model->document.bodies()) {
+            for (const auto& feature : body->features()) {
+                window.selectObject(feature->id());
+                if (!window.propertyPanelFitsItsPanel())
+                    fail("a Feature property panel is wider than its dock, so "
+                         "values are pushed out of sight");
+            }
+        }
+
+        // --- The MODEL toolbar ----------------------------------------------
+        //
+        // Pad, Pocket and Revolve lived only under Insert. A command a user has
+        // to go hunting for in a menu is one they do not know exists -- which
+        // is how Revolve went unnoticed for a whole milestone.
+        {
+            const int buttons = window.modelToolbarButtonCount();
+            if (buttons < 5) fail("the model toolbar is missing commands");
+            if (window.modelToolbarButtonsWithIcons() != buttons)
+                fail("a model toolbar button has no icon");
+
+            bool sawPad = false;
+            bool sawPocket = false;
+            bool sawRevolve = false;
+            bool sawOnFace = false;
+            std::vector<unsigned long long> prints;
+            for (int i = 0; i < buttons; ++i) {
+                const std::string label = window.modelToolbarLabel(i);
+                if (label.find("Pad") != std::string::npos) sawPad = true;
+                if (label.find("Pocket") != std::string::npos) sawPocket = true;
+                if (label.find("Revolve") != std::string::npos) sawRevolve = true;
+                if (label.find("On Face") != std::string::npos) sawOnFace = true;
+                const unsigned long long print = window.modelToolbarIconFingerprint(i);
+                if (print == 0) fail("a model toolbar icon rendered as nothing");
+                for (std::size_t j = 0; j < prints.size(); ++j)
+                    if (prints[j] == print)
+                        fail("two model toolbar buttons carry the SAME icon");
+                prints.push_back(print);
+            }
+            if (!sawPad) fail("the model toolbar has no Pad button");
+            if (!sawPocket) fail("the model toolbar has no Pocket button");
+            if (!sawRevolve) fail("the model toolbar has no Revolve button");
+            if (!sawOnFace) fail("the model toolbar has no Sketch-on-Face button");
+
+            // THE SAME ACTIONS the Insert menu holds, so availability cannot
+            // differ between the two surfaces. With nothing selected, the
+            // sketch-driven commands are off.
+            window.selectObject(kInvalidObjectId);
+            for (int i = 0; i < buttons; ++i) {
+                if (window.modelToolbarLabel(i).find("Pad") == std::string::npos) continue;
+                if (window.modelToolbarButtonEnabled(i))
+                    fail("Pad is offered on the toolbar with no sketch selected");
+            }
+
+            // --- Sketch on Face, with nothing picked -------------------------
+            //
+            // Nothing in this run has clicked a face -- there is no 3D pick in
+            // a self test -- so the button must be OFF and the command must
+            // still explain itself if the menu is used anyway. Those are two
+            // different promises and both have been broken before: a button
+            // enabled on a state it cannot act on, and a command that refuses
+            // in silence.
+            for (int i = 0; i < buttons; ++i) {
+                if (window.modelToolbarLabel(i).find("On Face") == std::string::npos) continue;
+                if (window.modelToolbarButtonEnabled(i))
+                    fail("Sketch on Face is offered on the toolbar with no face picked");
+            }
+            const std::string refusal = window.sketchOnFaceCommand().toStdString();
+            if (refusal.empty()) fail("Sketch on Face refused in silence");
+            if (refusal.find("face") == std::string::npos)
+                fail(("Sketch on Face's refusal does not mention a face: " + refusal).c_str());
+            if (window.inSketchMode())
+                fail("a refused Sketch on Face opened a sketch anyway");
+        }
+
+        // --- The main toolbar: Undo and Redo are REACHABLE ------------------
+        //
+        // They were menu-and-shortcut only, which answers "can I undo?" only by
+        // opening a menu. The toolbar answers it at a glance -- but only if the
+        // buttons are there, carry icons, and carry DIFFERENT ones: Undo and
+        // Redo are exact mirrors by design, and a mirroring bug that produced
+        // two identical arrows would look deliberate.
+        {
+            const int buttons = window.mainToolbarButtonCount();
+            if (buttons < 5) fail("the main toolbar is missing commands");
+            if (window.mainToolbarButtonsWithIcons() != buttons)
+                fail("a main toolbar button has no icon");
+
+            bool sawUndo = false;
+            bool sawRedo = false;
+            std::vector<unsigned long long> prints;
+            for (int i = 0; i < buttons; ++i) {
+                const std::string label = window.mainToolbarLabel(i);
+                if (label.find("Undo") != std::string::npos) sawUndo = true;
+                if (label.find("Redo") != std::string::npos) sawRedo = true;
+                const unsigned long long print = window.mainToolbarIconFingerprint(i);
+                if (print == 0) fail("a main toolbar icon rendered as nothing");
+                for (std::size_t j = 0; j < prints.size(); ++j) {
+                    if (prints[j] == print) {
+                        std::fprintf(stderr, "  main buttons %zu and %d share an icon\n", j, i);
+                        fail("two main toolbar buttons carry the SAME icon");
+                    }
+                }
+                prints.push_back(print);
+            }
+            if (!sawUndo) fail("the main toolbar has no Undo button");
+            if (!sawRedo) fail("the main toolbar has no Redo button");
+        }
+
+        // --- M12: the sketch UI, driven through the shell -------------------
+        //
+        // Everything below is reachable ONLY here. tests/SketchCanvasTests.cpp
+        // proves what a click MEANS and tests/Solver/SketchCanvasSolveTests.cpp
+        // proves what the solver then says -- neither can see whether any of it
+        // was PAINTED. That is the M6.14 defect exactly: the model was right and
+        // the screen was empty, and every test asked the model.
+        if (built == Sample::M12Sketch) {
+            window.newSketchCommand();
+            if (!window.inSketchMode()) fail("New Sketch did not open the sketch canvas");
+
+            // --- M15: the icon toolbar ----------------------------------
+            //
+            // The bar is icon-only, so an action without an icon is a blank
+            // button and an action whose tooltip is empty is a command with no
+            // name anywhere on screen.
+            const int buttons = window.sketchToolbarButtonCount();
+            if (buttons < 18) fail("the sketch toolbar is missing commands");
+            if (window.sketchToolbarButtonsWithIcons() != buttons)
+                fail("a sketch toolbar button has no icon");
+
+            // DISTINCT icons. "Every button has an icon" is satisfied by giving
+            // them all the same one -- which is exactly what a copy-paste slip
+            // in the command table produces, and it looks fine until a user
+            // tries to find one.
+            std::vector<unsigned long long> fingerprints;
+            for (int i = 0; i < buttons; ++i) {
+                const unsigned long long print = window.sketchToolbarIconFingerprint(i);
+                if (print == 0) fail("a sketch toolbar icon rendered as nothing");
+                for (std::size_t j = 0; j < fingerprints.size(); ++j) {
+                    if (fingerprints[j] == print) {
+                        std::fprintf(stderr, "  buttons %zu and %d share an icon\n", j, i);
+                        fail("two sketch toolbar buttons carry the SAME icon");
+                    }
+                }
+                fingerprints.push_back(print);
+                if (window.sketchToolbarTooltip(i).empty())
+                    fail("an icon-only toolbar button has no tooltip to name it");
+            }
+
+            // NAMED buttons, not just a count. "The bar has 19 buttons" stays
+            // true when the one a user is looking for is the one that is
+            // missing -- which is how the owner ended up hunting for a tool
+            // that had tests, a decision layer, and no way in.
+            {
+                bool sawUse = false;
+                for (int i = 0; i < buttons; ++i)
+                    if (window.sketchToolbarTooltip(i).find("Use projected geometry") !=
+                        std::string::npos)
+                        sawUse = true;
+                if (!sawUse) fail("the sketch toolbar has no Use button");
+                std::fprintf(stderr, "  sketch toolbar: %d buttons\n", buttons);
+            }
+            SketchCanvasWidget* canvas = window.sketchCanvas();
+            if (canvas == nullptr) {
+                fail("the shell has no sketch canvas");
+            } else {
+                // Draw a rectangle with two clicks, exactly as the user does.
+                canvas->setTool(SketchTool::Rectangle);
+                canvas->clickAt(Vec2{0.0, 0.0});
+                canvas->clickAt(Vec2{80.0, 40.0});
+                canvas->repaint();
+
+                // FIVE: the origin point every new sketch starts with, plus the
+                // rectangle's four sides.
+                if (canvas->paintedEntities() != 5)
+                    fail("the sketch canvas is not drawing the origin and the rectangle's 4 "
+                         "lines");
+
+                // The colour the geometry was STROKED with while the sketch is
+                // still under-constrained. Kept for the comparison at the end of
+                // this block: roadmap 8.1 wants the geometry itself to change
+                // colour once the solver reaches DOF 0, and nothing but a
+                // readback from the painter can say whether it did.
+                const QColor underConstrainedColour = canvas->paintedGeometryColour();
+                if (!underConstrainedColour.isValid())
+                    fail("the canvas drew geometry but reported no colour for it");
+                if (canvas->paintedConstraintGlyphs() < 4)
+                    fail("the rectangle's constraints are not visible on the canvas");
+
+                // The constraint manager (roadmap 6.3) has to SHOW them.
+                //
+                // TEN: the origin point's own Fix, then the rectangle's 2
+                // horizontal + 2 vertical + 4 coincident corners, plus the
+                // coincidence its first corner earned by landing ON the origin
+                // point. Roadmap 4.2 will not let that snap be mere magnetism --
+                // if it moves the cursor it has to produce a constraint, and the
+                // constraint has to be visible and deletable like any other.
+                if (window.displayedConstraintRowCount() != 10)
+                    fail("the constraint panel is not listing the sketch's 10 constraints");
+                if (window.displayedConstraintText(0).empty())
+                    fail("the constraint panel has rows but no visible text");
+                {
+                    bool sawFix = false;
+                    for (int i = 0; i < window.displayedConstraintRowCount(); ++i)
+                        if (window.displayedConstraintText(i).find("Fix") != std::string::npos)
+                            sawFix = true;
+                    if (!sawFix)
+                        fail("the corner dropped on the origin did not become a visible Fix");
+                }
+
+                // Dimension the bottom edge and check the LABEL reaches the
+                // screen, not merely the document.
+                canvas->clearSelection();
+                if (!canvas->selectAt(Vec2{40.0, 0.0}))
+                    fail("clicking the bottom edge selected nothing");
+                const QString dimensionStatus = canvas->applyDimension(SketchEditKind::None);
+                canvas->repaint();
+                if (canvas->paintedDimensions() != 1)
+                    fail("the dimension was created but is not drawn on the canvas");
+                if (dimensionStatus.isEmpty())
+                    fail("dimensioning reported nothing to the user");
+
+                // --- Roadmap 8.1: fully constrained LOOKS different ---------
+                //
+                // Here and not later: the M13 block below adds geometry of its
+                // own, and a sketch with a loose circle in it can never reach
+                // DOF 0. The rectangle already carries the Fix its origin corner
+                // earned, so ONE more dimension -- the height -- finishes it.
+                {
+                    canvas->clearSelection();
+                    if (!canvas->selectAt(Vec2{80.0, 20.0}))
+                        fail("clicking the right-hand edge selected nothing");
+                    if (canvas->applyDimension(SketchEditKind::None).isEmpty())
+                        fail("dimensioning the right-hand edge reported nothing");
+                    canvas->clearSelection();
+                    canvas->repaint();
+
+                    if (window.displayedSketchStatus().find("Fully constrained") ==
+                        std::string::npos)
+                        fail("width, height and the origin anchor did not reach DOF 0");
+
+                    const QColor solvedColour = canvas->paintedGeometryColour();
+                    if (!solvedColour.isValid())
+                        fail("a fully constrained sketch reported no geometry colour");
+                    // A06 keeps colour a SECOND channel, never the only one --
+                    // which is why the status line is checked above and not
+                    // instead. But a second channel that never changes is not a
+                    // channel, and only the painter can testify that it did.
+                    if (solvedColour == underConstrainedColour)
+                        fail("the geometry is drawn the same colour fully constrained as "
+                             "under-constrained");
+
+                    // Put the sketch back where the rest of this block expects
+                    // it: one dimension, under-constrained.
+                    window.undoCommand();
+                    canvas->repaint();
+                    if (canvas->paintedDimensions() != 1)
+                        fail("undoing the height dimension did not restore the canvas");
+                    if (canvas->paintedGeometryColour() != underConstrainedColour)
+                        fail("the geometry did not go back to its under-constrained colour");
+                }
+
+                // A refusal must EXPLAIN itself rather than doing nothing
+                // silently -- an empty selection cannot be dimensioned.
+                canvas->clearSelection();
+                if (canvas->applyDimension(SketchEditKind::None).isEmpty())
+                    fail("a refused dimension command said nothing at all");
+
+                // The DOF is reported as TEXT, not only as a colour (A06).
+                const std::string sketchStatus = window.displayedSketchStatus();
+                if (sketchStatus.find("DOF") == std::string::npos &&
+                    sketchStatus.find("constrained") == std::string::npos)
+                    fail("the status bar does not report the sketch's constraint state as text");
+
+                // UNDO WHILE THE CANVAS IS OPEN. This is a widget-only defect:
+                // Undo routes through onRecomputeRequested -> refreshAll, and a
+                // refreshAll that did not touch the canvas left it drawing
+                // geometry the document no longer had. Nothing that asks the
+                // model can see that.
+                window.undoCommand();
+                canvas->repaint();
+                if (canvas->paintedDimensions() != 0)
+                    fail("Ctrl+Z removed the dimension but the canvas is still drawing it");
+                if (window.displayedConstraintRowCount() != 10)
+                    fail("Ctrl+Z did not refresh the constraint panel");
+                window.redoCommand();
+                canvas->repaint();
+                if (canvas->paintedDimensions() != 1)
+                    fail("Redo restored the dimension but the canvas is not drawing it");
+
+                // --- Construction geometry, through the shell ---------------
+                //
+                // The flag is Core and unit-tested; what only a running window
+                // can answer is whether the user can reach it and SEE the
+                // result. A dashed stroke is the sole cue that a line will not
+                // become an edge, so a flag with no visible consequence is a
+                // flag nobody can use.
+                {
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+                    if (!canvas->selectAt(Vec2{40.0, 0.0}))
+                        fail("clicking the bottom edge selected nothing");
+                    canvas->repaint();
+                    if (canvas->paintedConstructionEntities() != 0)
+                        fail("something is drawn as construction before anything was switched");
+
+                    const QString status = canvas->toggleConstruction();
+                    if (status.isEmpty()) fail("the construction command reported nothing");
+                    canvas->repaint();
+                    if (canvas->paintedConstructionEntities() != 1)
+                        fail("the switched line is not drawn as construction geometry");
+                    // Still DRAWN, just differently: construction geometry that
+                    // vanished would be a delete with a friendly name.
+                    if (canvas->paintedEntities() != 5)
+                        fail("switching to construction removed the line from the canvas");
+
+                    // A refusal explains itself.
+                    canvas->clearSelection();
+                    if (canvas->toggleConstruction().isEmpty())
+                        fail("a refused construction command said nothing at all");
+
+                    // And back, in one undo.
+                    window.undoCommand();
+                    canvas->repaint();
+                    if (canvas->paintedConstructionEntities() != 0)
+                        fail("Ctrl+Z did not put the construction line back to normal");
+                }
+
+                // --- Offset and Distance-to-Line, THROUGH THE SHELL ---------
+                //
+                // Both shipped once with tests, a decision layer and NO BUTTON.
+                // Every unit test passed and neither command existed as far as
+                // a user was concerned. That is the M6.14 defect in its purest
+                // form, and this block is the only thing that can see it.
+                {
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+                    const int entitiesBefore = canvas->paintedEntities();
+
+                    // Offset needs a selection, and says so when it has none.
+                    if (!canvas->applyOffset(10.0).contains(QStringLiteral("Select")))
+                        fail("Offset with nothing selected did not say what to select");
+
+                    if (!canvas->selectAt(Vec2{40.0, 0.0}))
+                        fail("clicking the bottom edge selected nothing");
+                    const QString status = canvas->applyOffset(12.0);
+                    if (status.isEmpty()) fail("Offset reported nothing to the user");
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("Offset did not draw the copy it created");
+                    // The COPY is selected, so the next command acts on it.
+                    if (canvas->selectionCount() != 1)
+                        fail("Offset did not leave its copy selected");
+
+                    // ...and it came with the constraints that make it an
+                    // offset rather than a second parallel line.
+                    bool sawParallel = false;
+                    bool sawDistance = false;
+                    for (int i = 0; i < window.displayedConstraintRowCount(); ++i) {
+                        const std::string row = window.displayedConstraintText(i);
+                        if (row.find("Parallel") != std::string::npos) sawParallel = true;
+                        if (row.find("PointLineDistance") != std::string::npos)
+                            sawDistance = true;
+                    }
+                    if (!sawParallel) fail("the offset copy is not listed as Parallel");
+                    if (!sawDistance)
+                        fail("the offset copy has no distance constraint holding it there");
+
+                    // Undo takes the copy AND its constraints in one step.
+                    window.undoCommand();
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("Ctrl+Z did not remove the offset copy");
+                }
+
+                {
+                    // Distance to Line: one point, one line, one dimension.
+                    const int entitiesBefore = canvas->paintedEntities();
+                    canvas->setTool(SketchTool::Point);
+                    canvas->clickAt(Vec2{40.0, 30.0});
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+                    if (!canvas->selectAt(Vec2{40.0, 30.0}))
+                        fail("clicking the new point selected nothing");
+                    if (!canvas->selectAt(Vec2{40.0, 0.0}))
+                        fail("clicking the bottom edge selected nothing");
+                    if (canvas->selectionCount() != 2)
+                        fail("the point and the line are not both selected");
+
+                    const int dimensionsBefore = canvas->paintedDimensions();
+                    if (canvas->applyDimension(SketchEditKind::AddPointLineDistance).isEmpty())
+                        fail("the distance-to-line command reported nothing");
+                    canvas->repaint();
+                    if (canvas->paintedDimensions() != dimensionsBefore + 1)
+                        fail("the distance-to-line dimension is not drawn on the canvas");
+
+                    // TWICE: the dimension, then the point that was drawn for
+                    // it. The blocks below count entities, and a stray point
+                    // left here would fail them somewhere far from its cause.
+                    window.undoCommand();
+                    window.undoCommand();
+                    canvas->repaint();
+                    canvas->clearSelection();
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("the distance-to-line check left geometry behind");
+                }
+
+                // --- Trim, THROUGH THE SHELL --------------------------------
+                //
+                // Written because Offset shipped with tests, a decision layer
+                // and no button. A command is not reachable until something
+                // drives it the way a user does.
+                {
+                    const int entitiesBefore = canvas->paintedEntities();
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+
+                    // A line that overhangs the rectangle's right-hand edge.
+                    canvas->setTool(SketchTool::Line);
+                    canvas->clickAt(Vec2{40.0, 25.0});
+                    const QString drawn = canvas->clickAt(Vec2{120.0, 25.0});
+                    if (drawn.isEmpty()) fail("drawing the line to trim reported nothing");
+                    canvas->pressEscape();
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("the line to trim was not drawn");
+
+                    // Trim is a MODE, and the button says so.
+                    canvas->setTrimming(true);
+                    if (!canvas->trimming()) fail("the canvas did not enter trim mode");
+                    canvas->repaint();
+                    if (!window.trimButtonChecked())
+                        fail("the canvas is trimming but the Trim button is not pressed");
+
+                    // Click the overhang, past the rectangle's right edge at x=80.
+                    const QString status = canvas->clickAt(Vec2{100.0, 25.0});
+                    if (status.isEmpty()) fail("Trim reported nothing to the user");
+                    canvas->repaint();
+                    // The line is still THERE -- trimmed, not deleted.
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("Trim removed the whole line instead of the overhang");
+
+                    // Esc leaves the mode, and the button follows.
+                    canvas->pressEscape();
+                    canvas->repaint();
+                    if (canvas->trimming()) fail("Esc did not leave trim mode");
+                    if (window.trimButtonChecked())
+                        fail("Esc left trim mode but the button is still pressed");
+
+                    // AN ARC trims too, since ADR-M17-018 gave its tips
+                    // variables. Only the shell can say whether the hit-test
+                    // offers an arc at all -- it used to look at lines only.
+                    canvas->setTool(SketchTool::Arc);
+                    canvas->clickAt(Vec2{150.0, 50.0});   // centre
+                    canvas->clickAt(Vec2{180.0, 50.0});   // radius 30, due east
+                    canvas->clickAt(Vec2{150.0, 80.0});   // sweeping to due north
+                    canvas->pressEscape();
+                    canvas->setTool(SketchTool::Line);
+                    canvas->clickAt(Vec2{150.0, 50.0});
+                    canvas->clickAt(Vec2{200.0, 100.0});  // a 45-degree cutter
+                    canvas->pressEscape();
+                    canvas->repaint();
+                    const int withArc = canvas->paintedEntities();
+
+                    canvas->setTrimming(true);
+                    // Click the arc near due north, past the 45-degree crossing.
+                    // Asserts it TRIMMED, not merely that it said something:
+                    // a refusal ("click the part of a line or arc") is also a
+                    // non-empty string, and a mutation that dropped arcs from
+                    // the hit-test slipped past a check that only asked for
+                    // text -- failing several blocks later, far from its cause.
+                    if (!canvas->clickAt(Vec2{154.0, 79.7}).contains(QStringLiteral("Trimmed")))
+                        fail("clicking an arc in trim mode did not trim it");
+                    canvas->pressEscape();
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != withArc)
+                        fail("trimming an arc removed it instead of shortening it");
+                    window.undoCommand();  // the trim
+                    window.undoCommand();  // the cutter line
+                    window.undoCommand();  // the arc
+                    canvas->repaint();
+
+                    // A refusal explains itself: nothing crosses out here.
+                    canvas->setTrimming(true);
+                    if (canvas->clickAt(Vec2{300.0, 300.0}).isEmpty())
+                        fail("a refused trim said nothing at all");
+                    canvas->pressEscape();
+
+                    // PICKING A TOOL LEAVES TRIM MODE, and drawing works again.
+                    //
+                    // Trim swallows the whole click, so a mode left running
+                    // makes every drawing tool look broken -- the button
+                    // lights, the cursor changes, and nothing is ever drawn.
+                    canvas->setTrimming(true);
+                    canvas->setTool(SketchTool::Line);
+                    if (canvas->trimming())
+                        fail("choosing a drawing tool did not leave trim mode");
+                    if (window.trimButtonChecked())
+                        fail("the Trim button is still pressed after choosing a tool");
+                    const int beforeDraw = canvas->paintedEntities();
+                    canvas->clickAt(Vec2{200.0, 200.0});
+                    canvas->clickAt(Vec2{260.0, 200.0});
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != beforeDraw + 1)
+                        fail("a drawing tool cannot draw after trim mode was used");
+                    window.undoCommand();
+                    canvas->pressEscape();
+
+                    // Undo puts the whole line back, then remove it entirely so
+                    // the blocks below see the sketch they expect.
+                    window.undoCommand();
+                    window.undoCommand();
+                    canvas->repaint();
+                    canvas->clearSelection();
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("the trim check left geometry behind");
+                }
+
+                // --- Extend and Chamfer, THROUGH THE SHELL ------------------
+                //
+                // Same reason as the Trim block: a command with a decision
+                // layer and no reachable button is a command that does not
+                // exist, and only this can tell the difference.
+                {
+                    const int entitiesBefore = canvas->paintedEntities();
+
+                    // A short line well inside the rectangle, pointing at its
+                    // right-hand edge at x = 80.
+                    canvas->setTool(SketchTool::Line);
+                    canvas->clickAt(Vec2{20.0, 15.0});
+                    canvas->clickAt(Vec2{50.0, 15.0});
+                    canvas->pressEscape();
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("the line to extend was not drawn");
+
+                    canvas->setExtending(true);
+                    if (!canvas->extending()) fail("the canvas did not enter extend mode");
+                    canvas->repaint();
+                    if (!window.extendButtonChecked())
+                        fail("the canvas is extending but the Extend button is not pressed");
+                    // The two picking modes are exclusive.
+                    canvas->setTrimming(true);
+                    if (canvas->extending())
+                        fail("turning on Trim left Extend running as well");
+                    canvas->setExtending(true);
+                    if (canvas->trimming()) fail("turning on Extend left Trim running as well");
+
+                    // Click near the far end: it stretches to the rectangle's edge.
+                    if (canvas->clickAt(Vec2{48.0, 15.0}).isEmpty())
+                        fail("Extend reported nothing to the user");
+                    canvas->pressEscape();
+                    if (canvas->extending()) fail("Esc did not leave extend mode");
+                    if (window.extendButtonChecked())
+                        fail("Esc left extend mode but the button is still pressed");
+
+                    // A drawing tool works afterwards -- the lesson Trim taught.
+                    canvas->setExtending(true);
+                    canvas->setTool(SketchTool::Line);
+                    if (canvas->extending())
+                        fail("choosing a drawing tool did not leave extend mode");
+
+                    window.undoCommand(); // the extend
+                    window.undoCommand(); // the line
+                    canvas->repaint();
+                    canvas->clearSelection();
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("the extend check left geometry behind");
+                }
+
+                {
+                    // Chamfer the rectangle's bottom-right corner. The two
+                    // sides are already joined by a Coincident, which is the
+                    // interesting part: it has to GO.
+                    const int entitiesBefore = canvas->paintedEntities();
+                    const int rowsBefore = window.displayedConstraintRowCount();
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+                    if (!canvas->selectAt(Vec2{40.0, 0.0}))
+                        fail("clicking the bottom edge selected nothing");
+                    if (!canvas->selectAt(Vec2{80.0, 20.0}))
+                        fail("clicking the right edge selected nothing");
+                    if (canvas->selectionCount() != 2)
+                        fail("the two sides of the corner are not both selected");
+
+                    const QString status = canvas->applyChamfer(10.0, 10.0);
+                    if (status.isEmpty()) fail("Chamfer reported nothing to the user");
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("the chamfer line was not drawn");
+                    // One coincidence released, two created: net +1 row.
+                    if (window.displayedConstraintRowCount() != rowsBefore + 1)
+                        fail("the chamfer did not replace the corner's coincidence with two");
+
+                    // ONE undo for the whole thing.
+                    window.undoCommand();
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("Ctrl+Z did not undo the whole chamfer");
+                    if (window.displayedConstraintRowCount() != rowsBefore)
+                        fail("Ctrl+Z did not restore the corner's coincidence");
+                    canvas->clearSelection();
+                }
+
+                // --- Mirror, THROUGH THE SHELL ------------------------------
+                {
+                    const int entitiesBefore = canvas->paintedEntities();
+                    const int rowsBefore = window.displayedConstraintRowCount();
+
+                    // A short line to mirror, and a vertical axis well clear of
+                    // the rectangle so nothing snaps to anything unintended.
+                    canvas->setTool(SketchTool::Line);
+                    canvas->clickAt(Vec2{150.0, 10.0});
+                    canvas->clickAt(Vec2{170.0, 30.0});
+                    canvas->pressEscape();
+                    canvas->setTool(SketchTool::Line);
+                    canvas->clickAt(Vec2{200.0, -20.0});
+                    canvas->clickAt(Vec2{200.0, 60.0});
+                    canvas->pressEscape();
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 2)
+                        fail("the mirror sample geometry was not drawn");
+
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+                    // Refused until there is something AND an axis.
+                    if (canvas->applyMirror().isEmpty())
+                        fail("Mirror with nothing selected said nothing at all");
+
+                    if (!canvas->selectAt(Vec2{160.0, 20.0}))
+                        fail("clicking the line to mirror selected nothing");
+                    // The AXIS LAST -- that is the rule the tooltip states.
+                    if (!canvas->selectAt(Vec2{200.0, 20.0}))
+                        fail("clicking the mirror axis selected nothing");
+                    if (canvas->selectionCount() != 2)
+                        fail("the source and the axis are not both selected");
+
+                    const QString status = canvas->applyMirror();
+                    if (status.isEmpty()) fail("Mirror reported nothing to the user");
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 3)
+                        fail("Mirror did not draw the reflected copy");
+                    // TIED, not stamped: two symmetries, one per end.
+                    int symmetries = 0;
+                    for (int i = 0; i < window.displayedConstraintRowCount(); ++i)
+                        if (window.displayedConstraintText(i).find("Symmetric") !=
+                            std::string::npos)
+                            ++symmetries;
+                    if (symmetries != 2)
+                        fail("the mirrored line is not tied to its original at both ends");
+
+                    // One command, one Ctrl+Z.
+                    window.undoCommand();
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 2)
+                        fail("Ctrl+Z did not undo the whole mirror");
+                    // ...and clean up the two sample lines.
+                    window.undoCommand();
+                    window.undoCommand();
+                    canvas->repaint();
+                    canvas->clearSelection();
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("the mirror check left geometry behind");
+                    if (window.displayedConstraintRowCount() != rowsBefore)
+                        fail("the mirror check left constraints behind");
+                }
+
+                // --- Dragging geometry, THROUGH THE SHELL -------------------
+                //
+                // The Core tests prove the CONSTRAINTS decide. What only a
+                // running window can say is whether a press picks anything up,
+                // whether a release commits it, and whether a plain click still
+                // just selects.
+                {
+                    const int entitiesBefore = canvas->paintedEntities();
+                    canvas->setTool(SketchTool::Line);
+                    canvas->clickAt(Vec2{150.0, 100.0});
+                    canvas->clickAt(Vec2{190.0, 100.0});
+                    canvas->pressEscape();
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("the line to drag was not drawn");
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+
+                    // A PLAIN CLICK still only selects, and costs no undo step.
+                    const std::size_t depthAfterDraw = model->document.undoDepth();
+                    canvas->clickAt(Vec2{190.0, 100.0});
+                    if (canvas->isDraggingGeometry()) {
+                        // Picked up, as a press does -- releasing without
+                        // moving must record nothing.
+                        canvas->finishGeometryDrag();
+                    }
+                    if (model->document.undoDepth() != depthAfterDraw)
+                        fail("clicking a point without moving it left an undo step behind");
+
+                    // A REAL DRAG: grab the free end and move it.
+                    if (!canvas->beginGeometryDrag(Vec2{190.0, 100.0}))
+                        fail("pressing on a line's endpoint did not pick it up");
+                    if (!canvas->isDraggingGeometry())
+                        fail("the canvas does not think a drag is running");
+                    canvas->updateGeometryDrag(Vec2{200.0, 130.0});
+                    canvas->updateGeometryDrag(Vec2{210.0, 150.0});
+                    const QString status = canvas->finishGeometryDrag();
+                    if (status.isEmpty()) fail("finishing a drag reported nothing to the user");
+                    canvas->repaint();
+                    if (canvas->isDraggingGeometry()) fail("the drag did not end on release");
+
+                    // ONE undo step for the whole drag, however many moves.
+                    if (model->document.undoDepth() != depthAfterDraw + 1)
+                        fail("a drag did not collapse into ONE undo step");
+                    window.undoCommand();
+                    canvas->repaint();
+
+                    // ESC MID-DRAG puts it back and records nothing.
+                    if (!canvas->beginGeometryDrag(Vec2{190.0, 100.0}))
+                        fail("could not pick the endpoint up a second time");
+                    canvas->updateGeometryDrag(Vec2{220.0, 160.0});
+                    const std::size_t depthMidDrag = model->document.undoDepth();
+                    if (!canvas->pressEscape()) fail("Esc did nothing during a drag");
+                    if (canvas->isDraggingGeometry()) fail("Esc did not abandon the drag");
+                    if (model->document.undoDepth() != depthMidDrag)
+                        fail("an abandoned drag left an undo step behind");
+
+                    // ...and the geometry really is back where it started.
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("Esc during a drag lost geometry");
+
+                    window.undoCommand(); // remove the sample line
+                    canvas->repaint();
+                    canvas->clearSelection();
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("the drag check left geometry behind");
+                }
+
+                // --- A REFUSAL SURVIVES THE MOUSE ---------------------------
+                //
+                // Reported by the owner: select two line endpoints, press
+                // Concentric, "nothing happens". The refusal WAS produced --
+                // and then erased by the next repaint, which a canvas with
+                // mouse tracking gets on the first pixel of movement. A message
+                // nobody can read is silence, which is the failure roadmap 8 is
+                // written against.
+                {
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+                    // Two ENDPOINTS of two different lines -- the owner's exact
+                    // selection.
+                    if (!canvas->selectAt(Vec2{0.0, 0.0}))
+                        fail("clicking the first endpoint selected nothing");
+                    if (!canvas->selectAt(Vec2{80.0, 40.0}))
+                        fail("clicking the second endpoint selected nothing");
+
+                    const QString refusal =
+                        window.applySketchCommand(SketchEditKind::AddConcentric, false);
+                    if (refusal.isEmpty()) fail("Concentric on two points said nothing at all");
+                    // It NAMES the command they wanted. "Not a circle or an arc"
+                    // is true and useless.
+                    if (!refusal.contains(QStringLiteral("Coincident")))
+                        fail("the Concentric refusal does not say to use Coincident");
+                    if (window.displayedSketchMessage().empty())
+                        fail("the refusal never reached the status line");
+
+                    // NOW MOVE THE MOUSE. This is the whole test.
+                    canvas->hoverAt(Vec2{40.0, 25.0});
+                    canvas->hoverAt(Vec2{41.0, 26.0});
+                    canvas->repaint();
+                    if (window.displayedSketchMessage().empty())
+                        fail("moving the mouse erased the reason the command refused");
+
+                    // Doing something REAL clears it again -- a refusal that
+                    // outlived its own answer would be its own kind of lie.
+                    if (window.applySketchCommand(SketchEditKind::AddCoincident, false).isEmpty())
+                        fail("Coincident on the two endpoints reported nothing");
+                    canvas->hoverAt(Vec2{45.0, 25.0});
+                    canvas->repaint();
+                    if (!window.displayedSketchMessage().empty())
+                        fail("the status line is stuck on a message the user has answered");
+                    window.undoCommand();
+                    canvas->clearSelection();
+                }
+
+                // --- Fillet, THROUGH THE SHELL ------------------------------
+                {
+                    const int entitiesBefore = canvas->paintedEntities();
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+                    // The rectangle's bottom and right sides meet at a corner.
+                    if (!canvas->selectAt(Vec2{40.0, 0.0}))
+                        fail("clicking the bottom edge selected nothing");
+                    if (!canvas->selectAt(Vec2{80.0, 20.0}))
+                        fail("clicking the right edge selected nothing");
+                    const QString status = canvas->applyFillet(10.0);
+                    if (status.isEmpty()) fail("Fillet reported nothing to the user");
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("the fillet arc was not drawn");
+
+                    // It SURVIVES a recompute still joined -- the thing an arc
+                    // with a fixed sweep could never do.
+                    (void)model->document.recompute();
+                    canvas->repaint();
+                    const std::string sketchStatus = window.displayedSketchStatus();
+                    if (sketchStatus.find("Conflicting") != std::string::npos)
+                        fail("the fillet made the sketch conflicting");
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("the fillet arc vanished on recompute");
+
+                    window.undoCommand();
+                    canvas->repaint();
+                    canvas->clearSelection();
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("Ctrl+Z did not undo the whole fillet");
+                }
+
+                // --- Esc leaves the tool, and the TOOLBAR says so -----------
+                //
+                // Every drawing tool, because the bug this guards against is
+                // per-button: the checked state used to be set only inside a
+                // button's own handler, so Esc returned the canvas to the arrow
+                // while the toolbar went on showing Rectangle pressed. The
+                // model was right and the screen was wrong -- and no test that
+                // asks the model can see it.
+                {
+                    struct Case {
+                        SketchTool tool;
+                        const char* label;
+                        Vec2 first;
+                    };
+                    const Case kCases[] = {
+                        {SketchTool::Line, "Line", Vec2{200.0, 200.0}},
+                        {SketchTool::Rectangle, "Rectangle", Vec2{200.0, 220.0}},
+                        {SketchTool::Circle, "Circle", Vec2{220.0, 200.0}},
+                        {SketchTool::Arc, "Arc", Vec2{240.0, 200.0}},
+                        {SketchTool::Point, "Point", Vec2{260.0, 200.0}},
+                    };
+                    const int entitiesBefore = canvas->paintedEntities();
+                    for (const Case& one : kCases) {
+                        canvas->setTool(one.tool);
+                        if (canvas->tool() != one.tool)
+                            fail("the canvas did not take the tool it was given");
+                        if (window.checkedSketchToolLabel() != one.label)
+                            fail("the toolbar is not showing the tool that was selected");
+
+                        // Half-draw with it. Point completes on one click, so it
+                        // is left alone -- there is nothing half-drawn to abandon.
+                        if (one.tool != SketchTool::Point) canvas->clickAt(one.first);
+
+                        canvas->pressEscape();
+                        if (canvas->tool() != SketchTool::Select)
+                            fail("Esc did not return the canvas to Select");
+                        if (window.checkedSketchToolLabel() != std::string("Select"))
+                            fail("Esc returned the canvas to Select but the toolbar still "
+                                 "shows the drawing tool pressed");
+                    }
+                    canvas->repaint();
+                    // ONE press, so nothing was committed on the way out.
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("abandoning a shape with Esc left geometry behind");
+                }
+
+                // --- Dimension FROM the origin -----------------------------
+                //
+                // The measurement almost every mechanical sketch starts with,
+                // and it was impossible: the canvas drew a marker at (0,0) and
+                // snapped to it, but nothing was there to select, so nothing
+                // could be measured from it. A real fixed Point is what makes
+                // this reachable, and only the running shell can say whether a
+                // user can actually pick it.
+                {
+                    const SketchEntityId origin = canvas->originPoint();
+                    if (origin == kInvalidSketchEntityId)
+                        fail("a new sketch has no origin point to dimension from");
+
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+                    if (!canvas->selectAt(Vec2{0.0, 0.0}))
+                        fail("clicking the origin selected nothing");
+                    // The far corner of the rectangle.
+                    if (!canvas->selectAt(Vec2{80.0, 40.0}))
+                        fail("clicking the rectangle's far corner selected nothing");
+                    if (canvas->selectionCount() != 2)
+                        fail("the origin and the corner are not both selected");
+
+                    const int dimensionsBefore = canvas->paintedDimensions();
+                    const QString status = canvas->applyDimension(SketchEditKind::None);
+                    if (status.isEmpty())
+                        fail("dimensioning from the origin reported nothing");
+                    canvas->repaint();
+                    if (canvas->paintedDimensions() != dimensionsBefore + 1)
+                        fail("the origin-to-corner dimension is not drawn on the canvas");
+
+                    // It measures the DIAGONAL of an 80x40 rectangle, and it is
+                    // a real driving dimension rather than a label: a value that
+                    // did not come from the geometry would still look right.
+                    const double expected = std::sqrt(80.0 * 80.0 + 40.0 * 40.0);
+                    bool found = false;
+                    for (int i = 0; i < window.displayedConstraintRowCount(); ++i) {
+                        const std::string row = window.displayedConstraintText(i);
+                        if (row.find("Distance") == std::string::npos) continue;
+                        found = true;
+                    }
+                    if (!found)
+                        fail("the origin-to-corner dimension is not listed as a Distance");
+                    bool matched = false;
+                    for (const auto& parameter : model->document.parameters().items())
+                        if (parameter != nullptr &&
+                            std::abs(parameter->value() - expected) < 1e-6)
+                            matched = true;
+                    if (!matched)
+                        fail("the origin-to-corner dimension was not seeded at what it measures");
+
+                    // Undo it: the block below counts on the sketch it was left.
+                    window.undoCommand();
+                    canvas->repaint();
+                    if (canvas->paintedDimensions() != dimensionsBefore)
+                        fail("Ctrl+Z did not remove the origin-to-corner dimension");
+                    canvas->clearSelection();
+                }
+
+                // --- The DIMENSION TOOL, through the shell (M17.18) ---------
+                //
+                // Onshape's shape: pick the geometry, then click where the
+                // dimension line goes. What only a running window can answer
+                // is whether the placement click lands the dimension WHERE IT
+                // WAS CLICKED -- "the tool created a dimension" and "it is
+                // where the user put it" are two claims, and the second is the
+                // whole reason the tool exists.
+                {
+                    const int constraintsBefore = window.displayedConstraintRowCount();
+                    canvas->setDimensioning(true);
+                    if (!canvas->dimensioning()) fail("Dimension mode would not switch on");
+
+                    // Pick the bottom edge. One line is a LENGTH -- inferred,
+                    // not chosen from eight buttons.
+                    canvas->clickAt(Vec2{40.0, 0.0});
+                    if (canvas->selectionCount() != 1)
+                        fail("the first dimension click did not pick the edge");
+
+                    // With something dimensionable picked, the pending
+                    // dimension is DRAWN at the cursor: a user asked to click a
+                    // position for something invisible is guessing.
+                    canvas->hoverAt(Vec2{40.0, -18.0});
+                    canvas->repaint();
+                    if (canvas->paintedDimensionGhosts() < 1)
+                        fail("the pending dimension is not shown before it is placed");
+
+                    // The placement click.
+                    const QString placed = canvas->dimensionClickAt(Vec2{40.0, -18.0});
+                    if (!canvas->lastCommandApplied())
+                        fail(("the placement click created no dimension: " +
+                              placed.toStdString())
+                                 .c_str());
+                    if (window.displayedConstraintRowCount() != constraintsBefore + 1)
+                        fail("the dimension tool did not add exactly one constraint");
+
+                    // WHERE IT WAS CLICKED. Read back from the document, not
+                    // from what the tool intended.
+                    const Sketch* dimensioned = window.openedSketches().empty()
+                                                    ? nullptr
+                                                    : window.openedSketches().back();
+                    if (dimensioned == nullptr) fail("the dimensioned sketch went missing");
+                    bool placedWhereClicked = false;
+                    if (dimensioned != nullptr)
+                        for (const SketchConstraint& constraint : dimensioned->constraints()) {
+                            const Vec2* at = dimensioned->dimensionPlacement(constraint.id);
+                            if (at == nullptr) continue;
+                            if (std::fabs(at->x - 40.0) < 1e-6 && std::fabs(at->y + 18.0) < 1e-6)
+                                placedWhereClicked = true;
+                        }
+                    if (!placedWhereClicked)
+                        fail("the dimension was not placed where the second click was");
+
+                    // The selection is cleared, so the next click starts a NEW
+                    // dimension rather than adding to the one just finished.
+                    if (canvas->selectionCount() != 0)
+                        fail("the finished dimension left its picks selected");
+
+                    // Esc backs out of the mode; a drawing tool leaves it too.
+                    canvas->pressEscape();
+                    if (canvas->dimensioning()) fail("Esc did not leave dimension mode");
+                    canvas->setTool(SketchTool::Select);
+
+                    // UNDONE, so the checks below meet the sketch they expect.
+                    // Every block here shares one document, and a dimension
+                    // left behind is a constraint the next block counts.
+                    window.undoCommand();
+                    if (window.displayedConstraintRowCount() != constraintsBefore)
+                        fail("undoing the placed dimension did not restore the sketch");
+                    canvas->clearSelection();
+                }
+
+                // --- Roadmap 6.3: find a constraint, see it, throw it away --
+                //
+                // The panel already LISTED constraints; listing is not managing.
+                // Section 6.3 asks for two more things, and section 8.2 point 2
+                // for the reason: a user diagnosing a sketch has to be able to
+                // pick a row and see WHICH geometry it is about, then delete it.
+                // Neither is reachable from a unit test -- one is a ring drawn
+                // by the painter, the other a button on a dock.
+                {
+                    canvas->clearSelection();
+                    if (!window.selectConstraintRow(0))
+                        fail("could not select the first constraint row");
+                    canvas->repaint();
+                    if (canvas->paintedHighlightedGlyphs() != 1)
+                        fail("selecting a constraint row did not ring its glyph on the canvas");
+                    if (canvas->paintedHighlightedEntities() < 1)
+                        fail("selecting a constraint row did not emphasise the geometry it names");
+                    // The canvas selection is UNTOUCHED: picking a row is a
+                    // diagnosis, not a change of what the user has picked.
+                    if (canvas->selectionCount() != 0)
+                        fail("selecting a constraint row clobbered the canvas selection");
+                    if (!window.constraintDeleteButtonEnabled())
+                        fail("the delete button is disabled while a constraint row is selected");
+                    if (window.constraintDeleteButtonText().empty())
+                        fail("the delete button has no label");
+                    const SketchConstraintId pinned = canvas->highlightedConstraint();
+                    if (pinned == kInvalidSketchConstraintId)
+                        fail("selecting a row did not record which constraint is highlighted");
+
+                    // Now over-constrain it ON PURPOSE and recover. A second
+                    // length on the bottom edge, disagreeing with the first, is
+                    // the smallest honest conflict -- and getting out of it by
+                    // deleting the offender is the entire point of the panel.
+                    const int rowsBefore = window.displayedConstraintRowCount();
+                    canvas->clearSelection();
+                    if (!canvas->selectAt(Vec2{40.0, 0.0}))
+                        fail("clicking the bottom edge selected nothing");
+                    if (canvas->applyDimension(SketchEditKind::None).isEmpty())
+                        fail("adding a second length reported nothing");
+                    canvas->clearSelection();
+                    const int addedRow = window.displayedConstraintRowCount() - 1;
+                    if (addedRow != rowsBefore)
+                        fail("the second length did not appear in the constraint panel");
+
+                    // The panel was just REBUILT, and the highlight survived it.
+                    // Every recompute rebuilds these rows, so a highlight that
+                    // did not survive one would blink out at exactly the moment
+                    // the user is watching the sketch resolve.
+                    if (canvas->highlightedConstraint() != pinned)
+                        fail("rebuilding the constraint panel dropped the highlight");
+                    canvas->repaint();
+                    if (canvas->paintedHighlightedGlyphs() != 1)
+                        fail("the ring is gone after the panel was rebuilt");
+                    const auto addedId = static_cast<SketchConstraintId>(static_cast<ObjectId>(
+                        window.displayedConstraintId(addedRow)));
+                    if (canvas->commitDimensionText(addedId, QStringLiteral("55")).isEmpty())
+                        fail("committing the contradicting value reported nothing");
+                    canvas->repaint();
+
+                    const SketchStatusLine conflicted = canvas->statusLine();
+                    if (conflicted.badge == "OK")
+                        fail("two disagreeing lengths on one edge are reported as OK");
+
+                    // Prefer whatever the solver BLAMED -- that is the row a
+                    // user would reach for. Fall back to the one just added when
+                    // it named nobody, so the recovery is still exercised.
+                    int target = -1;
+                    for (int i = 0; i < window.displayedConstraintRowCount(); ++i)
+                        if (window.displayedConstraintText(i).find("AT FAULT") !=
+                            std::string::npos)
+                            target = i;
+                    if (target < 0) target = addedRow;
+                    if (!window.selectConstraintRow(target))
+                        fail("could not select the offending constraint row");
+                    if (!window.constraintDeleteButtonEnabled())
+                        fail("the delete button is disabled on the offending row");
+                    if (window.clickConstraintDeleteButton().isEmpty())
+                        fail("deleting a constraint reported nothing to the user");
+                    canvas->repaint();
+
+                    if (window.displayedConstraintRowCount() != rowsBefore)
+                        fail("deleting the constraint did not remove its row");
+                    if (canvas->statusLine().badge == conflicted.badge &&
+                        conflicted.badge != "OK")
+                        fail("the sketch is still reporting trouble after the offender was "
+                             "deleted");
+                    // The highlight went WITH it rather than sliding onto
+                    // whatever took its row.
+                    if (canvas->highlightedConstraint() != kInvalidSketchConstraintId)
+                        fail("the deleted constraint is still highlighted");
+                    if (canvas->paintedHighlightedGlyphs() != 0)
+                        fail("a ring is still drawn for a constraint that no longer exists");
+                }
+
+                // --- The other direction: click the BADGE, press Delete -----
+                //
+                // Roadmap 6.3's own words: "click the constraint icon on the
+                // canvas, then press Delete". Both halves are reachable only
+                // here -- one is a hit-test against a box the painter placed,
+                // the other a key event -- and the round trip is what proves
+                // the panel and the canvas agree about what is selected.
+                {
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+
+                    // Pick a badge that still exists, by asking the canvas where
+                    // it drew one rather than guessing at coordinates.
+                    const int rowsBefore = window.displayedConstraintRowCount();
+                    if (rowsBefore < 1) fail("no constraints left to pick on the canvas");
+                    const auto wantedId = static_cast<SketchConstraintId>(
+                        static_cast<ObjectId>(window.displayedConstraintId(0)));
+                    Vec2 badgeCentre{};
+                    if (!canvas->constraintBadgeCentre(wantedId, &badgeCentre))
+                        fail("the first listed constraint has no badge on the canvas");
+                    if (canvas->constraintBadgeAt(badgeCentre) != wantedId)
+                        fail("the badge cannot be hit where it is drawn");
+
+                    canvas->clickAt(badgeCentre);
+                    canvas->repaint();
+                    if (canvas->highlightedConstraint() != wantedId)
+                        fail("clicking a constraint badge did not highlight it");
+                    if (canvas->paintedHighlightedGlyphs() != 1)
+                        fail("clicking a badge did not ring it");
+                    // The PANEL followed the canvas: the same constraint, and
+                    // its delete button live.
+                    const int followed = window.selectedConstraintRow();
+                    if (followed < 0)
+                        fail("clicking a badge left the constraint panel with no selection");
+                    if (static_cast<SketchConstraintId>(static_cast<ObjectId>(
+                            window.displayedConstraintId(followed))) != wantedId)
+                        fail("the panel selected a different constraint from the one clicked");
+                    if (!window.constraintDeleteButtonEnabled())
+                        fail("the delete button is dead after picking a badge on the canvas");
+                    // ...and the click did not also select geometry, or Delete
+                    // would be ambiguous.
+                    if (canvas->selectionCount() != 0)
+                        fail("clicking a badge also selected geometry underneath it");
+
+                    // Delete, from the keyboard, on the canvas.
+                    //
+                    // Delivered to the widget directly rather than through
+                    // QApplication::sendEvent: the application redirects key
+                    // events to the focus widget, and this window is never
+                    // shown, so there is no focus to redirect to. What is under
+                    // test is the canvas's key handling, which is what
+                    // QWidget::event dispatches to.
+                    QKeyEvent del(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+                    QCoreApplication::sendEvent(canvas, &del);
+                    canvas->repaint();
+                    if (window.displayedConstraintRowCount() != rowsBefore - 1)
+                        fail("Delete did not remove the constraint whose badge was clicked");
+                    if (canvas->highlightedConstraint() != kInvalidSketchConstraintId)
+                        fail("the deleted constraint is still highlighted");
+                    if (canvas->paintedEntities() != 5)
+                        fail("Delete removed geometry as well as the constraint");
+
+                    // Undo brings it back: a deleted constraint is an ordinary
+                    // document change, not a view action (roadmap 15).
+                    window.undoCommand();
+                    canvas->repaint();
+                    if (window.displayedConstraintRowCount() != rowsBefore)
+                        fail("Ctrl+Z did not bring the deleted constraint back");
+                }
+
+                // --- M13: a geometric constraint, in the running shell ------
+                //
+                // Same reason the M12 block exists: SketchGeometricConstraintTests
+                // proves the residual solves and SketchCanvasTests proves the
+                // selection rules hold, and NEITHER can say whether a user can
+                // reach any of it. Without this the seven new constraints would
+                // be owner-validatable only on paper.
+                const int rowsBeforeTangent = window.displayedConstraintRowCount();
+                const int glyphsBeforeTangent = canvas->paintedConstraintGlyphs();
+
+                canvas->setTool(SketchTool::Circle);
+                canvas->clickAt(Vec2{40.0, 20.0});   // centre
+                canvas->clickAt(Vec2{50.0, 20.0});   // rim: r = 10
+                canvas->setTool(SketchTool::Select);
+                canvas->clearSelection();
+                if (!canvas->selectAt(Vec2{40.0, 30.0}))
+                    fail("clicking the circle's rim selected nothing");
+                // ...and the tangency is CHECKED, not just listed. A constraint
+                // that appears in the panel and does not hold is the silent
+                // failure this whole file exists to catch -- and the circle's
+                // position after it is what the pick below depends on.
+                if (!canvas->selectAt(Vec2{40.0, 0.0}))
+                    fail("clicking the rectangle's bottom edge selected nothing");
+                if (canvas->selectionCount() != 2)
+                    fail("the circle and the line are not both selected");
+
+                const QString tangentStatus =
+                    canvas->applyConstraint(SketchEditKind::AddTangent);
+                canvas->repaint();
+                if (tangentStatus.isEmpty())
+                    fail("the tangent command reported nothing to the user");
+                if (window.displayedConstraintRowCount() != rowsBeforeTangent + 1)
+                    fail("the tangent constraint is not listed in the constraint panel");
+                if (canvas->paintedConstraintGlyphs() <= glyphsBeforeTangent)
+                    fail("the tangent constraint has no glyph on the canvas");
+                if (canvas->paintedEntities() != 6)
+                    fail("the canvas is not drawing the circle it was asked to draw");
+                {
+                    const Sketch* solved = model->document.findSketch(canvas->sketchId());
+                    if (solved == nullptr) fail("the sketch went away mid-test");
+                    const SketchCircle* touching = nullptr;
+                    for (const SketchEntity& entity : solved->entities())
+                        if (const auto* circle = std::get_if<SketchCircle>(&entity.geometry))
+                            touching = circle;
+                    if (touching == nullptr) fail("the circle this test drew is gone");
+                    // The rectangle's bottom edge is y = 0, so a tangent circle
+                    // has its centre exactly one radius from it.
+                    else if (std::abs(std::abs(touching->center.y) - touching->radiusMm) > 1e-6)
+                        fail("the tangent constraint was listed but the circle does not touch");
+                }
+
+                // A REFUSAL has to reach the user too. Two lines cannot be
+                // tangent, and a command that silently does nothing is the
+                // failure roadmap section 8 is written against.
+                canvas->clearSelection();
+                canvas->selectAt(Vec2{40.0, 0.0});
+                canvas->selectAt(Vec2{0.0, 20.0});
+                if (canvas->applyConstraint(SketchEditKind::AddTangent).isEmpty())
+                    fail("a refused tangent command said nothing at all");
+
+                // --- Every dimension TYPE, on screen ------------------------
+                //
+                // The linear case above exercises extension lines, arrowheads
+                // and rotated knocked-out text. Radial, diametral and angular
+                // reuse that machinery but the ANGULAR one also strokes an arc,
+                // and an arc drawn with the wrong sweep or the wrong centre is
+                // a defect only a painted pixel can show.
+                // WHERE THE CIRCLE IS NOW, asked rather than assumed.
+                //
+                // The tangency above MOVES it: a circle told to touch the
+                // rectangle's bottom edge ends up with its centre one radius
+                // above that edge, not where it was drawn. This used to be a
+                // hard-coded (40, 30) that happened to still be on the rim, and
+                // it stopped being so the day the solver got better at
+                // satisfying the constraint -- a test failing because the code
+                // started working.
+                const auto rimOfTheCircle = [&]() {
+                    const Sketch* current = model->document.findSketch(canvas->sketchId());
+                    if (current == nullptr) fail("the sketch went away mid-test");
+                    for (const SketchEntity& entity : current->entities())
+                        if (const auto* circle = std::get_if<SketchCircle>(&entity.geometry))
+                            return Vec2{circle->center.x, circle->center.y + circle->radiusMm};
+                    fail("the circle this test drew is gone");
+                    return Vec2{0.0, 0.0};
+                };
+                canvas->clearSelection();
+                if (!canvas->selectAt(rimOfTheCircle()))
+                    fail("could not select the circle to dimension it");
+                if (canvas->applyDimension(SketchEditKind::None).isEmpty())
+                    fail("dimensioning the circle reported nothing");
+
+                // Two fresh lines making a corner. The rectangle's own sides
+                // are already Horizontal and Vertical, so an angle between them
+                // would be REDUNDANT -- a true diagnosis, and the wrong thing
+                // to put in a screenshot of what a good dimension looks like.
+                canvas->setTool(SketchTool::Line);
+                canvas->clickAt(Vec2{10.0, -40.0});
+                canvas->clickAt(Vec2{70.0, -40.0});
+                canvas->clickAt(Vec2{95.0, -12.0});
+                canvas->setTool(SketchTool::Select);
+                canvas->clearSelection();
+                if (!canvas->selectAt(Vec2{40.0, -40.0}))
+                    fail("could not select the first leg of the corner");
+                if (!canvas->selectAt(Vec2{82.0, -26.0}))
+                    fail("could not select the second leg of the corner");
+                if (canvas->applyDimension(SketchEditKind::None).isEmpty())
+                    fail("dimensioning the corner angle reported nothing");
+
+                canvas->repaint();
+                // Length, diameter and angle -- all three drawn.
+                if (canvas->paintedDimensions() != 3)
+                    fail("the canvas is not drawing all three dimension types");
+                // DRAWN AS DIMENSIONS, not merely as numbers. Two heads for the
+                // length, two for the diameter, two on the angular arc.
+                if (canvas->paintedDimensionArrows() != 6)
+                    fail("the dimensions are not being drawn with arrowheads");
+                if (canvas->paintedDimensionArcs() != 1)
+                    fail("the angular dimension is not drawing its arc");
+
+                // --- M16: dragging a dimension, in the running shell --------
+                //
+                // The layer below proves a placement REPLACES the computed
+                // layout; only this can say the canvas actually hands the drag
+                // through, and that one drag is one undo step rather than one
+                // per mouse move.
+                const SketchConstraintId dragged = canvas->dimensionAt(Vec2{40.0, -14.4});
+                if (dragged == kInvalidSketchConstraintId) {
+                    fail("the length dimension cannot be found where it was drawn");
+                } else {
+                    const std::size_t undoBefore = model->document.undoDepth();
+                    if (!canvas->beginDimensionDrag(Vec2{40.0, -14.4}))
+                        fail("grabbing the dimension did not start a drag");
+                    // Several moves, as a real drag produces.
+                    canvas->updateDimensionDrag(Vec2{40.0, -20.0});
+                    canvas->updateDimensionDrag(Vec2{40.0, -26.0});
+                    canvas->updateDimensionDrag(Vec2{40.0, -32.0});
+                    if (!canvas->isDraggingDimension())
+                        fail("the drag ended before the mouse was released");
+                    if (canvas->finishDimensionDrag().isEmpty())
+                        fail("finishing the drag reported nothing to the user");
+
+                    // ONE undo step for the whole drag. Recording per move
+                    // would make a drag across the canvas a thousand-step
+                    // history nobody can get back through.
+                    if (model->document.undoDepth() != undoBefore + 1)
+                        fail("a dimension drag did not collapse into ONE undo step");
+
+                    canvas->repaint();
+                    if (canvas->paintedDimensions() != 3)
+                        fail("a dragged dimension stopped being drawn");
+
+                    // ...and it is REALLY where it was dropped.
+                    const Sketch* dragTarget = model->document.findSketch(canvas->sketchId());
+                    if (dragTarget == nullptr ||
+                        dragTarget->dimensionPlacement(dragged) == nullptr)
+                        fail("the drag did not record a placement");
+
+                    // Auto-place puts it back, also in one step.
+                    if (window.sketchCanvas()->autoPlaceAllDimensions().isEmpty())
+                        fail("auto-place reported nothing");
+                    if (dragTarget->dimensionPlacement(dragged) != nullptr)
+                        fail("auto-place left the dimension pinned");
+                }
+
+                // --- M16: a prefix and a tolerance, through the shell -------
+                if (dragged != kInvalidSketchConstraintId) {
+                    const QString formatted = window.applyDimensionFormat(
+                        dragged, QStringLiteral("2x "), QStringLiteral(""), 0.1, 0.1);
+                    if (formatted.isEmpty()) fail("formatting a dimension reported nothing");
+                    canvas->repaint();
+                    const QString shown = canvas->dimensionDisplayText(dragged);
+                    if (!shown.startsWith(QStringLiteral("2x ")))
+                        fail("the dimension is not showing its prefix");
+                    if (!shown.contains(QStringLiteral("+/-0.1")))
+                        fail("the dimension is not showing its tolerance");
+                    if (canvas->paintedDimensions() != 3)
+                        fail("a formatted dimension stopped being drawn");
+                }
+
+                if (screenshotPath != nullptr) {
+                    canvas->repaint();
+                    // The WHOLE window, not just the canvas: the toolbar is
+                    // now icon-only, so whether those icons read is part of
+                    // what a screenshot has to answer.
+                    if (!window.grab().save(QString::fromUtf8(screenshotPath)))
+                        fail("could not write the requested screenshot");
+                }
+
+                // --- Projected reference geometry, through the shell --------
+                //
+                // The projection is unit-tested and the Use tool is unit-tested,
+                // and NEITHER can answer the only question that matters here:
+                // does the underlay reach the screen, and can a click convert
+                // it? An underlay that is stored but never painted is a feature
+                // a user cannot see; a Use mode with no button is a command
+                // that does not exist. Both have shipped in this project
+                // before, with every test green.
+                {
+                    const int entitiesBefore = canvas->paintedEntities();
+
+                    // Refuses BEFORE there is anything to use, and says why.
+                    // "Nothing happened" is the failure this block exists for.
+                    canvas->setUseReference(true);
+                    if (!canvas->useReference()) fail("Use mode would not switch on");
+                    const QString empty = canvas->useReferenceAt(Vec2{10.0, 10.0});
+                    if (!empty.contains(QStringLiteral("reference")))
+                        fail("Use with no projected geometry did not say what is missing");
+                    canvas->setUseReference(false);
+
+                    // The underlay a sketch on a face would have: the far edge
+                    // of the face, a hole in it, and the two corners. Added
+                    // through the SAME facade call the sketch-on-face command
+                    // uses, so this drives the real path.
+                    const std::vector<SketchGeometry> projected = {
+                        SketchLine{Vec2{0.0, 60.0}, Vec2{80.0, 60.0}},
+                        SketchCircle{Vec2{40.0, 30.0}, 8.0},
+                        SketchPoint{Vec2{0.0, 60.0}},
+                        SketchPoint{Vec2{80.0, 60.0}}};
+                    if (model->document.addSketchReferences(window.editingSketch(), projected) !=
+                        projected.size())
+                        fail("the document refused the projected reference geometry");
+
+                    canvas->repaint();
+                    if (canvas->paintedReferences() != 4)
+                        fail("the projected reference geometry is not drawn on the canvas");
+                    // And it did NOT become sketch geometry by being drawn: the
+                    // whole separation would be pointless if painting merged
+                    // the two.
+                    if (canvas->paintedEntities() != entitiesBefore)
+                        fail("projected geometry was counted as sketch geometry");
+
+                    // Convert the reference line, exactly as a user does: turn
+                    // the mode on, click the edge.
+                    canvas->setUseReference(true);
+                    const QString used = canvas->useReferenceAt(Vec2{40.0, 60.0});
+                    if (used.isEmpty()) fail("Use reported nothing to the user");
+                    if (!canvas->lastCommandApplied())
+                        fail(("clicking a projected edge in Use mode converted nothing: " +
+                              used.toStdString())
+                                 .c_str());
+                    canvas->repaint();
+                    if (canvas->paintedEntities() != entitiesBefore + 1)
+                        fail("the converted edge was not drawn as sketch geometry");
+                    // The reference SURVIVES being used -- the underlay is what
+                    // the face looked like, and using an edge did not change
+                    // that.
+                    if (canvas->paintedReferences() != 4)
+                        fail("using a projected edge consumed it");
+
+                    // The same edge again is REFUSED. A duplicate curve lying
+                    // exactly on top of another is invisible, and it makes the
+                    // profile ambiguous.
+                    const QString again = canvas->useReferenceAt(Vec2{40.0, 60.0});
+                    if (!again.contains(QStringLiteral("already")))
+                        fail("Use converted the same edge twice");
+
+                    // Use is a MODE, and choosing a drawing tool leaves it --
+                    // the defect Trim shipped with, where the button stayed lit
+                    // and nothing was ever drawn.
+                    canvas->setTool(SketchTool::Line);
+                    if (canvas->useReference())
+                        fail("choosing a drawing tool left Use mode running");
+                    canvas->setTool(SketchTool::Select);
+                }
+
+                // --- A PAD WITH A HOLE IN IT --------------------------------
+                //
+                // Reported by the owner: a rectangle with a circle inside it
+                // padded to a solid rectangle with no hole. TWO defects behind
+                // one symptom -- the profile validator refused a second loop,
+                // and the command printed "Pad created" regardless, so the user
+                // was told the opposite of what happened.
+                //
+                // Both are fixed, so this now checks the FEATURE: the pad is
+                // built, and the profile really did carry the hole.
+                {
+                    window.newSketchCommand();
+                    SketchCanvasWidget* holed = window.sketchCanvas();
+                    if (holed == nullptr) fail("no canvas for the two-loop sketch");
+                    holed->setTool(SketchTool::Rectangle);
+                    holed->clickAt(Vec2{0.0, 0.0});
+                    holed->clickAt(Vec2{100.0, 50.0});
+                    holed->pressEscape();
+                    holed->setTool(SketchTool::Circle);
+                    holed->clickAt(Vec2{50.0, 25.0});
+                    holed->clickAt(Vec2{60.0, 25.0});
+                    holed->pressEscape();
+                    window.finishSketchCommand();
+
+                    // --- The sketch is IN THE PART VIEW (M17.7) -------------
+                    //
+                    // Reported by the owner: after Finish Sketch the sketch was
+                    // simply not there. It existed only on the 2D canvas, so
+                    // nothing in the part view said where it sat relative to
+                    // anything else -- which is the whole reason a sketch has a
+                    // plane.
+                    //
+                    // Counted from the SCENE, not from the presenter's list: a
+                    // presenter that names a sketch and a viewer that never
+                    // draws it is precisely the shape of the bug.
+                    if (window.viewer() == nullptr) fail("the shell has no 3D view");
+                    if (window.viewer()->displayedSketchCount() < 1)
+                        fail("the finished sketch is not drawn in the part view");
+
+                    // --- RENAMING, through the panel (M17.16) ---------------
+                    //
+                    // "The row is editable" and "typing into it renames the
+                    // thing" are two claims, and the gap between them is
+                    // exactly how a Length row that accepted typing and changed
+                    // nothing survived a milestone (ADR-M17-027). This types
+                    // into the cell and reads the TREE back.
+                    {
+                        // The sketch just finished, selected the way clicking
+                        // its row selects it.
+                        const ObjectId sketchId = window.openedSketches().empty()
+                                                      ? kInvalidObjectId
+                                                      : window.openedSketches().back()->id();
+                        if (sketchId == kInvalidObjectId) fail("no sketch to rename");
+                        window.selectObject(sketchId);
+                        if (!window.typeIntoPropertyRow("Name", "Outline"))
+                            fail("the Name row cannot be typed into");
+
+                        bool renamed = false;
+                        for (const std::string& row : window.treeRows())
+                            if (row.find("Outline") != std::string::npos) renamed = true;
+                        if (!renamed) fail("renaming did not reach the model tree");
+
+                        // Renaming it to a name ANOTHER row already has is
+                        // refused, and the name that was there survives --
+                        // names are how a user picks what to delete.
+                        window.selectObject(sketchId);
+                        // "PadLength" is a PARAMETER the sample already has --
+                        // taken at this exact moment, unlike a feature name
+                        // that is not created until further down.
+                        window.typeIntoPropertyRow("Name", "PadLength");
+                        // Checked in the TREE, not in the cell. A refused edit
+                        // deliberately keeps the typed text on screen so a
+                        // typo does not have to be retyped (M11.3) -- so the
+                        // cell reads "PadLength" and the MODEL must not.
+                        bool keptItsName = false;
+                        for (const std::string& row : window.treeRows())
+                            if (row.find("Outline") != std::string::npos) keptItsName = true;
+                        if (!keptItsName)
+                            fail("a refused rename changed the name anyway");
+                    }
+
+                    // --- Every row has its OWN name (M17.15) ----------------
+                    //
+                    // The owner deleted one of two rows both reading "Pocket"
+                    // and lost their undo history: the middle link of a chain
+                    // cannot be removed reversibly, the tail can, and nothing
+                    // on screen told the two apart. The tree is how a user
+                    // picks what to delete.
+                    {
+                        std::vector<std::string> names;
+                        for (std::string row : window.treeRows()) {
+                            const std::size_t at = row.find_first_not_of(' ');
+                            if (at != std::string::npos) row = row.substr(at);
+                            // Constraints repeat by design -- four Coincidents
+                            // under one sketch are four different constraints
+                            // and the row shows what each one IS. Objects a
+                            // user selects and deletes must not repeat.
+                            if (row.rfind("[Cst]", 0) == 0) continue;
+                            if (row.rfind("[Par]", 0) == 0) continue;
+                            names.push_back(row);
+                        }
+                        for (std::size_t i = 0; i < names.size(); ++i)
+                            for (std::size_t j = i + 1; j < names.size(); ++j)
+                                if (names[i] == names[j])
+                                    fail(("two model tree rows read the same: " + names[i])
+                                             .c_str());
+                    }
+
+                    // --- The tree is a TIMELINE, and it ABSORBS (M17.10) ----
+                    //
+                    // The outline's shape is unit-tested; what only a running
+                    // window can answer is whether it reached the QTreeWidget.
+                    // "The outline nested it" and "the tree shows it nested"
+                    // are two claims, and this shell exists because the gap
+                    // between two such claims has shipped here before.
+                    {
+                        const std::vector<std::string> rows = window.treeRows();
+                        const auto depthOf = [](const std::string& row) {
+                            const std::size_t indent = row.find_first_not_of(' ');
+                            return indent == std::string::npos
+                                       ? 0
+                                       : static_cast<int>(indent) / 2;
+                        };
+                        bool sawPad = false;
+                        bool padHoldsItsSketch = false;
+                        for (std::size_t i = 0; i < rows.size(); ++i) {
+                            // By KIND TAG, not by name: "PadLength" is a
+                            // PARAMETER whose name begins with Pad, and matching
+                            // it found a row whose next sibling is another
+                            // parameter -- a check that failed on a tree that
+                            // was in fact correct.
+                            if (rows[i].find("[Sld] Pad") == std::string::npos) continue;
+                            sawPad = true;
+                            // The absorbed sketch is the pad's only child, so
+                            // it is the very next row, one level deeper.
+                            if (i + 1 >= rows.size()) break;
+                            if (depthOf(rows[i + 1]) == depthOf(rows[i]) + 1 &&
+                                rows[i + 1].find("Sketch") != std::string::npos)
+                                padHoldsItsSketch = true;
+                            break;
+                        }
+                        if (!sawPad) fail("the model tree has no Pad row");
+                        if (!padHoldsItsSketch) {
+                            for (const std::string& row : rows)
+                                std::fprintf(stderr, "  tree| %s\n", row.c_str());
+                            fail("the pad's sketch is not nested inside it in the tree");
+                        }
+                    }
+
+                    // --- View > Solid / Wireframe (M17.9) -------------------
+                    //
+                    // Two claims, and the second is the one a menu gets wrong:
+                    // the VIEW changed, and the MENU says what the view is
+                    // doing. A menu that ticks itself while the view does
+                    // something else is the defect the sketch toolbar shipped
+                    // once already.
+                    {
+                        if (window.wireframeMenuChecked())
+                            fail("the view starts in wireframe rather than shaded");
+
+                        const QString toWire = window.setSolidDisplayCommand(true);
+                        if (!toWire.contains(QStringLiteral("wireframe")))
+                            fail("switching to wireframe reported nothing about it");
+                        if (window.viewer()->solidDisplay() !=
+                            OcctViewWidget::SolidDisplay::Wireframe)
+                            fail("the menu said wireframe and the view stayed shaded");
+                        if (!window.wireframeMenuChecked())
+                            fail("the view is in wireframe and the menu does not say so");
+                        // The SKETCH is still drawn -- switching how solids are
+                        // shaded must not remove anything from the scene.
+                        if (window.viewer()->displayedSketchCount() < 1)
+                            fail("wireframe mode dropped the sketch from the scene");
+
+                        const QString toSolid = window.setSolidDisplayCommand(false);
+                        if (!toSolid.contains(QStringLiteral("shaded")))
+                            fail("switching back to solid reported nothing about it");
+                        if (window.viewer()->solidDisplay() !=
+                            OcctViewWidget::SolidDisplay::Shaded)
+                            fail("the menu said solid and the view stayed in wireframe");
+                        if (window.wireframeMenuChecked())
+                            fail("the view is shaded and the menu still says wireframe");
+                    }
+
+                    const ObjectId holedId = window.openedSketches().empty()
+                                               ? kInvalidObjectId
+                                               : window.openedSketches().back()->id();
+                    if (holedId == kInvalidObjectId) fail("the two-loop sketch went missing");
+
+                    const QString status = window.insertPadFromSelection();
+                    if (!status.contains(QStringLiteral("Pad created")))
+                        fail("a rectangle with a circle in it still cannot be padded");
+
+                    // THE HOLE REACHED THE PROFILE. A pad that computed is not
+                    // the claim -- one that quietly dropped the circle would
+                    // compute too, and look exactly like the bug being fixed.
+                    const Sketch* profileSketch = window.openedSketchById(holedId);
+                    if (profileSketch == nullptr) fail("could not re-read the two-loop sketch");
+                    if (profileSketch != nullptr) {
+                        const ProfileResult built = BuildProfile(*profileSketch);
+                        if (!built) fail("the two-loop profile no longer validates");
+                        if (built && built.profile.inners.size() != 1)
+                            fail("the pad's profile did not carry the circle as a hole");
+                    }
+                    // --- TWO POCKETS, AND YOU CAN TELL THEM APART (M17.15) --
+                    //
+                    // The owner's own file, reproduced: Pad -> Pocket -> Pocket.
+                    // Both pockets were called "Pocket", so the tree showed two
+                    // identical rows. They are not interchangeable -- the
+                    // middle link of a chain cannot be deleted reversibly and
+                    // the tail can -- and deleting the wrong one silently
+                    // cleared every undo step the owner had.
+                    //
+                    // The check is on the NAMES, because that is the only thing
+                    // a user has to pick by.
+                    {
+                        window.selectObject(holedId);
+                        const QString first = window.insertPocketFromSelection();
+                        window.selectObject(holedId);
+                        const QString second = window.insertPocketFromSelection();
+                        if (!first.startsWith(QStringLiteral("Pocket created")) ||
+                            !second.startsWith(QStringLiteral("Pocket created")))
+                            fail("a second pocket on the same sketch was refused");
+
+                        std::vector<std::string> pockets;
+                        for (std::string row : window.treeRows()) {
+                            const std::size_t at = row.find_first_not_of(' ');
+                            if (at != std::string::npos) row = row.substr(at);
+                            if (row.find("Pocket") != std::string::npos) pockets.push_back(row);
+                        }
+                        if (pockets.size() < 2) fail("the tree does not show both pockets");
+                        for (std::size_t i = 0; i < pockets.size(); ++i)
+                            for (std::size_t j = i + 1; j < pockets.size(); ++j)
+                                if (pockets[i] == pockets[j])
+                                    fail(("two pocket rows read the same: " + pockets[i])
+                                             .c_str());
+
+                        // And deleting the CONSUMED one says what it costs --
+                        // which is the half the owner was never told.
+                        window.selectObject(window.openedSketches().empty()
+                                                ? kInvalidObjectId
+                                                : kInvalidObjectId);
+                        window.undoCommand();
+                        window.undoCommand();
+                    }
+
+                    window.undoCommand();
+                }
+
+                // --- SKETCH TO SOLID: Revolve, through the shell -------------
+                //
+                // Core could build a RevolveFeature since M8 and the shell had
+                // no command for it -- implemented, tested, unreachable. The
+                // same gap Offset shipped with, and the reason this block
+                // exists at all.
+                {
+                    const std::size_t bodiesBefore = model->document.bodies().empty()
+                                                         ? 0
+                                                         : model->document.bodies().front()->features().size();
+
+                    // A profile beside an axis: a rectangle to the right of a
+                    // vertical CONSTRUCTION line. Revolving it makes a tube.
+                    window.newSketchCommand();
+                    SketchCanvasWidget* revolveCanvas = window.sketchCanvas();
+                    if (revolveCanvas == nullptr) fail("no canvas for the revolve sketch");
+                    revolveCanvas->setTool(SketchTool::Rectangle);
+                    revolveCanvas->clickAt(Vec2{20.0, 0.0});
+                    revolveCanvas->clickAt(Vec2{40.0, 60.0});
+                    revolveCanvas->pressEscape();
+
+                    revolveCanvas->setTool(SketchTool::Line);
+                    revolveCanvas->clickAt(Vec2{0.0, -10.0});
+                    revolveCanvas->clickAt(Vec2{0.0, 70.0});
+                    revolveCanvas->pressEscape();
+                    revolveCanvas->setTool(SketchTool::Select);
+                    revolveCanvas->clearSelection();
+                    if (!revolveCanvas->selectAt(Vec2{0.0, 30.0}))
+                        fail("clicking the axis line selected nothing");
+                    if (revolveCanvas->toggleConstruction().isEmpty())
+                        fail("marking the axis as construction reported nothing");
+
+                    const ObjectId sketchId = revolveCanvas->sketchId();
+                    window.finishSketchCommand();
+
+                    // THE AXIS IS OBVIOUS: one construction line, so no question
+                    // is asked. That is what the Construction flag buys here.
+                    const SketchEntityId axis = window.obviousRevolveAxis(sketchId);
+                    if (axis == kInvalidSketchEntityId)
+                        fail("a sketch with ONE construction line has no obvious revolve axis");
+
+                    // TWO construction lines is NOT an obvious answer, and
+                    // taking the first would be a guess wearing a convention's
+                    // clothes. Checked here because a sketch with exactly one
+                    // cannot tell "exactly one" from "the first one" -- a
+                    // mutation that took the first survived without this.
+                    window.editSelectedSketchCommand();
+                    SketchCanvasWidget* again = window.sketchCanvas();
+                    if (again == nullptr) fail("could not reopen the revolve sketch");
+                    again->setTool(SketchTool::Line);
+                    again->clickAt(Vec2{60.0, -10.0});
+                    again->clickAt(Vec2{60.0, 70.0});
+                    again->pressEscape();
+                    again->setTool(SketchTool::Select);
+                    again->clearSelection();
+                    if (!again->selectAt(Vec2{60.0, 30.0}))
+                        fail("clicking the second axis candidate selected nothing");
+                    again->toggleConstruction();
+                    window.finishSketchCommand();
+                    if (window.obviousRevolveAxis(sketchId) != kInvalidSketchEntityId)
+                        fail("two construction lines still produced an 'obvious' axis");
+                    // Put the sketch back to one construction line.
+                    window.undoCommand();  // the construction switch
+                    window.undoCommand();  // the second line
+                    if (window.obviousRevolveAxis(sketchId) == kInvalidSketchEntityId)
+                        fail("removing the second candidate did not restore the obvious axis");
+
+                    const QString status = window.insertRevolveFromSelection(axis, 360.0);
+                    if (status.isEmpty()) fail("Revolve reported nothing to the user");
+                    // It SAYS the panel will show radians, because the user
+                    // typed 360 and will read 6.2832.
+                    if (!status.contains(QStringLiteral("radians")))
+                        fail("Revolve did not warn that its angle reads in radians");
+
+                    // A SOLID came out. The feature existing is not the claim --
+                    // a revolve that failed would still be in the tree.
+                    if (model->document.bodies().empty()) fail("Revolve created no body");
+                    const auto& features = model->document.bodies().front()->features();
+                    if (features.size() != bodiesBefore + 1)
+                        fail("Revolve did not add exactly one feature");
+                    if (features.back()->state() != ComputeState::Valid)
+                        fail("the revolve feature did not compute");
+
+                    // ...and it is PARAMETRIC: halving the angle rebuilds it.
+                    //
+                    // Asked of the FEATURE, not looked up by name. The name was
+                    // a literal here until feature and parameter names became
+                    // unique (M17.15) -- and looking a parameter up by the name
+                    // a command happened to give it was always the fragile
+                    // half: it asserts a naming convention while claiming to
+                    // assert the revolve's own angle.
+                    const auto* revolveFeature =
+                        dynamic_cast<const RevolveFeature*>(features.back().get());
+                    const Parameter* angle =
+                        revolveFeature == nullptr
+                            ? nullptr
+                            : model->document.parameters().findById(
+                                  revolveFeature->angleParameterId());
+                    if (angle == nullptr) fail("the revolve has no angle parameter");
+                    if (angle != nullptr) {
+                        if (!model->document.setParameterValue(angle->id(), 3.14159265358979 / 2.0))
+                            fail("the revolve angle refused a new value");
+                        (void)model->document.recompute();
+                        if (model->document.bodies().front()->features().back()->state() !=
+                            ComputeState::Valid)
+                            fail("the revolve did not rebuild after its angle changed");
+                    }
+                }
+
+                // LAST IN THIS BLOCK, deliberately: Open leaves the window
+                // looking at a document its owner does not hold, so anything
+                // after it that inspected `model->document` would be asking the
+                // wrong one. Two checks below did, and failed for that reason
+                // rather than for any fault of their own.
+                // --- FILE: Save then Open, through the shell ----------------
+                //
+                // Round-tripped through the RUNNING window, not through the
+                // serializer's own tests: what only this can answer is whether
+                // Open can re-seat everything that points at a document.
+                // PartDocument is deliberately non-copyable AND non-movable, so
+                // opening a file cannot swap a document's contents -- it has to
+                // change WHICH document the window, the presenter and the
+                // canvas look at, and any one of them left behind is a dangling
+                // pointer that Debug will not necessarily catch.
+                {
+                    const std::size_t featuresBefore =
+                        model->document.bodies().empty()
+                            ? 0
+                            : model->document.bodies().front()->features().size();
+                    const std::size_t parametersBefore =
+                        model->document.parameters().items().size();
+
+                    const QString path =
+                        QDir::temp().filePath(QStringLiteral("ep3d_selftest_roundtrip.ep3d"));
+                    QFile::remove(path);
+                    const QString saved = window.saveDocumentFile(path);
+                    if (!saved.startsWith(QStringLiteral("Saved")))
+                        fail("saving the document reported a failure");
+                    if (!QFile::exists(path)) fail("Save wrote no file");
+                    if (window.documentPath() != path)
+                        fail("the window did not remember where it saved");
+
+                    // CHANGE THE ORIGINAL AFTER SAVING, so the file and the
+                    // in-memory document differ. Without this the round trip
+                    // compares a document with itself, and a window that never
+                    // re-seated its pointer passes every count -- which is
+                    // exactly what a mutation proved.
+                    model->document.addParameter("AfterSave", 1.0, UnitType::Millimeter);
+                    if (model->document.parameters().items().size() != parametersBefore + 1)
+                        fail("the post-save marker parameter was not added");
+
+                    const QString opened = window.openDocumentFile(path);
+                    if (!opened.startsWith(QStringLiteral("Opened")))
+                        fail("opening the document just saved reported a failure");
+
+                    // THE WINDOW IS LOOKING AT THE LOADED DOCUMENT, and it is
+                    // whole. Counting through the WINDOW rather than through
+                    // `model` is the point: `model` still owns the original,
+                    // and a window that quietly kept pointing at it would pass
+                    // any check that asked `model`.
+                    if (window.openedDocumentFeatureCount() != featuresBefore)
+                        fail("the opened document lost features");
+                    // The FILE's parameter count, not the original's -- the
+                    // marker added after saving must NOT be there.
+                    if (window.openedDocumentParameterCount() != parametersBefore)
+                        fail("the window is still looking at the document it had before Open");
+
+                    // AND THE SKETCH IS STILL EDITABLE.
+                    //
+                    // Reported by the owner: create a sketch, save, reopen, and
+                    // it can no longer be edited. A document you cannot carry on
+                    // working in is not saved, it is exported.
+                    {
+                        const std::vector<const Sketch*> sketches = window.openedSketches();
+                        if (sketches.empty())
+                            fail("the opened document has no sketch to edit");
+                        if (!sketches.empty()) {
+                            const ObjectId reopened = sketches.front()->id();
+                            window.selectObject(reopened);
+                            const QString editing = window.editSelectedSketchCommand();
+                            if (!window.inSketchMode())
+                                fail("a sketch from a reopened document cannot be edited");
+                            if (editing.contains(QStringLiteral("Select a sketch")))
+                                fail("the reopened sketch could not be selected for editing");
+                            // ...and it can be DRAWN in: an editable sketch that
+                            // refuses geometry is editable in name only.
+                            SketchCanvasWidget* reopenedCanvas = window.sketchCanvas();
+                            if (reopenedCanvas == nullptr) fail("no canvas for the reopened sketch");
+                            // REPAINTED FIRST. The counter reports the LAST paint,
+                            // and that was of a different sketch -- reading it before
+                            // repainting compares this sketch against another one.
+                            reopenedCanvas->repaint();
+                            const int before = reopenedCanvas->paintedEntities();
+                            reopenedCanvas->setTool(SketchTool::Line);
+                            reopenedCanvas->clickAt(Vec2{200.0, 200.0});
+                            reopenedCanvas->clickAt(Vec2{240.0, 200.0});
+                            reopenedCanvas->pressEscape();
+                            reopenedCanvas->repaint();
+                            if (reopenedCanvas->paintedEntities() != before + 1)
+                                fail("nothing can be drawn in a sketch from a reopened document");
+                            window.finishSketchCommand();
+                        }
+                    }
+
+                    // --- DELETE, and FILE > NEW ----------------------------
+                    //
+                    // Reported by the owner: nothing in the shell could delete
+                    // an existing object, and there was no way to start a fresh
+                    // document. Core could do both; only the commands were
+                    // missing -- the same gap Offset and Revolve shipped with.
+                    {
+                        const std::vector<const Sketch*> before = window.openedSketches();
+                        if (before.empty()) fail("no sketch to delete");
+                        if (!before.empty()) {
+                            const ObjectId victim = before.back()->id();
+                            window.selectObject(victim);
+                            const QString deleted = window.deleteSelectedObjectCommand();
+                            if (!deleted.startsWith(QStringLiteral("Deleted")))
+                                fail("deleting a selected sketch reported a failure");
+                            if (window.openedSketches().size() != before.size() - 1)
+                                fail("the deleted sketch is still in the document");
+                            // AND IT WARNS. Deleting a sketch is NOT undoable
+                            // (ADR-M12-008: UndoDelta has no sketch-existence
+                            // case), so the command says so before the fact
+                            // rather than letting the user find out when Ctrl+Z
+                            // does nothing.
+                            if (!deleted.contains(QStringLiteral("cannot be undone")))
+                                fail("deleting a sketch did not warn that it is irreversible");
+                        }
+                        // Nothing selected: refused with a reason, never silent.
+                        window.selectObject(kInvalidObjectId);
+                        if (!window.deleteSelectedObjectCommand().contains(
+                                QStringLiteral("Select")))
+                            fail("deleting with nothing selected said nothing useful");
+                    }
+
+                    // A FILE THAT IS NOT ONE changes nothing and says why.
+                    const QString bogus =
+                        QDir::temp().filePath(QStringLiteral("ep3d_selftest_not_a_doc.ep3d"));
+                    QFile junk(bogus);
+                    if (junk.open(QIODevice::WriteOnly))
+                        junk.write("this is not an EP3D document"), junk.close();
+                    const QString refused = window.openDocumentFile(bogus);
+                    if (!refused.startsWith(QStringLiteral("Could not open")))
+                        fail("opening a corrupt file did not report a failure");
+                    if (window.openedDocumentFeatureCount() != featuresBefore)
+                        fail("a refused open damaged the document that was already loaded");
+                    QFile::remove(bogus);
+                    QFile::remove(path);
+
+                    // --- A DOCUMENT WHOSE ONLY CONTENT IS A SKETCH -------
+                    //
+                    // Reported by the owner against a real file: open it, and
+                    // "Edit Selected Sketch" stays GREYED OUT however the
+                    // sketch is clicked.
+                    //
+                    // The cause was not Open at all -- selectObject() updated
+                    // the tree, the viewer and the properties panel but never
+                    // re-armed the commands, so the enabled state only caught
+                    // up when some other command happened to refresh it. Finish
+                    // Sketch does, which is why the usual route worked; a
+                    // document that is ONLY a sketch has no other route.
+                    {
+                        const QString onlySketch =
+                            QDir::temp().filePath(QStringLiteral("ep3d_selftest_sketch_only.ep3d"));
+                        QFile::remove(onlySketch);
+                        window.newDocumentCommand();
+                        window.newSketchCommand();
+                        SketchCanvasWidget* only = window.sketchCanvas();
+                        if (only == nullptr) fail("no canvas for the sketch-only document");
+                        only->setTool(SketchTool::Rectangle);
+                        only->clickAt(Vec2{0.0, 0.0});
+                        only->clickAt(Vec2{40.0, 20.0});
+                        only->pressEscape();
+                        window.finishSketchCommand();
+                        if (!window.saveDocumentFile(onlySketch).startsWith(QStringLiteral("Saved")))
+                            fail("could not save the sketch-only document");
+
+                        // Read it back, exactly as the owner did.
+                        if (!window.openDocumentFile(onlySketch)
+                                 .startsWith(QStringLiteral("Opened")))
+                            fail("could not reopen the sketch-only document");
+                        if (window.openedSketches().size() != 1u)
+                            fail("the sketch-only document did not come back with its sketch");
+
+                        // NOTHING is selected after Open, so the command is
+                        // correctly unavailable...
+                        if (window.editSketchEnabled())
+                            fail("Edit Sketch is offered with nothing selected");
+                        // ...and selecting the sketch MUST arm it. This is the
+                        // whole bug: the selection landed, and the menu item
+                        // stayed grey.
+                        window.selectObject(window.openedSketches().front()->id());
+                        if (!window.editSketchEnabled())
+                            fail("selecting a sketch did not enable Edit Selected Sketch");
+                        window.editSelectedSketchCommand();
+                        if (!window.inSketchMode())
+                            fail("the reopened sketch-only document cannot be edited");
+                        window.finishSketchCommand();
+                        QFile::remove(onlySketch);
+                    }
+
+                    // LAST: File > New empties the document, so any check above
+                    // that counts what was loaded has to run before it.
+                    {
+                        // FILE > NEW: an empty document, and no path -- so the
+                        // next Save must ask, rather than overwriting the file
+                        // that was open a moment ago.
+                        const QString made = window.newDocumentCommand();
+                        if (!made.contains(QStringLiteral("New document")))
+                            fail("File > New reported something unexpected");
+                        if (!window.openedSketches().empty())
+                            fail("a new document is not empty");
+                        if (window.openedDocumentFeatureCount() != 0)
+                            fail("a new document already has features");
+                        if (!window.documentPath().isEmpty())
+                            fail("File > New kept the previous document's path");
+                        // ...and it is USABLE: a new document you cannot draw in
+                        // is a blank screen with a menu bar.
+                        window.newSketchCommand();
+                        SketchCanvasWidget* freshCanvas = window.sketchCanvas();
+                        if (freshCanvas == nullptr) fail("no canvas in a new document");
+                        freshCanvas->repaint();
+                        const int start = freshCanvas->paintedEntities();
+                        freshCanvas->setTool(SketchTool::Rectangle);
+                        freshCanvas->clickAt(Vec2{0.0, 0.0});
+                        freshCanvas->clickAt(Vec2{50.0, 30.0});
+                        freshCanvas->pressEscape();
+                        freshCanvas->repaint();
+                        if (freshCanvas->paintedEntities() != start + 4)
+                            fail("a new document cannot be drawn in");
+                        window.finishSketchCommand();
+                    }
+
+                }
+
+                window.finishSketchCommand();
+                if (window.inSketchMode()) fail("Finish Sketch did not leave sketch mode");
+            }
+        }
+
+        // --- The script socket, over a REAL connection (M17.28) --------------
+        //
+        // ScriptServer's own logic is small; what is not small is TCP. A
+        // command can arrive in two pieces and two commands can arrive in one
+        // packet, and an interpreter fed whatever happened to be in the buffer
+        // would run half a line. Nothing but a real socket can show that.
+        {
+            paramcad::ScriptServer probe(model->document, [&window]() { window.refreshAll(); });
+            QString listenError;
+            // PORT 0: the operating system picks a free one. A fixed number
+            // would make this test fail on a machine that happens to be using
+            // it, which is a flake rather than a finding.
+            if (!probe.listen(0, &listenError)) {
+                fail("the script server could not listen on a free port");
+            } else {
+                const std::size_t sketchesBefore = model->document.sketches().size();
+                QTcpSocket client;
+                client.connectToHost(QHostAddress::LocalHost, probe.port());
+                if (!client.waitForConnected(3000)) {
+                    fail("could not connect to the script server");
+                } else {
+                    // ONE BUFFER, and the event loop PUMPED rather than
+                    // blocked on.
+                    //
+                    // The client and the server are in the same thread here, so
+                    // client.waitForReadyRead() would wait for a reply the
+                    // server has not been given a chance to write -- it services
+                    // one socket, and the one that needs servicing is the other
+                    // one. The first version of this test did exactly that and
+                    // timed out on every exchange.
+                    QByteArray inbox;
+                    const auto readLine = [&client, &inbox]() -> QString {
+                        QElapsedTimer clock;
+                        clock.start();
+                        for (;;) {
+                            const int newline = inbox.indexOf('\n');
+                            if (newline >= 0) {
+                                const QByteArray line = inbox.left(newline);
+                                inbox.remove(0, newline + 1);
+                                return QString::fromUtf8(line);
+                            }
+                            if (clock.elapsed() > 3000) return QString();
+                            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                            inbox.append(client.readAll());
+                        }
+                    };
+                    // Reads log lines until the verdict, which the protocol
+                    // promises exactly one of per exchange.
+                    const auto exchange = [&readLine](QString* log) -> QString {
+                        for (;;) {
+                            const QString line = readLine();
+                            if (line.isEmpty()) return QString();
+                            if (line.startsWith(QStringLiteral(". "))) {
+                                if (log != nullptr) *log += line.mid(2) + "\n";
+                                continue;
+                            }
+                            return line;
+                        }
+                    };
+
+                    if (!exchange(nullptr).startsWith(QStringLiteral("OK")))
+                        fail("the script server did not greet the client");
+
+                    // TWO COMMANDS IN ONE WRITE, which is what a client that
+                    // does not flush per line produces.
+                    client.write("sketch Socket\ntool line\n");
+                    client.flush();
+                    if (!exchange(nullptr).startsWith(QStringLiteral("OK")) ||
+                        !exchange(nullptr).startsWith(QStringLiteral("OK")))
+                        fail("two commands in one packet were not both run");
+
+                    // ...and ONE COMMAND SPLIT ACROSS TWO WRITES.
+                    client.write("click 0 ");
+                    client.flush();
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                    client.write("0\n");
+                    client.flush();
+                    if (!exchange(nullptr).startsWith(QStringLiteral("OK")))
+                        fail("a command split across two packets was not reassembled");
+
+                    QString madeLog;
+                    client.write("click 60 0\n");
+                    client.flush();
+                    if (!exchange(&madeLog).startsWith(QStringLiteral("OK")) ||
+                        !madeLog.contains(QStringLiteral("Line1")))
+                        fail("the socket did not report the geometry it made");
+
+                    // THE STATE SURVIVED between messages: `tool line` arrived
+                    // in one packet and its two clicks in others, and a line
+                    // came out. That is the whole reason a session exists.
+                    const paramcad::Sketch* made = nullptr;
+                    for (const paramcad::Sketch* one : model->document.sketches())
+                        if (one->name() == "Socket") made = one;
+                    if (made == nullptr)
+                        fail("the socket did not create the sketch it was told to");
+                    else if (made->entities().size() != 1)
+                        fail("the socket's two clicks did not make one line");
+                    if (model->document.sketches().size() != sketchesBefore + 1)
+                        fail("the socket created the wrong number of sketches");
+
+                    // A REFUSAL comes back as ERR and names what was wrong.
+                    client.write("tool wobble\n");
+                    client.flush();
+                    const QString refused = exchange(nullptr);
+                    if (!refused.startsWith(QStringLiteral("ERR")))
+                        fail("a refused command did not answer ERR");
+                    if (!refused.contains(QStringLiteral("wobble")))
+                        fail("the refusal did not name what was wrong");
+
+                    if (probe.connectionCount() != 1)
+                        fail("the script server miscounted its connections");
+                }
+            }
         }
 
         if (status == 0) std::printf("SELFTEST OK\n");

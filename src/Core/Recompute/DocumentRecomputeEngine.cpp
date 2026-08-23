@@ -2,6 +2,7 @@
 #include "Core/Dependency/DependencyGraph.h"
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Document/PartDocument.h"
+#include "Core/Expression/ExpressionEvaluator.h"
 #include "Core/Parameter/Parameter.h"
 #include "Core/Recompute/IRecomputable.h"
 #include "Core/Recompute/RecomputeContext.h"
@@ -59,6 +60,11 @@ DocumentRecomputeReport DocumentRecomputeEngine::run() {
     std::unordered_set<ObjectId> succeeded;
     std::unordered_map<ObjectId, std::string> messages;
 
+    // Rolled-back features are not evaluated (M9.4). Asked of the document
+    // rather than baked into the graph, because the graph is generic and knows
+    // nothing about bodies or feature order.
+    const auto skip = [&](ObjectId id) { return !document_.isFeatureActive(id); };
+
     const RecomputeReport graphReport = graph.recompute([&](ObjectId id) {
         invocationOrder.push_back(id);
         if (IRecomputable* recomputable = registry.findRecomputable(id)) {
@@ -70,13 +76,52 @@ DocumentRecomputeReport DocumentRecomputeEngine::run() {
             }
             return false;
         }
-        if (const ObjectRegistry::ObjectRef* ref = registry.find(id)) {
+        if (ObjectRegistry::ObjectRef* ref = registry.find(id)) {
             // Registered but not recomputable: a dirty source (Parameter or
-            // other input node). Trivially valid in M2 -- scalar parameters
-            // have no evaluator; a non-empty expression string still
-            // auto-validates (documented limitation, ADR-011).
-            if (auto* const* parameter = std::get_if<Parameter*>(ref))
-                (*parameter)->markEvaluated();
+            // other input node).
+            //
+            // M11.2 CLOSES ADR-011's documented limitation. A parameter with a
+            // non-empty expression is EVALUATED here rather than auto-validated,
+            // and its prerequisites are guaranteed to be current already: the
+            // `#name` references are real graph edges (setParameterExpression /
+            // rewireParameterExpressions), so the topological order this
+            // callback runs in has visited them first. Nothing here walks or
+            // orders anything.
+            if (auto* const* parameter = std::get_if<Parameter*>(ref)) {
+                const std::string& text = (*parameter)->expression();
+                if (text.empty()) {
+                    (*parameter)->markEvaluated();
+                    messages[id] = "dirty source";
+                    succeeded.insert(id);
+                    return true;
+                }
+                const std::optional<Dimension> dimension =
+                    ExpressionDimensionOf((*parameter)->unit());
+                if (!dimension.has_value()) {
+                    // Unreachable through the facade -- setParameterExpression
+                    // and the loader both refuse this pairing. Kept because a
+                    // recompute must never be the place a unit mismatch is
+                    // discovered by dereferencing an empty optional.
+                    (*parameter)->markEvaluationFailed();
+                    messages[id] = "this parameter's unit takes a literal value only";
+                    return false;
+                }
+                const VariableResolver resolver = [this](std::string_view name) {
+                    return document_.resolveExpressionVariable(name);
+                };
+                const ExpressionEvalResult evaluated =
+                    EvaluateExpressionText(text, resolver, *dimension);
+                if (!evaluated) {
+                    (*parameter)->markEvaluationFailed();
+                    messages[id] = DescribeExpressionError(evaluated.error);
+                    return false;
+                }
+                (*parameter)->setValue(evaluated.value.magnitude); // -> Dirty
+                (*parameter)->markEvaluated();                     // -> Valid
+                messages[id] = "evaluated expression";
+                succeeded.insert(id);
+                return true;
+            }
             messages[id] = "dirty source";
             succeeded.insert(id);
             return true;
@@ -84,7 +129,7 @@ DocumentRecomputeReport DocumentRecomputeEngine::run() {
         // Unreachable via the document facade (defensive, spec 20).
         messages[id] = "missing registry object";
         return false;
-    });
+    }, skip);
 
     const std::unordered_set<ObjectId> invoked(invocationOrder.begin(), invocationOrder.end());
     std::unordered_set<ObjectId> represented; // ids already placed into report.items

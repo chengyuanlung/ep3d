@@ -26,6 +26,13 @@ public:
     explicit DocumentPresenter(PartDocument& document) noexcept : document_(&document) {}
 
     PartDocument& document() const noexcept { return *document_; }
+    // Points at a DIFFERENT document -- what File > Open needs.
+    //
+    // Possible only because this was always a pointer, not a reference:
+    // PartDocument is deliberately non-copyable and non-movable, so opening a
+    // file cannot replace a document's contents in place. It has to replace
+    // WHICH document everything looks at.
+    void setDocument(PartDocument& document) noexcept { document_ = &document; }
 
     // ObjectIds of the features that currently hold a valid runtime shape, in
     // document order. A feature whose ComputeState is not Valid is omitted:
@@ -33,6 +40,23 @@ public:
     // as if it were current is the display-layer version of the defect
     // ADR-M3-006 fixed for mass properties.
     std::vector<ObjectId> displayableSolids() const;
+
+    // ObjectIds of the sketches the part view should draw, in document order
+    // (M17.7, ADR-M17-030).
+    //
+    // A sketch is only half-visible while it lives exclusively on the 2D
+    // canvas: after Finish Sketch a user looks at the part and cannot see
+    // where the sketch sits relative to everything else, which is the whole
+    // reason a sketch has a plane.
+    //
+    // A sketch CONSUMED by a pad is still drawn, unlike a consumed solid. The
+    // two cases are not alike: a consumed solid is a stale copy of the same
+    // material and drawing it erases its successor's pocket, whereas a sketch
+    // and the solid grown from it are different things, and seeing the outline
+    // on the face is how a user checks that the pad did what they meant. Ctrl+H
+    // hides any of them, sketch or solid, and that is the switch for anyone who
+    // disagrees.
+    std::vector<ObjectId> displayableSketches() const;
 
     // Recomputes and reports whether the display should be rebuilt. The viewer
     // calls this rather than touching the graph itself.

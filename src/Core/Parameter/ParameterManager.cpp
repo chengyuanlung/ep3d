@@ -2,17 +2,19 @@
 
 namespace paramcad {
 
-Parameter& ParameterManager::add(std::string name, double value, UnitType unit) {
-    auto item = std::make_unique<Parameter>(std::move(name), value, unit);
+Parameter& ParameterManager::add(std::string name, double value, UnitType unit,
+                                 ValueDomain domain) {
+    auto item = std::make_unique<Parameter>(std::move(name), value, unit, domain);
     auto& ref = *item;
     items_.push_back(std::move(item));
     return ref;
 }
 
 Parameter& ParameterManager::restore(ObjectId id, std::string name, double value, UnitType unit,
-                                     std::string expression, ParameterState state) {
+                                     std::string expression, ParameterState state,
+                                     ValueDomain domain) {
     auto item = std::make_unique<Parameter>(id, std::move(name), value, unit,
-                                            std::move(expression), state);
+                                            std::move(expression), state, domain);
     auto& ref = *item;
     items_.push_back(std::move(item));
     return ref;

@@ -1,5 +1,9 @@
 #pragma once
 
+#include "Core/Kernel/EdgeQuery.h"
+#include "Core/Kernel/FaceQuery.h"
+
+#include <cstdint>
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Kernel/KernelTypes.h"
 #include "Core/Kernel/ProfileDefinition.h"
@@ -98,8 +102,81 @@ public:
     // controlled GeometryConstructionFailed from OCCT's own algorithms --
     // there is no cheap a-priori bound worth half-checking. Neither call
     // modifies its input shape. Never throws.
-    virtual ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) = 0;
-    virtual ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) = 0;
+    // `selection` is a QUERY, answered against this shape on every call
+    // (M17.12, ADR-M17-034). It replaced filletAllEdges/chamferAllEdges rather
+    // than joining them: `AllEdgesSelection()` says the same thing, and two
+    // ways to ask for one behaviour is how two behaviours eventually appear.
+    //
+    // A selection that matches NO edge is refused with a diagnostic, never
+    // treated as "nothing to do". A fillet that dresses no edge returns the
+    // solid unchanged and reports success -- a command that changed nothing
+    // while saying it worked, which this project has already had to fix twice
+    // in other clothes.
+    // --- Provenance (M17.13, ADR-M17-035) -----------------------------------
+    //
+    // Records WHO made which face, so a `CreatedBy` query can be answered on
+    // any later shape in the chain. Called by a feature straight after it
+    // builds, with what it consumed, what it produced, and an opaque TAG --
+    // Core puts a feature id in it; a kernel only has to hand the same number
+    // back.
+    //
+    // DEFAULTED to "no provenance", not pure, because a kernel that does not
+    // track history is a perfectly good kernel: the fake models volumes and has
+    // no topology to attribute. Making this pure would have forced an empty
+    // override into every fake for a fact none of them can produce, and a
+    // pile of empty overrides is where a real one eventually gets missed.
+    // The ONE face a query names on this shape (M17.14, ADR-M17-036).
+    //
+    // DEFAULTED to a refusal, not to a guess: a kernel that cannot answer must
+    // say so, because the caller's next move is to place a sketch on the
+    // answer. Returning an identity plane would put it at the world origin,
+    // which is a perfectly plausible-looking wrong place.
+    virtual FaceQueryResult resolveFace(const KernelShape& shape, const FaceQuery& query) {
+        (void)shape;
+        (void)query;
+        return FaceQueryResult{false, "this kernel cannot find faces", {}};
+    }
+
+    virtual KernelShape tagCreatedFaces(const KernelShape& result, const KernelShape& base,
+                                        std::uint64_t tag) {
+        (void)base;
+        (void)tag;
+        return result;
+    }
+
+    virtual ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
+                                    double radiusMm) = 0;
+    virtual ShapeResult chamferEdges(const KernelShape& shape, const EdgeSelection& selection,
+                                     double distanceMm) = 0;
+
+    // --- M10.6: the two verbs Mirror and Pattern are made of -----------------
+    //
+    // ADR-M9-006 deferred Mirror and Pattern to M10 because both are a
+    // TRANSFORM plus a BOOLEAN, and a transform needs a stable plane or axis to
+    // be defined against -- which is what a ReferenceFrame now is. These are
+    // that transform and that boolean.
+    //
+    // `mirrorShape` reflects across the plane through `planeOriginMm` with
+    // normal `planeNormal`. A reflection is NOT expressible as a Transform3D:
+    // a unit quaternion is a rotation, and rotations preserve handedness while
+    // a mirror reverses it. So the plane is passed as origin + normal rather
+    // than as a transform, which also matches how a frame describes a plane
+    // (its origin, and its local +Z as the normal -- the same convention
+    // SketchFrame uses).
+    //
+    // `translateShape` is the pattern verb: a pure offset, which IS a
+    // Transform3D case, kept narrow because that is all a linear pattern needs.
+    //
+    // `fuseShapes` unions two solids. Disjoint inputs give a compound whose
+    // volume is the sum -- a legal result, not an error, exactly as a disjoint
+    // cut is in `subtractShape`.
+    //
+    // A degenerate normal (zero length, non-finite) is refused. None of these
+    // modifies its inputs. None throws.
+    virtual ShapeResult mirrorShape(const KernelShape& shape, const Vec3& planeOriginMm,
+                                    const Vec3& planeNormal) = 0;
+    virtual ShapeResult translateShape(const KernelShape& shape, const Vec3& offsetMm) = 0;
+    virtual ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) = 0;
 };
 
 } // namespace paramcad

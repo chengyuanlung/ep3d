@@ -1,9 +1,23 @@
 #include "Kernel/Occt/OcctGeometryKernel.h"
+#include <set>
+#include <gp_Lin.hxx>
+#include <GeomAbs_CurveType.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include "Kernel/Occt/OcctFaceQuery.h"
+#include "Kernel/Occt/OcctProvenance.h"
+#include "Core/Kernel/EdgeQuery.h"
 #include "Kernel/Occt/OcctShape.h"
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepGProp.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <gp_Trsf.hxx>
+#include <BRepLib.hxx>
+#include <TopoDS_Solid.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopAbs_ShapeEnum.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -23,6 +37,13 @@
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Elips.hxx>
+#include "Kernel/Occt/OcctSplineInterpolation.h"
+
+#include <GeomAPI_Interpolate.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Precision.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
 #include <gp_Mat.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
@@ -115,6 +136,7 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
     const gp_Dir normal(profile.plane.normal.x, profile.plane.normal.y,
                         profile.plane.normal.z);
     const gp_Dir uDir(profile.plane.uAxis.x, profile.plane.uAxis.y, profile.plane.uAxis.z);
+    const gp_Dir vDir(profile.plane.vAxis.x, profile.plane.vAxis.y, profile.plane.vAxis.z);
     const gp_Ax2 axes(origin, normal, uDir);
     const gp_Pln plane(axes);
 
@@ -128,14 +150,43 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
                           uv.y * profile.plane.vAxis.z);
     };
 
+    // An ellipse's supporting curve, in the sketch plane.
+    //
+    // gp_Ax2's X direction is where the ellipse's MAJOR axis points, so the
+    // rotation is applied by turning that direction rather than by rotating
+    // anything afterwards -- one place, and the same convention the sketch
+    // stores.
+    const auto ellipseOf = [&](Vec2 centre, double major, double minor, double rotation) {
+        const gp_Dir major2d(uDir.XYZ() * std::cos(rotation) + vDir.XYZ() * std::sin(rotation));
+        return gp_Elips(gp_Ax2(toWorld(centre), normal, major2d), major, minor);
+    };
+
+    // The B-spline THROUGH a list of points. The interpolation itself lives in
+    // InterpolateSplineThrough -- ONE copy, shared with the wireframe the 3D
+    // view draws, so a preview and the solid it previews cannot show different
+    // curves through the same points.
+    const auto splineThrough = [&](const std::vector<Vec2>& points,
+                                   bool closed) -> Handle(Geom_BSplineCurve) {
+        std::vector<gp_Pnt> world;
+        world.reserve(points.size());
+        for (const Vec2& point : points) world.push_back(toWorld(point));
+        return InterpolateSplineThrough(world, closed);
+    };
+
+    // ONE wire builder, used for the outer boundary and for every hole. The
+    // loops differ in what they MEAN, not in how they are built, and two copies
+    // of the edge-building switch would be two places to disagree about how an
+    // arc is trimmed.
+    const auto buildWire = [&](const std::vector<ProfileSegment>& segments,
+                               TopoDS_Wire& out) -> bool {
     BRepBuilderAPI_MakeWire wireMaker;
-    for (const ProfileSegment& segment : profile.segments) {
+    for (const ProfileSegment& segment : segments) {
         if (const auto* line = std::get_if<ProfileLineSegment>(&segment)) {
             BRepBuilderAPI_MakeEdge edge(toWorld(line->start), toWorld(line->end));
             edge.Build();
             if (!edge.IsDone()) {
                 error = "OCCT could not build a line edge for the profile";
-                return TopoDS_Face();
+                return false;
             }
             wireMaker.Add(edge.Edge());
         } else if (const auto* arc = std::get_if<ProfileArcSegment>(&segment)) {
@@ -150,7 +201,51 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
             edge.Build();
             if (!edge.IsDone()) {
                 error = "OCCT could not build an arc edge for the profile";
-                return TopoDS_Face();
+                return false;
+            }
+            wireMaker.Add(edge.Edge());
+        } else if (const auto* spline = std::get_if<ProfileSplineSegment>(&segment)) {
+            const Handle(Geom_BSplineCurve) curve =
+                splineThrough(spline->points, spline->closed);
+            if (curve.IsNull()) {
+                error = "OCCT could not interpolate a spline through those points";
+                return false;
+            }
+            BRepBuilderAPI_MakeEdge edge(curve);
+            edge.Build();
+            if (!edge.IsDone()) {
+                error = "OCCT could not build a spline edge for the profile";
+                return false;
+            }
+            wireMaker.Add(edge.Edge());
+        } else if (const auto* ellipse = std::get_if<ProfileEllipseSegment>(&segment)) {
+            BRepBuilderAPI_MakeEdge edge(ellipseOf(ellipse->center, ellipse->majorRadiusMm,
+                                                   ellipse->minorRadiusMm,
+                                                   ellipse->rotationRad));
+            edge.Build();
+            if (!edge.IsDone()) {
+                error = "OCCT could not build an elliptical edge for the profile";
+                return false;
+            }
+            wireMaker.Add(edge.Edge());
+        } else if (const auto* piece = std::get_if<ProfileEllipticalArcSegment>(&segment)) {
+            // Trimmed by PARAMETER, which is the same number this project
+            // stores: OCCT's gp_Elips is parametrised exactly as
+            // centre + R(rot)*(a cos t, b sin t), so there is nothing to
+            // convert and nothing to get wrong. Feeding it a geometric angle
+            // would land the ends in the right places and cover the wrong
+            // piece of curve between them.
+            const gp_Elips support = ellipseOf(piece->center, piece->majorRadiusMm,
+                                               piece->minorRadiusMm, piece->rotationRad);
+            const double first = piece->counterClockwise ? piece->startParamRad
+                                                         : piece->endParamRad;
+            const double last = piece->counterClockwise ? piece->endParamRad
+                                                        : piece->startParamRad;
+            BRepBuilderAPI_MakeEdge edge(support, first, last);
+            edge.Build();
+            if (!edge.IsDone()) {
+                error = "OCCT could not build an elliptical arc edge for the profile";
+                return false;
             }
             wireMaker.Add(edge.Edge());
         } else {
@@ -160,7 +255,7 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
             edge.Build();
             if (!edge.IsDone()) {
                 error = "OCCT could not build a circular edge for the profile";
-                return TopoDS_Face();
+                return false;
             }
             wireMaker.Add(edge.Edge());
         }
@@ -169,19 +264,39 @@ TopoDS_Face BuildFaceForProfile(const PlanarProfileDefinition& profile, std::str
     wireMaker.Build();
     if (!wireMaker.IsDone()) {
         error = "OCCT could not assemble the profile edges into a wire";
-        return TopoDS_Face();
+        return false;
     }
-    const TopoDS_Wire wire = wireMaker.Wire();
-    if (!wire.Closed()) {
+    out = wireMaker.Wire();
+    if (!out.Closed()) {
         error = "profile wire is not closed";
-        return TopoDS_Face();
+        return false;
     }
+    return true;
+    };
 
-    BRepBuilderAPI_MakeFace faceMaker(plane, wire);
+    TopoDS_Wire outer;
+    if (!buildWire(profile.segments, outer)) return TopoDS_Face();
+
+    BRepBuilderAPI_MakeFace faceMaker(plane, outer);
     faceMaker.Build();
     if (!faceMaker.IsDone()) {
         error = "OCCT could not build a planar face from the profile";
         return TopoDS_Face();
+    }
+
+    // HOLES. Each inner wire is added REVERSED: OCCT reads a face's boundary
+    // orientation to tell material from void, so an inner wire wound the same
+    // way as the outer one describes a second outer boundary rather than a
+    // hole -- and the result is a face OCCT accepts and a solid nobody wanted.
+    for (const std::vector<ProfileSegment>& inner : profile.innerLoops) {
+        TopoDS_Wire hole;
+        if (!buildWire(inner, hole)) return TopoDS_Face();
+        faceMaker.Add(TopoDS::Wire(hole.Reversed()));
+        faceMaker.Build();
+        if (!faceMaker.IsDone()) {
+            error = "OCCT could not cut a hole into the profile face";
+            return TopoDS_Face();
+        }
     }
     return faceMaker.Face();
 }
@@ -198,10 +313,14 @@ ShapeResult OcctGeometryKernel::extrudeProfile(const PlanarProfileDefinition& pr
                            "invalid profile definition: empty, non-finite, or degenerate "
                            "plane/segment"};
     }
-    if (!IsValidExtrusionDistance(distanceMm)) {
+    // SIGNED (M17.8, ADR-M17-031): a negative distance extrudes to the other
+    // side of the plane. Only the magnitude has to clear the floor -- the sign
+    // is a direction, not a size.
+    if (!IsValidSignedExtrusionDistance(distanceMm)) {
         return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
                            "invalid extrusion distance: must be finite and at least " +
-                               std::to_string(kMinExtrusionDistanceMm) + " mm"};
+                               std::to_string(kMinExtrusionDistanceMm) +
+                               " mm away from zero (negative extrudes the other way)"};
     }
 
     try {
@@ -275,6 +394,108 @@ ShapeResult OcctGeometryKernel::revolveProfile(const PlanarProfileDefinition& pr
     }
 }
 
+namespace {
+
+// One place to turn a KernelShape into an OCCT shape, or say why it cannot be
+// done -- the same dynamic_cast discipline every verb here uses (ADR-M3-001).
+const OcctShape* AsOcct(const KernelShape& shape) {
+    return dynamic_cast<const OcctShape*>(shape.handle());
+}
+
+} // namespace
+
+ShapeResult OcctGeometryKernel::mirrorShape(const KernelShape& shape, const Vec3& planeOriginMm,
+                                            const Vec3& planeNormal) {
+    const OcctShape* occt = AsOcct(shape);
+    if (occt == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "mirror input is not an OcctShape (null or foreign kernel)"};
+    const double length = std::sqrt(planeNormal.x * planeNormal.x +
+                                    planeNormal.y * planeNormal.y +
+                                    planeNormal.z * planeNormal.z);
+    if (!std::isfinite(length) || length < 1e-12 || !std::isfinite(planeOriginMm.x) ||
+        !std::isfinite(planeOriginMm.y) || !std::isfinite(planeOriginMm.z))
+        return ShapeResult{KernelShape{}, KernelError::NonFinite,
+                           "mirror plane is degenerate or non-finite"};
+    try {
+        const gp_Ax2 plane(gp_Pnt(planeOriginMm.x, planeOriginMm.y, planeOriginMm.z),
+                           gp_Dir(planeNormal.x, planeNormal.y, planeNormal.z));
+        gp_Trsf mirror;
+        mirror.SetMirror(plane); // reflection across the plane, not about its axis
+        BRepBuilderAPI_Transform transform(occt->shape(), mirror, /*copy=*/Standard_True);
+        if (!transform.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT mirror transform did not complete"};
+
+        // RE-ORIENT. A mirror reverses handedness, so the transformed solid's
+        // shell normals point INWARD. Measured alone it still reports the right
+        // volume and centre of mass -- which is exactly what makes this
+        // dangerous -- but fusing it with another solid produces a shape whose
+        // centre of mass is wrong while its VOLUME stays exactly right.
+        //
+        // M10's GATE_P caught it: two disjoint prisms, one mirrored, fused ->
+        // volume 200000 exactly and the centroid off by 2%. Every volume oracle
+        // in this project would have kept passing. A box happened not to show
+        // it, which is why the gate that found this uses the extruded pad.
+        TopoDS_Shape result = transform.Shape();
+        if (result.ShapeType() == TopAbs_SOLID) {
+            TopoDS_Solid solid = TopoDS::Solid(result);
+            BRepLib::OrientClosedSolid(solid); // no-op when already outward
+            result = solid;
+        }
+        auto handle = std::make_shared<OcctShape>(result);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& error) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT mirror failed: ") + error.GetMessageString()};
+    }
+}
+
+ShapeResult OcctGeometryKernel::translateShape(const KernelShape& shape, const Vec3& offsetMm) {
+    const OcctShape* occt = AsOcct(shape);
+    if (occt == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "translate input is not an OcctShape (null or foreign kernel)"};
+    if (!std::isfinite(offsetMm.x) || !std::isfinite(offsetMm.y) || !std::isfinite(offsetMm.z))
+        return ShapeResult{KernelShape{}, KernelError::NonFinite,
+                           "translation offset is not finite"};
+    try {
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(offsetMm.x, offsetMm.y, offsetMm.z));
+        BRepBuilderAPI_Transform transform(occt->shape(), move, /*copy=*/Standard_True);
+        if (!transform.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT translate transform did not complete"};
+        auto handle = std::make_shared<OcctShape>(transform.Shape());
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& error) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT translate failed: ") + error.GetMessageString()};
+    }
+}
+
+ShapeResult OcctGeometryKernel::fuseShapes(const KernelShape& a, const KernelShape& b) {
+    const OcctShape* occtA = AsOcct(a);
+    const OcctShape* occtB = AsOcct(b);
+    if (occtA == nullptr || occtB == nullptr)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "fuse input is not an OcctShape (null or foreign kernel)"};
+    try {
+        BRepAlgoAPI_Fuse fuse(occtA->shape(), occtB->shape());
+        if (!fuse.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT boolean fuse did not complete"};
+        // DISJOINT inputs give a compound, and its volume is the sum. That is a
+        // legal result and is returned as an ordinary shape -- the same rule
+        // subtractShape applies to a disjoint tool (M8 spec 6).
+        auto handle = std::make_shared<OcctShape>(fuse.Shape());
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& error) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT fuse failed: ") + error.GetMessageString()};
+    }
+}
+
 ShapeResult OcctGeometryKernel::subtractShape(const KernelShape& base, const KernelShape& tool) {
     // Same handle discipline as calculateMassProperties: dynamic_cast, never UB
     // on a null or foreign handle (ADR-M3-001).
@@ -327,7 +548,144 @@ ShapeResult AnalyzedDressResult(const TopoDS_Shape& shape, const char* noun,
 
 } // namespace
 
-ShapeResult OcctGeometryKernel::filletAllEdges(const KernelShape& shape, double radiusMm) {
+// --- Answering an edge query against real topology (M17.12, ADR-M17-034) ----
+//
+// The query is a sentence about which edges are wanted; this is where the
+// sentence is answered, and it is answered AGAIN on every rebuild. Nothing
+// here is stored: the map, the indices, the TopoDS handles all die with the
+// call, which is the whole point -- transient topology is exactly what
+// ADR-M4-004 forbids anyone from keeping as identity.
+namespace {
+
+double Dot(Vec3 a, Vec3 b) noexcept { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+// The face that lies furthest along `direction` AND faces that way.
+//
+// Two conditions, not one. "Furthest along +Z" alone would happily pick a
+// vertical side face whose highest point is the top corner; a face has to
+// FACE the direction to be the top face. The outward normal is what says so,
+// and PlaneOfFace already accounts for orientation (M17_FQ_002).
+TopoDS_Face ExtremeFace(const TopoDS_Shape& shape, Vec3 direction, bool& found) {
+    found = false;
+    TopoDS_Face best;
+    double bestOffset = 0.0;
+    constexpr double kFacing = 0.9; // within ~26 degrees of the asked direction
+
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        const FacePlane plane = PlaneOfFace(it.Current());
+        if (!plane.planar) continue;
+        if (Dot(plane.normal, direction) < kFacing) continue;
+        const double offset = Dot(plane.point, direction);
+        if (found && offset <= bestOffset) continue;
+        best = TopoDS::Face(it.Current());
+        bestOffset = offset;
+        found = true;
+    }
+    return best;
+}
+
+bool EdgeIsParallelTo(const TopoDS_Edge& edge, Vec3 direction) {
+    BRepAdaptor_Curve curve(edge);
+    if (curve.GetType() != GeomAbs_Line) return false; // only a straight edge has a direction
+    const gp_Dir line = curve.Line().Direction();
+    const double alignment =
+        std::fabs(line.X() * direction.x + line.Y() * direction.y + line.Z() * direction.z);
+    const double length = std::sqrt(Dot(direction, direction));
+    if (length < 1e-12) return false;
+    return alignment / length > 0.999;
+}
+
+// The edges one query names, as positions in `edges` -- the deduplicated map
+// of the shape's edges, valid only for this call.
+void CollectQuery(const TopoDS_Shape& shape, const KernelShape& carrier,
+                  const TopTools_IndexedMapOfShape& edges, const EdgeQuery& query,
+                  std::set<int>& into) {
+    if (std::holds_alternative<AllEdges>(query)) {
+        for (int i = 1; i <= edges.Extent(); ++i) into.insert(i);
+        return;
+    }
+    if (const auto* face = std::get_if<EdgesOfExtremeFace>(&query)) {
+        bool found = false;
+        const TopoDS_Face target = ExtremeFace(shape, face->direction, found);
+        if (!found) return; // no face faces that way: the query names nothing
+        for (TopExp_Explorer it(target, TopAbs_EDGE); it.More(); it.Next()) {
+            const int index = edges.FindIndex(it.Current());
+            if (index > 0) into.insert(index);
+        }
+        return;
+    }
+    if (const auto* wanted = std::get_if<EdgesOfFace>(&query)) {
+        // Resolved through the SAME function a tracked sketch uses, so "the
+        // edges of the pocket floor" and "the sketch on the pocket floor"
+        // cannot come to disagree about which face that is.
+        const FaceQueryResult found = ResolveFaceQuery(carrier, wanted->face);
+        if (!found.ok) return; // narrowed to none or to several: names nothing
+        // FacePlane carries geometry, not topology, so the edges are taken
+        // from the shape by matching the resolved face's plane -- the same
+        // match the pick uses, and the only thing a plane and a face share.
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+            const FacePlane plane = PlaneOfFace(it.Current());
+            if (!plane.planar) continue;
+            const Vec3 d{plane.point.x - found.face.point.x, plane.point.y - found.face.point.y,
+                         plane.point.z - found.face.point.z};
+            const double along = d.x * found.face.normal.x + d.y * found.face.normal.y +
+                                 d.z * found.face.normal.z;
+            const double facing = plane.normal.x * found.face.normal.x +
+                                  plane.normal.y * found.face.normal.y +
+                                  plane.normal.z * found.face.normal.z;
+            if (std::fabs(along) > 1e-6 || facing < 0.999) continue;
+            for (TopExp_Explorer e(it.Current(), TopAbs_EDGE); e.More(); e.Next()) {
+                const int index = edges.FindIndex(e.Current());
+                if (index > 0) into.insert(index);
+            }
+        }
+        return;
+    }
+    if (const auto* made = std::get_if<EdgesCreatedBy>(&query)) {
+        // Answered from the PROVENANCE the shape carries, not from its
+        // geometry: this is the one query that describes where a face came
+        // from rather than where it is.
+        const auto* occt = dynamic_cast<const OcctShape*>(carrier.handle());
+        if (occt == nullptr) return;
+        const auto entry = occt->provenance().find(static_cast<std::uint64_t>(made->featureId));
+        if (entry == occt->provenance().end()) return; // that feature made nothing here
+        for (int f = 1; f <= entry->second.Extent(); ++f)
+            for (TopExp_Explorer it(entry->second(f), TopAbs_EDGE); it.More(); it.Next()) {
+                const int index = edges.FindIndex(it.Current());
+                if (index > 0) into.insert(index);
+            }
+        return;
+    }
+    const auto& parallel = std::get<EdgesParallelTo>(query);
+    for (int i = 1; i <= edges.Extent(); ++i)
+        if (EdgeIsParallelTo(TopoDS::Edge(edges(i)), parallel.direction)) into.insert(i);
+}
+
+} // namespace
+
+// Every edge the selection names, deduplicated. An edge named by two queries is
+// dressed once -- adding it twice to ChFi3d is undefined-behaviour territory,
+// which is the same reason the map exists at all.
+std::set<int> SelectedEdgeIndices(const TopoDS_Shape& shape, const KernelShape& carrier,
+                                  const TopTools_IndexedMapOfShape& edges,
+                                  const EdgeSelection& selection) {
+    std::set<int> chosen;
+    for (const EdgeQuery& query : selection) CollectQuery(shape, carrier, edges, query, chosen);
+    return chosen;
+}
+
+FaceQueryResult OcctGeometryKernel::resolveFace(const KernelShape& shape,
+                                               const FaceQuery& query) {
+    return ResolveFaceQuery(shape, query);
+}
+
+KernelShape OcctGeometryKernel::tagCreatedFaces(const KernelShape& result,
+                                               const KernelShape& base, std::uint64_t tag) {
+    return WithProvenance(result, base, tag);
+}
+
+ShapeResult OcctGeometryKernel::filletEdges(const KernelShape& shape,
+                                           const EdgeSelection& selection, double radiusMm) {
     const auto* occtShape = dynamic_cast<const OcctShape*>(shape.handle());
     if (occtShape == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
@@ -348,8 +706,13 @@ ShapeResult OcctGeometryKernel::filletAllEdges(const KernelShape& shape, double 
         if (edges.IsEmpty())
             return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                                "the shape has no edges to fillet"};
-        for (int i = 1; i <= edges.Extent(); ++i)
-            fillet.Add(radiusMm, TopoDS::Edge(edges(i)));
+        // The query, answered NOW against this shape.
+        const std::set<int> chosen = SelectedEdgeIndices(occtShape->shape(), shape, edges, selection);
+        if (chosen.empty())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "no edge matched the fillet's selection (" +
+                                   DescribeEdgeSelection(selection) + ")"};
+        for (int index : chosen) fillet.Add(radiusMm, TopoDS::Edge(edges(index)));
         fillet.Build();
         if (!fillet.IsDone())
             return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
@@ -362,7 +725,8 @@ ShapeResult OcctGeometryKernel::filletAllEdges(const KernelShape& shape, double 
     }
 }
 
-ShapeResult OcctGeometryKernel::chamferAllEdges(const KernelShape& shape, double distanceMm) {
+ShapeResult OcctGeometryKernel::chamferEdges(const KernelShape& shape,
+                                            const EdgeSelection& selection, double distanceMm) {
     const auto* occtShape = dynamic_cast<const OcctShape*>(shape.handle());
     if (occtShape == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
@@ -379,10 +743,14 @@ ShapeResult OcctGeometryKernel::chamferAllEdges(const KernelShape& shape, double
         if (edges.IsEmpty())
             return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                                "the shape has no edges to chamfer"};
+        const std::set<int> chosen = SelectedEdgeIndices(occtShape->shape(), shape, edges, selection);
+        if (chosen.empty())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "no edge matched the chamfer's selection (" +
+                                   DescribeEdgeSelection(selection) + ")"};
         // One distance = the symmetric 45-degree bevel, which is what a bare
         // "chamfer 2mm" means on a drawing.
-        for (int i = 1; i <= edges.Extent(); ++i)
-            chamfer.Add(distanceMm, TopoDS::Edge(edges(i)));
+        for (int index : chosen) chamfer.Add(distanceMm, TopoDS::Edge(edges(index)));
         chamfer.Build();
         if (!chamfer.IsDone())
             return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
@@ -408,7 +776,45 @@ KernelMassPropertiesResult OcctGeometryKernel::calculateMassProperties(const Ker
 
     GProp_GProps props;
     try {
-        BRepGProp::VolumeProperties(occtShape->shape(), props);
+        // PER SOLID, then summed with OCCT's own combination API.
+        //
+        // `VolumeProperties` on a COMPOUND of disjoint solids returns the right
+        // VOLUME and a wrong CENTRE OF MASS -- measured at 2% on two 100x50x20
+        // prisms 200 mm apart. That is the worst possible shape for this
+        // defect: every volume oracle in this project keeps passing, and the
+        // centroid is the only thing that moves.
+        //
+        // M10's GATE_P found it, and only because its expected centroid does
+        // NOT sit at the midpoint of the lumps. GATE_M and GATE_N both fuse
+        // disjoint solids too and both passed -- their expected values are at
+        // the symmetric centre, where the error cancels exactly. That is M8
+        // GATE_RB2's coincidence lesson for the third time in this project.
+        //
+        // Summing per solid is exact because each solid on its own is exact,
+        // and `GProp_GProps::Add` is the documented way to combine systems.
+        bool summedAnySolid = false;
+        for (TopExp_Explorer it(occtShape->shape(), TopAbs_SOLID); it.More(); it.Next()) {
+            GProp_GProps one;
+            BRepGProp::VolumeProperties(it.Current(), one, 1.0e-11);
+            props.Add(one);
+            summedAnySolid = true;
+        }
+        if (!summedAnySolid) {
+        // ADAPTIVE, not the default overload (M10.6). The default integrates
+        // with a fixed scheme, and M10's GATE_P caught it being ~2% wrong on
+        // the CENTRE OF MASS of a fused compound -- two disjoint extruded
+        // prisms, one of them mirrored -- while reporting the volume exactly.
+        // A wrong centre of mass with a right volume is the worst shape of
+        // this defect: every volume oracle in the project would keep passing.
+        //
+        // This overload iterates until the relative error is below Eps and
+        // returns the error achieved. 1e-11 is far below every tolerance any
+        // gate asserts, and the cost is paid only where the fixed scheme was
+        // not already exact.
+            // No solids at all: a shell, a face, or an empty result. Measured
+            // as-is, which is what an empty difference must report (M8 spec 6).
+            BRepGProp::VolumeProperties(occtShape->shape(), props, 1.0e-11);
+        }
     } catch (const Standard_Failure& failure) {
         // Same "never throws" contract as createBox (ADR-M3-001).
         return KernelMassPropertiesResult{

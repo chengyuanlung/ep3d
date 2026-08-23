@@ -81,7 +81,10 @@ public:
         if (!IsValidProfileDefinition(profile))
             return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
                                "invalid profile definition"};
-        if (!IsValidExtrusionDistance(distanceMm))
+        // SIGNED, exactly as the real kernel is (ADR-M17-031). A fake that
+        // refused what the real kernel accepts would let a defect through the
+        // whole unit-test suite and only show up in the application.
+        if (!IsValidSignedExtrusionDistance(distanceMm))
             return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
                                "invalid extrusion distance"};
         ++extrudeProfileCallCount;
@@ -149,7 +152,10 @@ public:
         }
 
         KernelMassProperties properties;
-        properties.volumeMm3 = area * distanceMm;
+        // |distance|: a solid extruded the other way is on the other SIDE of
+        // the plane, not made of negative material. A signed volume here would
+        // travel straight into the mass properties and out to the status bar.
+        properties.volumeMm3 = area * std::fabs(distanceMm);
 
         // COM: cross-section centroid in the plane, lifted half the extrusion
         // distance along the normal.
@@ -332,9 +338,11 @@ public:
                            KernelError::None, {}};
     }
 
-    ShapeResult filletAllEdges(const KernelShape& shape, double radiusMm) override {
+    ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
+                            double radiusMm) override {
         ++filletCallCount;
         (void)shape;
+        (void)selection;
         (void)radiusMm;
         // No analytical model, DELIBERATELY: a rounded box's volume formula
         // exists, but carrying it here would make Core tests agree with this
@@ -345,14 +353,47 @@ public:
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "FakeGeometryKernel does not model fillets; use the OCCT kernel"};
     }
-    ShapeResult chamferAllEdges(const KernelShape& shape, double distanceMm) override {
+    ShapeResult chamferEdges(const KernelShape& shape, const EdgeSelection& selection,
+                             double distanceMm) override {
         ++chamferCallCount;
         (void)shape;
+        (void)selection;
         (void)distanceMm;
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "FakeGeometryKernel does not model chamfers; use the OCCT kernel"};
     }
 
+    // M10.6. Modelled the same way fillets and chamfers are: refused with a
+    // named diagnostic rather than faked, so a Core test that needs real
+    // mirrored geometry is forced onto the OCCT kernel instead of quietly
+    // asserting against a stub's invention.
+    ShapeResult mirrorShape(const KernelShape& shape, const Vec3& planeOriginMm,
+                            const Vec3& planeNormal) override {
+        ++mirrorShapeCallCount;
+        (void)shape;
+        (void)planeOriginMm;
+        (void)planeNormal;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "FakeGeometryKernel does not model mirrors; use the OCCT kernel"};
+    }
+    ShapeResult translateShape(const KernelShape& shape, const Vec3& offsetMm) override {
+        ++translateShapeCallCount;
+        (void)shape;
+        (void)offsetMm;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "FakeGeometryKernel does not model transforms; use the OCCT kernel"};
+    }
+    ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) override {
+        ++fuseShapesCallCount;
+        (void)a;
+        (void)b;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "FakeGeometryKernel does not model booleans; use the OCCT kernel"};
+    }
+
+    int mirrorShapeCallCount = 0;
+    int translateShapeCallCount = 0;
+    int fuseShapesCallCount = 0;
     int createBoxCallCount = 0;
     int extrudeProfileCallCount = 0;
     int calculateMassPropertiesCallCount = 0;

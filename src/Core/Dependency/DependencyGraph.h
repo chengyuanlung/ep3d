@@ -96,7 +96,16 @@ public:
     // insertion order, so results are deterministic. fn must be non-null:
     // asserts in debug; returns an empty RecomputeReport, graph unchanged, if
     // null in release.
-    RecomputeReport recompute(const ComputeFn& fn);
+    // `skip` (M9.4) answers "is this node outside what the document is
+    // evaluating right now" -- the rollback position. A skipped node is never
+    // invoked and its state is left ALONE, which is the difference from
+    // Suppressed: Suppressed is a persisted property OF the node, rollback is a
+    // property of the view onto the document, and writing it into the node's
+    // state would persist it into the file as a suppression the user never
+    // asked for. A skipped node is left Dirty, so moving the position back
+    // recomputes it.
+    using SkipFn = std::function<bool(ObjectId)>;
+    RecomputeReport recompute(const ComputeFn& fn, const SkipFn& skip = {});
 
 private:
     struct Node {

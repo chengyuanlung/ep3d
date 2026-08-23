@@ -24,17 +24,25 @@ struct ProfileLoop {
     std::vector<OrientedSketchEntityRef> entities;
 };
 
-// M4 validates one outer loop. Holes are deferred (spec 8), but nothing here
-// prevents adding an `inner` vector later.
+// An outer boundary and its HOLES (M17).
+//
+// M4 validated one loop and deferred holes; M17 pays that off. The rule that
+// makes the pair unambiguous is containment: exactly ONE loop must contain all
+// the others, and that one is the outer boundary. Anything else -- two loops
+// side by side, a hole containing another loop -- is refused rather than
+// guessed at, because each of those is a different modelling intent and none of
+// them is what "one solid with holes in it" means.
 struct ValidatedProfile {
     ProfileLoop outer;
+    std::vector<ProfileLoop> inners;
 };
 
 enum class ProfileError {
     None,
     NoEntities,        // nothing that could form a loop
     InvalidGeometry,   // an entity fails IsValidSketchGeometry
-    NotChainable,      // a Circle mixed with other curves, or a stray closed curve
+    NotChainable,      // a closed curve that cannot be combined as drawn
+    NotNested,         // several loops, but not one containing all the others
     OpenLoop,          // an endpoint has only one incident curve
     Branch,            // an endpoint has three or more incident curves
     DuplicateEntity,   // two entities span the same two endpoints
@@ -90,6 +98,24 @@ inline constexpr double kProfileConnectivityToleranceMm = kSketchToleranceMm;
 // of segment orientation logic would be two places to disagree about arc
 // reversal, and that is a geometry bug that looks like a solver bug.
 // False if a loop member no longer exists in the sketch or is a Point.
+// `frame` is the sketch's EFFECTIVE plane: its support frame's world transform
+// when it has one, otherwise its own embedded SketchFrame. Passed in rather
+// than read off the sketch (M10, ADR-M10-003) because only the document can
+// compose a frame chain, and this function must stay free of document
+// knowledge. `BuildKernelProfile(sketch, validated, out)` keeps the old
+// meaning -- the sketch's embedded frame -- so every pre-M10 caller and every
+// test that has no frames is unchanged.
+// The kernel-neutral plane a sketch frame describes.
+//
+// ONE conversion, shared. BuildKernelProfile filled these four fields inline;
+// the 3D view needs the same plane to draw a sketch's wireframe where the
+// sketch actually is (M17.7), and a second copy of the conversion would be a
+// second opinion about which way v points.
+ProfilePlane PlaneOfSketchFrame(const SketchFrame& frame) noexcept;
+
+bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
+                        const SketchFrame& frame, PlanarProfileDefinition& out);
+
 bool BuildKernelProfile(const Sketch& sketch, const ValidatedProfile& validated,
                         PlanarProfileDefinition& out);
 

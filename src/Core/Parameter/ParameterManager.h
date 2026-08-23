@@ -9,11 +9,13 @@ namespace paramcad {
 
 class ParameterManager {
 public:
-    Parameter& add(std::string name, double value, UnitType unit);
+    Parameter& add(std::string name, double value, UnitType unit,
+                   ValueDomain domain = ValueDomain::Continuous);
     // Restore path (deserialization): adds a parameter that keeps its
     // persisted id and state.
     Parameter& restore(ObjectId id, std::string name, double value, UnitType unit,
-                       std::string expression, ParameterState state);
+                       std::string expression, ParameterState state,
+                       ValueDomain domain = ValueDomain::Continuous);
     bool remove(ObjectId id) noexcept; // false if unknown
     Parameter* findById(ObjectId id) noexcept;
     Parameter* findByName(std::string_view name) noexcept;

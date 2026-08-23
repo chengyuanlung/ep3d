@@ -5,6 +5,8 @@
 // PLACED -- containment, disjointness and swallowing are all statements about
 // where the tool sits, and a corner-anchored box cannot express them.
 
+#include "Core/Sketch/SketchFrame.h"
+#include "Core/Kernel/ProfileDefinition.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
 #include <gtest/gtest.h>
 #include <cmath>
@@ -90,6 +92,68 @@ TEST(M8OcctBoolean, AForeignOrInvalidHandleIsRefusedNotDereferenced) {
     const ShapeResult nullBase = kernel.subtractShape(KernelShape{}, base.shape);
     EXPECT_FALSE(nullBase);
     EXPECT_EQ(nullBase.error, KernelError::GeometryConstructionFailed);
+}
+
+
+TEST(OcctBooleanTest, M10_KERNEL_010_MassPropertiesOfOverlappingAndDisjointFusesAreBothExact) {
+    // ADR-M10-005 changed `calculateMassProperties` to sum PER SOLID after
+    // GATE_P found the compound path returning a right volume with a 2% wrong
+    // centroid. This pins that, and pins the case M10's self-validation listed
+    // as the thing it was least sure of: an OVERLAPPING fuse, which produces one
+    // solid and whose union volume is NOT the sum of the parts.
+    //
+    // THE INPUTS ARE EXTRUDED PRISMS, NOT BOXES, and that is the whole reason
+    // this test discriminates. The first version used `createBox` and passed
+    // even with the defect restored -- a fused pair of BOXES measures correctly
+    // through the old compound path. Box and extruded prism have behaved
+    // differently three times in this milestone; the failing case is always the
+    // prism. A test built from the convenient primitive would have pinned
+    // nothing.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition profile;
+    ProfilePlane plane;
+    const SketchFrame worldXY = SketchFrame::WorldXY();
+    plane.origin = worldXY.toWorld(Vec2{0.0, 0.0});
+    plane.uAxis = worldXY.uAxis();
+    plane.vAxis = worldXY.vAxis();
+    plane.normal = worldXY.normal();
+    profile.plane = plane;
+    profile.segments = {ProfileLineSegment{Vec2{0, 0}, Vec2{100, 0}},
+                        ProfileLineSegment{Vec2{100, 0}, Vec2{100, 50}},
+                        ProfileLineSegment{Vec2{100, 50}, Vec2{0, 50}},
+                        ProfileLineSegment{Vec2{0, 50}, Vec2{0, 0}}};
+    const ShapeResult prism = kernel.extrudeProfile(profile, 20.0);
+    ASSERT_TRUE(prism) << prism.message;
+
+    // OVERLAPPING: shifted 50 in X, so the union spans x 0..150.
+    //   volume = 150 * 50 * 20 = 150000   (NOT 200000)
+    //   COM    = (75, 25, 10)
+    const ShapeResult shifted = kernel.translateShape(prism.shape, Vec3{50.0, 0.0, 0.0});
+    ASSERT_TRUE(shifted) << shifted.message;
+    const ShapeResult overlapping = kernel.fuseShapes(prism.shape, shifted.shape);
+    ASSERT_TRUE(overlapping) << overlapping.message;
+    const KernelMassPropertiesResult overlapProps =
+        kernel.calculateMassProperties(overlapping.shape);
+    ASSERT_TRUE(overlapProps) << overlapProps.message;
+    EXPECT_NEAR(overlapProps.properties.volumeMm3, 150000.0, 1e-6);
+    EXPECT_NEAR(overlapProps.properties.centerOfMassMm.x, 75.0, 1e-6);
+    EXPECT_NEAR(overlapProps.properties.centerOfMassMm.y, 25.0, 1e-6);
+    EXPECT_NEAR(overlapProps.properties.centerOfMassMm.z, 10.0, 1e-6);
+
+    // DISJOINT: 200 apart -- the case that found the defect. Two lumps, and the
+    // expected centroid deliberately does NOT sit on either lump's centre,
+    // because that is where the old error cancelled and hid itself.
+    const ShapeResult far = kernel.translateShape(prism.shape, Vec3{200.0, 0.0, 0.0});
+    ASSERT_TRUE(far) << far.message;
+    const ShapeResult disjoint = kernel.fuseShapes(prism.shape, far.shape);
+    ASSERT_TRUE(disjoint) << disjoint.message;
+    const KernelMassPropertiesResult disjointProps =
+        kernel.calculateMassProperties(disjoint.shape);
+    ASSERT_TRUE(disjointProps) << disjointProps.message;
+    EXPECT_NEAR(disjointProps.properties.volumeMm3, 200000.0, 1e-6);
+    EXPECT_NEAR(disjointProps.properties.centerOfMassMm.x, 150.0, 1e-6);
+    EXPECT_NEAR(disjointProps.properties.centerOfMassMm.y, 25.0, 1e-6);
+    EXPECT_NEAR(disjointProps.properties.centerOfMassMm.z, 10.0, 1e-6);
 }
 
 } // namespace

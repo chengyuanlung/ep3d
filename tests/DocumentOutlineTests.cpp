@@ -8,6 +8,10 @@
 
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/PadFeature.h"
+#include "Core/Sketch/Sketch.h"
+#include "Core/Body/Body.h"
+#include "Core/Parameter/Parameter.h"
+#include <vector>
 #include "Fakes/FakeGeometryKernel.h"
 #include "Viewer/DocumentOutline.h"
 #include <gtest/gtest.h>
@@ -246,13 +250,31 @@ TEST(DocumentOutlineTest, UI_PROP_002_EveryDimensionalValueCarriesAUnit) {
 }
 
 TEST(DocumentOutlineTest, UI_PROP_003_ReadOnlyRowsAreMarkedReadOnly) {
+    // "Name" used to be the example here, and stopped being one at M17.16 when
+    // renaming arrived (ADR-M17-039). "Type" is genuinely read-only: a Pad is
+    // a Pad, and there is nothing to type over.
+    OutlineDoc doc;
+    const std::vector<PropertyRow> rows = DocumentOutline(doc.document).propertiesOf(doc.pad->id());
+    const PropertyRow* type = Row(rows, "Type");
+    ASSERT_NE(type, nullptr);
+    EXPECT_FALSE(type->editable);
+    EXPECT_EQ(type->parameterId, kInvalidObjectId)
+        << "a read-only row still names something writable";
+    EXPECT_EQ(type->field, PropertyField::None);
+}
+
+TEST(DocumentOutlineTest, M17_PROP_030_NameIsEditableAndWritesTheOBJECTNotAParameter) {
+    // The Name row's `parameterId` carries the OBJECT's id. That field has
+    // always meant "what to write" -- but everything else that used it wrote a
+    // Parameter, so a rename row handed to the wrong branch would be refused
+    // with "that parameter no longer exists" on every sketch and feature.
     OutlineDoc doc;
     const std::vector<PropertyRow> rows = DocumentOutline(doc.document).propertiesOf(doc.pad->id());
     const PropertyRow* name = Row(rows, "Name");
     ASSERT_NE(name, nullptr);
-    EXPECT_FALSE(name->editable);
-    EXPECT_EQ(name->parameterId, kInvalidObjectId)
-        << "a read-only row still names something writable";
+    EXPECT_TRUE(name->editable);
+    EXPECT_EQ(name->field, PropertyField::Name);
+    EXPECT_EQ(name->parameterId, doc.pad->id());
 }
 
 TEST(DocumentOutlineTest, UI_PROP_004_SketchShowsProfileStatusAndReason) {
@@ -295,3 +317,150 @@ TEST(DocumentOutlineTest, UI_PROP_006_UnknownIdYieldsNoRows) {
 
 } // namespace
 
+// --- M17.10: the tree is a TIMELINE, and sketches are absorbed ---------------
+//
+// The tree used to list every sketch and then every feature. Sketch on a face,
+// pad, sketch on the new face, pad again -- and the result was three sketches
+// in a row followed by three pads: the ORDER was gone, and nothing said which
+// sketch made which pad. Both facts were in the model the whole time.
+//
+// This is SolidWorks' arrangement rather than Onshape's, and the reason is the
+// second half: absorption puts the lineage where a user reads it, instead of
+// behind a dependency dialog nobody opens.
+
+namespace {
+
+// The root's children, by name, in order -- what a user sees down the left.
+std::vector<std::string> Spine(const OutlineNode& root) {
+    std::vector<std::string> names;
+    for (const OutlineNode& child : root.children) names.push_back(child.name);
+    return names;
+}
+
+std::vector<std::string> ChildNames(const OutlineNode& node) {
+    std::vector<std::string> names;
+    for (const OutlineNode& child : node.children) names.push_back(child.name);
+    return names;
+}
+
+int IndexOf(const std::vector<std::string>& names, const std::string& name) {
+    for (std::size_t i = 0; i < names.size(); ++i)
+        if (names[i] == name) return static_cast<int>(i);
+    return -1;
+}
+
+} // namespace
+
+TEST(DocumentOutlineTest, M17_TREE_020_APadABSORBSTheSketchItWasBuiltFrom) {
+    OutlineDoc doc;
+    const OutlineNode root = DocumentOutline(doc.document).build();
+
+    // NOT on the spine any more -- it is inside the feature that consumed it.
+    EXPECT_EQ(IndexOf(Spine(root), "Sketch001"), -1)
+        << "the consumed sketch is still listed as a document-level peer";
+
+    const OutlineNode* pad = Find(root, "Pad001");
+    ASSERT_NE(pad, nullptr);
+    EXPECT_NE(IndexOf(ChildNames(*pad), "Sketch001"), -1)
+        << "the pad does not contain its own sketch";
+
+    // And it is still THE SAME OBJECT: absorbing a sketch must not cost it its
+    // identity, or selecting the row would stop reaching the sketch and "Edit
+    // Selected Sketch" would go grey on a row that plainly is one.
+    const OutlineNode* sketch = Find(root, "Sketch001");
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(sketch->id, doc.sketch->id());
+    EXPECT_EQ(sketch->kind, OutlineKind::Sketch);
+}
+
+TEST(DocumentOutlineTest, M17_TREE_021_TheSpineIsInCREATIONOrder) {
+    // The workflow this exists for: draw, pad, draw on the result, pad again.
+    // Listed by type that reads Sketch1 Sketch2 Pad1 Pad2, which says nothing
+    // about what followed what.
+    OutlineDoc doc;
+    Parameter& second = doc.document.addParameter("Boss", 5.0, UnitType::Millimeter);
+    Sketch& later = doc.document.addSketch("Sketch002");
+    later.addLine(Vec2{0, 0}, Vec2{10, 0});
+    later.addLine(Vec2{10, 0}, Vec2{10, 10});
+    later.addLine(Vec2{10, 10}, Vec2{0, 10});
+    later.addLine(Vec2{0, 10}, Vec2{0, 0});
+    doc.document.addPadFeature(*doc.document.bodies().front(), "Pad002", later.id(), second.id());
+
+    const OutlineNode root = DocumentOutline(doc.document).build();
+    const std::vector<std::string> spine = Spine(root);
+    const int first = IndexOf(spine, "Pad001");
+    const int next = IndexOf(spine, "Pad002");
+    ASSERT_NE(first, -1);
+    ASSERT_NE(next, -1);
+    EXPECT_LT(first, next) << "the second pad is listed before the first";
+
+    // Each pad carries its OWN sketch, which is the whole point: the lineage is
+    // readable without opening anything.
+    const OutlineNode* padOne = Find(root, "Pad001");
+    const OutlineNode* padTwo = Find(root, "Pad002");
+    ASSERT_NE(padOne, nullptr);
+    ASSERT_NE(padTwo, nullptr);
+    EXPECT_NE(IndexOf(ChildNames(*padOne), "Sketch001"), -1);
+    EXPECT_NE(IndexOf(ChildNames(*padTwo), "Sketch002"), -1);
+    EXPECT_EQ(IndexOf(ChildNames(*padOne), "Sketch002"), -1) << "the pads swapped sketches";
+}
+
+TEST(DocumentOutlineTest, M17_TREE_022_AnUnusedSketchStaysOnTheSpine) {
+    // A sketch nothing consumes belongs to nobody, and hiding it inside a
+    // feature would be a claim about a relationship that does not exist.
+    OutlineDoc doc;
+    Sketch& loose = doc.document.addSketch("Scratch");
+    loose.addLine(Vec2{0, 0}, Vec2{5, 0});
+
+    const OutlineNode root = DocumentOutline(doc.document).build();
+    EXPECT_NE(IndexOf(Spine(root), "Scratch"), -1);
+}
+
+TEST(DocumentOutlineTest, M17_TREE_023_ASketchWithTWOConsumersIsAbsorbedByNEITHER) {
+    // Nesting it under one of them would say it belongs to that feature, which
+    // is false for the other -- and the user would have no way to reach the
+    // relationship the tree chose to hide. It stays on the spine, visibly
+    // belonging to neither.
+    OutlineDoc doc;
+    Parameter& depth = doc.document.addParameter("PocketDepth", 5.0, UnitType::Millimeter);
+    doc.document.addPocketFeature(*doc.document.bodies().front(), "Pocket001", doc.pad->id(),
+                                  doc.sketch->id(), depth.id());
+
+    const OutlineNode root = DocumentOutline(doc.document).build();
+    EXPECT_NE(IndexOf(Spine(root), "Sketch001"), -1)
+        << "a sketch two features share was absorbed by one of them";
+    const OutlineNode* pad = Find(root, "Pad001");
+    ASSERT_NE(pad, nullptr);
+    EXPECT_EQ(IndexOf(ChildNames(*pad), "Sketch001"), -1);
+}
+
+TEST(DocumentOutlineTest, M17_TREE_024_ARowWithAStateOfItsOwnKeepsItWhenItsChildFails) {
+    // The rule absorption made load-bearing. A Pad whose sketch has conflicting
+    // dimensions is BLOCKED: it never ran, and the thing that broke is the
+    // sketch. Rolling the child's Failed upward would make the Pad report that
+    // IT failed -- pointing the user at the wrong object, which is the exact
+    // distinction M5_DEF_012 exists to protect.
+    OutlineDoc doc;
+    ASSERT_TRUE(doc.document.recompute().success);
+    Parameter& alt = doc.document.addParameter("Alt", 70.0, UnitType::Millimeter);
+    ASSERT_NE(doc.document.addSketchConstraint(doc.sketch->id(),
+                                               LengthConstraint{doc.topEdge, alt.id()}),
+              kInvalidSketchConstraintId);
+    ASSERT_NE(doc.document.addSketchConstraint(
+                  doc.sketch->id(), LengthConstraint{doc.topEdge, doc.length->id()}),
+              kInvalidSketchConstraintId);
+    doc.document.recompute();
+
+    const OutlineNode root = DocumentOutline(doc.document).build();
+    const OutlineNode* pad = Find(root, "Pad001");
+    ASSERT_NE(pad, nullptr);
+    const OutlineNode* sketch = Find(root, "Sketch001");
+    ASSERT_NE(sketch, nullptr);
+
+    EXPECT_EQ(sketch->state, OutlineState::Failed) << "the sketch is what broke";
+    EXPECT_EQ(pad->state, OutlineState::Blocked)
+        << "the pad reported its child's failure as its own: " << pad->diagnostic;
+    // The ROOT still summarises: rolling up must still travel, it just stops
+    // overwriting rows that had something of their own to say.
+    EXPECT_NE(root.state, OutlineState::Valid);
+}

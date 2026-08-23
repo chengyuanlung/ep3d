@@ -24,6 +24,16 @@ struct BuildProblemResult {
     // non-finite/non-positive dimension. Non-empty means InvalidInput
     // (ADR-M5-005): validation happens BEFORE any solving.
     std::vector<SketchConstraintId> invalidConstraints;
+
+    // DRIVEN dimensions (M17.19, ADR-M17-042): dimensional constraints that
+    // MEASURE rather than drive, so no residual was emitted for them.
+    //
+    // Reported rather than left to the caller to find again by re-testing the
+    // flag: two places deciding which constraints are driven is two places
+    // that can disagree, and the disagreement would show as a dimension whose
+    // number never updates or one that quietly constrains after all.
+    std::vector<SketchConstraintId> drivenConstraints;
+
     std::string message;
 
     explicit operator bool() const noexcept { return invalidConstraints.empty(); }

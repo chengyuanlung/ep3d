@@ -139,7 +139,7 @@ TEST(M4ReviewFindingTest, MAJOR2_RemovingASketchDetachesItFromTheDocument) {
     EXPECT_TRUE(document.sketches().empty())
         << "removeObject reported success but the document still owns the sketch";
     EXPECT_EQ(document.findSketch(sketchId), nullptr);
-    EXPECT_EQ(document.objectRegistry().find(sketchId), nullptr);
+    EXPECT_FALSE(document.objectRegistry().find(sketchId).has_value());
 }
 
 TEST(M4ReviewFindingTest, MAJOR2_RemovedSketchIsNotResurrectedOnReload) {
@@ -186,7 +186,7 @@ TEST(M4ReviewFindingTest, MAJOR2_RemovingTheMaterialDropsIt) {
 
     ASSERT_TRUE(document.removeObject(materialId));
     EXPECT_FALSE(document.material()) << "the document still holds the removed material";
-    EXPECT_EQ(document.objectRegistry().find(materialId), nullptr);
+    EXPECT_FALSE(document.objectRegistry().find(materialId).has_value());
 }
 
 // --- Major 3: save-side validation did not cover PadFeature ---------------

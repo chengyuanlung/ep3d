@@ -2,6 +2,7 @@
 #include "Core/Document/PartDocument.h"
 #include "Core/Parameter/Parameter.h"
 #include <gtest/gtest.h>
+#include <optional>
 #include <variant>
 
 namespace {
@@ -23,9 +24,12 @@ TEST(ObjectRegistryTest, M2_REG_001_RegisterAndFind) {
     // Document-level path: addParameter registers automatically.
     PartDocument document("RegDoc");
     Parameter& docParameter = document.addParameter("Height", 20.0, UnitType::Millimeter);
-    const ObjectRegistry::ObjectRef* docRef = document.objectRegistry().find(docParameter.id());
-    ASSERT_NE(docRef, nullptr);
-    EXPECT_EQ(std::get<Parameter*>(*docRef), &docParameter);
+    // Through a CONST document the handle carries const pointees (R2R4-M1):
+    // inspection resolves the same runtime object, and cannot mutate it.
+    const std::optional<ObjectRegistry::ConstObjectRef> docRef =
+        document.objectRegistry().find(docParameter.id());
+    ASSERT_TRUE(docRef.has_value());
+    EXPECT_EQ(std::get<const Parameter*>(*docRef), &docParameter);
 }
 
 TEST(ObjectRegistryTest, M2_REG_002_RejectDuplicateId) {

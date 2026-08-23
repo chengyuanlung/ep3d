@@ -24,6 +24,9 @@ inline constexpr int kMajor = 24;
 
 namespace size {
 inline constexpr int kToolbarIcon = 20;
+// The SKETCH toolbar runs icon-only, so its icons carry the whole meaning and
+// are given more room than the main bar's, where a label sits beside them.
+inline constexpr int kSketchToolbarIcon = 24;
 inline constexpr int kPropertyRowHeight = 30;
 inline constexpr int kTreeRowHeight = 26;
 inline constexpr int kStatusBarHeight = 24;

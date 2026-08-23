@@ -2,11 +2,14 @@
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Parameter/Parameter.h"
+#include "Core/Document/PartDocument.h"
 #include "Core/Recompute/RecomputeContext.h"
 #include "Core/Sketch/Profile.h"
 #include "Core/Sketch/Sketch.h"
+#include <cstdint>
 #include <string>
 #include <utility>
+#include <optional>
 #include <variant>
 
 namespace paramcad {
@@ -14,16 +17,20 @@ namespace paramcad {
 namespace {
 
 const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    const ObjectRegistry::ObjectRef* ref = registry.find(id);
-    if (ref == nullptr) return nullptr;
-    auto* const* parameter = std::get_if<Parameter*>(ref);
+    // The const overload yields const pointees (R2R4-M1); these resolvers
+    // already returned const pointers, so the projection matches their intent.
+    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
+    if (!ref) return nullptr;
+    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
     return parameter != nullptr ? *parameter : nullptr;
 }
 
 const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
-    const ObjectRegistry::ObjectRef* ref = registry.find(id);
-    if (ref == nullptr) return nullptr;
-    auto* const* sketch = std::get_if<Sketch*>(ref);
+    // The const overload yields const pointees (R2R4-M1); these resolvers
+    // already returned const pointers, so the projection matches their intent.
+    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
+    if (!ref) return nullptr;
+    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
     return sketch != nullptr ? *sketch : nullptr;
 }
 
@@ -66,7 +73,16 @@ RecomputeResult PadFeature::recompute(const RecomputeContext& context) {
     if (!profile) return fail("invalid profile: " + profile.message);
 
     PlanarProfileDefinition definition;
-    if (!BuildKernelProfile(*sketch, profile.profile, definition))
+    // A support frame that is GONE fails loudly (M10 gate I). Falling back to
+    // the embedded plane would move the geometry back to world XY on its own,
+    // silently, which is exactly what a deleted reference must never do.
+    if (context.document.sketchSupportFrameIsMissing(sketch->id()))
+        return fail("pad sketch's support frame is missing");
+    // The sketch's EFFECTIVE plane, which is its support frame's world
+    // transform when it has one (M10.2, ADR-M10-003). Reading `sketch->frame()`
+    // here instead would leave the geometry at the origin after the frame moved.
+    if (!BuildKernelProfile(*sketch, profile.profile,
+                            context.document.effectiveSketchFrame(sketch->id()), definition))
         return fail("profile references an entity that is no longer in the sketch");
 
     // Transactional (spec 13, mirroring BoxFeature): build into a LOCAL result
@@ -79,7 +95,11 @@ RecomputeResult PadFeature::recompute(const RecomputeContext& context) {
                                            : result.message);
     if (!result.shape.isValid()) return fail("kernel returned an invalid shape");
 
-    currentShape_ = std::move(result.shape);
+    // WHO MADE THIS (M17.13, ADR-M17-035). A pad starts from nothing, so
+    // every face of the prism is its own -- which is what lets a later feature
+    // say "the edges of everything Pad001 created".
+    currentShape_ = context.kernel->tagCreatedFaces(result.shape, KernelShape{},
+                                                    static_cast<std::uint64_t>(id()));
     setState(ComputeState::Valid);
     return {RecomputeStatus::Success, {}};
 }

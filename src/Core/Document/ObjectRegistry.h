@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include <cstddef>
 #include <unordered_map>
+#include <optional>
 #include <variant>
 
 namespace paramcad {
@@ -12,6 +13,8 @@ class Body;
 class Feature;
 class Material;
 class Sketch;
+class ReferenceFrame;
+class Connector;
 class IRecomputable;
 
 // Document-local ObjectId -> object lookup (ADR-010). Stores type-safe
@@ -29,16 +32,40 @@ public:
     // recomputable node since M5. It stays registered under its own concrete
     // alternative in both cases; findRecomputable below derives the capability
     // from the type rather than from the alternative.
-    using ObjectRef =
-        std::variant<Parameter*, Body*, Feature*, Material*, Sketch*, IRecomputable*>;
+    // ReferenceFrame and Connector join in M10, when they become resolvable
+    // document objects rather than entries in a vector (ADR-M10-001).
+    using ObjectRef = std::variant<Parameter*, Body*, Feature*, Material*, Sketch*,
+                                   ReferenceFrame*, Connector*, IRecomputable*>;
+
+    // The same handle with const pointees, for callers that only INSPECT.
+    //
+    // Round 4, R2R4-M1: `find` was const, but constness stopped at the
+    // pointees, so `document.objectRegistry().find(id)` on a `const
+    // PartDocument&` handed out mutable `Material*`, `Sketch*` and `Feature*`.
+    // That reopened, through one back door, two of the three accessors round 3
+    // had just closed -- a reviewer doubled a material's density through a
+    // const document and the cached mass stayed `valid`. The header's own
+    // "Const-only access; mutation goes through the facade" was false.
+    //
+    // The fix is the same const-correctness `sketches()` got in M5 and
+    // `material()` got in round 3, applied at the registry: the const overload
+    // of `find` yields const pointees, the non-const overload (owners only --
+    // PartDocument and the recompute engine hold a non-const registry) is
+    // unchanged.
+    using ConstObjectRef =
+        std::variant<const Parameter*, const Body*, const Feature*, const Material*,
+                     const Sketch*, const ReferenceFrame*, const Connector*,
+                     const IRecomputable*>;
 
     // Rejects kInvalidObjectId, duplicate ids, null handles, and handles
     // whose ->id() differs from the registered id (returns false).
     bool registerObject(ObjectId id, ObjectRef ref);
     bool unregisterObject(ObjectId id) noexcept; // false if unknown
     bool contains(ObjectId id) const noexcept;
-    const ObjectRef* find(ObjectId id) const noexcept; // nullptr if unknown
-    IRecomputable* findRecomputable(ObjectId id) const noexcept;
+    ObjectRef* find(ObjectId id) noexcept;                          // nullptr if unknown
+    std::optional<ConstObjectRef> find(ObjectId id) const noexcept; // nullopt if unknown
+    IRecomputable* findRecomputable(ObjectId id) noexcept;
+    const IRecomputable* findRecomputable(ObjectId id) const noexcept;
     std::size_t size() const noexcept;
 
 private:

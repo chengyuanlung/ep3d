@@ -216,14 +216,18 @@ INSTANTIATE_TEST_SUITE_P(
         SubElementCase{"Line", SketchSubElement::EndPoint, true},
         SubElementCase{"Line", SketchSubElement::CenterPoint, false},
         SubElementCase{"Line", SketchSubElement::Whole, false},
-        // A curve's only referenceable point is its centre.
+        // A CIRCLE is closed: its only referenceable point is its centre.
         SubElementCase{"Circle", SketchSubElement::CenterPoint, true},
         SubElementCase{"Circle", SketchSubElement::StartPoint, false},
         SubElementCase{"Circle", SketchSubElement::EndPoint, false},
         SubElementCase{"Circle", SketchSubElement::Whole, false},
+        // An ARC has ENDS, and since M17 they are real variables tied to its
+        // centre, radius and angle (ArcTipU/V). Before that a reference to one
+        // resolved to the RADIUS -- which is what ADR-M12-003 refused it for,
+        // and what the tip variables replace. Fillet needs exactly this.
         SubElementCase{"Arc", SketchSubElement::CenterPoint, true},
-        SubElementCase{"Arc", SketchSubElement::StartPoint, false},
-        SubElementCase{"Arc", SketchSubElement::EndPoint, false},
+        SubElementCase{"Arc", SketchSubElement::StartPoint, true},
+        SubElementCase{"Arc", SketchSubElement::EndPoint, true},
         SubElementCase{"Arc", SketchSubElement::Whole, false},
         // A point IS its position.
         SubElementCase{"Point", SketchSubElement::Whole, true},

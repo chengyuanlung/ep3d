@@ -306,7 +306,7 @@ TEST(SerializationV6Test, M8_REV_309_AGarbageBaseIdIsRefusedAtCreation) {
     PocketDoc doc;
     Parameter& depth2 = doc.document.addParameter("Depth2", 5.0, UnitType::Millimeter);
     Body& body = *doc.document.bodies().front();
-    EXPECT_THROW(doc.document.addPocketFeature(body, "Pocket002", ObjectId{999999},
+    EXPECT_THROW(doc.document.addPocketFeature(body, "Pocket002", ObjectIdGenerator::Next(),
                                                doc.pocketSketchId, depth2.id()),
                  std::runtime_error);
 }
@@ -320,7 +320,9 @@ TEST(SerializationV6Test, M8_REV_310_TheRestoreFacadeRefusesADiamondDirectly) {
     PocketDoc doc;
     Body& body = *doc.document.bodies().front();
     const ObjectId materialId = doc.document.material()->id();
-    EXPECT_THROW(doc.document.restorePocketFeature(body, ObjectId{999000}, "Rogue",
+    // The new feature's id must be UNUSED, or the throw would come from
+    // requireUnusedId and this test would credit the wrong guard.
+    EXPECT_THROW(doc.document.restorePocketFeature(body, ObjectIdGenerator::Next(), "Rogue",
                                                    ComputeState::Valid, doc.padId,
                                                    doc.pocketSketchId, doc.depthId, materialId),
                  std::runtime_error);

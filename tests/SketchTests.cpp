@@ -109,7 +109,9 @@ TEST(SketchTest, M4_SKETCH_007_RestoreAcceptsInvalidGeometryForLosslessRoundTrip
     EXPECT_EQ(sketch.addCircle(Vec2{0, 0}, -5.0), kInvalidSketchEntityId);
     EXPECT_TRUE(sketch.entities().empty());
 
-    EXPECT_TRUE(sketch.restoreEntity(SketchEntityId{77}, SketchCircle{Vec2{0, 0}, -5.0}));
+    // Allocated, never a literal: the generator is process-global, so any
+    // constant is an id some other test can legitimately be handed first.
+    EXPECT_TRUE(sketch.restoreEntity(NextSketchEntityId(), SketchCircle{Vec2{0, 0}, -5.0}));
     EXPECT_EQ(sketch.entities().size(), 1u);
 }
 
