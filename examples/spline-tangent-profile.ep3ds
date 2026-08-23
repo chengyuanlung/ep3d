@@ -1,0 +1,38 @@
+# A PROFILE A SPLINE CAN ACTUALLY BE PART OF (M18).
+#
+# Before M18 the tangency below was refused outright, so the spline met the
+# line with a visible kink -- and the solid built from it had the kink too,
+# because the kernel was choosing its own end condition.
+
+sketch Blade
+
+tool line
+click 0 0
+click 120 0
+
+tool spline
+click 120 0
+click 150 35
+click 120 70
+click 60 80
+finish
+
+# The spline's first click landed on the line's end, so the tool ALREADY
+# inferred the coincidence -- and the line's first click landed on the origin,
+# so that Fix is inferred too. Adding either by hand would be a second copy of
+# a constraint that is already there, and the solver would rightly call the
+# sketch redundant.
+#
+# What is NOT inferred is the tangency: nothing can guess that a curve meeting
+# a line was meant to meet it smoothly.
+constrain tangent Spline1 Line1
+
+constrain horizontal Line1
+dimension length Line1 120 as Root
+
+solve
+
+echo --- what did we build? ---
+measure Line1
+measure Spline1
+measure Line1.start Spline1.end

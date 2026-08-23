@@ -1,0 +1,290 @@
+{
+  "format": "ParametricCAD",
+  "schemaVersion": 23,
+  "documentType": "Part",
+  "id": "1",
+  "name": "SplineAndEllipse",
+  "parameters": [
+    {
+      "id": "5",
+      "name": "MajorA",
+      "value": 40,
+      "unit": "Millimeter",
+      "expression": "",
+      "state": "Valid"
+    },
+    {
+      "id": "6",
+      "name": "MinorB",
+      "value": 15,
+      "unit": "Millimeter",
+      "expression": "",
+      "state": "Valid"
+    },
+    {
+      "id": "7",
+      "name": "EllipseAngle",
+      "value": 0.5235987755982988,
+      "unit": "Radian",
+      "expression": "",
+      "state": "Valid"
+    },
+    {
+      "id": "8",
+      "name": "HoleR",
+      "value": 8,
+      "unit": "Millimeter",
+      "expression": "",
+      "state": "Valid"
+    },
+    {
+      "id": "18",
+      "name": "BladeSpan",
+      "value": 120,
+      "unit": "Millimeter",
+      "expression": "",
+      "state": "Valid"
+    },
+    {
+      "id": "26",
+      "name": "Thickness",
+      "value": 10,
+      "unit": "Millimeter",
+      "expression": "",
+      "state": "Valid"
+    }
+  ],
+  "material": null,
+  "bodies": [
+    {
+      "id": "27",
+      "name": "Body001",
+      "features": [
+        {
+          "id": "28",
+          "name": "RingPad",
+          "type": "Pad",
+          "state": "Valid",
+          "sketchId": "4",
+          "lengthParameterId": "26",
+          "materialId": "0"
+        }
+      ]
+    },
+    {
+      "id": "29",
+      "name": "Body002",
+      "features": [
+        {
+          "id": "30",
+          "name": "BladePad",
+          "type": "Pad",
+          "state": "Valid",
+          "sketchId": "17",
+          "lengthParameterId": "26",
+          "materialId": "0"
+        }
+      ]
+    }
+  ],
+  "sketches": [
+    {
+      "id": "4",
+      "name": "EllipseRing",
+      "frame": {
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "rotation": {
+          "w": 1,
+          "x": 0,
+          "y": 0,
+          "z": 0
+        }
+      },
+      "entities": [
+        {
+          "id": "9",
+          "type": "Ellipse",
+          "u": 0,
+          "v": 0,
+          "majorRadiusMm": 40,
+          "minorRadiusMm": 15,
+          "rotationRad": 0.5235987755982988
+        },
+        {
+          "id": "14",
+          "type": "Circle",
+          "u": 0,
+          "v": 0,
+          "radiusMm": 8
+        }
+      ],
+      "constraints": [
+        {
+          "id": "10",
+          "type": "Fix",
+          "target": {
+            "entityId": "9",
+            "subElement": "CenterPoint"
+          }
+        },
+        {
+          "id": "11",
+          "type": "MajorAxis",
+          "curve": "9",
+          "minor": false,
+          "parameterId": "5"
+        },
+        {
+          "id": "12",
+          "type": "MinorAxis",
+          "curve": "9",
+          "minor": true,
+          "parameterId": "6"
+        },
+        {
+          "id": "13",
+          "type": "EllipseRotation",
+          "curve": "9",
+          "parameterId": "7"
+        },
+        {
+          "id": "15",
+          "type": "Concentric",
+          "curveA": "9",
+          "curveB": "14"
+        },
+        {
+          "id": "16",
+          "type": "Radius",
+          "curve": "14",
+          "parameterId": "8"
+        }
+      ],
+      "dimensionPlacements": [],
+      "dimensionFormats": []
+    },
+    {
+      "id": "17",
+      "name": "SplineBlade",
+      "frame": {
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "rotation": {
+          "w": 1,
+          "x": 0,
+          "y": 0,
+          "z": 0
+        }
+      },
+      "entities": [
+        {
+          "id": "19",
+          "type": "Spline",
+          "points": [
+            {
+              "u": 0,
+              "v": 0
+            },
+            {
+              "u": 30,
+              "v": 25
+            },
+            {
+              "u": 60,
+              "v": -10
+            },
+            {
+              "u": 90,
+              "v": 20
+            },
+            {
+              "u": 120,
+              "v": 0
+            }
+          ],
+          "closed": false
+        },
+        {
+          "id": "20",
+          "type": "Line",
+          "u1": 120,
+          "v1": 0,
+          "u2": 0,
+          "v2": 0
+        }
+      ],
+      "constraints": [
+        {
+          "id": "21",
+          "type": "Fix",
+          "target": {
+            "entityId": "20",
+            "subElement": "EndPoint"
+          }
+        },
+        {
+          "id": "22",
+          "type": "Horizontal",
+          "line": "20"
+        },
+        {
+          "id": "23",
+          "type": "Length",
+          "line": "20",
+          "parameterId": "18"
+        },
+        {
+          "id": "24",
+          "type": "Coincident",
+          "a": {
+            "entityId": "19",
+            "subElement": "StartPoint"
+          },
+          "b": {
+            "entityId": "20",
+            "subElement": "EndPoint"
+          }
+        },
+        {
+          "id": "25",
+          "type": "Coincident",
+          "a": {
+            "entityId": "19",
+            "subElement": "EndPoint"
+          },
+          "b": {
+            "entityId": "20",
+            "subElement": "StartPoint"
+          }
+        }
+      ],
+      "dimensionPlacements": [],
+      "dimensionFormats": []
+    }
+  ],
+  "frames": [
+    {
+      "id": "3",
+      "name": "Origin",
+      "parentFrameId": "0",
+      "transform": {
+        "tx": 0,
+        "ty": 0,
+        "tz": 0,
+        "qw": 1,
+        "qx": 0,
+        "qy": 0,
+        "qz": 0
+      }
+    }
+  ],
+  "connectors": [],
+  "dependencies": []
+}

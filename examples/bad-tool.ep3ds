@@ -1,0 +1,6 @@
+# A script that must fail: `wobble` is not a tool.
+#
+# Registered in CTest with WILL_FAIL, because a CLI that returned 0 on a
+# refused script would make every green build meaningless.
+sketch S
+tool wobble

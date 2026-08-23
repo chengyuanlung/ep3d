@@ -1,0 +1,78 @@
+# examples/spline-and-ellipse.ep3ds
+#
+#   ep3d --script examples/spline-and-ellipse.ep3ds --out examples/from-script.ep3d
+#
+# Every line goes through the SAME path a mouse click does: `tool` and `click`
+# drive SketchCanvasModel, and `constrain`/`dimension` go through the functions
+# that decide whether a selection means anything.
+#
+# The geometry is drawn LOOSE and then pulled into place by constraints, which
+# is both the honest way to show what a constraint does and the way to keep the
+# sketch from ending up over-constrained: a click that lands on the origin or
+# on existing geometry already infers a constraint, and adding the same one by
+# hand afterwards makes it redundant.
+
+echo === Sketch 1: an ellipse, fully constrained ===
+
+sketch EllipseRing
+
+# Centre, then the end of the LONG axis, then the width. The second click gives
+# both the major radius AND the rotation, because an ellipse's rotation is
+# measured to its major axis -- so pointing at the long end says the two things
+# that have to agree in one gesture.
+tool ellipse
+click 60 40
+click 92 60              # roughly 38 mm out, at about 32 degrees
+click 60 52              # 12 mm across the axis
+
+# Five numbers, five constraints. Every one of them MOVES something, because
+# the ellipse was drawn by eye.
+constrain fix Ellipse1.center
+dimension majoraxis Ellipse1 40 as MajorA
+dimension minoraxis Ellipse1 15 as MinorB
+dimension ellipseangle Ellipse1 30 as EllipseAngle
+
+# A circle for the bore, drawn well away from the ellipse so that Concentric
+# has to pull it in. An ellipse CAN be concentric with something: sharing a
+# centre says nothing about how many radii either side has.
+tool circle
+click 130 40
+click 138 40
+constrain concentric Ellipse1 Circle1
+dimension radius Circle1 8 as HoleR
+
+pad RingBody 10 as Thickness
+
+echo === Sketch 2: a five-point spline, DOF 6 ===
+
+sketch SplineBlade
+
+# Five points, then `finish` -- which is the double-click.
+tool spline
+click 10 5
+click 40 30
+click 70 -5
+click 100 25
+click 130 5
+finish
+
+# The straight edge that will close the profile, drawn clear of the spline.
+tool line
+click 135 -20
+click 5 -20
+
+# The chord, pinned outright: 2 + 1 + 1 for its four freedoms.
+constrain fix Line1.end
+constrain horizontal Line1
+dimension length Line1 120 as BladeSpan
+
+# ...and the spline's TWO ENDS pulled onto it. These are the only part of a
+# spline a constraint can reach: SketchElementRef names a sub-element, there
+# are four of them, and an interior point has no name. The three points in the
+# middle stay free -- which is why `solve` below reports 6 and not 0.
+constrain coincident Spline1.start Line1.end
+constrain coincident Spline1.end Line1.start
+
+pad BladeBody 10 as BladeThickness
+
+solve

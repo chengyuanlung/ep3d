@@ -1,0 +1,35 @@
+# A SEVEN-NODE SPLINE, FULLY CONSTRAINED -- DOF 0.
+#
+# Every one of its seven points is nameable now (M17.30): the two ends by name,
+# the five between them by index. Drawn by eye and pulled onto exact numbers.
+
+sketch Blade7
+
+tool spline
+click 7 -13
+click 33 31
+click 61 -7
+click 92 27
+click 119 -5
+click 147 23
+click 173 -11
+finish
+
+# The two ends, pinned outright.
+constrain fix Spline1.start
+dimension hdistance Spline1.start Spline1.end 180 as Span
+dimension vdistance Spline1.start Spline1.end 0 as EndRise
+
+# ...and the five interior points, each placed from the start point.
+dimension hdistance Spline1.start Spline1.p1 30 as X1
+dimension vdistance Spline1.start Spline1.p1 45 as Y1
+dimension hdistance Spline1.start Spline1.p2 60 as X2
+dimension vdistance Spline1.start Spline1.p2 -8 as Y2
+dimension hdistance Spline1.start Spline1.p3 90 as X3
+dimension vdistance Spline1.start Spline1.p3 40 as Y3
+dimension hdistance Spline1.start Spline1.p4 120 as X4
+dimension vdistance Spline1.start Spline1.p4 -6 as Y4
+dimension hdistance Spline1.start Spline1.p5 150 as X5
+dimension vdistance Spline1.start Spline1.p5 35 as Y5
+
+solve

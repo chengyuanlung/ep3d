@@ -1,0 +1,33 @@
+# A SEVEN-NODE SPLINE, constrained as far as a spline can be.
+#
+# Drawn loose on purpose -- none of these numbers is round -- so every
+# constraint below has to MOVE something.
+
+sketch Blade7
+
+tool spline
+click 8 -14
+click 35 32
+click 62 -6
+click 90 26
+click 118 -4
+click 146 24
+click 172 -12
+finish
+
+# The straight chord that closes the profile, drawn clear of the spline.
+tool line
+click 178 -30
+click 2 -30
+
+# The chord, pinned outright: 2 + 1 + 1 for its four freedoms.
+constrain fix Line1.end
+constrain horizontal Line1
+dimension length Line1 180 as ChordLength
+
+# ...and the spline's TWO ENDS pulled onto it.
+constrain coincident Spline1.start Line1.end
+constrain coincident Spline1.end Line1.start
+
+pad Blade 6 as BladeThickness
+solve
