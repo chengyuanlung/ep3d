@@ -10,6 +10,7 @@
 
 #include "Cli/SketchScript.h"
 #include "Core/Assembly/AssemblyDocument.h"
+#include "Core/Assembly/AssemblyStates.h"
 #include "Core/Assembly/Instance.h"
 #include "Core/Assembly/Mate.h"
 #include "Core/Document/DocumentBase.h"
@@ -225,6 +226,56 @@ void MainWindow::buildMenus() {
         QStringLiteral("Delete the selected mate.\n"
                        "The instances it held stay -- a mate holds them, it does not own them."));
     connect(deleteMateAction_, &QAction::triggered, this, &MainWindow::onDeleteMateRequested);
+
+    // --- The three state mechanisms (M30, §49) ------------------------------
+    //
+    // THREE SEPARATE GROUPS, because they are three separate mechanisms. §49
+    // warns against merging them into one "view state", and a menu that listed
+    // them together would be the first step in doing exactly that.
+    assemblyMenu_->addSeparator();
+    capturePositionAction_ = assemblyMenu_->addAction(QStringLiteral("&Capture Position..."));
+    capturePositionAction_->setToolTip(
+        QStringLiteral("Remember where everything is: every mate's value, and where the "
+                       "instances no mate places are sitting."));
+    connect(capturePositionAction_, &QAction::triggered, this,
+            &MainWindow::onCaptureNamedPositionRequested);
+
+    applyPositionAction_ = assemblyMenu_->addAction(QStringLiteral("App&ly Position"));
+    applyPositionAction_->setToolTip(
+        QStringLiteral("Move the assembly back to the selected position.\n"
+                       "One undo step, because it is one thing you chose."));
+    connect(applyPositionAction_, &QAction::triggered, this,
+            &MainWindow::onApplyNamedPositionRequested);
+
+    assemblyMenu_->addSeparator();
+    addExplodeViewAction_ = assemblyMenu_->addAction(QStringLiteral("New &Exploded View..."));
+    connect(addExplodeViewAction_, &QAction::triggered, this,
+            &MainWindow::onAddExplodeViewRequested);
+    addExplodeStepAction_ = assemblyMenu_->addAction(QStringLiteral("Add Explode &Step..."));
+    addExplodeStepAction_->setToolTip(
+        QStringLiteral("Move the selected instance out, as the next step of the selected "
+                       "view.\nSteps can be previewed one at a time."));
+    connect(addExplodeStepAction_, &QAction::triggered, this,
+            &MainWindow::onAddExplodeStepRequested);
+    showExplodeAction_ = assemblyMenu_->addAction(QStringLiteral("Sho&w Exploded View"));
+    showExplodeAction_->setCheckable(true);
+    showExplodeAction_->setToolTip(
+        QStringLiteral("Draw the selected exploded view.\n"
+                       "Nothing moves: an explosion is a picture, not an edit."));
+    connect(showExplodeAction_, &QAction::triggered, this,
+            &MainWindow::onShowExplodeViewRequested);
+    explodePreviewAction_ = assemblyMenu_->addAction(QStringLiteral("Explode &Up To..."));
+    explodePreviewAction_->setToolTip(
+        QStringLiteral("Show only the first N steps -- the view's own rollback bar."));
+    connect(explodePreviewAction_, &QAction::triggered, this,
+            &MainWindow::onExplodePreviewRequested);
+
+    assemblyMenu_->addSeparator();
+    interferenceAction_ = assemblyMenu_->addAction(QStringLiteral("Check &Interference"));
+    interferenceAction_->setToolTip(
+        QStringLiteral("Find every pair of instances that overlap, and by how much."));
+    connect(interferenceAction_, &QAction::triggered, this,
+            &MainWindow::onCheckInterferenceRequested);
 
     assemblyMenu_->addSeparator();
     deleteInstanceAction_ = assemblyMenu_->addAction(QStringLiteral("&Delete Instance"));
@@ -733,6 +784,17 @@ void MainWindow::selectInstancesForTesting(const std::vector<ObjectId>& ids) {
     refreshCommandStates();
 }
 
+void MainWindow::selectNamedPositionForTesting(const QString& name) {
+    if (const AssemblyDocument* assembly = AsAssembly(document_))
+        if (const NamedPosition* found =
+                assembly->findNamedPositionNamed(name.toStdString()))
+            selectObject(found->id());
+}
+
+std::size_t MainWindow::undoDepthForTesting() const {
+    return document_ != nullptr ? document_->undoDepth() : 0;
+}
+
 bool MainWindow::recomputeForTesting() {
     return document_ != nullptr && document_->recompute().success;
 }
@@ -784,6 +846,240 @@ QString MainWindow::driveSelectedMateForTesting(double value) {
 QString MainWindow::limitSelectedMateForTesting(double minimum, double maximum) {
     selectFirstMateForTesting();
     return limitSelectedMate(minimum, maximum);
+}
+
+ObjectId MainWindow::selectedNamedPosition() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return kInvalidObjectId;
+    return assembly->findNamedPosition(selectedId_) != nullptr ? selectedId_ : kInvalidObjectId;
+}
+
+ObjectId MainWindow::selectedExplodeView() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return kInvalidObjectId;
+    return assembly->findExplodeView(selectedId_) != nullptr ? selectedId_ : kInvalidObjectId;
+}
+
+QString MainWindow::captureNamedPositionCommand(const QString& name) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return say(QStringLiteral("Only an assembly has positions."));
+    if (name.trimmed().isEmpty()) return say(QStringLiteral("A position needs a name."));
+    if (assembly->findNamedPositionNamed(name.toStdString()) != nullptr)
+        return say(QStringLiteral("There is already a position called %1.").arg(name));
+
+    document_->beginTransaction("Capture position " + name.toStdString());
+    assembly->captureNamedPosition(name.toStdString());
+    if (!document_->commitTransaction())
+        return say(QStringLiteral("The document refused that position."));
+    refreshAll();
+    // WHAT IT CAPTURED, said plainly. §49: a named position is the mate values
+    // PLUS the transforms of instances no mate places -- and that second half
+    // is the one that is easy to forget exists until a hand-placed part comes
+    // back somewhere else.
+    return say(QStringLiteral("Captured %1: every mate's value, and where the instances no "
+                              "mate places are sitting.")
+                   .arg(name));
+}
+
+QString MainWindow::applySelectedNamedPosition() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId positionId = selectedNamedPosition();
+    if (assembly == nullptr || positionId == kInvalidObjectId)
+        return say(QStringLiteral("Select a named position to apply."));
+    const NamedPosition* position = assembly->findNamedPosition(positionId);
+    const QString name =
+        position != nullptr ? QString::fromStdString(position->name()) : QStringLiteral("it");
+
+    // ONE TRANSACTION, so it is ONE undo step. A position is one thing the user
+    // chose; without this, undoing "back to Open" would walk back one mate at a
+    // time and stop somewhere that was never any position at all.
+    document_->beginTransaction("Apply position " + name.toStdString());
+    const bool applied = assembly->applyNamedPosition(positionId);
+    if (!applied || !document_->commitTransaction())
+        return say(QStringLiteral("%1 could not be applied.").arg(name));
+    (void)document_->recompute();
+    refreshAll();
+    return say(QStringLiteral("Moved to %1").arg(name));
+}
+
+QString MainWindow::addExplodeViewCommand(const QString& name) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return say(QStringLiteral("Only an assembly explodes."));
+    if (name.trimmed().isEmpty()) return say(QStringLiteral("An exploded view needs a name."));
+    if (assembly->findExplodeViewNamed(name.toStdString()) != nullptr)
+        return say(QStringLiteral("There is already a view called %1.").arg(name));
+
+    document_->beginTransaction("Add exploded view " + name.toStdString());
+    const ExplodeView& made = assembly->addExplodeView(name.toStdString());
+    const ObjectId madeId = made.id();
+    if (!document_->commitTransaction())
+        return say(QStringLiteral("The document refused that view."));
+    refreshAll();
+    selectObject(madeId);
+    return say(QStringLiteral("Added %1. Select an instance and add a step to it.").arg(name));
+}
+
+QString MainWindow::addExplodeStepCommand(ObjectId viewId, const Vec3& offsetMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return say(QStringLiteral("Only an assembly explodes."));
+    const ExplodeView* view = assembly->findExplodeView(viewId);
+    if (view == nullptr) return say(QStringLiteral("Select an exploded view first."));
+    const ObjectId instanceId = selectedInstance();
+    if (instanceId == kInvalidObjectId)
+        return say(QStringLiteral("Select the instance this step moves."));
+
+    const Instance* instance = assembly->findInstance(instanceId);
+    const std::string stepName =
+        (instance != nullptr ? instance->name() : std::string("Step")) + " out";
+
+    document_->beginTransaction("Add explode step");
+    bool added = false;
+    try {
+        added = assembly->addExplodeStep(viewId, stepName, instanceId, offsetMm);
+    } catch (const std::exception& problem) {
+        document_->commitTransaction();
+        return say(QStringLiteral("That step was refused: %1")
+                       .arg(QString::fromUtf8(problem.what())));
+    }
+    if (!added || !document_->commitTransaction())
+        return say(QStringLiteral("That step was refused."));
+    refreshAll();
+    return say(QStringLiteral("Added step %1 of %2")
+                   .arg(view->steps().size())
+                   .arg(QString::fromStdString(view->name())));
+}
+
+QString MainWindow::showExplodeView(ObjectId viewId) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return say(QStringLiteral("Only an assembly explodes."));
+
+    // PRESENTATION ONLY -- no transaction, nothing recorded, nothing to undo.
+    // The model is not moved by looking at it exploded, which is the whole
+    // difference between an exploded view and dragging the parts apart.
+    presenter_->setShownExplodeView(viewId);
+    refreshAll();
+    if (viewId == kInvalidObjectId)
+        return say(QStringLiteral("Showing the assembly as it is."));
+    const ExplodeView* view = assembly->findExplodeView(viewId);
+    return say(QStringLiteral("Showing %1. Nothing has moved -- this is a picture.")
+                   .arg(view != nullptr ? QString::fromStdString(view->name())
+                                        : QStringLiteral("that view")));
+}
+
+QString MainWindow::setExplodePreviewCommand(ObjectId viewId, std::size_t stepsShown) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return say(QStringLiteral("Only an assembly explodes."));
+    const ExplodeView* view = assembly->findExplodeView(viewId);
+    if (view == nullptr) return say(QStringLiteral("Select an exploded view first."));
+
+    // THE VIEW'S OWN ROLLBACK BAR (§49 point 2). The position is stored on the
+    // view, so it survives a save -- and it CLAMPS rather than erroring, which
+    // is EvaluationCut's whole contract: a shortened list with an old position
+    // means "all of it" without anyone having to go and fix it.
+    document_->beginTransaction("Preview explode steps");
+    const bool set = assembly->setExplodePreview(viewId, stepsShown);
+    if (!set || !document_->commitTransaction())
+        return say(QStringLiteral("That preview position was refused."));
+    refreshAll();
+    return say(QStringLiteral("Showing %1 of %2 step%3")
+                   .arg(std::min(stepsShown, view->steps().size()))
+                   .arg(view->steps().size())
+                   .arg(view->steps().size() == 1 ? "" : "s"));
+}
+
+QString MainWindow::showHideSelectedInstance() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId instanceId = selectedInstance();
+    if (assembly == nullptr || instanceId == kInvalidObjectId)
+        return say(QStringLiteral("Select an instance to hide."));
+
+    // PURE PRESENTATION (A02). It never touches the document, so it records no
+    // undo step and cannot be saved -- and that second half is a real limit,
+    // not an oversight: §49's DISPLAY STATE is a NAMED set of what is hidden,
+    // and naming one that cannot be persisted would be a feature that forgets
+    // itself. Where a named display state should live is a decision this
+    // milestone does not make.
+    presenter_->toggleHidden(instanceId);
+    refreshAll();
+    const Instance* instance = assembly->findInstance(instanceId);
+    const QString name =
+        instance != nullptr ? QString::fromStdString(instance->name()) : QStringLiteral("it");
+    return say(presenter_->isHidden(instanceId)
+                   ? QStringLiteral("%1 hidden. It is still there and still solved.").arg(name)
+                   : QStringLiteral("%1 shown").arg(name));
+}
+
+QString MainWindow::checkInterferenceCommand() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return say(QStringLiteral("Only an assembly can interfere."));
+
+    const AssemblyDocument::InterferenceReport report = assembly->checkInterference();
+    if (!report.ok)
+        return say(QStringLiteral("Interference could not be checked: %1")
+                       .arg(QString::fromStdString(report.message)));
+    if (report.overlaps.empty()) {
+        // WHAT WAS ACTUALLY CHECKED. "No interference" over an assembly where
+        // three instances failed to build is a clean bill of health for a part
+        // that was never looked at, and the report already says so.
+        return say(report.message.empty()
+                       ? QStringLiteral("No interference.")
+                       : QStringLiteral("No interference. %1")
+                             .arg(QString::fromStdString(report.message)));
+    }
+    // NAMED PAIRS, not a count. "3 interferences" tells a user nothing they can
+    // act on; which two parts, and by how much, is the whole of what they need.
+    QStringList lines;
+    for (const AssemblyDocument::Interference& overlap : report.overlaps) {
+        const Instance* first = assembly->findInstance(overlap.firstInstanceId);
+        const Instance* second = assembly->findInstance(overlap.secondInstanceId);
+        lines << QStringLiteral("%1 and %2 overlap by %3 mm^3")
+                     .arg(first != nullptr ? QString::fromStdString(first->name())
+                                           : QStringLiteral("?"),
+                          second != nullptr ? QString::fromStdString(second->name())
+                                            : QStringLiteral("?"))
+                     .arg(overlap.volumeMm3, 0, 'f', 3);
+    }
+    return say(lines.join(QStringLiteral("; ")));
 }
 
 ObjectId MainWindow::selectedMate() const {
@@ -1170,6 +1466,61 @@ QString MainWindow::deleteSelectedInstance() {
 }
 
 // --- The slots: the dialogs, and nothing else --------------------------------
+
+void MainWindow::onCaptureNamedPositionRequested() {
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, QStringLiteral("Capture Position"),
+                                               QStringLiteral("Name this position"),
+                                               QLineEdit::Normal, QStringLiteral("Open"), &ok);
+    if (!ok) return;
+    captureNamedPositionCommand(name);
+}
+
+void MainWindow::onApplyNamedPositionRequested() { applySelectedNamedPosition(); }
+
+void MainWindow::onAddExplodeViewRequested() {
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, QStringLiteral("New Exploded View"),
+                                               QStringLiteral("Name this view"),
+                                               QLineEdit::Normal,
+                                               QStringLiteral("Assembly steps"), &ok);
+    if (!ok) return;
+    addExplodeViewCommand(name);
+}
+
+void MainWindow::onAddExplodeStepRequested() {
+    const ObjectId viewId = selectedExplodeView();
+    if (viewId == kInvalidObjectId) {
+        statusLeft_->setText(QStringLiteral("Select the exploded view this step belongs to."));
+        return;
+    }
+    bool ok = false;
+    const double along = QInputDialog::getDouble(this, QStringLiteral("Add Explode Step"),
+                                                 QStringLiteral("Move out along Z, in mm"),
+                                                 40.0, -1e6, 1e6, 3, &ok);
+    if (!ok) return;
+    addExplodeStepCommand(viewId, Vec3{0.0, 0.0, along});
+}
+
+void MainWindow::onShowExplodeViewRequested() {
+    const ObjectId viewId = selectedExplodeView();
+    // A TOGGLE: showing the view again puts the assembly back as it is.
+    showExplodeView(presenter_ != nullptr && presenter_->shownExplodeView() == viewId
+                        ? kInvalidObjectId
+                        : viewId);
+}
+
+void MainWindow::onExplodePreviewRequested() {
+    const ObjectId viewId = selectedExplodeView();
+    if (viewId == kInvalidObjectId) return;
+    bool ok = false;
+    const int shown = QInputDialog::getInt(this, QStringLiteral("Explode Up To"),
+                                           QStringLiteral("How many steps?"), 1, 0, 999, 1, &ok);
+    if (!ok) return;
+    setExplodePreviewCommand(viewId, static_cast<std::size_t>(shown));
+}
+
+void MainWindow::onCheckInterferenceRequested() { checkInterferenceCommand(); }
 
 void MainWindow::onAddMateRequested() {
     const std::vector<ObjectId> chosen = selectedInstances();
@@ -2036,6 +2387,24 @@ void MainWindow::refreshCommandStates() {
         if (driveMateAction_ != nullptr) driveMateAction_->setEnabled(haveMate);
         if (limitMateAction_ != nullptr) limitMateAction_->setEnabled(haveMate);
         if (deleteMateAction_ != nullptr) deleteMateAction_->setEnabled(haveMate);
+
+        const bool havePosition = isAssembly && selectedNamedPosition() != kInvalidObjectId;
+        const bool haveView = isAssembly && selectedExplodeView() != kInvalidObjectId;
+        if (capturePositionAction_ != nullptr) capturePositionAction_->setEnabled(isAssembly);
+        if (applyPositionAction_ != nullptr) applyPositionAction_->setEnabled(havePosition);
+        if (addExplodeViewAction_ != nullptr) addExplodeViewAction_->setEnabled(isAssembly);
+        if (addExplodeStepAction_ != nullptr)
+            addExplodeStepAction_->setEnabled(haveView || (isAssembly && haveInstance));
+        if (showExplodeAction_ != nullptr) {
+            showExplodeAction_->setEnabled(haveView);
+            // TICKED WHEN IT IS THE ONE BEING DRAWN. The tick is the only place
+            // "you are looking at a picture, not the model" is written down.
+            showExplodeAction_->setChecked(
+                haveView && presenter_ != nullptr &&
+                presenter_->shownExplodeView() == selectedExplodeView());
+        }
+        if (explodePreviewAction_ != nullptr) explodePreviewAction_->setEnabled(haveView);
+        if (interferenceAction_ != nullptr) interferenceAction_->setEnabled(isAssembly);
     }
 
     if (partOrNull() == nullptr) {

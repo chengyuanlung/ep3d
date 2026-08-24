@@ -195,6 +195,39 @@ public:
     QString limitSelectedMate(double minimum, double maximum);
     QString clearLimitOnSelectedMate();
 
+    // --- Assembly state: the three mechanisms of §49 (M30) -------------------
+    //
+    // KEPT THREE, because they capture three different KINDS of thing:
+    //   * a named position is a GEOMETRIC EVALUATION INPUT -- mate values plus
+    //     the transforms of instances no mate places. Document state.
+    //   * an exploded view is a DERIVED PRESENTATION TRANSFORM built from
+    //     authored steps. The steps are document state; which view you are
+    //     LOOKING at is not (see DocumentPresenter).
+    //   * a display state is what is hidden. Pure presentation, and A02 keeps
+    //     it out of Core entirely -- see the note on showHideSelectedInstance.
+    // Merging them into one "view state" is what §49 warns against, and it
+    // would take the document/presentation line with it.
+    QString captureNamedPositionCommand(const QString& name);
+    QString applySelectedNamedPosition();
+
+    QString addExplodeViewCommand(const QString& name);
+    // Appends a step moving the SELECTED instance by `offset`.
+    QString addExplodeStepCommand(ObjectId viewId, const Vec3& offsetMm);
+    // Which view is drawn, and how much of it. kInvalidObjectId shows the
+    // assembly as it actually is.
+    QString showExplodeView(ObjectId viewId);
+    QString setExplodePreviewCommand(ObjectId viewId, std::size_t stepsShown);
+
+    // Hides or shows the selected instance. PRESENTATION: it never touches the
+    // document, so it is not saved and cannot make the model wrong.
+    QString showHideSelectedInstance();
+
+    // Runs the interference check and reports it. Reading, never writing.
+    QString checkInterferenceCommand();
+
+    ObjectId selectedNamedPosition() const;
+    ObjectId selectedExplodeView() const;
+
     // --- Readbacks, so a self test can drive the whole workflow -------------
     //
     // Asked of the document the WINDOW is looking at, which after an Open is
@@ -216,6 +249,9 @@ public:
     bool mateIsDrivenForTesting() const;
     std::vector<ObjectId> selectedInstancesForTesting() const { return selectedInstances(); }
     bool recomputeForTesting();
+    void selectNamedPositionForTesting(const QString& name);
+    ObjectId selectedExplodeViewForTesting() const { return selectedExplodeView(); }
+    std::size_t undoDepthForTesting() const;
     std::vector<ObjectId> allInstancesForTesting() const;
     Vec3 instanceWorldPlaceForTesting(ObjectId instanceId) const;
     // Freedoms the mates LEFT this instance, or -1 when the solve did not say.
@@ -560,6 +596,13 @@ private slots:
     void onDeleteMateRequested();
     void onDriveMateRequested();
     void onLimitMateRequested();
+    void onCaptureNamedPositionRequested();
+    void onApplyNamedPositionRequested();
+    void onAddExplodeViewRequested();
+    void onAddExplodeStepRequested();
+    void onShowExplodeViewRequested();
+    void onExplodePreviewRequested();
+    void onCheckInterferenceRequested();
     void onSaveRequested();
     void onSaveAsRequested();
     void onOpenRequested();
@@ -785,6 +828,13 @@ private:
     QAction* deleteMateAction_ = nullptr;
     QAction* driveMateAction_ = nullptr;
     QAction* limitMateAction_ = nullptr;
+    QAction* capturePositionAction_ = nullptr;
+    QAction* applyPositionAction_ = nullptr;
+    QAction* addExplodeViewAction_ = nullptr;
+    QAction* addExplodeStepAction_ = nullptr;
+    QAction* showExplodeAction_ = nullptr;
+    QAction* explodePreviewAction_ = nullptr;
+    QAction* interferenceAction_ = nullptr;
     QMenu* assemblyMenu_ = nullptr;
 
     QDockWidget* treeDock_ = nullptr;

@@ -83,6 +83,22 @@ public:
     };
     std::vector<DisplayedShape> displayableShapes() const;
 
+    // --- Which exploded view is being SHOWN (M30, roadmap §49) --------------
+    //
+    // PRESENTATION, and it lives here for that reason. The explosion's STEPS
+    // are document state -- they are authored, saved and reloaded -- but which
+    // one you are currently looking at is a property of this window, exactly
+    // like which solids are hidden. A02 is explicit that visibility does not
+    // enter Core, and "am I looking at the exploded picture" is the same kind
+    // of fact.
+    //
+    // kInvalidObjectId means the assembly as it actually is. That is not a
+    // special case in the drawing code: explodedWorldTransform answers with
+    // instanceWorldTransform unchanged for an unknown view, which is the
+    // evidence that an explosion is a PICTURE and not a move.
+    void setShownExplodeView(ObjectId viewId) noexcept { shownExplodeView_ = viewId; }
+    ObjectId shownExplodeView() const noexcept { return shownExplodeView_; }
+
     // Recomputes and reports whether the display should be rebuilt. The viewer
     // calls this rather than touching the graph itself.
     bool recomputeForDisplay();
@@ -97,6 +113,7 @@ public:
 
 private:
     DocumentBase* document_;
+    ObjectId shownExplodeView_ = kInvalidObjectId;
     std::set<ObjectId> hidden_;
 };
 

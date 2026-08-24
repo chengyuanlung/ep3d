@@ -4025,6 +4025,131 @@ int main(int argc, char** argv) {
                     fail("deleting a mate took its instances with it");
             }
 
+            // --- M30's GATE: the three state mechanisms, kept three ---------
+            //
+            // §49 splits them because they capture three different KINDS of
+            // thing: a named position is a geometric evaluation INPUT, an
+            // exploded view is a derived PRESENTATION transform, and a display
+            // state is what is hidden. What this gate checks is not that each
+            // works, but that they stay apart -- that exploding does not move
+            // the model, and hiding does not change it at all.
+            //
+            // The hinge from M29 is still open, mated and driveable.
+            {
+                const std::vector<ObjectId> made = window.allInstancesForTesting();
+                if (made.size() != 2) fail("M30 expected M29's two instances");
+                const ObjectId arm = made[1];
+
+                // M29's block ends by DELETING its mate, to prove the instances
+                // survive it -- so there is nothing here to drive until one is
+                // put back. Caught by this gate on its first run, which is what
+                // the "or this proves nothing" check below is for.
+                if (window.mateCountForTesting() == 0)
+                    window.createMateCommand(MateType::Revolute, made[0],
+                                             QStringLiteral("Pivot"), made[1],
+                                             QStringLiteral("Eye"));
+                if (window.mateCountForTesting() != 1)
+                    fail("M30 could not get a mate to drive");
+
+                // --- NAMED POSITIONS ------------------------------------------
+                window.selectFirstMateForTesting();
+                window.driveSelectedMateForTesting(0.0);
+                const Vec3 shut = window.instanceWorldPlaceForTesting(arm);
+                if (!window.captureNamedPositionCommand(QStringLiteral("Shut"))
+                         .contains(QStringLiteral("Captured")))
+                    fail("a named position would not capture");
+
+                window.driveSelectedMateForTesting(0.5);
+                const Vec3 open = window.instanceWorldPlaceForTesting(arm);
+                if (std::fabs(shut.x - open.x) < 1e-6 && std::fabs(shut.y - open.y) < 1e-6)
+                    fail("driving the hinge did not move the arm, so this gate proves nothing");
+
+                // APPLYING PUTS IT BACK, and in ONE undo step -- a position is
+                // one thing the user chose, and undoing it a mate at a time
+                // would stop somewhere that was never any position at all.
+                window.selectNamedPositionForTesting(QStringLiteral("Shut"));
+                const std::size_t undoBefore = window.undoDepthForTesting();
+                if (!window.applySelectedNamedPosition().contains(QStringLiteral("Moved to")))
+                    fail("a named position would not apply");
+                if (window.undoDepthForTesting() != undoBefore + 1)
+                    fail("applying a position was not one undo step");
+                const Vec3 backAgain = window.instanceWorldPlaceForTesting(arm);
+                if (std::fabs(backAgain.x - shut.x) > 1e-6 ||
+                    std::fabs(backAgain.y - shut.y) > 1e-6)
+                    fail("applying a named position did not put the assembly back");
+
+                // --- EXPLODED VIEWS -------------------------------------------
+                if (!window.addExplodeViewCommand(QStringLiteral("Apart"))
+                         .contains(QStringLiteral("Added")))
+                    fail("an exploded view would not be created");
+                const ObjectId view = window.selectedExplodeViewForTesting();
+                if (view == kInvalidObjectId) fail("the new exploded view was not selected");
+
+                window.selectObject(arm);
+                if (!window.addExplodeStepCommand(view, Vec3{0.0, 0.0, 50.0})
+                         .contains(QStringLiteral("Added step")))
+                    fail("an explode step would not be added");
+
+                // THE MODEL IS UNTOUCHED BY THE PICTURE. This is §49's whole
+                // point and the reason the three are separate: showing an
+                // exploded view must not move anything.
+                const Vec3 modelBefore = window.instanceWorldPlaceForTesting(arm);
+                if (!window.showExplodeView(view).contains(QStringLiteral("picture")))
+                    fail("showing an exploded view did not say it is a picture");
+                const Vec3 modelAfter = window.instanceWorldPlaceForTesting(arm);
+                if (std::fabs(modelBefore.z - modelAfter.z) > 1e-9)
+                    fail("showing an exploded view MOVED the model");
+
+                // ...AND THE DRAWING DID CHANGE, or the view is a no-op that
+                // only claims to be a picture.
+                const std::vector<DocumentPresenter::DisplayedShape> exploded =
+                    presenter.displayableShapes();
+                bool sawOffset = false;
+                for (const auto& shape : exploded)
+                    if (shape.id == arm &&
+                        std::fabs(shape.placement.translation.z - modelAfter.z - 50.0) < 1e-6)
+                        sawOffset = true;
+                if (!sawOffset)
+                    fail("the exploded view is shown but nothing is drawn moved");
+
+                // ITS OWN ROLLBACK BAR (§49 point 2), and it CLAMPS -- a count
+                // past the end means "all of it" rather than an error.
+                if (!window.setExplodePreviewCommand(view, 0)
+                         .contains(QStringLiteral("0 of 1")))
+                    fail("the explode preview would not step back to nothing");
+                const std::vector<DocumentPresenter::DisplayedShape> unexploded =
+                    presenter.displayableShapes();
+                for (const auto& shape : unexploded)
+                    if (shape.id == arm &&
+                        std::fabs(shape.placement.translation.z - modelAfter.z) > 1e-6)
+                        fail("a preview of 0 steps still drew the explosion");
+                if (!window.setExplodePreviewCommand(view, 99)
+                         .contains(QStringLiteral("1 of 1")))
+                    fail("a preview past the end was not clamped to all of it");
+
+                window.showExplodeView(kInvalidObjectId);
+
+                // --- DISPLAY STATE: presentation, and it stays out of Core ---
+                const std::size_t undoBeforeHide = window.undoDepthForTesting();
+                window.selectObject(arm);
+                if (!window.showHideSelectedInstance().contains(QStringLiteral("hidden")))
+                    fail("an instance would not hide");
+                if (window.undoDepthForTesting() != undoBeforeHide)
+                    fail("hiding recorded an undo step, so it reached the document");
+                // STILL THERE AND STILL SOLVED -- hidden is not deleted.
+                if (window.allInstancesForTesting().size() != 2)
+                    fail("hiding an instance removed it");
+                // ...and not drawn.
+                for (const auto& shape : presenter.displayableShapes())
+                    if (shape.id == arm) fail("a hidden instance is still being drawn");
+                window.showHideSelectedInstance();
+
+                // --- INTERFERENCE ----------------------------------------------
+                const QString interference = window.checkInterferenceCommand();
+                if (interference.isEmpty())
+                    fail("the interference check said nothing at all");
+            }
+
             window.newDocumentCommand();
             if (window.openedDocumentType() != DocumentType::Part)
                 fail("the self test did not get back to a part document");

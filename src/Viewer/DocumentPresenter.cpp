@@ -139,8 +139,13 @@ std::vector<DocumentPresenter::DisplayedShape> DocumentPresenter::displayableSha
             if (instance->currentState() != ComputeState::Valid) continue;
             if (!instance->currentShape().isValid()) continue;
             if (isHidden(instance->id())) continue; // hidden: computed, not drawn
-            shapes.push_back(DisplayedShape{instance->id(), &instance->currentShape(),
-                                            assembly->instanceWorldTransform(instance->id())});
+            // WHERE IT APPEARS, which is where it IS unless an exploded view
+            // is being shown. Asked of explodedWorldTransform in both cases:
+            // with no view it answers instanceWorldTransform unchanged, so
+            // there is no branch here for the two to drift apart in.
+            shapes.push_back(DisplayedShape{
+                instance->id(), &instance->currentShape(),
+                assembly->explodedWorldTransform(shownExplodeView_, instance->id())});
         }
     }
     return shapes;
