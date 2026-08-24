@@ -342,6 +342,35 @@ its parent so a patterned copy does not silently jump when its original goes.
 ep3d --script examples/sub-assembly.ep3ds
 ```
 
+## `gear-train.ep3ds` (M31)
+
+Two arms on one plate, geared 2:1. Turn the first and the second turns twice as
+far -- and **nobody drives the second one**.
+
+That is the whole check, and it is why the script measures rather than draws.
+The second arm's angle is not typed anywhere. A relation that were stored and
+never applied -- the exact failure this milestone exists to avoid -- would let
+this script run, save, and leave the second arm sitting at zero, and every test
+that read the log instead of the geometry would pass.
+
+A relation couples two **freedoms**, not two things (roadmap 20.5). A gear names
+a rotation on each of two mates; a **screw** names the rotation and the
+translation of ONE mate, because a screw turns and advances at once. Built on
+"a relation joins two objects", the screw is a special case forever.
+
+The ratio's unit comes from the type: turns per turn for a gear or a linear
+ratio, **millimetres per turn** for a screw or a rack -- which is how a lead
+screw and a rack are actually quoted. The conversion to radians happens in
+exactly one place, so no caller can get 2*pi wrong on its own.
+
+Which freedom on each mate is not typed either: a gear takes each mate's first
+free rotation. One rule, shared by this script, the Assembly menu and the
+loader, so a click and a script cannot produce different gears.
+
+```
+ep3d --script examples/gear-train.ep3ds
+```
+
 ---
 
 ## `stepper-motor.ep3ds` (M26)

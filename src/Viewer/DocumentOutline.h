@@ -44,6 +44,10 @@ enum class OutlineKind {
     // that is enabled. Found by looking at it.
     Assembly,
     Instance, Mate, NamedPosition, ExplodeView,
+    // M31: a coupling between two mate freedoms. Its OWN kind, not a Mate --
+    // the row has to say which of the two it is, because deleting a mate
+    // takes its relations with it and deleting a relation takes nothing.
+    Relation,
     Other
 };
 

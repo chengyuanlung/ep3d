@@ -367,6 +367,37 @@ struct ExplodePreviewEdit {
     std::size_t after = EvaluationCut::kAll;
 };
 
+// M31: a relation was created or deleted.
+//
+// It carries the two FREEDOMS rather than two mate ids, because that is what a
+// relation is (§20.5) -- and a delta that stored less than the object would be
+// an undo that puts back something subtly different.
+struct RelationExistenceEdit {
+    ObjectId relationId = kInvalidObjectId;
+    std::string name;
+    int type = 0; // RelationType, as its underlying value, to keep this header light
+    ObjectId driverMateId = kInvalidObjectId;
+    int driverComponent = 0;
+    ObjectId drivenMateId = kInvalidObjectId;
+    int drivenComponent = 0;
+    double ratio = 1.0;
+    bool reversed = false;
+    bool addedByTheEdit = false;
+};
+
+// M31: a relation's ratio or its direction was changed.
+//
+// BOTH IN ONE DELTA, because they are one edit from the user's side -- a gear
+// ratio typed as a negative number is a ratio AND a direction, and splitting
+// them would make undo walk back through a state that was never on screen.
+struct RelationValueEdit {
+    ObjectId relationId = kInvalidObjectId;
+    double beforeRatio = 1.0;
+    double afterRatio = 1.0;
+    bool beforeReversed = false;
+    bool afterReversed = false;
+};
+
 using UndoDelta =
     std::variant<ParameterValueEdit, FeatureExistenceEdit, SuppressionEdit, RollbackEdit,
                  ParameterExistenceEdit, FrameExistenceEdit, FrameTransformEdit,
@@ -377,7 +408,8 @@ using UndoDelta =
                  SketchConstraintDrivenEdit, InstanceExistenceEdit, MateExistenceEdit,
                  MateValueEdit, InstanceGroundEdit, MateLimitEdit, MateDrivenEdit,
                  NamedPositionExistenceEdit, ExplodeViewExistenceEdit,
-                 ExplodeStepsEdit, ExplodePreviewEdit>;
+                 ExplodeStepsEdit, ExplodePreviewEdit, RelationExistenceEdit,
+                 RelationValueEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

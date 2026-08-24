@@ -9,10 +9,12 @@
 #include "Core/Assembly/Instance.h"
 #include "Core/Assembly/Mate.h"
 #include "Core/Assembly/Relation.h"
+#include "Core/Serialization/AssemblyDocumentSerializer.h"
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -52,6 +54,17 @@ struct Gearbox {
 // in the Kernel suite; this milestone's subject is the coupling itself.
 double ValueOf(const AssemblyDocument& document, ObjectId mateId, MateComponent component) {
     return document.valuesAfterRelations(mateId)[static_cast<std::size_t>(component)];
+}
+
+std::string SaveToString(const AssemblyDocument& document) {
+    std::ostringstream out;
+    EXPECT_TRUE(saveAssemblyDocument(document, out));
+    return out.str();
+}
+
+AssemblyLoadResult LoadFromString(const std::string& text) {
+    std::istringstream in(text);
+    return loadAssemblyDocument(in);
 }
 
 } // namespace
@@ -192,10 +205,14 @@ TEST(RelationTest, M31_REL_015_TwoRelationsCannotDriveTheSameFreedom) {
     Gearbox rig;
     const ObjectId a = rig.mate("A", MateType::Revolute, rig.housing, rig.first);
     const ObjectId b = rig.mate("B", MateType::Revolute, rig.housing, rig.second);
-    rig.document.addRelation("First", RelationType::Gear, CoupledFreedom{a, MateComponent::RZ},
+    rig.document.addRelation("Reduction", RelationType::Gear,
+                             CoupledFreedom{a, MateComponent::RZ},
                              CoupledFreedom{b, MateComponent::RZ}, 2.0);
 
-    EXPECT_THROW(rig.document.addRelation("Second", RelationType::Gear,
+    // A DIFFERENT NAME, so what this refuses is the second DRIVER and not the
+    // name -- "First" and "Second" are instances in this rig, and a test that
+    // passed on the name check would be testing the wrong rule.
+    EXPECT_THROW(rig.document.addRelation("Overdrive", RelationType::Gear,
                                           CoupledFreedom{a, MateComponent::RZ},
                                           CoupledFreedom{b, MateComponent::RZ}, 3.0),
                  std::invalid_argument);
@@ -233,4 +250,348 @@ TEST(RelationTest, M31_REL_017_ChangingTheRatioMovesTheDrivenEnd) {
 
     ASSERT_TRUE(rig.document.setRelationRatio(relation, 4.0));
     EXPECT_NEAR(ValueOf(rig.document, driven, MateComponent::RZ), 2.0, 1e-9);
+}
+
+// =============================================================================
+// M31.2 -- a relation that survives the file, and one that can be taken back
+// =============================================================================
+
+TEST(RelationTest, M31_SER_001_ARelationSurvivesASaveAndAReopenAndSTILLDrives) {
+    // NOT "the relation is in the file". A relation that comes back as an
+    // object nobody applies is exactly the shape this milestone exists to
+    // avoid, so the check is the DRIVEN ANGLE after the reopen.
+    Gearbox rig;
+    const ObjectId drive = rig.mate("Drive", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId driven = rig.mate("Driven", MateType::Revolute, rig.housing, rig.second);
+    rig.document.addRelation("Reduction", RelationType::Gear,
+                             CoupledFreedom{drive, MateComponent::RZ},
+                             CoupledFreedom{driven, MateComponent::RZ}, 2.0, /*reversed=*/true);
+    rig.document.setMateComponentValue(drive, MateComponent::RZ, 0.5);
+
+    const std::string text = SaveToString(rig.document);
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    ASSERT_TRUE(loaded) << loaded.message;
+    const AssemblyDocument& back = *loaded.document;
+
+    const Relation* relation = back.findRelationNamed("Reduction");
+    ASSERT_NE(relation, nullptr) << "the relation did not survive the save";
+    EXPECT_EQ(relation->type(), RelationType::Gear);
+    EXPECT_NEAR(relation->ratio(), 2.0, 1e-12);
+    EXPECT_TRUE(relation->reversed()) << "the direction was lost, so the gears now turn together";
+
+    const Mate* driveBack = back.findMateNamed("Drive");
+    const Mate* drivenBack = back.findMateNamed("Driven");
+    ASSERT_NE(driveBack, nullptr);
+    ASSERT_NE(drivenBack, nullptr);
+    EXPECT_NEAR(ValueOf(back, drivenBack->id(), MateComponent::RZ), -1.0, 1e-9)
+        << "the reopened relation is stored but not applied";
+
+    // A loaded document has nothing to undo, and saving it again writes the
+    // same bytes -- the two properties every other kind in this format has.
+    EXPECT_EQ(back.undoDepth(), 0u);
+    EXPECT_EQ(SaveToString(back), text);
+}
+
+TEST(RelationTest, M31_SER_002_ARelationNamingAMateThatIsGoneIsREFUSED) {
+    // ADR-M3-008 at the loader's door: a reference that cannot resolve is
+    // refused by name, not loaded as a relation that drives nothing.
+    Gearbox rig;
+    const ObjectId drive = rig.mate("Drive", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId driven = rig.mate("Driven", MateType::Revolute, rig.housing, rig.second);
+    rig.document.addRelation("Reduction", RelationType::Gear,
+                             CoupledFreedom{drive, MateComponent::RZ},
+                             CoupledFreedom{driven, MateComponent::RZ}, 2.0);
+
+    std::string text = SaveToString(rig.document);
+    const std::string real = "\"driverMateId\": \"" + std::to_string(drive) + "\"";
+    const std::size_t at = text.find(real);
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, real.size(), "\"driverMateId\": \"777333\"");
+
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_EQ(loaded.error, SerializationError::UnknownDependencyId);
+    EXPECT_NE(loaded.message.find("777333"), std::string::npos) << loaded.message;
+}
+
+TEST(RelationTest, M31_SER_003_AFileWhereTwoRelationsDriveOneFreedomIsREFUSED) {
+    // The facade refuses this at creation; the loader has to refuse it too, or
+    // a hand-edited file walks straight past the rule and the solve takes
+    // whichever relation happened to be stored last.
+    Gearbox rig;
+    const ObjectId a = rig.mate("A", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId b = rig.mate("B", MateType::Revolute, rig.housing, rig.second);
+    rig.document.addRelation("Reduction", RelationType::Gear,
+                             CoupledFreedom{a, MateComponent::RZ},
+                             CoupledFreedom{b, MateComponent::RZ}, 2.0);
+
+    // Duplicate the single relation entry, with a fresh id and name.
+    std::string text = SaveToString(rig.document);
+    const Relation* only = rig.document.findRelationNamed("Reduction");
+    ASSERT_NE(only, nullptr);
+    const std::string entry = "\"id\": \"" + std::to_string(only->id()) + "\"";
+    const std::size_t at = text.find("\"relations\":");
+    ASSERT_NE(at, std::string::npos) << text;
+    const std::size_t idAt = text.find(entry, at);
+    ASSERT_NE(idAt, std::string::npos) << text;
+    const std::size_t open = text.rfind('{', idAt);
+    const std::size_t close = text.find('}', idAt);
+    ASSERT_NE(open, std::string::npos);
+    ASSERT_NE(close, std::string::npos);
+    std::string copy = text.substr(open, close - open + 1);
+    copy.replace(copy.find(entry), entry.size(), "\"id\": \"909091\"");
+    copy.replace(copy.find("\"Reduction\""), 11, "\"Overdrive\"");
+    text.insert(close + 1, ", " + copy);
+
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded) << "a file with two answers for one freedom was accepted";
+    EXPECT_EQ(loaded.error, SerializationError::InvalidDependency);
+}
+
+TEST(RelationTest, M31_SER_004_AFileCouplingAFreedomAMateDoesNotHaveIsREFUSED) {
+    // A slider has no rotation. Accepting this would give the file a relation
+    // writing a component the solve pins to zero -- a control with nothing
+    // behind it, exactly as a limit on a pinned component would be.
+    Gearbox rig;
+    const ObjectId slide = rig.mate("Slide", MateType::Slider, rig.housing, rig.first);
+    const ObjectId turn = rig.mate("Turn", MateType::Revolute, rig.housing, rig.second);
+    rig.document.addRelation("Feed", RelationType::RackAndPinion,
+                             CoupledFreedom{turn, MateComponent::RZ},
+                             CoupledFreedom{slide, MateComponent::TZ}, 10.0);
+
+    std::string text = SaveToString(rig.document);
+    // Point the DRIVEN end at the slider's rotation, which it has not got.
+    const std::size_t at = text.find("\"drivenComponent\": 2");
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, std::string("\"drivenComponent\": 2").size(), "\"drivenComponent\": 5");
+
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_EQ(loaded.error, SerializationError::InvalidFieldType);
+}
+
+TEST(RelationTest, M31_UNDO_001_AddingARelationIsONEUndoStepAndGivesTheFreedomBack) {
+    Gearbox rig;
+    const ObjectId drive = rig.mate("Drive", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId driven = rig.mate("Driven", MateType::Revolute, rig.housing, rig.second);
+    rig.document.setMateComponentValue(driven, MateComponent::RZ, 0.25);
+    rig.document.setMateComponentValue(drive, MateComponent::RZ, 0.5);
+
+    const std::size_t before = rig.document.undoDepth();
+    rig.document.addRelation("Reduction", RelationType::Gear,
+                             CoupledFreedom{drive, MateComponent::RZ},
+                             CoupledFreedom{driven, MateComponent::RZ}, 2.0);
+    EXPECT_EQ(rig.document.undoDepth(), before + 1);
+    EXPECT_NEAR(ValueOf(rig.document, driven, MateComponent::RZ), 1.0, 1e-9);
+
+    ASSERT_TRUE(rig.document.undo());
+    EXPECT_EQ(rig.document.findRelationNamed("Reduction"), nullptr);
+    // ...and the freedom is the MATE'S OWN NUMBER again, not the last thing
+    // the relation wrote into it.
+    EXPECT_NEAR(ValueOf(rig.document, driven, MateComponent::RZ), 0.25, 1e-9)
+        << "the driven mate kept the angle a relation that no longer exists gave it";
+
+    ASSERT_TRUE(rig.document.redo());
+    ASSERT_NE(rig.document.findRelationNamed("Reduction"), nullptr);
+    EXPECT_NEAR(ValueOf(rig.document, driven, MateComponent::RZ), 1.0, 1e-9);
+}
+
+TEST(RelationTest, M31_UNDO_002_ChangingTheRatioIsUndoableAndMOVESTheDrivenEndBack) {
+    Gearbox rig;
+    const ObjectId drive = rig.mate("Drive", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId driven = rig.mate("Driven", MateType::Revolute, rig.housing, rig.second);
+    const ObjectId relation =
+        rig.document
+            .addRelation("Reduction", RelationType::Gear,
+                         CoupledFreedom{drive, MateComponent::RZ},
+                         CoupledFreedom{driven, MateComponent::RZ}, 2.0)
+            .id();
+    rig.document.setMateComponentValue(drive, MateComponent::RZ, 0.5);
+
+    ASSERT_TRUE(rig.document.setRelationRatio(relation, 4.0));
+    ASSERT_TRUE(rig.document.setRelationReversed(relation, true));
+    EXPECT_NEAR(ValueOf(rig.document, driven, MateComponent::RZ), -2.0, 1e-9);
+
+    ASSERT_TRUE(rig.document.undo()); // the direction
+    EXPECT_NEAR(ValueOf(rig.document, driven, MateComponent::RZ), 2.0, 1e-9);
+    ASSERT_TRUE(rig.document.undo()); // the ratio
+    EXPECT_NEAR(ValueOf(rig.document, driven, MateComponent::RZ), 1.0, 1e-9)
+        << "the ratio came back but the driven end stayed where the new one put it";
+    ASSERT_NE(rig.document.findRelation(relation), nullptr);
+    EXPECT_NEAR(rig.document.findRelation(relation)->ratio(), 2.0, 1e-12);
+}
+
+TEST(RelationTest, M31_UNDO_003_DeletingTheMateTakesTheRelationAndONEUndoBringsBothBack) {
+    // A relation names a mate's freedom, so it cannot outlive that mate --
+    // and the user deleted ONE thing, so one undo must put back everything
+    // that went with it. Two steps would let the user stop halfway, at a
+    // state the model was never in.
+    Gearbox rig;
+    const ObjectId drive = rig.mate("Drive", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId driven = rig.mate("Driven", MateType::Revolute, rig.housing, rig.second);
+    rig.document.addRelation("Reduction", RelationType::Gear,
+                             CoupledFreedom{drive, MateComponent::RZ},
+                             CoupledFreedom{driven, MateComponent::RZ}, 2.0);
+
+    const std::size_t before = rig.document.undoDepth();
+    ASSERT_TRUE(rig.document.removeObject(drive));
+    EXPECT_EQ(rig.document.findRelationNamed("Reduction"), nullptr)
+        << "a relation outlived the mate whose freedom it reads";
+    EXPECT_EQ(rig.document.undoDepth(), before + 1) << "one deletion, one undo step";
+
+    ASSERT_TRUE(rig.document.undo());
+    EXPECT_NE(rig.document.findMateNamed("Drive"), nullptr);
+    const Relation* back = rig.document.findRelationNamed("Reduction");
+    ASSERT_NE(back, nullptr) << "the relation did not come back with its mate";
+    EXPECT_NEAR(back->ratio(), 2.0, 1e-12);
+
+    // ...and it drives again, which is the part a restored-but-inert object
+    // would fail.
+    rig.document.setMateComponentValue(rig.document.findMateNamed("Drive")->id(),
+                                       MateComponent::RZ, 0.5);
+    EXPECT_NEAR(ValueOf(rig.document, driven, MateComponent::RZ), 1.0, 1e-9);
+}
+
+TEST(RelationTest, M31_UNDO_004_DeletingARelationOnItsOwnIsUndoable) {
+    Gearbox rig;
+    const ObjectId drive = rig.mate("Drive", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId driven = rig.mate("Driven", MateType::Revolute, rig.housing, rig.second);
+    const ObjectId relation =
+        rig.document
+            .addRelation("Reduction", RelationType::Gear,
+                         CoupledFreedom{drive, MateComponent::RZ},
+                         CoupledFreedom{driven, MateComponent::RZ}, 2.0, /*reversed=*/true)
+            .id();
+
+    ASSERT_TRUE(rig.document.removeObject(relation));
+    EXPECT_EQ(rig.document.findRelation(relation), nullptr);
+    ASSERT_TRUE(rig.document.undo());
+    const Relation* back = rig.document.findRelation(relation);
+    ASSERT_NE(back, nullptr);
+    EXPECT_EQ(back->name(), "Reduction");
+    EXPECT_TRUE(back->reversed()) << "the relation came back turning the wrong way";
+}
+
+// =============================================================================
+// A relation is a NAMED OBJECT, like every other one
+// =============================================================================
+//
+// This project's signature defect: a new kind added to SOME of the parallel
+// lists that all have to agree. `ownObjectName`, `applyOwnName` and
+// `ownNameIsTaken` are three such lists, and M31's first draft was in none of
+// them -- so a relation could take a name a mate already had, could not be
+// renamed, and had no name for its own deletion label to print.
+
+TEST(RelationTest, M31_NAME_001_TwoRelationsCannotShareAName) {
+    Gearbox rig;
+    const ObjectId a = rig.mate("A", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId b = rig.mate("B", MateType::Revolute, rig.housing, rig.second);
+    const ObjectId third = rig.document.addInstance("Third", "wheel.ep3d").id();
+    const ObjectId c = rig.mate("C", MateType::Revolute, rig.housing, third);
+
+    rig.document.addRelation("Reduction", RelationType::Gear,
+                             CoupledFreedom{a, MateComponent::RZ},
+                             CoupledFreedom{b, MateComponent::RZ}, 2.0);
+    EXPECT_THROW(rig.document.addRelation("Reduction", RelationType::Gear,
+                                          CoupledFreedom{a, MateComponent::RZ},
+                                          CoupledFreedom{c, MateComponent::RZ}, 3.0),
+                 std::invalid_argument);
+}
+
+TEST(RelationTest, M31_NAME_002_ARelationCannotTakeANameAMateAlreadyHas) {
+    // Names are unique across the WHOLE document, not within a kind. A rule
+    // enforced per-kind is a rule that fails the first time somebody renames
+    // across kinds.
+    Gearbox rig;
+    const ObjectId a = rig.mate("Drive", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId b = rig.mate("Driven", MateType::Revolute, rig.housing, rig.second);
+    EXPECT_THROW(rig.document.addRelation("Drive", RelationType::Gear,
+                                          CoupledFreedom{a, MateComponent::RZ},
+                                          CoupledFreedom{b, MateComponent::RZ}, 2.0),
+                 std::invalid_argument);
+}
+
+TEST(RelationTest, M31_NAME_003_ARelationCanBeRenamedAndTheRenameIsUndoable) {
+    Gearbox rig;
+    const ObjectId a = rig.mate("Drive", MateType::Revolute, rig.housing, rig.first);
+    const ObjectId b = rig.mate("Driven", MateType::Revolute, rig.housing, rig.second);
+    const ObjectId relation =
+        rig.document
+            .addRelation("Reduction", RelationType::Gear,
+                         CoupledFreedom{a, MateComponent::RZ},
+                         CoupledFreedom{b, MateComponent::RZ}, 2.0)
+            .id();
+
+    // ...and the document can SAY its name, which is what the tree row, the
+    // property panel and the deletion label all read.
+    EXPECT_EQ(rig.document.objectName(relation), "Reduction");
+
+    const auto renamed = rig.document.renameObject(relation, "Step down");
+    ASSERT_TRUE(renamed.ok) << renamed.message;
+    EXPECT_EQ(rig.document.findRelation(relation)->name(), "Step down");
+    ASSERT_TRUE(rig.document.undo());
+    EXPECT_EQ(rig.document.findRelation(relation)->name(), "Reduction");
+}
+
+// =============================================================================
+// The two ways of saying which freedom each end is, and that they AGREE
+// =============================================================================
+
+TEST(RelationTest, M31_KIND_001_EveryTypesOwnFreEdomKindsAreOnesItWillACCEPT) {
+    // TWO THINGS THAT MUST AGREE, and this project's whole defect class.
+    //
+    // `WhyRelationIsRefused` says which pairs are acceptable, backwards -- you
+    // offer it a pair and it tells you no. `RelationDriverIsRotation` and
+    // `RelationDrivenIsRotation` say the same table FORWARDS, so a caller that
+    // has to CHOOSE a pair does not have to guess and be refused. Two readings
+    // of one rule is exactly the shape that drifts.
+    //
+    // Found by mutation: making a rack and pinion drive a ROTATION was killed
+    // by nothing, because every test that built a relation through the menu or
+    // the script used a gear -- and for a gear the two readings agree.
+    struct Case {
+        RelationType type;
+        bool oneMate;
+    };
+    const Case kCases[] = {{RelationType::Gear, false},
+                           {RelationType::RackAndPinion, false},
+                           {RelationType::Screw, true},
+                           {RelationType::Linear, false}};
+    for (const Case& one : kCases) {
+        const auto pick = [](bool rotation, ObjectId mateId) {
+            return CoupledFreedom{mateId, rotation ? MateComponent::RZ : MateComponent::TZ};
+        };
+        const ObjectId driverMate = 41;
+        const ObjectId drivenMate = one.oneMate ? driverMate : 42;
+        const std::string why = WhyRelationIsRefused(
+            one.type, pick(RelationDriverIsRotation(one.type), driverMate),
+            pick(RelationDrivenIsRotation(one.type), drivenMate));
+        EXPECT_TRUE(why.empty())
+            << toString(one.type) << " refuses the very freedoms its own table chooses: " << why;
+    }
+}
+
+TEST(RelationTest, M31_KIND_002_FirstFreeComponentOfKindPicksTheKindItWasAskedFor) {
+    // A slider has a translation and no rotation; a revolute the other way
+    // round. Asking for the kind a mate has not got returns the count, which
+    // the callers report rather than working around.
+    const MateFreedom slider = FreedomOf(MateType::Slider);
+    EXPECT_EQ(FirstFreeComponentOfKind(slider, /*rotation=*/true), kMateComponentCount);
+    EXPECT_LT(FirstFreeComponentOfKind(slider, /*rotation=*/false), kMateComponentCount);
+    EXPECT_FALSE(IsRotation(static_cast<MateComponent>(
+        FirstFreeComponentOfKind(slider, /*rotation=*/false))));
+
+    const MateFreedom revolute = FreedomOf(MateType::Revolute);
+    EXPECT_EQ(FirstFreeComponentOfKind(revolute, /*rotation=*/false), kMateComponentCount);
+    EXPECT_TRUE(IsRotation(static_cast<MateComponent>(
+        FirstFreeComponentOfKind(revolute, /*rotation=*/true))));
+
+    // A CYLINDRICAL mate has BOTH, which is the case a screw needs -- and the
+    // reason this asks for a kind rather than for "the first free one".
+    const MateFreedom cylindrical = FreedomOf(MateType::Cylindrical);
+    const std::size_t turns = FirstFreeComponentOfKind(cylindrical, /*rotation=*/true);
+    const std::size_t slides = FirstFreeComponentOfKind(cylindrical, /*rotation=*/false);
+    EXPECT_LT(turns, kMateComponentCount);
+    EXPECT_LT(slides, kMateComponentCount);
+    EXPECT_NE(turns, slides);
 }

@@ -3,6 +3,7 @@
 #include "Core/Assembly/MateFreedom.h"
 #include "Core/Document/ObjectId.h"
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -112,5 +113,31 @@ constexpr bool IsRotation(MateComponent component) noexcept {
 // project keeps removing.
 std::string WhyRelationIsRefused(RelationType type, const CoupledFreedom& driver,
                                  const CoupledFreedom& driven);
+
+// Which KIND of freedom each end of this type is: true for a rotation.
+//
+//   Gear           rotation -> rotation
+//   Linear         translation -> translation
+//   RackAndPinion  rotation -> translation   (the pinion drives the rack)
+//   Screw          rotation -> translation   (of the same mate)
+//
+// The same table WhyRelationIsRefused enforces, readable forwards -- so a
+// caller that has to CHOOSE a pair does not have to guess and then be
+// refused.
+constexpr bool RelationDriverIsRotation(RelationType type) noexcept {
+    return type != RelationType::Linear;
+}
+constexpr bool RelationDrivenIsRotation(RelationType type) noexcept {
+    return type == RelationType::Gear;
+}
+
+// The freedom a user means when they pick a mate for one end of a relation:
+// that mate's FIRST FREE component of the kind this end needs.
+//
+// ONE RULE, HERE. The menu needs it, a script would need it, and a second copy
+// is how the toolbar and the loader end up disagreeing about which axis a gear
+// turns on. `kMateComponentCount` is returned when the mate has no freedom of
+// that kind -- which is a refusal the caller must report, not work around.
+std::size_t FirstFreeComponentOfKind(const MateFreedom& freedom, bool rotation) noexcept;
 
 } // namespace paramcad

@@ -99,7 +99,16 @@ inline StatePresentation presentationFor(OutlineState state, const QPalette& pal
             // a document state (UI spec 11).
             return {QStringLiteral("h"), QStringLiteral("Hidden"), mutedText, false};
         default:
-            return {QString(), QStringLiteral("Not computed"), mutedText, false};
+            // NOTHING TO COMPUTE, so nothing is claimed. Normal's own comment
+            // says "no computed state of its own (a container or a grouping
+            // row)", and "Not computed" said the opposite -- it reads as a
+            // failure to run. The part tree hid that by rolling container
+            // states up; the ASSEMBLY tree has rows that genuinely have no
+            // compute state at all -- a mate, a relation, a named position, an
+            // exploded view -- and every one of them sat there reading "Not
+            // computed" about work nobody was ever going to do (found by
+            // looking at the screen, M31).
+            return {QString(), QString(), mutedText, false};
     }
 }
 
@@ -122,6 +131,7 @@ inline QString kindTag(OutlineKind kind) {
         case OutlineKind::Mate: return QStringLiteral("[Mte]");
         case OutlineKind::NamedPosition: return QStringLiteral("[Pos]");
         case OutlineKind::ExplodeView: return QStringLiteral("[Exp]");
+        case OutlineKind::Relation: return QStringLiteral("[Rel]");
         default: return QStringLiteral("[   ]");
     }
 }

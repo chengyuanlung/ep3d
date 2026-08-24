@@ -53,6 +53,12 @@ bool Relation::couplesAFreedomToItself() const noexcept {
     return driver_.mateId == driven_.mateId && driver_.component == driven_.component;
 }
 
+std::size_t FirstFreeComponentOfKind(const MateFreedom& freedom, bool rotation) noexcept {
+    for (std::size_t c = 0; c < kMateComponentCount; ++c)
+        if (freedom.free[c] && IsRotation(static_cast<MateComponent>(c)) == rotation) return c;
+    return kMateComponentCount;
+}
+
 std::string WhyRelationIsRefused(RelationType type, const CoupledFreedom& driver,
                                  const CoupledFreedom& driven) {
     if (driver.mateId == kInvalidObjectId || driven.mateId == kInvalidObjectId)

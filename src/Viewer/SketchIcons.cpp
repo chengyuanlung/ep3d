@@ -417,6 +417,27 @@ void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
         p.drawRect(QRectF(10.0, 8.5, 4.0, 8.0));
         break;
     }
+    case SketchIcon::AddRelation: {
+        // TWO TOOTHED WHEELS, meshing. The teeth are what make it a gear
+        // rather than two circles, and the mesh is what makes it a relation
+        // rather than two mates: turn one and the other has to turn.
+        Stroke(p, ink.stroke, 1.5);
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(QPointF(8.0, 9.0), 5.0, 5.0);
+        p.drawEllipse(QPointF(16.5, 15.5), 4.0, 4.0);
+        // Four teeth each, drawn as short radial stubs -- enough to read as a
+        // gear at 24 px, where a full tooth ring is a grey smudge.
+        Stroke(p, ink.accent, 1.5);
+        p.drawLine(QPointF(8.0, 3.0), QPointF(8.0, 5.0));
+        p.drawLine(QPointF(8.0, 13.0), QPointF(8.0, 15.0));
+        p.drawLine(QPointF(2.0, 9.0), QPointF(4.0, 9.0));
+        p.drawLine(QPointF(12.0, 9.0), QPointF(14.0, 9.0));
+        p.drawLine(QPointF(16.5, 10.5), QPointF(16.5, 12.0));
+        p.drawLine(QPointF(16.5, 19.0), QPointF(16.5, 20.5));
+        p.drawLine(QPointF(11.0, 15.5), QPointF(12.5, 15.5));
+        p.drawLine(QPointF(20.5, 15.5), QPointF(22.0, 15.5));
+        break;
+    }
 
     case SketchIcon::HVDistance:
         // BOTH legs at once: the two points, the horizontal run and the
@@ -1148,6 +1169,7 @@ const char* SketchIconName(SketchIcon icon) noexcept {
     case SketchIcon::NamedPosition: return "NamedPosition";
     case SketchIcon::ExplodeView: return "ExplodeView";
     case SketchIcon::Interference: return "Interference";
+    case SketchIcon::AddRelation: return "AddRelation";
     case SketchIcon::HVDistance: return "HVDistance";
     case SketchIcon::PointLineDistance: return "PointLineDistance";
     case SketchIcon::Offset: return "Offset";

@@ -1,0 +1,111 @@
+# TWO ARMS THAT TURN TOGETHER (M31).
+#
+# A relation couples two freedoms a mate solve would otherwise choose
+# independently (roadmap §20.5). This one is a GEAR at 2:1 -- turn the first
+# arm and the second turns twice as far, without anybody driving it.
+#
+# What makes this a real check rather than a picture: the second arm is never
+# driven. Its angle is not typed anywhere. If the relation were stored and not
+# applied -- which is the failure this whole milestone exists to avoid -- the
+# script would still run, still save, and the second arm would simply sit at
+# zero. So what is measured below is WHERE IT ENDS UP.
+#
+# Run it:
+#   ep3d --script examples/gear-train.ep3ds
+
+# --- the parts ----------------------------------------------------------------
+#
+# A plate with two pivots on it, and an arm. One part file, two bodies -- the
+# same shape assembly-three-parts.ep3ds uses.
+
+sketch Plate
+tool rect
+click -70 -25
+click 70 25
+pad Plate 8
+
+# THE TWO PIVOTS, on the PART (roadmap §21). A connector is defined once here
+# and every instance of this plate in every assembly has it -- it is not an
+# assembly concept that happens to live on a part.
+#
+# The three numbers after the position are where the connector's +Z POINTS, and
+# that is the whole act of saying where the hinge is: a revolute turns about
+# +Z.
+connector Left -40 0 8 0 0 1
+connector Right 40 0 8 0 0 1
+
+part
+
+sketch Bar
+tool rect
+click 0 -5
+click 60 5
+pad Arm 6
+
+# OFF THE ARM'S OWN ORIGIN, at the end. A connector at the centre of mass would
+# make turning the arm move nothing measurable, and every check below would
+# pass on an assembly that never moved.
+connector Eye 0 0 0 0 0 1
+
+save build/gear-parts.ep3d
+
+# --- the assembly -------------------------------------------------------------
+
+assembly GearTrain
+insert Frame build/gear-parts.ep3d Plate
+insert First build/gear-parts.ep3d Arm
+insert Second build/gear-parts.ep3d Arm
+
+# SOMETHING HAS TO BE FIXED, or a chain of mates is relative to nothing.
+ground Frame
+
+mate revolute Hinge1 Frame/Left First/Eye 0
+mate revolute Hinge2 Frame/Right Second/Eye 0
+
+# --- the relation -------------------------------------------------------------
+#
+# TWO MATES, and the ratio is turns per turn. Which FREEDOM on each mate is not
+# typed here: a gear couples two rotations, so it takes each mate's first free
+# rotation -- one rule, in FirstFreeComponentOfKind, shared by this script, the
+# Assembly menu and the loader, so a click and a script cannot produce
+# different gears.
+#
+# `reversed` would be the fourth word, and it is what two meshing gears
+# actually do -- left out here so the arithmetic below stays readable.
+relation gear Reduction Hinge1 Hinge2 2
+
+echo --- both arms at 0 ---
+solve
+measure
+
+# --- and now turn ONE of them -------------------------------------------------
+#
+# One number changes, and TWO arms move.
+#
+# The arm is 60 x 10 x 6 with its Eye at one end, so its centre of mass sits
+# 30 mm out along itself. At 0 degrees that is +30 in x from its pivot; at
+# 45 it is (21.213, 21.213); at 90 it is +30 in y.
+#
+# So driving Hinge1 to 45 degrees puts:
+#   First   at 45 -- its centre at (-40 + 21.213, 21.213) = (-18.787, 21.213)
+#   Second  at 90 -- its centre at ( 40 +  0.000, 30.000) = ( 40.000, 30.000)
+#
+# Second is at NINETY because of the relation and nothing else. Nobody typed
+# it, and no mate constrains it to any particular angle.
+
+drive Hinge1 45
+echo --- Hinge1 at 45, so Hinge2 is at 90 ---
+solve
+measure
+
+# Half again, and the far end follows: 22.5 in gives 45 out.
+drive Hinge1 22.5
+echo --- Hinge1 at 22.5, so Hinge2 is at 45 ---
+solve
+measure
+
+save build/gear-train.ep3da
+
+# The relation is IN that file (schema v34) -- open it again and the second arm
+# is still geared to the first. A coupling that lived only in this session
+# would be a feature that forgets itself.

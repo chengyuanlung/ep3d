@@ -131,6 +131,10 @@ enum class SketchIcon {
     NamedPosition,
     ExplodeView,
     Interference,
+    // M31. Two blocks with a LINK between them, because a relation is not a
+    // part and not a mate -- it is the thing that makes one freedom follow
+    // another, and the link is the only part of it a user can point at.
+    AddRelation,
 
     Count
 };

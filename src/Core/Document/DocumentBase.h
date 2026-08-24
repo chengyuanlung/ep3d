@@ -138,6 +138,17 @@ public:
     // carries that id or the thing that does has no name.
     std::string objectName(ObjectId id) const;
 
+    // A name nothing in this document is using, made from `wanted` by adding
+    // " 2", " 3", ... until it is free.
+    //
+    // PUBLIC BECAUSE THE UI NEEDS IT (M31). Every facade that takes a name
+    // throws on a duplicate -- it treats one as a caller that should have
+    // known -- so a shell inventing "Gear" has to be able to ask. The shells
+    // that instead checked one KIND's names (findMateNamed, and the sketch
+    // panel before it) were each one rename away from throwing at the user,
+    // because uniqueness here is across the whole document and always was.
+    std::string unusedNameLike(const std::string& wanted) const;
+
     // --- Undo (M9.1, ADR-M9-001) --------------------------------------------
     void beginTransaction(std::string label);
     bool commitTransaction();

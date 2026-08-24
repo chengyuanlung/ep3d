@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Assembly/Mate.h"
+#include "Core/Assembly/Relation.h"
 #include "Core/Document/CadDocument.h"
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/BooleanFeature.h"
@@ -195,6 +196,33 @@ public:
     QString limitSelectedMate(double minimum, double maximum);
     QString clearLimitOnSelectedMate();
 
+    // --- Relations (M31, roadmap §20.5) --------------------------------------
+    //
+    // A relation couples two mate freedoms: two gears turn together, a rack
+    // advances as its pinion turns, a screw travels as it turns.
+    //
+    // WHICH FREEDOM ON EACH MATE IS DERIVED, NOT ASKED. A gear takes the
+    // driving mate's first free ROTATION and the driven mate's first free
+    // rotation; a rack and pinion takes a rotation and a translation. The rule
+    // lives in FirstFreeComponentOfKind so the menu, a script and the loader
+    // cannot disagree about which axis a gear turns on.
+    //
+    // THE TYPE IS STILL THE USER'S, exactly as §20.6 requires of a mate: a
+    // gear and a rack and pinion are different machines, and EP3D must not
+    // pick between them. Which mates, and the ratio, are the user's too.
+    QString createRelationCommand(RelationType type, ObjectId driverMate, ObjectId drivenMate,
+                                  double ratio, bool reversed = false);
+    // Which relation the tree has selected, or kInvalidObjectId.
+    ObjectId selectedRelation() const;
+    // Every mate the tree has selected, IN DOCUMENT ORDER -- the same rule
+    // selectedInstances() follows, and for the same reason: a relation's
+    // DRIVER is the first, and an order nobody can see would gear the train
+    // backwards.
+    std::vector<ObjectId> selectedMates() const;
+    QString setSelectedRelationRatio(double ratio);
+    QString reverseSelectedRelation();
+    QString deleteSelectedRelation();
+
     // --- Assembly state: the three mechanisms of §49 (M30) -------------------
     //
     // KEPT THREE, because they capture three different KINDS of thing:
@@ -261,6 +289,23 @@ public:
     // cannot click: they select the one mate and then do what the menu does.
     QString driveSelectedMateForTesting(double value);
     QString limitSelectedMateForTesting(double minimum, double maximum);
+    // M31. Selects the named mates and then does what the menu does, because a
+    // self test cannot click two tree rows.
+    QString createRelationForTesting(RelationType type, const QString& driverMateName,
+                                     const QString& drivenMateName, double ratio,
+                                     bool reversed = false);
+    void selectRelationForTesting(const QString& name);
+    std::size_t relationCountForTesting() const;
+    bool addRelationEnabledForTesting() const;
+    // Drives a NAMED mate. `driveSelectedMateForTesting` always takes the
+    // FIRST mate, which is fine while there is one and silently wrong the
+    // moment there are two -- as M31 found, by driving the wrong hinge.
+    QString driveMateForTesting(ObjectId mateId, double value);
+    std::vector<ObjectId> allMatesForTesting() const;
+    std::vector<std::string> relationNamesForTesting() const;
+    // What the tree would CALL this object -- so a gate can name a mate it
+    // found by id without a second table of names to drift from the first.
+    std::string objectNameForTesting(ObjectId id) const;
     // WHAT KIND of document this window is looking at (M27). A readback,
     // so a self test can assert that File > Open read the file right.
     DocumentType openedDocumentType() const;
@@ -383,6 +428,11 @@ public:
     // window can answer is whether that shape reached the QTreeWidget -- and
     // "the outline nested it" and "the tree shows it nested" are two claims.
     std::vector<std::string> treeRows() const;
+    // The STATE CELL of the first row whose name contains this fragment, as the
+    // widget holds it. treeRows() reads column 0 only, so everything that
+    // column 1 says -- "Failed", "driven", a relation's ratio -- was invisible
+    // to every gate this project has.
+    std::string treeStateFor(const std::string& nameFragment) const;
     // The 3D view, for readbacks only. The smoke test has to be able to ask
     // what is actually in the scene: "the presenter listed it" and "it is on
     // screen" are different claims, and the gap between two such claims is the
@@ -604,6 +654,10 @@ private slots:
     void onDeleteMateRequested();
     void onDriveMateRequested();
     void onLimitMateRequested();
+    void onAddRelationRequested();
+    void onRelationRatioRequested();
+    void onReverseRelationRequested();
+    void onDeleteRelationRequested();
     void onCaptureNamedPositionRequested();
     void onApplyNamedPositionRequested();
     void onAddExplodeViewRequested();
@@ -839,6 +893,10 @@ private:
     QAction* deleteMateAction_ = nullptr;
     QAction* driveMateAction_ = nullptr;
     QAction* limitMateAction_ = nullptr;
+    QAction* addRelationAction_ = nullptr;
+    QAction* relationRatioAction_ = nullptr;
+    QAction* reverseRelationAction_ = nullptr;
+    QAction* deleteRelationAction_ = nullptr;
     QAction* capturePositionAction_ = nullptr;
     QAction* applyPositionAction_ = nullptr;
     QAction* addExplodeViewAction_ = nullptr;

@@ -227,6 +227,42 @@ void MainWindow::buildMenus() {
                        "The instances it held stay -- a mate holds them, it does not own them."));
     connect(deleteMateAction_, &QAction::triggered, this, &MainWindow::onDeleteMateRequested);
 
+    // --- Relations (M31, §20.5) ---------------------------------------------
+    //
+    // THEIR OWN GROUP, after the mates. A relation is not a mate and the menu
+    // has to say so: a mate decides where two parts are, a relation decides
+    // that two numbers a mate solve was free to choose move together.
+    assemblyMenu_->addSeparator();
+    addRelationAction_ = assemblyMenu_->addAction(QStringLiteral("Add &Relation..."));
+    addRelationAction_->setToolTip(
+        QStringLiteral("Couple the selected mates so one drives the other:\n"
+                       "a gear, a rack and pinion, a screw or a linear ratio.\n"
+                       "Select TWO mates -- or one, for a screw."));
+    connect(addRelationAction_, &QAction::triggered, this, &MainWindow::onAddRelationRequested);
+
+    relationRatioAction_ = assemblyMenu_->addAction(QStringLiteral("Relation Rat&io..."));
+    relationRatioAction_->setToolTip(
+        QStringLiteral("Change the selected relation's ratio.\n"
+                       "Turns per turn for a gear; MILLIMETRES PER TURN for a screw or a "
+                       "rack."));
+    connect(relationRatioAction_, &QAction::triggered, this,
+            &MainWindow::onRelationRatioRequested);
+
+    reverseRelationAction_ = assemblyMenu_->addAction(QStringLiteral("Re&verse Relation"));
+    reverseRelationAction_->setToolTip(
+        QStringLiteral("Turn the driven end the other way.\n"
+                       "Two meshing gears turn opposite ways; this is how that is said."));
+    connect(reverseRelationAction_, &QAction::triggered, this,
+            &MainWindow::onReverseRelationRequested);
+
+    deleteRelationAction_ = assemblyMenu_->addAction(QStringLiteral("Delete Relati&on"));
+    deleteRelationAction_->setToolTip(
+        QStringLiteral("Delete the selected relation.\n"
+                       "The mates it coupled stay, and the freedom it was driving is the "
+                       "solve's again."));
+    connect(deleteRelationAction_, &QAction::triggered, this,
+            &MainWindow::onDeleteRelationRequested);
+
     // --- The three state mechanisms (M30, §49) ------------------------------
     //
     // THREE SEPARATE GROUPS, because they are three separate mechanisms. §49
@@ -638,6 +674,7 @@ void MainWindow::buildToolbar() {
     addAssembly(addMateAction_, ui::SketchIcon::AddMate, "Mate");
     addAssembly(driveMateAction_, ui::SketchIcon::DriveMate, "Drive");
     addAssembly(limitMateAction_, ui::SketchIcon::LimitMate, "Limit");
+    addAssembly(addRelationAction_, ui::SketchIcon::AddRelation, "Relation");
     assembly->addSeparator();
     addAssembly(patternInstanceAction_, ui::SketchIcon::AssemblyPattern, "Pattern");
     assembly->addSeparator();
@@ -892,6 +929,64 @@ int MainWindow::instanceFreedomForTesting(ObjectId instanceId) const {
 QString MainWindow::driveSelectedMateForTesting(double value) {
     selectFirstMateForTesting();
     return driveSelectedMate(value);
+}
+
+QString MainWindow::driveMateForTesting(ObjectId mateId, double value) {
+    selectObject(mateId);
+    return driveSelectedMate(value);
+}
+
+QString MainWindow::createRelationForTesting(RelationType type, const QString& driverMateName,
+                                            const QString& drivenMateName, double ratio,
+                                            bool reversed) {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return QStringLiteral("not an assembly");
+    const Mate* driver = assembly->findMateNamed(driverMateName.toStdString());
+    const Mate* driven = assembly->findMateNamed(drivenMateName.toStdString());
+    if (driver == nullptr || driven == nullptr) return QStringLiteral("no such mate");
+    // THROUGH THE SELECTION, so the enabling rule is exercised too: a command
+    // reachable only from a test is a command nobody can click.
+    selectInstancesForTesting(driver->id() == driven->id()
+                                  ? std::vector<ObjectId>{driver->id()}
+                                  : std::vector<ObjectId>{driver->id(), driven->id()});
+    return createRelationCommand(type, driver->id(), driven->id(), ratio, reversed);
+}
+
+void MainWindow::selectRelationForTesting(const QString& name) {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return;
+    const Relation* relation = assembly->findRelationNamed(name.toStdString());
+    if (relation == nullptr) return;
+    selectObject(relation->id());
+}
+
+std::size_t MainWindow::relationCountForTesting() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    return assembly == nullptr ? 0u : assembly->relations().size();
+}
+
+bool MainWindow::addRelationEnabledForTesting() const {
+    return addRelationAction_ != nullptr && addRelationAction_->isEnabled();
+}
+
+std::vector<ObjectId> MainWindow::allMatesForTesting() const {
+    std::vector<ObjectId> ids;
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return ids;
+    for (const Mate* mate : assembly->mates()) ids.push_back(mate->id());
+    return ids;
+}
+
+std::vector<std::string> MainWindow::relationNamesForTesting() const {
+    std::vector<std::string> names;
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return names;
+    for (const Relation* relation : assembly->relations()) names.push_back(relation->name());
+    return names;
+}
+
+std::string MainWindow::objectNameForTesting(ObjectId id) const {
+    return document_ == nullptr ? std::string() : document_->objectName(id);
 }
 
 QString MainWindow::limitSelectedMateForTesting(double minimum, double maximum) {
@@ -1252,6 +1347,20 @@ QString MainWindow::driveSelectedMate(double value) {
         return say(QStringLiteral("A %1 mate leaves nothing to drive.")
                        .arg(QString::fromUtf8(std::string(toString(mate->type())).c_str())));
 
+    // NOT IF A RELATION ALREADY DECIDES IT (M31). The relation would overwrite
+    // the number on the very next solve, so accepting the value would report
+    // "driven to 0.5" over a part that did not move -- and the user would have
+    // no way to tell which of the two things they should have changed.
+    for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+        if (!FreedomOf(mate->type()).free[c]) continue;
+        const Relation* by = assembly->relationDriving(mateId, static_cast<MateComponent>(c));
+        if (by == nullptr) continue;
+        return say(QStringLiteral("%1 is driven by the relation %2. Change its ratio, or "
+                                  "delete it, to move this.")
+                       .arg(QString::fromStdString(mate->name()),
+                            QString::fromStdString(by->name())));
+    }
+
     document_->beginTransaction("Drive mate");
     // DRIVEN, and said so in the model -- not merely given a value. A value set
     // on a mate the solver is free to move is a value the next solve overwrites,
@@ -1310,6 +1419,199 @@ QString MainWindow::limitSelectedMate(double minimum, double maximum) {
                    .arg(QString::fromStdString(mate->name()))
                    .arg(minimum, 0, 'f', 3)
                    .arg(maximum, 0, 'f', 3));
+}
+
+// =============================================================================
+// Relations (M31, roadmap §20.5)
+// =============================================================================
+
+std::vector<ObjectId> MainWindow::selectedMates() const {
+    std::vector<ObjectId> found;
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr || tree_ == nullptr) return found;
+    std::set<ObjectId> chosen;
+    for (const QTreeWidgetItem* item : tree_->selectedItems())
+        chosen.insert(static_cast<ObjectId>(item->data(0, kIdRole).toULongLong()));
+    // IN DOCUMENT ORDER, for the reason selectedInstances() gives: Qt does not
+    // keep click order, and a relation whose DRIVER depended on an order
+    // nobody can see would gear the train backwards.
+    for (const Mate* mate : assembly->mates())
+        if (chosen.count(mate->id()) != 0) found.push_back(mate->id());
+    return found;
+}
+
+ObjectId MainWindow::selectedRelation() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return kInvalidObjectId;
+    return assembly->findRelation(selectedId_) != nullptr ? selectedId_ : kInvalidObjectId;
+}
+
+QString MainWindow::createRelationCommand(RelationType type, ObjectId driverMate,
+                                          ObjectId drivenMate, double ratio, bool reversed) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return say(QStringLiteral("Relations belong to an assembly."));
+    const Mate* driver = assembly->findMate(driverMate);
+    const Mate* driven = assembly->findMate(drivenMate);
+    if (driver == nullptr || driven == nullptr)
+        return say(QStringLiteral("Select the mate to drive from, and the one to drive."));
+
+    // WHICH FREEDOM, derived by the one rule (§20.5). A gear takes each mate's
+    // first free ROTATION, a rack and pinion a rotation and a translation --
+    // and a mate that has not got the freedom the type needs is refused here,
+    // by name, rather than coupled to a component the solve pins to zero.
+    const auto pick = [&](const Mate& mate, bool rotation,
+                          CoupledFreedom& into) -> QString {
+        const std::size_t c = FirstFreeComponentOfKind(FreedomOf(mate.type()), rotation);
+        if (c >= kMateComponentCount)
+            return QStringLiteral("%1 is a %2 mate, which has nothing to %3.")
+                .arg(QString::fromStdString(mate.name()),
+                     QString::fromUtf8(std::string(toString(mate.type())).c_str()),
+                     rotation ? QStringLiteral("turn") : QStringLiteral("slide"));
+        into.mateId = mate.id();
+        into.component = static_cast<MateComponent>(c);
+        return {};
+    };
+    CoupledFreedom from;
+    CoupledFreedom to;
+    if (const QString bad = pick(*driver, RelationDriverIsRotation(type), from); !bad.isEmpty())
+        return say(bad);
+    if (const QString bad = pick(*driven, RelationDrivenIsRotation(type), to); !bad.isEmpty())
+        return say(bad);
+
+    // ASKED BEFORE IT IS DONE, because addRelation THROWS on a refusal -- it
+    // treats one as a programming error from a UI that should have known. So
+    // this is the UI knowing.
+    if (const std::string why = assembly->whyRelationIsRefused(type, from, to); !why.empty())
+        return say(QStringLiteral("That relation was refused: %1")
+                       .arg(QString::fromStdString(why)));
+
+    const std::string name = document_->unusedNameLike(std::string(toString(type)));
+    document_->beginTransaction("Add relation");
+    Relation* made = nullptr;
+    try {
+        made = &assembly->addRelation(name, type, from, to, ratio, reversed);
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That relation was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    // THE MATE IS NO LONGER DRIVEN BY HAND. Its freedom now belongs to the
+    // relation, and a tree row still saying "driven" would be the model
+    // claiming two authorities for one number. Released inside the SAME
+    // transaction, so it is one undo step, and said out loud below -- a
+    // silent state change is the thing this is avoiding, not the change.
+    //
+    // NOT FOR A SCREW, where the driver and the driven end are the same mate:
+    // there, driving the rotation by hand is exactly the point.
+    const bool released = driven->id() != driver->id() && driven->isDriven() &&
+                          assembly->setMateDriven(driven->id(), false);
+    if (!document_->commitTransaction()) return say(QStringLiteral("That relation was refused."));
+    (void)document_->recompute();
+    selectedId_ = made->id();
+    refreshAll();
+
+    const bool perTurn = type == RelationType::Screw || type == RelationType::RackAndPinion;
+    const QString sentence =
+        QStringLiteral("%1 now drives %2 at %3 %4%5")
+            .arg(QString::fromStdString(driver->name()),
+                 QString::fromStdString(driven->name()))
+            .arg(ratio, 0, 'f', 3)
+            .arg(perTurn ? QStringLiteral("mm per turn") : QStringLiteral("per turn"),
+                 reversed ? QStringLiteral(", reversed") : QString());
+    const QString full =
+        released ? sentence + QStringLiteral(". %1 is no longer driven by hand")
+                                  .arg(QString::fromStdString(driven->name()))
+                 : sentence;
+    const AssemblyDocument::MateSolveReport& report = assembly->mateSolveReport();
+    if (!report.ok)
+        return say(QStringLiteral("%1, but the assembly will not solve: %2")
+                       .arg(full, QString::fromStdString(report.message)));
+    return say(full);
+}
+
+QString MainWindow::setSelectedRelationRatio(double ratio) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId id = selectedRelation();
+    if (assembly == nullptr || id == kInvalidObjectId)
+        return say(QStringLiteral("Select a relation."));
+    const Relation* relation = assembly->findRelation(id);
+    if (relation == nullptr) return say(QStringLiteral("That relation is gone."));
+
+    document_->beginTransaction("Relation ratio");
+    const bool set = assembly->setRelationRatio(id, ratio);
+    if (!set || !document_->commitTransaction())
+        return say(QStringLiteral("That ratio was refused."));
+    (void)document_->recompute();
+    refreshAll();
+    const bool perTurn = relation->type() == RelationType::Screw ||
+                         relation->type() == RelationType::RackAndPinion;
+    return say(QStringLiteral("%1 is now %2 %3")
+                   .arg(QString::fromStdString(relation->name()))
+                   .arg(ratio, 0, 'f', 3)
+                   .arg(perTurn ? QStringLiteral("mm per turn") : QStringLiteral("per turn")));
+}
+
+QString MainWindow::reverseSelectedRelation() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId id = selectedRelation();
+    if (assembly == nullptr || id == kInvalidObjectId)
+        return say(QStringLiteral("Select a relation."));
+    const Relation* relation = assembly->findRelation(id);
+    if (relation == nullptr) return say(QStringLiteral("That relation is gone."));
+
+    const bool wanted = !relation->reversed();
+    document_->beginTransaction("Reverse relation");
+    const bool set = assembly->setRelationReversed(id, wanted);
+    if (!set || !document_->commitTransaction())
+        return say(QStringLiteral("That was refused."));
+    (void)document_->recompute();
+    refreshAll();
+    return say(QStringLiteral("%1 now turns %2")
+                   .arg(QString::fromStdString(relation->name()),
+                        wanted ? QStringLiteral("the other way")
+                               : QStringLiteral("the same way as its driver")));
+}
+
+QString MainWindow::deleteSelectedRelation() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId id = selectedRelation();
+    if (assembly == nullptr || id == kInvalidObjectId)
+        return say(QStringLiteral("Select a relation to delete."));
+    const Relation* relation = assembly->findRelation(id);
+    const QString name =
+        relation != nullptr ? QString::fromStdString(relation->name()) : QStringLiteral("it");
+
+    document_->beginTransaction("Delete relation");
+    const bool removed = document_->removeObject(id);
+    if (!removed || !document_->commitTransaction())
+        return say(QStringLiteral("%1 could not be deleted.").arg(name));
+    (void)document_->recompute();
+    selectedId_ = kInvalidObjectId;
+    refreshAll();
+    // NOTHING ELSE GOES, and the freedom goes back to the solve -- which is
+    // the opposite of deleting the MATE, and worth saying so nobody guesses.
+    return say(QStringLiteral("Deleted %1. The freedom it was driving is the solve's again.")
+                   .arg(name));
 }
 
 QString MainWindow::clearLimitOnSelectedMate() {
@@ -1642,6 +1944,80 @@ void MainWindow::onAddMateRequested() {
 
 void MainWindow::onDeleteMateRequested() { deleteSelectedMate(); }
 
+void MainWindow::onAddRelationRequested() {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return;
+    const std::vector<ObjectId> chosen = selectedMates();
+    if (chosen.empty() || chosen.size() > 2) return;
+
+    // THE TYPE IS THE USER'S, the same rule §20.6 sets for a mate: a gear and
+    // a rack and pinion are different machines, and one picked for you is a
+    // coupling you did not ask for. The list is filtered by ARITY only --
+    // one mate selected can only be a screw, two cannot be one -- because
+    // that much the selection already decided.
+    static const struct { const char* label; RelationType type; bool oneMate; } kTypes[] = {
+        {"Gear -- two rotations, in a fixed ratio", RelationType::Gear, false},
+        {"Rack and pinion -- a rotation drives a slide", RelationType::RackAndPinion, false},
+        {"Screw -- one mate's own turn drives its own travel", RelationType::Screw, true},
+        {"Linear -- two slides, in a fixed ratio", RelationType::Linear, false},
+    };
+    const bool oneMate = chosen.size() == 1;
+    QStringList labels;
+    std::vector<RelationType> offered;
+    for (const auto& entry : kTypes) {
+        if (entry.oneMate != oneMate) continue;
+        labels << QString::fromLatin1(entry.label);
+        offered.push_back(entry.type);
+    }
+    if (offered.empty()) return;
+
+    bool chose = false;
+    const QString picked = offered.size() == 1
+                               ? labels.front()
+                               : QInputDialog::getItem(this, QStringLiteral("Add Relation"),
+                                                       QStringLiteral("Couple them as:"), labels,
+                                                       0, false, &chose);
+    if (offered.size() > 1 && !chose) return;
+    const int which = labels.indexOf(picked);
+    if (which < 0) return;
+    const RelationType type = offered[static_cast<std::size_t>(which)];
+
+    // THE UNIT IS IN THE PROMPT, because the number means two different things
+    // and nothing else on screen would say which.
+    const bool perTurn = type == RelationType::Screw || type == RelationType::RackAndPinion;
+    bool ok = false;
+    const double ratio = QInputDialog::getDouble(
+        this, QStringLiteral("Add Relation"),
+        perTurn ? QStringLiteral("Millimetres per turn:") : QStringLiteral("Turns per turn:"),
+        perTurn ? 4.0 : 1.0, -1000000.0, 1000000.0, 4, &ok);
+    if (!ok) return;
+
+    const ObjectId driver = chosen.front();
+    const ObjectId driven = chosen.back(); // the same mate when only one was picked
+    createRelationCommand(type, driver, driven, ratio);
+}
+
+void MainWindow::onRelationRatioRequested() {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId id = selectedRelation();
+    if (assembly == nullptr || id == kInvalidObjectId) return;
+    const Relation* relation = assembly->findRelation(id);
+    if (relation == nullptr) return;
+    const bool perTurn = relation->type() == RelationType::Screw ||
+                         relation->type() == RelationType::RackAndPinion;
+    bool ok = false;
+    const double ratio = QInputDialog::getDouble(
+        this, QStringLiteral("Relation Ratio"),
+        perTurn ? QStringLiteral("Millimetres per turn:") : QStringLiteral("Turns per turn:"),
+        relation->ratio(), -1000000.0, 1000000.0, 4, &ok);
+    if (!ok) return;
+    setSelectedRelationRatio(ratio);
+}
+
+void MainWindow::onReverseRelationRequested() { reverseSelectedRelation(); }
+
+void MainWindow::onDeleteRelationRequested() { deleteSelectedRelation(); }
+
 void MainWindow::onDriveMateRequested() {
     bool ok = false;
     const double value = QInputDialog::getDouble(
@@ -1708,7 +2084,17 @@ void MainWindow::rebuildTree() {
         if (!presentation.marker.isEmpty()) label += presentation.marker + QStringLiteral(" ");
         label += QString::fromStdString(node.name);
         item->setText(0, label);
-        item->setText(1, presentation.label);
+        // WHEN THERE IS NO STATE, THE COLUMN SAYS WHAT THE ROW DOES.
+        //
+        // A mate, a relation, a named position and an exploded view have no
+        // compute state (they are not graph nodes), so that cell is empty --
+        // and a relation whose ratio lives only in a tooltip is a ratio nobody
+        // reading the tree can see. The rows that DO have a state keep it;
+        // their diagnostic stays in the tooltip, where it does not displace
+        // "Failed".
+        item->setText(1, presentation.label.isEmpty() && !node.diagnostic.empty()
+                             ? QString::fromStdString(node.diagnostic)
+                             : presentation.label);
         item->setForeground(0, presentation.color);
         item->setForeground(1, presentation.color);
         if (presentation.bold) {
@@ -2450,6 +2836,17 @@ void MainWindow::refreshCommandStates() {
         if (driveMateAction_ != nullptr) driveMateAction_->setEnabled(haveMate);
         if (limitMateAction_ != nullptr) limitMateAction_->setEnabled(haveMate);
         if (deleteMateAction_ != nullptr) deleteMateAction_->setEnabled(haveMate);
+
+        // A RELATION NEEDS THE MATES SELECTED, and how many decides which
+        // types are on offer: two for a gear, a rack or a linear ratio, one
+        // for a screw. Enabled exactly when the command would work.
+        const std::size_t mateCount = isAssembly ? selectedMates().size() : 0u;
+        const bool haveRelation = isAssembly && selectedRelation() != kInvalidObjectId;
+        if (addRelationAction_ != nullptr)
+            addRelationAction_->setEnabled(mateCount == 1 || mateCount == 2);
+        if (relationRatioAction_ != nullptr) relationRatioAction_->setEnabled(haveRelation);
+        if (reverseRelationAction_ != nullptr) reverseRelationAction_->setEnabled(haveRelation);
+        if (deleteRelationAction_ != nullptr) deleteRelationAction_->setEnabled(haveRelation);
 
         const bool havePosition = isAssembly && selectedNamedPosition() != kInvalidObjectId;
         const bool haveView = isAssembly && selectedExplodeView() != kInvalidObjectId;
@@ -3865,6 +4262,19 @@ QString MainWindow::importDxfFile(const QString& path) {
     statusLeft_->setText(message);
     statusLeft_->setToolTip(message);
     return message;
+}
+
+std::string MainWindow::treeStateFor(const std::string& nameFragment) const {
+    std::string found;
+    if (tree_ == nullptr) return found;
+    const std::function<void(QTreeWidgetItem*)> visit = [&](QTreeWidgetItem* item) {
+        if (found.empty() &&
+            item->text(0).toStdString().find(nameFragment) != std::string::npos)
+            found = item->text(1).toStdString();
+        for (int i = 0; i < item->childCount(); ++i) visit(item->child(i));
+    };
+    for (int i = 0; i < tree_->topLevelItemCount(); ++i) visit(tree_->topLevelItem(i));
+    return found;
 }
 
 std::vector<std::string> MainWindow::treeRows() const {

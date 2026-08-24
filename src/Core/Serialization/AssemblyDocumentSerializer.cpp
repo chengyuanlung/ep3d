@@ -128,6 +128,39 @@ SaveResult validateSaveable(const AssemblyDocument& document) {
                                   "named position '" + pose->name() +
                                       "' names an instance that is not in this document"};
     }
+    // v34 (M31). A relation names two mate FREEDOMS, and every rule the loader
+    // will apply to them is applied here first (ADR-M3-008) -- including the
+    // one-driver-per-freedom rule, because a hand-edited file that was loaded
+    // and re-saved must not become a file that cannot be loaded.
+    std::vector<std::pair<ObjectId, std::size_t>> drivenAlready;
+    for (const Relation* relation : document.relations()) {
+        if (const SaveResult bad = claim(relation->id(), "relation"); !bad) return bad;
+        const CoupledFreedom ends[2] = {relation->driver(), relation->driven()};
+        for (const CoupledFreedom& end : ends) {
+            const Mate* mate = document.findMate(end.mateId);
+            if (mate == nullptr)
+                return SaveResult{SerializationError::UnknownDependencyId,
+                                  "relation '" + relation->name() +
+                                      "' names a mate that is not in this document"};
+            if (!mate->freedom().free[static_cast<std::size_t>(end.component)])
+                return SaveResult{SerializationError::InvalidFieldType,
+                                  "relation '" + relation->name() + "' couples a freedom that "
+                                                                    "its mate does not have"};
+        }
+        if (const std::string why = WhyRelationIsRefused(relation->type(), relation->driver(),
+                                                         relation->driven());
+            !why.empty())
+            return SaveResult{SerializationError::InvalidDependency,
+                              "relation '" + relation->name() + "': " + why};
+        const std::pair<ObjectId, std::size_t> slot{
+            relation->driven().mateId, static_cast<std::size_t>(relation->driven().component)};
+        for (const auto& taken : drivenAlready)
+            if (taken == slot)
+                return SaveResult{SerializationError::InvalidDependency,
+                                  "relation '" + relation->name() +
+                                      "' drives a freedom another relation already drives"};
+        drivenAlready.push_back(slot);
+    }
     for (const ExplodeView* view : document.explodeViews()) {
         if (const SaveResult bad = claim(view->id(), "exploded view"); !bad) return bad;
         for (const ExplodeStep& step : view->steps())
@@ -274,6 +307,36 @@ JsonValue toJson(const AssemblyDocument& document) {
         views.add(std::move(entry));
     }
     root.set("explodeViews", std::move(views));
+
+    // v34 (M31). A relation is two FREEDOMS and a number (roadmap 20.5), so
+    // that is what is written: a mate id and a component INDEX per end. The
+    // index rather than a name because toString(MateComponent) is prose for
+    // messages ("about z"), and a format that borrowed it would be one
+    // rewording away from refusing to open its own old files. `limits` above
+    // writes its component the same way, for the same reason.
+    //
+    // The RATIO's meaning depends on the type -- turns per turn for a gear,
+    // millimetres per turn for a screw -- and that reading lives in
+    // Relation::valueFor, not here. A file that stored the converted number
+    // instead would be a file that could not be re-read into the ratio the
+    // user typed.
+    JsonValue relations = JsonValue::makeArray();
+    for (const Relation* relation : document.relations()) {
+        JsonValue entry = JsonValue::makeObject();
+        entry.set("id", JsonValue::makeString(idToString(relation->id())));
+        entry.set("name", JsonValue::makeString(relation->name()));
+        entry.set("type", JsonValue::makeString(std::string(toString(relation->type()))));
+        entry.set("driverMateId", JsonValue::makeString(idToString(relation->driver().mateId)));
+        entry.set("driverComponent",
+                  JsonValue::makeNumber(static_cast<double>(relation->driver().component)));
+        entry.set("drivenMateId", JsonValue::makeString(idToString(relation->driven().mateId)));
+        entry.set("drivenComponent",
+                  JsonValue::makeNumber(static_cast<double>(relation->driven().component)));
+        entry.set("ratio", JsonValue::makeNumber(relation->ratio()));
+        entry.set("reversed", JsonValue::makeBool(relation->reversed()));
+        relations.add(std::move(entry));
+    }
+    root.set("relations", std::move(relations));
     return root;
 }
 
@@ -321,6 +384,24 @@ std::optional<MateType> mateTypeFromString(std::string_view text) {
     if (text == "Ball") return MateType::Ball;
     if (text == "Planar") return MateType::Planar;
     if (text == "Parallel") return MateType::Parallel;
+    return std::nullopt;
+}
+
+struct RelationData {
+    ObjectId id = kInvalidObjectId;
+    std::string name;
+    RelationType type = RelationType::Gear;
+    CoupledFreedom driver{};
+    CoupledFreedom driven{};
+    double ratio = 1.0;
+    bool reversed = false;
+};
+
+std::optional<RelationType> relationTypeFromString(std::string_view text) {
+    if (text == "Gear") return RelationType::Gear;
+    if (text == "RackAndPinion") return RelationType::RackAndPinion;
+    if (text == "Screw") return RelationType::Screw;
+    if (text == "Linear") return RelationType::Linear;
     return std::nullopt;
 }
 
@@ -789,6 +870,118 @@ AssemblyLoadResult loadAssemblyDocument(std::istream& in) {
         }
     }
 
+    // v34 relations. Absent in a v33 file, which is why this is not required.
+    std::vector<RelationData> relationData;
+    if (const JsonValue* field = root.find("relations")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'relations' is not an array");
+        std::vector<std::pair<ObjectId, std::size_t>> drivenAlready;
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "relations[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            RelationData relation;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(
+                    SerializationError::InvalidFieldType,
+                    context + ": field 'id' is not a valid decimal ObjectId string");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            relation.id = *id;
+
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            relation.name = name->asString();
+
+            const JsonValue* type = requireField(entry, "type", JsonType::String, context, err);
+            if (type == nullptr) return loadFailure(err.error, err.message);
+            const auto parsedType = relationTypeFromString(type->asString());
+            if (!parsedType.has_value())
+                return loadFailure(SerializationError::InvalidEnumValue,
+                                   context + ": unknown relation type '" + type->asString() +
+                                       "'");
+            relation.type = *parsedType;
+
+            // BOTH ENDS, and both name a mate IN THIS FILE that actually
+            // leaves that freedom free -- otherwise the relation would drive a
+            // number nothing reads, silently.
+            struct End {
+                const char* idKey;
+                const char* componentKey;
+                CoupledFreedom* into;
+            };
+            const End ends[2] = {{"driverMateId", "driverComponent", &relation.driver},
+                                 {"drivenMateId", "drivenComponent", &relation.driven}};
+            for (const End& end : ends) {
+                const JsonValue* endId =
+                    requireField(entry, end.idKey, JsonType::String, context, err);
+                if (endId == nullptr) return loadFailure(err.error, err.message);
+                const auto parsed = idFromString(endId->asString());
+                if (!parsed.has_value())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field '" + end.idKey +
+                                           "' is not a valid ObjectId");
+                const MateData* named = nullptr;
+                for (const MateData& candidate : mateData)
+                    if (candidate.id == *parsed) named = &candidate;
+                if (named == nullptr)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       context + ": " + end.idKey + " " + idToString(*parsed) +
+                                           " is not a mate in this document");
+                const JsonValue* which =
+                    requireField(entry, end.componentKey, JsonType::Number, context, err);
+                if (which == nullptr) return loadFailure(err.error, err.message);
+                const double index = which->asNumber();
+                if (index < 0.0 || index >= static_cast<double>(kMateComponentCount) ||
+                    index != static_cast<double>(static_cast<int>(index)))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field '" + end.componentKey +
+                                           "' names no component");
+                const std::size_t c = static_cast<std::size_t>(index);
+                if (!FreedomOf(named->type).free[c])
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": mate '" + named->name +
+                                           "' has no freedom for '" + end.componentKey +
+                                           "' to couple");
+                end.into->mateId = *parsed;
+                end.into->component = static_cast<MateComponent>(c);
+            }
+
+            // THE SAME SENTENCE THE FACADE REFUSES WITH. One rule, one place:
+            // a loader with its own copy is the seam this project keeps
+            // closing.
+            if (const std::string why =
+                    WhyRelationIsRefused(relation.type, relation.driver, relation.driven);
+                !why.empty())
+                return loadFailure(SerializationError::InvalidDependency, context + ": " + why);
+
+            const std::pair<ObjectId, std::size_t> slot{
+                relation.driven.mateId, static_cast<std::size_t>(relation.driven.component)};
+            for (const auto& taken : drivenAlready)
+                if (taken == slot)
+                    return loadFailure(SerializationError::InvalidDependency,
+                                       context + ": that freedom is already driven by another "
+                                                 "relation");
+            drivenAlready.push_back(slot);
+
+            const JsonValue* ratio = requireField(entry, "ratio", JsonType::Number, context, err);
+            if (ratio == nullptr) return loadFailure(err.error, err.message);
+            relation.ratio = ratio->asNumber();
+            if (const JsonValue* reversed = entry.find("reversed")) {
+                if (reversed->type() != JsonType::Bool)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'reversed' is not a boolean");
+                relation.reversed = reversed->asBool();
+            }
+            relationData.push_back(std::move(relation));
+        }
+    }
+
     auto document = std::make_unique<AssemblyDocument>(documentId, documentName);
     // WHO OWNS THE ORIGIN ON LOAD. The constructor always makes one and the
     // file carries its own, so restoring naively would give the document two
@@ -814,6 +1007,12 @@ AssemblyLoadResult loadAssemblyDocument(std::istream& in) {
                                         mate.followingInstanceId,
                                         std::move(mate.followingConnector), mate.values,
                                         mate.driven, mate.limits);
+
+    // RELATIONS AFTER MATES, because a relation names two of them.
+    for (auto& relation : relationData)
+        document->restoreRelation(relation.id, std::move(relation.name), relation.type,
+                                  relation.driver, relation.driven, relation.ratio,
+                                  relation.reversed);
 
     // POSES AND VIEWS LAST, because both name mates and instances.
     for (auto& pose : positionData)

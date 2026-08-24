@@ -973,10 +973,12 @@ std::string AssemblyDocument::whyRelationIsRefused(RelationType type,
 Relation& AssemblyDocument::addRelation(std::string name, RelationType type,
                                         CoupledFreedom driver, CoupledFreedom driven,
                                         double ratio, bool reversed) {
-    for (const std::unique_ptr<Relation>& existing : relations_)
-        if (existing->name() == name)
-            throw std::invalid_argument("addRelation: there is already a relation "
-                                        "called '" + name + "'");
+    // ACROSS THE WHOLE DOCUMENT, not across the relations. Names are unique
+    // per document -- `renameObject` has always enforced that -- so a per-kind
+    // check here would accept a relation called "Drive" beside a mate called
+    // "Drive" and then refuse to rename either of them to anything.
+    if (nameIsTaken(name, kInvalidObjectId))
+        throw std::invalid_argument("addRelation: '" + name + "' is already taken");
     const std::string why = whyRelationIsRefused(type, driver, driven);
     if (!why.empty()) throw std::invalid_argument("addRelation: " + why);
 
@@ -989,12 +991,26 @@ Relation& AssemblyDocument::addRelation(std::string name, RelationType type,
     // its own.
     if (const Mate* mate = findMate(driven.mateId))
         graph_.markDirty(mate->followingInstanceId());
+
+    RelationExistenceEdit edit;
+    edit.relationId = ref.id();
+    edit.name = ref.name();
+    edit.type = static_cast<int>(ref.type());
+    edit.driverMateId = ref.driver().mateId;
+    edit.driverComponent = static_cast<int>(ref.driver().component);
+    edit.drivenMateId = ref.driven().mateId;
+    edit.drivenComponent = static_cast<int>(ref.driven().component);
+    edit.ratio = ref.ratio();
+    edit.reversed = ref.reversed();
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Add " + ref.name());
     return ref;
 }
 
 Relation& AssemblyDocument::restoreRelation(ObjectId id, std::string name, RelationType type,
                                             CoupledFreedom driver, CoupledFreedom driven,
                                             double ratio, bool reversed) {
+    requireUnusedId(id, "restoreRelation");
     auto item = std::make_unique<Relation>(RestoreObjectId(id), std::move(name), type, driver,
                                            driven, ratio, reversed);
     auto& ref = *item;
@@ -1025,6 +1041,15 @@ const Relation* AssemblyDocument::findRelationNamed(const std::string& name) con
 bool AssemblyDocument::setRelationRatio(ObjectId relationId, double ratio) {
     for (const std::unique_ptr<Relation>& one : relations_) {
         if (one->id() != relationId) continue;
+        if (!applyingHistory()) {
+            RelationValueEdit edit;
+            edit.relationId = relationId;
+            edit.beforeRatio = one->ratio();
+            edit.afterRatio = ratio;
+            edit.beforeReversed = one->reversed();
+            edit.afterReversed = one->reversed();
+            recordDelta(edit, "Ratio of " + one->name());
+        }
         one->setRatio(ratio);
         if (const Mate* mate = findMate(one->driven().mateId))
             graph_.markDirty(mate->followingInstanceId());
@@ -1036,6 +1061,15 @@ bool AssemblyDocument::setRelationRatio(ObjectId relationId, double ratio) {
 bool AssemblyDocument::setRelationReversed(ObjectId relationId, bool reversed) {
     for (const std::unique_ptr<Relation>& one : relations_) {
         if (one->id() != relationId) continue;
+        if (!applyingHistory()) {
+            RelationValueEdit edit;
+            edit.relationId = relationId;
+            edit.beforeRatio = one->ratio();
+            edit.afterRatio = one->ratio();
+            edit.beforeReversed = one->reversed();
+            edit.afterReversed = reversed;
+            recordDelta(edit, "Direction of " + one->name());
+        }
         one->setReversed(reversed);
         if (const Mate* mate = findMate(one->driven().mateId))
             graph_.markDirty(mate->followingInstanceId());
@@ -1044,12 +1078,18 @@ bool AssemblyDocument::setRelationReversed(ObjectId relationId, bool reversed) {
     return false;
 }
 
-bool AssemblyDocument::isDrivenByRelation(ObjectId mateId, std::size_t component) const noexcept {
+const Relation* AssemblyDocument::relationDriving(ObjectId mateId,
+                                                  MateComponent component) const noexcept {
     for (const std::unique_ptr<Relation>& one : relations_)
-        if (one->driven().mateId == mateId &&
-            static_cast<std::size_t>(one->driven().component) == component)
-            return true;
-    return false;
+        if (one->driven().mateId == mateId && one->driven().component == component)
+            return one.get();
+    return nullptr;
+}
+
+bool AssemblyDocument::isDrivenByRelation(ObjectId mateId, std::size_t component) const noexcept {
+    // THROUGH THE SAME QUERY the shell asks, so the solve and the menu cannot
+    // disagree about which freedoms are still anybody's to choose.
+    return relationDriving(mateId, static_cast<MateComponent>(component)) != nullptr;
 }
 
 MateValues AssemblyDocument::valuesAfterRelations(ObjectId mateId) const {
@@ -1483,6 +1523,7 @@ void AssemblyDocument::requireUnusedIdHook(ObjectId id, const char* who) const {
 std::string AssemblyDocument::ownObjectName(ObjectId id) const {
     if (const Instance* instance = findInstance(id)) return instance->name();
     if (const Mate* mate = findMate(id)) return mate->name();
+    if (const Relation* relation = findRelation(id)) return relation->name();
     if (const NamedPosition* pose = findNamedPosition(id)) return pose->name();
     if (const ExplodeView* view = findExplodeView(id)) return view->name();
     return {};
@@ -1493,6 +1534,11 @@ void AssemblyDocument::applyOwnName(ObjectId id, const std::string& name) {
         mate->setName(name);
         return;
     }
+    for (const std::unique_ptr<Relation>& one : relations_)
+        if (one->id() == id) {
+            one->setName(name);
+            return;
+        }
     if (NamedPosition* pose = findNamedPositionForEdit(id)) {
         pose->setName(name);
         return;
@@ -1516,6 +1562,8 @@ bool AssemblyDocument::ownNameIsTaken(const std::string& name, ObjectId except) 
     for (const std::unique_ptr<Instance>& one : instances_)
         if (one->id() != except && one->name() == name) return true;
     for (const std::unique_ptr<Mate>& one : mates_)
+        if (one->id() != except && one->name() == name) return true;
+    for (const std::unique_ptr<Relation>& one : relations_)
         if (one->id() != except && one->name() == name) return true;
     for (const std::unique_ptr<NamedPosition>& one : namedPositions_)
         if (one->id() != except && one->name() == name) return true;
@@ -1548,6 +1596,35 @@ void AssemblyDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
             removeObject(edit->mateId);
         // Whatever the mate was placing has to be worked out again.
         graph_.markDirty(edit->followingInstanceId);
+        return;
+    }
+    if (const auto* edit = std::get_if<RelationExistenceEdit>(&delta)) {
+        const bool shouldExist = forward ? edit->addedByTheEdit : !edit->addedByTheEdit;
+        const bool doesExist = findRelation(edit->relationId) != nullptr;
+        if (shouldExist == doesExist) return;
+        if (shouldExist)
+            restoreRelation(edit->relationId, edit->name,
+                            static_cast<RelationType>(edit->type),
+                            CoupledFreedom{edit->driverMateId,
+                                           static_cast<MateComponent>(edit->driverComponent)},
+                            CoupledFreedom{edit->drivenMateId,
+                                           static_cast<MateComponent>(edit->drivenComponent)},
+                            edit->ratio, edit->reversed);
+        else
+            removeObject(edit->relationId);
+        // The freedom it was writing is somebody else's again -- or nobody's.
+        if (const Mate* mate = findMate(edit->drivenMateId))
+            graph_.markDirty(mate->followingInstanceId());
+        return;
+    }
+    if (const auto* edit = std::get_if<RelationValueEdit>(&delta)) {
+        // Through the facade, so the driven end is dirtied and the geometry
+        // catches up -- putting the number back without moving anything would
+        // leave the screen showing a gear train at a ratio the model no longer
+        // says it is at.
+        setRelationRatio(edit->relationId, forward ? edit->afterRatio : edit->beforeRatio);
+        setRelationReversed(edit->relationId,
+                            forward ? edit->afterReversed : edit->beforeReversed);
         return;
     }
     if (const auto* edit = std::get_if<MateValueEdit>(&delta)) {
@@ -1604,11 +1681,48 @@ bool AssemblyDocument::removeObject(ObjectId id) {
     if (found == nullptr) return false;
     const ObjectRegistry::ObjectRef handle = *found; // copy before unregistering
 
+    // ONE UNDO STEP FOR THE WHOLE DELETION, CASCADE INCLUDED.
+    //
+    // Deleting an instance takes its mates, and deleting a mate takes its
+    // relations. Each of those records its own delta -- as it must, so undo
+    // puts each thing back exactly as it was -- and without this they would
+    // land as SEPARATE undo steps. The user deleted one thing; pressing undo
+    // once would then bring back a relation and leave the mate it names still
+    // gone, which is a state the model was never in.
+    //
+    // The OUTERMOST call owns the transaction: the recursive ones see it open
+    // and leave it alone. Nothing is opened while history is being applied,
+    // because undo must not record.
+    struct OneStep {
+        AssemblyDocument* document = nullptr;
+        bool owned = false;
+        ~OneStep() {
+            if (owned) document->commitTransaction();
+        }
+    };
+    const bool ownsTheStep = !isTransactionOpen() && !applyingHistory();
+    if (ownsTheStep) beginTransaction("Delete " + objectName(id));
+    const OneStep step{this, ownsTheStep};
+
     // Decided BEFORE anything is unhooked, so a refusal leaves the document
     // byte-for-byte unchanged.
     // A MATE is the simplest thing here: nothing owns it and nothing but the
     // solve reads it.
     if (const Mate* mate = findMate(id)) {
+        // ...EXCEPT ITS RELATIONS. A relation names a mate's freedom (§20.5)
+        // and cannot outlive it -- exactly as a mate cannot outlive an
+        // instance. Taken FIRST so their deltas are recorded before the mate's
+        // and an undo therefore puts the mate back before the relations that
+        // name it.
+        for (bool again = true; again;) {
+            again = false;
+            for (const std::unique_ptr<Relation>& one : relations_) {
+                if (one->driver().mateId != id && one->driven().mateId != id) continue;
+                removeObject(one->id());
+                again = true;
+                break;
+            }
+        }
         if (!applyingHistory()) {
             MateExistenceEdit edit;
             edit.mateId = id;
@@ -1632,6 +1746,35 @@ bool AssemblyDocument::removeObject(ObjectId id) {
             }
         // What it was placing is now placed by something else, or by nothing.
         graph_.markDirty(follower);
+        return true;
+    }
+
+    // A RELATION holds nothing and nothing holds it, so it goes on its own.
+    if (const Relation* relation = findRelation(id)) {
+        if (!applyingHistory()) {
+            RelationExistenceEdit edit;
+            edit.relationId = id;
+            edit.name = relation->name();
+            edit.type = static_cast<int>(relation->type());
+            edit.driverMateId = relation->driver().mateId;
+            edit.driverComponent = static_cast<int>(relation->driver().component);
+            edit.drivenMateId = relation->driven().mateId;
+            edit.drivenComponent = static_cast<int>(relation->driven().component);
+            edit.ratio = relation->ratio();
+            edit.reversed = relation->reversed();
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Delete " + relation->name());
+        }
+        const ObjectId drivenMate = relation->driven().mateId;
+        registry_.unregisterObject(id);
+        for (auto it = relations_.begin(); it != relations_.end(); ++it)
+            if ((*it)->id() == id) {
+                relations_.erase(it);
+                break;
+            }
+        // The freedom it was writing belongs to the solve again.
+        if (const Mate* mate = findMate(drivenMate))
+            graph_.markDirty(mate->followingInstanceId());
         return true;
     }
 

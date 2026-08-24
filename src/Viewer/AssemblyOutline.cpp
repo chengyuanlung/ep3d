@@ -4,6 +4,7 @@
 #include "Core/Assembly/AssemblyStates.h"
 #include "Core/Assembly/Instance.h"
 #include "Core/Assembly/Mate.h"
+#include "Core/Assembly/Relation.h"
 
 #include <cstdio>
 #include <string>
@@ -37,6 +38,21 @@ OutlineState FromComputeState(ComputeState state) noexcept {
         case ComputeState::Suppressed: return OutlineState::Suppressed;
         default: return OutlineState::Dirty;
     }
+}
+
+// The ratio as a sentence, in the unit the type gives it.
+//
+// SHARED by the tree row and the property panel, because those two saying
+// different things about the same number is exactly the seam this project
+// keeps closing -- and it is `Relation::valueFor` that decides the meaning,
+// so the wording follows that and nothing else.
+std::string RatioSentence(const Relation& relation) {
+    const bool perTurn = relation.type() == RelationType::Screw ||
+                         relation.type() == RelationType::RackAndPinion;
+    std::string text = Number(relation.ratio());
+    text += perTurn ? " mm per turn" : " : 1";
+    if (relation.reversed()) text += ", reversed";
+    return text;
 }
 
 OutlineNode Group(std::string name) {
@@ -116,6 +132,28 @@ OutlineNode AssemblyOutline::build(const std::set<ObjectId>& hiddenIds) const {
         mates.children.push_back(std::move(node));
     }
     root.children.push_back(std::move(mates));
+
+    // --- Relations (§20.5) ----------------------------------------------------
+    //
+    // ONLY WHEN THERE ARE ANY, like the two groups below: an empty group in
+    // every assembly ever made is a row that teaches a reader to skip it.
+    if (!document.relations().empty()) {
+        OutlineNode relations = Group("Relations");
+        for (const Relation* relation : document.relations()) {
+            OutlineNode node;
+            node.id = relation->id();
+            node.name = relation->name();
+            node.typeLabel = std::string(toString(relation->type()));
+            node.kind = OutlineKind::Relation;
+            node.state = OutlineState::Normal;
+            // WHAT IT DOES, in the unit the user typed it in -- the ratio
+            // alone reads as a pure number, and "4" on a screw is 4 mm per
+            // turn, not four of anything else.
+            node.diagnostic = RatioSentence(*relation);
+            relations.children.push_back(std::move(node));
+        }
+        root.children.push_back(std::move(relations));
+    }
 
     // --- Named positions (§49) ----------------------------------------------
     if (!document.namedPositions().empty()) {
@@ -211,6 +249,37 @@ std::vector<PropertyRow> AssemblyOutline::propertiesOf(ObjectId id) const {
         };
         describeEnd("From", mate->leadingInstanceId(), mate->leadingConnector());
         describeEnd("To", mate->followingInstanceId(), mate->followingConnector());
+        return rows;
+    }
+
+    if (const Relation* relation = document.findRelation(id)) {
+        rows.push_back(PropertyRow{"General", "Name", relation->name(), "", true, relation->id(),
+                                   0.0, PropertyField::Name});
+        rows.push_back(ReadOnlyRow("General", "Type", std::string(toString(relation->type()))));
+
+        // THE TWO ENDS, each named by its mate and the freedom on it. A
+        // relation whose panel showed only a ratio would leave the user unable
+        // to tell a gear from the gear next to it.
+        const auto describeEnd = [&](const char* label, const CoupledFreedom& end) {
+            const Mate* mate = document.findMate(end.mateId);
+            rows.push_back(ReadOnlyRow(
+                "Couples", label,
+                (mate != nullptr ? mate->name() : std::string("(missing)")) + " -- " +
+                    (IsRotation(end.component) ? "turn " : "slide ") +
+                    std::string(toString(end.component))));
+        };
+        describeEnd("Driven by", relation->driver());
+        describeEnd("Drives", relation->driven());
+
+        // THE UNIT IS PART OF THE NUMBER. A gear's ratio is turns per turn and
+        // a screw's is millimetres per turn; a panel that showed "4.000" for
+        // both would be a panel that means two things by one row.
+        const bool perTurn = relation->type() == RelationType::Screw ||
+                             relation->type() == RelationType::RackAndPinion;
+        rows.push_back(ReadOnlyRow("Coupling", "Ratio", Number(relation->ratio()),
+                                   perTurn ? "mm per turn" : "per turn"));
+        rows.push_back(ReadOnlyRow("Coupling", "Direction",
+                                   relation->reversed() ? "reversed" : "same way"));
         return rows;
     }
 

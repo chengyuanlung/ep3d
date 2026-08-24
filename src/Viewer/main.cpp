@@ -4152,7 +4152,7 @@ int main(int argc, char** argv) {
                 // opened deliberately; a toolbar is always in view.
                 {
                     const int buttons = window.assemblyToolbarButtonCount();
-                    if (buttons < 9)
+                    if (buttons < 10)
                         fail("the assembly toolbar is missing commands");
                     if (!window.assemblyToolbarVisible())
                         fail("an assembly does not show the assembly toolbar");
@@ -4175,7 +4175,7 @@ int main(int argc, char** argv) {
 
                     // NAMED, so a renamed or dropped button says which one.
                     for (const char* wanted : {"Insert", "Ground", "Mate", "Drive", "Limit",
-                                               "Pattern", "Position", "Explode",
+                                               "Relation", "Pattern", "Position", "Explode",
                                                "Interference"}) {
                         bool found = false;
                         for (int i = 0; i < buttons; ++i)
@@ -4194,6 +4194,200 @@ int main(int argc, char** argv) {
                 const QString interference = window.checkInterferenceCommand();
                 if (interference.isEmpty())
                     fail("the interference check said nothing at all");
+            }
+
+            // --- M31's GATE: relations, on the screen -----------------------
+            //
+            // A relation couples two freedoms a mate solve would otherwise
+            // choose independently (§20.5). What this asks is not that the
+            // object exists but that the SECOND ARM MOVES when the first one
+            // is driven: a relation stored and never applied is the shape this
+            // milestone exists to avoid, and it would pass every check that
+            // only reads messages.
+            {
+                const QString armFile = QDir::tempPath() +
+                                        QStringLiteral("/ep3d-selftest/m29-arm.ep3d");
+                const std::vector<ObjectId> made = window.allInstancesForTesting();
+                if (made.size() != 2) fail("M31 expected M30's two instances");
+                const ObjectId bracket = made[0];
+                const ObjectId firstArm = made[1];
+
+                // A SECOND ARM on the same bracket, so there are two hinges to
+                // couple. Both turn about the bracket's one connector.
+                if (!window.insertInstanceCommand(armFile, QStringLiteral("Arm"))
+                         .contains(QStringLiteral("Inserted")))
+                    fail("M31 could not insert a second arm");
+                const std::vector<ObjectId> three = window.allInstancesForTesting();
+                if (three.size() != 3) fail("M31 did not end up with three instances");
+                const ObjectId secondArm = three[2];
+
+                if (window.mateCountForTesting() == 0)
+                    window.createMateCommand(MateType::Revolute, bracket,
+                                             QStringLiteral("Pivot"), firstArm,
+                                             QStringLiteral("Eye"));
+                const QString secondMate = window.createMateCommand(
+                    MateType::Revolute, bracket, QStringLiteral("Pivot"), secondArm,
+                    QStringLiteral("Eye"));
+                if (!secondMate.contains(QStringLiteral("Mated")))
+                    fail(("M31 could not mate the second arm: " + secondMate.toStdString())
+                             .c_str());
+                const std::vector<ObjectId> mates = window.allMatesForTesting();
+                if (mates.size() != 2) fail("M31 expected two mates to couple");
+                const std::string driveName = window.objectNameForTesting(mates[0]);
+                const std::string drivenName = window.objectNameForTesting(mates[1]);
+
+                // WHERE THE SECOND ARM SITS AT TWICE THE ANGLE, measured by
+                // driving it there BY HAND first. That is the place the gear
+                // has to put it, and comparing against a number computed here
+                // would only be checking this gate's own arithmetic.
+                window.driveMateForTesting(mates[1], 0.6);
+                const Vec3 atTwiceTheAngle = window.instanceWorldPlaceForTesting(secondArm);
+                window.driveMateForTesting(mates[1], 0.0);
+                const Vec3 atRest = window.instanceWorldPlaceForTesting(secondArm);
+                if (std::fabs(atRest.x - atTwiceTheAngle.x) < 1e-6 &&
+                    std::fabs(atRest.y - atTwiceTheAngle.y) < 1e-6)
+                    fail("driving the second hinge did not move it, so this gate proves "
+                         "nothing");
+
+                // THE MENU OFFERS IT EXACTLY WHEN IT WOULD WORK: two mates
+                // selected is a gear, nothing selected is neither.
+                window.selectObject(kInvalidObjectId);
+                if (window.addRelationEnabledForTesting())
+                    fail("Add Relation is offered with nothing selected");
+                window.selectInstancesForTesting({mates[0], mates[1]});
+                if (!window.addRelationEnabledForTesting())
+                    fail("Add Relation is not offered with two mates selected");
+
+                // A GEAR, 2:1 -- and it RELEASES the by-hand drive on the end
+                // it now decides, rather than leaving the tree claiming two
+                // authorities for one number.
+                const QString geared = window.createRelationForTesting(
+                    RelationType::Gear, QString::fromStdString(driveName),
+                    QString::fromStdString(drivenName), 2.0);
+                if (!geared.contains(QStringLiteral("now drives")))
+                    fail(("the gear would not be made: " + geared.toStdString()).c_str());
+                if (!geared.contains(QStringLiteral("no longer driven by hand")))
+                    fail(("a relation took over a hand-driven mate without saying so: " +
+                          geared.toStdString())
+                             .c_str());
+                if (window.relationCountForTesting() != 1) fail("the relation was not created");
+
+                // THE ARM ACTUALLY FOLLOWS. Half the angle on the driver puts
+                // the driven arm exactly where driving it to 0.6 put it.
+                window.driveMateForTesting(mates[0], 0.3);
+                const Vec3 followed = window.instanceWorldPlaceForTesting(secondArm);
+                if (std::fabs(followed.x - atTwiceTheAngle.x) > 1e-6 ||
+                    std::fabs(followed.y - atTwiceTheAngle.y) > 1e-6 ||
+                    std::fabs(followed.z - atTwiceTheAngle.z) > 1e-6)
+                    fail("the gear reported a coupling and the second arm did not follow");
+
+                // ...AND THE DRIVEN END IS NO LONGER THE USER'S TO SET.
+                const QString refused = window.driveMateForTesting(mates[1], 0.9);
+                if (!refused.contains(QStringLiteral("driven by the relation")))
+                    fail(("driving a relation-owned freedom was not refused by name: " +
+                          refused.toStdString())
+                             .c_str());
+                const Vec3 unmoved = window.instanceWorldPlaceForTesting(secondArm);
+                if (std::fabs(unmoved.x - followed.x) > 1e-9 ||
+                    std::fabs(unmoved.y - followed.y) > 1e-9)
+                    fail("a refused drive moved the arm anyway");
+
+                // THE TREE SHOWS IT, as its own kind. A relation that only
+                // exists in the file is one nobody can select, rename or
+                // delete.
+                {
+                    const OutlineNode tree = window.probeOutline();
+                    std::size_t relationRows = 0;
+                    std::string sentence;
+                    const std::function<void(const OutlineNode&)> walk =
+                        [&](const OutlineNode& node) {
+                            if (node.kind == OutlineKind::Relation) {
+                                ++relationRows;
+                                sentence = node.diagnostic;
+                            }
+                            for (const OutlineNode& child : node.children) walk(child);
+                        };
+                    walk(tree);
+                    if (relationRows != 1)
+                        fail("the assembly tree does not show its relation");
+                    // WHAT IT DOES, in the unit it was typed in. A row showing
+                    // only a name tells a reader nothing they could not guess.
+                    if (sentence.find("2.000") == std::string::npos)
+                        fail(("the relation row does not say its ratio: " + sentence).c_str());
+                    // ...AND IT REACHED THE WIDGET. The outline saying it and
+                    // the tree showing it are two claims, and a State column
+                    // nothing ever read is where the first one goes to die.
+                    const std::string shown = window.treeStateFor("[Rel] ");
+                    if (shown.find("2.000") == std::string::npos)
+                        fail(("the tree's State column does not show the ratio: " + shown)
+                                 .c_str());
+                }
+
+                // THE PANEL, asked of the WIDGET -- and it has to name BOTH
+                // ends, or a gear cannot be told from the gear next to it.
+                const std::vector<std::string> relationNames = window.relationNamesForTesting();
+                if (relationNames.size() != 1) fail("M31 expected one relation to inspect");
+                window.selectRelationForTesting(QString::fromStdString(relationNames.front()));
+                if (window.propertyRowValue("Ratio").find("2.000") == std::string::npos)
+                    fail(("a selected relation shows no ratio: " +
+                          window.propertyRowValue("Ratio"))
+                             .c_str());
+                if (window.propertyRowValue("Driven by").find(driveName) != 0)
+                    fail("the panel does not say which mate drives the relation");
+                if (window.propertyRowValue("Drives").find(drivenName) != 0)
+                    fail("the panel does not say which mate the relation drives");
+
+                // A PICTURE OF THE ASSEMBLY SHELL, next to the one the run
+                // already takes of the part shell.
+                //
+                // The existing screenshot is written a long way above this,
+                // before any assembly is open, so every picture this project
+                // has ever taken is of a PART -- which is how "[Part]" on an
+                // assembly root and a greyed part toolbar both survived until
+                // somebody opened the program by hand. A second file, beside
+                // the first, so the part picture keeps meaning what it did.
+                if (screenshotPath != nullptr) {
+                    std::string beside = screenshotPath;
+                    const std::size_t dot = beside.rfind('.');
+                    beside = dot == std::string::npos ? beside + "-assembly"
+                                                      : beside.substr(0, dot) + "-assembly" +
+                                                            beside.substr(dot);
+                    if (!window.grab().save(QString::fromStdString(beside)))
+                        fail("could not write the assembly screenshot");
+                }
+
+                // REVERSED, and the arm goes the OTHER way.
+                if (!window.reverseSelectedRelation().contains(QStringLiteral("the other way")))
+                    fail("a relation would not reverse");
+                const Vec3 backwards = window.instanceWorldPlaceForTesting(secondArm);
+                if (std::fabs(backwards.x - followed.x) < 1e-6 &&
+                    std::fabs(backwards.y - followed.y) < 1e-6)
+                    fail("reversing a gear did not turn the arm the other way");
+
+                // DELETED, and the freedom goes back to the solve -- the
+                // opposite of deleting a MATE, and the message says so.
+                const QString gone = window.deleteSelectedRelation();
+                if (!gone.contains(QStringLiteral("solve's again")))
+                    fail(("deleting a relation did not say what happens to the freedom: " +
+                          gone.toStdString())
+                             .c_str());
+                if (window.relationCountForTesting() != 0)
+                    fail("the relation was not deleted");
+                if (window.allMatesForTesting().size() != 2)
+                    fail("deleting a relation took its mates with it");
+
+                // ...AND DELETING A MATE TAKES ITS RELATIONS. The other
+                // direction, on the screen: a relation reads a mate's freedom,
+                // so it cannot outlive it.
+                window.createRelationForTesting(RelationType::Gear,
+                                                QString::fromStdString(driveName),
+                                                QString::fromStdString(drivenName), 2.0);
+                if (window.relationCountForTesting() != 1)
+                    fail("M31 could not re-make the relation");
+                window.selectObject(mates[1]);
+                window.deleteSelectedMate();
+                if (window.relationCountForTesting() != 0)
+                    fail("a relation outlived the mate whose freedom it reads");
             }
 
             window.newDocumentCommand();

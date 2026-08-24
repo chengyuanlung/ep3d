@@ -443,6 +443,15 @@ void DocumentBase::applyName(ObjectId id, const std::string& name) {
     applyOwnName(id, name);
 }
 
+std::string DocumentBase::unusedNameLike(const std::string& wanted) const {
+    if (!nameIsTaken(wanted, kInvalidObjectId)) return wanted;
+    for (int suffix = 2; suffix < 100000; ++suffix) {
+        std::string candidate = wanted + " " + std::to_string(suffix);
+        if (!nameIsTaken(candidate, kInvalidObjectId)) return candidate;
+    }
+    return wanted; // a document with 100000 of one name has a bigger problem
+}
+
 bool DocumentBase::nameIsTaken(const std::string& name, ObjectId except) const {
     for (const std::unique_ptr<ReferenceFrame>& frame : frames_)
         if (frame->id() != except && frame->name() == name) return true;

@@ -169,6 +169,14 @@ public:
     bool setRelationRatio(ObjectId relationId, double ratio);
     bool setRelationReversed(ObjectId relationId, bool reversed);
 
+    // The relation that WRITES this freedom, or nullptr when the solve or the
+    // user still decides it.
+    //
+    // PUBLIC because the shell has to ask before it offers to drive a mate: a
+    // freedom a relation writes is not the user's to set, and "Driven to 0.5"
+    // over a part that did not move is the worst way to find that out.
+    const Relation* relationDriving(ObjectId mateId, MateComponent component) const noexcept;
+
     // Why this pair of freedoms cannot be coupled by this type, or empty when
     // it can. Checks the mates EXIST and actually leave those freedoms free,
     // which the type-only rule cannot know.

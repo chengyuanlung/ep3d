@@ -1,6 +1,7 @@
 #include "Cli/SketchScript.h"
 
 #include "Core/Assembly/Mate.h"
+#include "Core/Assembly/Relation.h"
 #include "Core/Geometry/Transform.h"
 #include "Core/Assembly/AssemblyDocument.h"
 #include "Core/Document/EvaluationCut.h"
@@ -410,6 +411,7 @@ private:
         if (verb == "mate") return doMate(tokens);
         if (verb == "drive") return doDrive(tokens);
         if (verb == "limit") return doLimit(tokens);
+        if (verb == "relation") return doRelation(tokens);
         if (verb == "row") return doRow(tokens);
         if (verb == "pose") return doPose(tokens);
         if (verb == "explode") return doExplode(tokens);
@@ -428,7 +430,8 @@ private:
             note("commands: sketch, tool, click, finish, constrain, dimension, pad, sweep, "
                  "loft, shell, draft, hole, union, subtract, intersect, ring, along, "
                  "export, import, connector, assembly, part, insert, place, ground, mate, "
-                 "drive, limit, row, pose, explode, interference, solve, save, measure, "
+                 "drive, limit, relation, row, pose, explode, interference, solve, save, "
+                 "measure, "
                  "handle, echo, help");
             return true;
         }
@@ -1384,6 +1387,76 @@ private:
                            value);
         note("mate " + tokens[1] + " " + tokens[2] + ": " + tokens[3] + " <-> " + tokens[4] +
              (tokens.size() == 6 ? " at " + tokens[5] : ""));
+        return true;
+    }
+
+    bool doRelation(const std::vector<std::string>& tokens) {
+        // relation KIND NAME DRIVER DRIVEN RATIO [reversed]
+        //
+        // KIND is gear, rack, screw or linear. DRIVER and DRIVEN are MATE
+        // names -- a relation's input is a mate (roadmap §20.5) -- and for a
+        // screw they are the same mate, which is the whole reason a relation
+        // couples FREEDOMS rather than things.
+        //
+        // THE RATIO IS IN THE UNIT THE TYPE GIVES IT: turns per turn for a
+        // gear or a linear ratio, MILLIMETRES PER TURN for a screw or a rack.
+        // No conversion happens here -- Relation::valueFor is the one place
+        // that reading lives, and a script that converted first would be a
+        // second copy of it.
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 6 && tokens.size() != 7)
+            return fail("relation needs a kind, a name, two mates and a ratio");
+
+        RelationType type = RelationType::Gear;
+        if (tokens[1] == "gear") type = RelationType::Gear;
+        else if (tokens[1] == "rack") type = RelationType::RackAndPinion;
+        else if (tokens[1] == "screw") type = RelationType::Screw;
+        else if (tokens[1] == "linear") type = RelationType::Linear;
+        else
+            return fail("'" + tokens[1] +
+                        "' is not a relation kind; use gear, rack, screw or linear");
+
+        const Mate* ends[2] = {assembly_->findMateNamed(tokens[3]),
+                               assembly_->findMateNamed(tokens[4])};
+        for (int i = 0; i < 2; ++i)
+            if (ends[i] == nullptr)
+                return fail("there is no mate called '" + tokens[3 + i] + "'");
+
+        double ratio = 0.0;
+        if (!ParseNumber(tokens[5], &ratio)) return fail("a relation ratio is a number");
+        bool reversed = false;
+        if (tokens.size() == 7) {
+            if (tokens[6] != "reversed")
+                return fail("the last word of a relation is `reversed`, or nothing");
+            reversed = true;
+        }
+
+        // WHICH FREEDOM, by the one rule the menu uses (§20.5) -- so a script
+        // and a click produce the same relation.
+        CoupledFreedom coupled[2];
+        const bool wantsRotation[2] = {RelationDriverIsRotation(type),
+                                       RelationDrivenIsRotation(type)};
+        for (int i = 0; i < 2; ++i) {
+            const std::size_t c =
+                FirstFreeComponentOfKind(FreedomOf(ends[i]->type()), wantsRotation[i]);
+            if (c >= kMateComponentCount)
+                return fail("'" + ends[i]->name() + "' is a " +
+                            std::string(toString(ends[i]->type())) + " mate, which has nothing to " +
+                            (wantsRotation[i] ? "turn" : "slide"));
+            coupled[i].mateId = ends[i]->id();
+            coupled[i].component = static_cast<MateComponent>(c);
+        }
+
+        if (const std::string why =
+                assembly_->whyRelationIsRefused(type, coupled[0], coupled[1]);
+            !why.empty())
+            return fail(why);
+        if (assembly_->findRelationNamed(tokens[2]) != nullptr)
+            return fail("there is already a relation called '" + tokens[2] + "'");
+        assembly_->addRelation(tokens[2], type, coupled[0], coupled[1], ratio, reversed);
+        note("relation " + tokens[1] + " " + tokens[2] + ": " + tokens[3] + " drives " +
+             tokens[4] + " at " + tokens[5] + (reversed ? ", reversed" : ""));
         return true;
     }
 

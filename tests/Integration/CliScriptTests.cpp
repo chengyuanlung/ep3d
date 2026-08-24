@@ -1317,6 +1317,128 @@ TEST(CliScriptTest, M24_CLI_001_TheWorkedHingeTurnsAndStaysTogether) {
         << "a half turn did not swing the arm: " << outcome.message;
 }
 
+// The four links of examples/gear-train.ep3ds, as a script prefix: a plate
+// with two pivots, an arm, and two hinges. Everything up to the relation.
+std::string GearTrainPrefix(const std::string& partPath) {
+    return std::string(
+               "sketch Plate\ntool rect\nclick -70 -25\nclick 70 25\npad Plate 8\n"
+               "connector Left -40 0 8 0 0 1\nconnector Right 40 0 8 0 0 1\n"
+               "part\n"
+               "sketch Bar\ntool rect\nclick 0 -5\nclick 60 5\npad Arm 6\n"
+               "connector Eye 0 0 0 0 0 1\n"
+               "save ") +
+           partPath + "\n"
+           "assembly GearTrain\n"
+           "insert Frame " + partPath + " Plate\n"
+           "insert First " + partPath + " Arm\n"
+           "insert Second " + partPath + " Arm\n"
+           "ground Frame\n"
+           "mate revolute Hinge1 Frame/Left First/Eye 0\n"
+           "mate revolute Hinge2 Frame/Right Second/Eye 0\n";
+}
+
+TEST(CliScriptTest, M31_CLI_001_AGearTurnsTheArmNOBODYDrove) {
+    // The regression test for examples/gear-train.ep3ds, and the M31 gate seen
+    // from where a user stands.
+    //
+    // WHAT CARRIES THE CLAIM: the second arm's centre of mass. Its angle is
+    // never typed. A relation that were stored and not applied -- the exact
+    // failure this milestone exists to avoid -- would let this script run,
+    // save, and leave the second arm sitting at zero, and every check that
+    // only read the log would pass.
+    //
+    // The arm is 60 x 10 x 6 with its Eye at one end, so its centre sits 30 mm
+    // out along itself, and the pivots are at -40 and +40.
+    ScratchIo part{"cli-gear-parts.ep3d"};
+    ScratchIo rig{"cli-gear-train.ep3da"};
+
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(GearTrainPrefix(part.path) +
+            "relation gear Reduction Hinge1 Hinge2 2\n"
+            "solve\nmeasure\n"
+            "drive Hinge1 45\nsolve\nmeasure\n"
+            "drive Hinge1 22.5\nsolve\nmeasure\n"
+            "save " + rig.path + "\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(rig.exists());
+
+    // At rest: 30 out from each pivot, along +x.
+    EXPECT_TRUE(LogMentions(outcome, "Second: volume = 3600 mm^3, centre = 70, 0, 11 mm"))
+        << outcome.message;
+    // Hinge1 at 45 puts Hinge2 at NINETY: 40 + 30*cos90 = 40, 30*sin90 = 30.
+    EXPECT_TRUE(LogMentions(outcome, "Second: volume = 3600 mm^3, centre = 40, 30, 11 mm"))
+        << "the gear did not carry the angle to the arm nobody drove: " << outcome.message;
+    // ...and half the input is half the output, which is the check that the
+    // ratio is a SCALE and not a single remembered pose.
+    EXPECT_TRUE(LogMentions(outcome,
+                            "Second: volume = 3600 mm^3, centre = 61.213203, 21.213203, 11 mm"))
+        << "the gear ratio is not a scale: " << outcome.message;
+
+    // ...AND THE DRIVER IS UNTOUCHED. A relation writes one end, not both.
+    EXPECT_TRUE(LogMentions(outcome,
+                            "First: volume = 3600 mm^3, centre = -18.786797, 21.213203, 11 mm"))
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M31_CLI_006_ARackTRAVELSItsMillimetresPerTurn) {
+    // THE OTHER ARITY OF FREEDOM KINDS, and the only test that builds a
+    // non-gear relation through a real command.
+    //
+    // Found by mutation: making a rack and pinion drive a ROTATION was killed
+    // by nothing, because every relation created through the script or the menu
+    // was a gear -- and for a gear "the driven end is a rotation" is true under
+    // both the right rule and the wrong one.
+    //
+    // The ratio for a rack is MILLIMETRES PER TURN, so one full turn of the
+    // pinion is one whole ratio of travel. Measured as travel, because the
+    // conversion from radians is the part a message cannot show.
+    ScratchIo part{"cli-rack.ep3d"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string(
+                "sketch Plate\ntool rect\nclick -70 -25\nclick 70 25\npad Plate 8\n"
+                "connector Left -40 0 8 0 0 1\nconnector Right 40 0 8 0 0 1\n"
+                "part\n"
+                "sketch Bar\ntool rect\nclick 0 -5\nclick 60 5\npad Arm 6\n"
+                "connector Eye 0 0 0 0 0 1\n"
+                "save ") + part.path + "\n"
+            "assembly RackRig\n"
+            "insert Frame " + part.path + " Plate\n"
+            "insert Pinion " + part.path + " Arm\n"
+            "insert Rack " + part.path + " Arm\n"
+            "ground Frame\n"
+            "mate revolute Turn Frame/Left Pinion/Eye 0\n"
+            "mate slider Slide Frame/Right Rack/Eye 0\n"
+            "relation rack Feed Turn Slide 10\n"
+            "solve\nmeasure\n"
+            "drive Turn 360\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+
+    // At rest the rack sits 30 mm out from the right pivot, 8 + 3 up.
+    EXPECT_TRUE(LogMentions(outcome, "Rack: volume = 3600 mm^3, centre = 70, 0, 11 mm"))
+        << outcome.message;
+    // ONE FULL TURN of the pinion, TEN MILLIMETRES of travel -- along the
+    // slider's shared +Z, which is what the connectors point along.
+    EXPECT_TRUE(LogMentions(outcome, "Rack: volume = 3600 mm^3, centre = 70, 0, 21 mm"))
+        << "one turn of a 10 mm-per-turn rack did not travel 10 mm: " << outcome.message;
+}
+
+TEST(CliScriptTest, M31_CLI_003_AGearOnAFreedomTheMateHasNotGotIsRefusedByName) {
+    // A slider has no rotation to gear to. Refused where the reason is near the
+    // cause, rather than accepted as a coupling that writes a component the
+    // solve pins to zero.
+    ScratchIo part{"cli-gear-parts3.ep3d"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(GearTrainPrefix(part.path) +
+            "insert Third " + part.path + " Arm\n"
+            "mate slider Slide Frame/Left Third/Eye 0\n"
+            "relation gear Bad Hinge1 Slide 2\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("nothing to turn"), std::string::npos) << outcome.message;
+}
+
 TEST(CliScriptTest, M24_CLI_002_AnAngleIsTypedInDEGREESAndStoredInRADIANS) {
     // The same conversion `draft` makes, in the same place, for the same
     // reason: a drawing says degrees and the model stores radians, and a
@@ -1485,6 +1607,44 @@ TEST(CliScriptTest, M25_CLI_001_TheWorkedFourBarTurnsAndTheOtherLinksFOLLOW) {
     // ...and the rocker moved, which is the linkage being a linkage.
     const std::vector<double> volumes = MeasuredVolumes(outcome);
     EXPECT_FALSE(volumes.empty());
+}
+
+TEST(CliScriptTest, M31_CLI_004_ARelationInsideACLOSEDLOOPIsExtraInformationTheLoopMustSatisfy) {
+    // THE ONE CASE A TREE CANNOT SHOW, and the mutation harness found it: every
+    // other relation test in this milestone is a tree, so the line that keeps a
+    // relation-driven freedom OUT of the loop solver's unknowns was killed by
+    // nothing (M31-04 survived).
+    //
+    // A four-bar is one degree of freedom. Drive J1 and the whole linkage is
+    // decided -- including J4. So gearing J1 to J4 says something the loop has
+    // already said, and at a ratio the linkage does not have, the two
+    // statements CONTRADICT.
+    //
+    // The right answer is to say so. If the relation-driven freedom were still
+    // an unknown, the solver would be free to re-choose J4, the loop would
+    // close beautifully, and the relation the user asked for would have been
+    // silently discarded -- a mechanism on screen that does not do what its own
+    // model says it does.
+    ScratchIo parts{"cli-geared-loop.ep3d"};
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(FourBarParts(parts.path) + FourBarAssembly(parts.path) +
+            "relation gear Sync J1 J4 2\n"
+            "drive J1 40\nsolve\n");
+    EXPECT_FALSE(outcome.ok)
+        << "a geared loop that cannot close reported success: " << outcome.message;
+    EXPECT_NE(outcome.message.find("does not close"), std::string::npos) << outcome.message;
+}
+
+TEST(CliScriptTest, M31_CLI_005_TheSAMELoopSolvesFineWithoutTheRelation) {
+    // ...or the test above proves only that this rig was broken to begin with.
+    // Same parts, same mates, same driven angle, no relation.
+    ScratchIo parts{"cli-ungeared-loop.ep3d"};
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(FourBarParts(parts.path) + FourBarAssembly(parts.path) +
+            "drive J1 40\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
 }
 
 TEST(CliScriptTest, M25_CLI_002_AMechanismWithNoSolverSaysSoByName) {
