@@ -252,6 +252,7 @@ public:
     void selectNamedPositionForTesting(const QString& name);
     ObjectId selectedExplodeViewForTesting() const { return selectedExplodeView(); }
     std::size_t undoDepthForTesting() const;
+    void fitAllForTesting();
     std::vector<ObjectId> allInstancesForTesting() const;
     Vec3 instanceWorldPlaceForTesting(ObjectId instanceId) const;
     // Freedoms the mates LEFT this instance, or -1 when the solve did not say.

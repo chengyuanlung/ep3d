@@ -791,6 +791,8 @@ void MainWindow::selectNamedPositionForTesting(const QString& name) {
             selectObject(found->id());
 }
 
+void MainWindow::fitAllForTesting() { onFitAllRequested(); }
+
 std::size_t MainWindow::undoDepthForTesting() const {
     return document_ != nullptr ? document_->undoDepth() : 0;
 }

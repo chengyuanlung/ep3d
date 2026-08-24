@@ -57,7 +57,7 @@ OutlineNode AssemblyOutline::build(const std::set<ObjectId>& hiddenIds) const {
     root.id = document.id();
     root.name = document.name();
     root.typeLabel = "Assembly";
-    root.kind = OutlineKind::Document;
+    root.kind = OutlineKind::Assembly;
     root.state = OutlineState::Valid;
 
     const AssemblyDocument::MateSolveReport& report = document.mateSolveReport();

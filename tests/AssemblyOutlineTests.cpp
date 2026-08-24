@@ -54,7 +54,10 @@ TEST(AssemblyOutlineTest, M27_TREE_001_TheTreeIsInstancesAndMatesNotAPartsRows) 
     const OutlineNode root = outline.build();
 
     EXPECT_EQ(root.typeLabel, "Assembly");
-    EXPECT_EQ(root.kind, OutlineKind::Document);
+    // [Asm], not [Part]. The tag a reader sees comes from the kind, and an
+    // assembly whose root said "[Part]" contradicted the title bar, the
+    // status bar and the menu that was enabled.
+    EXPECT_EQ(root.kind, OutlineKind::Assembly);
 
     // The two things an assembly is made of, each under its own group.
     const OutlineNode* instances = Find(root, "Instances");

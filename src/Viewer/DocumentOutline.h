@@ -38,6 +38,11 @@ enum class OutlineKind {
     // M27: what an ASSEMBLY's tree is made of. In the shared vocabulary rather
     // than a second enum, because the widget, the state markers and the
     // selection are shared -- only the BUILDER differs (see AssemblyOutline).
+    // The ROOT of an assembly. Not Document, because the tag a reader sees
+    // comes from the kind -- and an assembly whose root row says "[Part]"
+    // is the tree contradicting the title bar, the status bar and the menu
+    // that is enabled. Found by looking at it.
+    Assembly,
     Instance, Mate, NamedPosition, ExplodeView,
     Other
 };

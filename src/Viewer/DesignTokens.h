@@ -117,6 +117,7 @@ inline QString kindTag(OutlineKind kind) {
         // M27, assemblies. [Mte] rather than [Mat] for a mate: Material got
         // there first, and two tags a reader cannot tell apart is worse than
         // an unfamiliar one.
+        case OutlineKind::Assembly: return QStringLiteral("[Asm]");
         case OutlineKind::Instance: return QStringLiteral("[Ins]");
         case OutlineKind::Mate: return QStringLiteral("[Mte]");
         case OutlineKind::NamedPosition: return QStringLiteral("[Pos]");
