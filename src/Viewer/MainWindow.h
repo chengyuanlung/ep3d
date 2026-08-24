@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/Assembly/Mate.h"
 #include "Core/Document/CadDocument.h"
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/BooleanFeature.h"
@@ -156,6 +157,43 @@ public:
 
     // Which instance the tree has selected, or kInvalidObjectId.
     ObjectId selectedInstance() const;
+    // Every instance the tree has selected, IN DOCUMENT ORDER. A mate takes
+    // two, and which is LEADING decides which one moves.
+    std::vector<ObjectId> selectedInstances() const;
+
+    // --- Mates (M29) --------------------------------------------------------
+    //
+    // WHAT AN INSTANCE OFFERS TO BE MATED BY. Its part's connectors, re-read
+    // from the part file on every rebuild -- roadmap §21: a connector is
+    // defined ONCE on the part ("the shaft axis"), and every instance of that
+    // part in every assembly has it. The shell lists them; it does not invent
+    // them.
+    std::vector<std::string> connectorsOfInstance(ObjectId instanceId) const;
+
+    // Mates two instances by naming a connector on each.
+    //
+    // The TYPE is the user's, never inferred. Roadmap §20.6 is explicit that
+    // dropping one connector on another opens a dialog to choose rather than
+    // guessing -- a mate picked for the user is a constraint they did not ask
+    // for, and every one of the seven types is a different machine.
+    QString createMateCommand(MateType type, ObjectId leadingInstance,
+                              const QString& leadingConnector, ObjectId followingInstance,
+                              const QString& followingConnector);
+
+    // Deletes the selected mate. Nothing else goes with it -- a mate holds
+    // instances, it does not own them.
+    QString deleteSelectedMate();
+
+    // Which mate the tree has selected, or kInvalidObjectId.
+    ObjectId selectedMate() const;
+
+    // The value of a mate's free component, and how to change it. Driving a
+    // mate is how a mechanism is moved without dragging it (M25).
+    QString driveSelectedMate(double value);
+    // Limits on the same component: below, above. Clamped, never refused
+    // (roadmap §22 -- a value outside its limits is held at the limit).
+    QString limitSelectedMate(double minimum, double maximum);
+    QString clearLimitOnSelectedMate();
 
     // --- Readbacks, so a self test can drive the whole workflow -------------
     //
@@ -168,6 +206,24 @@ public:
     std::vector<std::string> instanceNamesForTesting() const;
     std::vector<Vec3> instancePlacesForTesting() const;
     void selectFirstInstanceForTesting();
+    void selectFirstMateForTesting();
+    // Selects several tree rows, which is what a mate consumes and what
+    // selectObject() cannot do.
+    void selectInstancesForTesting(const std::vector<ObjectId>& ids);
+    // The value a mate currently holds, for asserting that a driven one
+    // KEEPS it across a solve.
+    double mateValueForTesting() const;
+    bool mateIsDrivenForTesting() const;
+    std::vector<ObjectId> selectedInstancesForTesting() const { return selectedInstances(); }
+    bool recomputeForTesting();
+    std::vector<ObjectId> allInstancesForTesting() const;
+    Vec3 instanceWorldPlaceForTesting(ObjectId instanceId) const;
+    // Freedoms the mates LEFT this instance, or -1 when the solve did not say.
+    int instanceFreedomForTesting(ObjectId instanceId) const;
+    // Drive and limit WITHOUT needing the tree selection, which a self test
+    // cannot click: they select the one mate and then do what the menu does.
+    QString driveSelectedMateForTesting(double value);
+    QString limitSelectedMateForTesting(double minimum, double maximum);
     // WHAT KIND of document this window is looking at (M27). A readback,
     // so a self test can assert that File > Open read the file right.
     DocumentType openedDocumentType() const;
@@ -500,6 +556,10 @@ private slots:
     void onGroundInstanceRequested();
     void onPatternInstanceRequested();
     void onDeleteInstanceRequested();
+    void onAddMateRequested();
+    void onDeleteMateRequested();
+    void onDriveMateRequested();
+    void onLimitMateRequested();
     void onSaveRequested();
     void onSaveAsRequested();
     void onOpenRequested();
@@ -721,6 +781,10 @@ private:
     QAction* groundInstanceAction_ = nullptr;
     QAction* patternInstanceAction_ = nullptr;
     QAction* deleteInstanceAction_ = nullptr;
+    QAction* addMateAction_ = nullptr;
+    QAction* deleteMateAction_ = nullptr;
+    QAction* driveMateAction_ = nullptr;
+    QAction* limitMateAction_ = nullptr;
     QMenu* assemblyMenu_ = nullptr;
 
     QDockWidget* treeDock_ = nullptr;

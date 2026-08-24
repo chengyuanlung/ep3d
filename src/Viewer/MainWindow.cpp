@@ -201,6 +201,32 @@ void MainWindow::buildMenus() {
             &MainWindow::onPatternInstanceRequested);
 
     assemblyMenu_->addSeparator();
+    addMateAction_ = assemblyMenu_->addAction(QStringLiteral("Add &Mate..."));
+    addMateAction_->setToolTip(
+        QStringLiteral("Mate the two selected instances by naming a connector on each.\n"
+                       "The TYPE is yours to choose -- a mate picked for you is a "
+                       "constraint you did not ask for."));
+    connect(addMateAction_, &QAction::triggered, this, &MainWindow::onAddMateRequested);
+
+    driveMateAction_ = assemblyMenu_->addAction(QStringLiteral("Dri&ve Mate..."));
+    driveMateAction_->setToolTip(
+        QStringLiteral("Set the selected mate's free value and hold it there.\n"
+                       "This is how a mechanism is moved without dragging it."));
+    connect(driveMateAction_, &QAction::triggered, this, &MainWindow::onDriveMateRequested);
+
+    limitMateAction_ = assemblyMenu_->addAction(QStringLiteral("&Limit Mate..."));
+    limitMateAction_->setToolTip(
+        QStringLiteral("Stop the selected mate at a lower and an upper bound.\n"
+                       "A value outside them is held at the nearer end, not refused."));
+    connect(limitMateAction_, &QAction::triggered, this, &MainWindow::onLimitMateRequested);
+
+    deleteMateAction_ = assemblyMenu_->addAction(QStringLiteral("Delete M&ate"));
+    deleteMateAction_->setToolTip(
+        QStringLiteral("Delete the selected mate.\n"
+                       "The instances it held stay -- a mate holds them, it does not own them."));
+    connect(deleteMateAction_, &QAction::triggered, this, &MainWindow::onDeleteMateRequested);
+
+    assemblyMenu_->addSeparator();
     deleteInstanceAction_ = assemblyMenu_->addAction(QStringLiteral("&Delete Instance"));
     deleteInstanceAction_->setToolTip(
         QStringLiteral("Delete the selected instance.\n"
@@ -676,6 +702,295 @@ void MainWindow::selectFirstInstanceForTesting() {
         if (!assembly->instances().empty()) selectObject(assembly->instances().front()->id());
 }
 
+std::vector<ObjectId> MainWindow::selectedInstances() const {
+    std::vector<ObjectId> found;
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr || tree_ == nullptr) return found;
+    std::set<ObjectId> chosen;
+    for (const QTreeWidgetItem* item : tree_->selectedItems())
+        chosen.insert(static_cast<ObjectId>(item->data(0, kIdRole).toULongLong()));
+    // IN DOCUMENT ORDER, for the reason selectedSketches() gives: Qt does not
+    // keep click order, and a mate whose LEADING instance depended on an order
+    // nobody can see would place the wrong part. Document order is the order
+    // the instances were inserted in, which is what the tree shows.
+    for (const Instance* instance : assembly->instances())
+        if (chosen.count(instance->id()) != 0) found.push_back(instance->id());
+    return found;
+}
+
+void MainWindow::selectInstancesForTesting(const std::vector<ObjectId>& ids) {
+    if (tree_ == nullptr) return;
+    updatingWidgets_ = true;
+    tree_->clearSelection();
+    const std::function<void(QTreeWidgetItem*)> mark = [&](QTreeWidgetItem* item) {
+        const ObjectId id = static_cast<ObjectId>(item->data(0, kIdRole).toULongLong());
+        for (const ObjectId wanted : ids)
+            if (wanted == id) item->setSelected(true);
+        for (int i = 0; i < item->childCount(); ++i) mark(item->child(i));
+    };
+    for (int i = 0; i < tree_->topLevelItemCount(); ++i) mark(tree_->topLevelItem(i));
+    updatingWidgets_ = false;
+    refreshCommandStates();
+}
+
+bool MainWindow::recomputeForTesting() {
+    return document_ != nullptr && document_->recompute().success;
+}
+
+bool MainWindow::mateIsDrivenForTesting() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr || assembly->mates().empty()) return false;
+    return assembly->mates().front()->isDriven();
+}
+
+double MainWindow::mateValueForTesting() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr || assembly->mates().empty()) return 0.0;
+    return assembly->mates().front()->value();
+}
+
+void MainWindow::selectFirstMateForTesting() {
+    if (const AssemblyDocument* assembly = AsAssembly(document_))
+        if (!assembly->mates().empty()) selectObject(assembly->mates().front()->id());
+}
+
+std::vector<ObjectId> MainWindow::allInstancesForTesting() const {
+    std::vector<ObjectId> ids;
+    if (const AssemblyDocument* assembly = AsAssembly(document_))
+        for (const Instance* instance : assembly->instances()) ids.push_back(instance->id());
+    return ids;
+}
+
+Vec3 MainWindow::instanceWorldPlaceForTesting(ObjectId instanceId) const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return Vec3{};
+    return assembly->instanceWorldTransform(instanceId).translation;
+}
+
+int MainWindow::instanceFreedomForTesting(ObjectId instanceId) const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return -1;
+    for (const auto& freedom : assembly->mateSolveReport().freedoms)
+        if (freedom.instanceId == instanceId)
+            return freedom.rotational + freedom.translational;
+    return -1;
+}
+
+QString MainWindow::driveSelectedMateForTesting(double value) {
+    selectFirstMateForTesting();
+    return driveSelectedMate(value);
+}
+
+QString MainWindow::limitSelectedMateForTesting(double minimum, double maximum) {
+    selectFirstMateForTesting();
+    return limitSelectedMate(minimum, maximum);
+}
+
+ObjectId MainWindow::selectedMate() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return kInvalidObjectId;
+    return assembly->findMate(selectedId_) != nullptr ? selectedId_ : kInvalidObjectId;
+}
+
+std::vector<std::string> MainWindow::connectorsOfInstance(ObjectId instanceId) const {
+    std::vector<std::string> names;
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return names;
+    const Instance* instance = assembly->findInstance(instanceId);
+    if (instance == nullptr) return names;
+    // ITS PART'S connectors, re-read on every rebuild. The shell lists what the
+    // part offers; it does not invent connectors, because a connector belongs
+    // to the part that has the feature (§21) and an assembly cannot write into
+    // a part file.
+    for (const Instance::MateConnector& connector : instance->connectors())
+        names.push_back(connector.name);
+    return names;
+}
+
+QString MainWindow::createMateCommand(MateType type, ObjectId leadingInstance,
+                                      const QString& leadingConnector,
+                                      ObjectId followingInstance,
+                                      const QString& followingConnector) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return say(QStringLiteral("Only an assembly can hold mates."));
+
+    const Instance* leading = assembly->findInstance(leadingInstance);
+    const Instance* following = assembly->findInstance(followingInstance);
+    if (leading == nullptr || following == nullptr)
+        return say(QStringLiteral("A mate needs two instances."));
+    if (leadingInstance == followingInstance)
+        return say(QStringLiteral("A mate holds two different instances; that is one."));
+
+    // NAMED CONNECTORS THAT EXIST, checked here rather than deep in the solve.
+    // A mate that resolves to nothing fails at solve time naming an id, which
+    // is a message about the wrong thing.
+    if (leading->findConnector(leadingConnector.toStdString()) == nullptr)
+        return say(QStringLiteral("%1 has no connector called %2")
+                       .arg(QString::fromStdString(leading->name()), leadingConnector));
+    if (following->findConnector(followingConnector.toStdString()) == nullptr)
+        return say(QStringLiteral("%1 has no connector called %2")
+                       .arg(QString::fromStdString(following->name()), followingConnector));
+
+    std::string name = std::string(toString(type));
+    for (int suffix = 2; assembly->findMateNamed(name) != nullptr; ++suffix)
+        name = std::string(toString(type)) + " " + std::to_string(suffix);
+
+    document_->beginTransaction("Add mate " + name);
+    assembly->addMate(name, type, leadingInstance, leadingConnector.toStdString(),
+                      followingInstance, followingConnector.toStdString());
+    if (!document_->commitTransaction())
+        return say(QStringLiteral("The document refused that mate."));
+
+    // SOLVED, then reported. A mate that cannot be solved -- because nothing is
+    // grounded, or because it conflicts -- is something the user has to hear
+    // about now, and the solver already says which.
+    (void)document_->recompute();
+    refreshAll();
+    const AssemblyDocument::MateSolveReport& report = assembly->mateSolveReport();
+    if (!report.ok)
+        return say(QStringLiteral("%1 added, but the assembly will not solve: %2")
+                       .arg(QString::fromStdString(name),
+                            QString::fromStdString(report.message)));
+    return say(QStringLiteral("Mated %1 / %2 to %3 / %4 (%5)")
+                   .arg(QString::fromStdString(leading->name()), leadingConnector,
+                        QString::fromStdString(following->name()), followingConnector,
+                        QString::fromUtf8(std::string(toString(type)).c_str())));
+}
+
+QString MainWindow::deleteSelectedMate() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId mateId = selectedMate();
+    if (assembly == nullptr || mateId == kInvalidObjectId)
+        return say(QStringLiteral("Select a mate to delete."));
+    const Mate* mate = assembly->findMate(mateId);
+    const QString name =
+        mate != nullptr ? QString::fromStdString(mate->name()) : QStringLiteral("it");
+
+    document_->beginTransaction("Delete mate");
+    const bool removed = document_->removeObject(mateId);
+    if (!removed || !document_->commitTransaction())
+        return say(QStringLiteral("%1 could not be deleted.").arg(name));
+    (void)document_->recompute();
+    selectedId_ = kInvalidObjectId;
+    refreshAll();
+    // NOTHING ELSE GOES. A mate holds two instances; it does not own them, so
+    // deleting it frees them rather than taking them with it -- which is the
+    // opposite of deleting an instance, and worth saying so nobody has to guess.
+    return say(QStringLiteral("Deleted %1. The instances it held are free again.").arg(name));
+}
+
+QString MainWindow::driveSelectedMate(double value) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId mateId = selectedMate();
+    if (assembly == nullptr || mateId == kInvalidObjectId)
+        return say(QStringLiteral("Select a mate to drive."));
+    const Mate* mate = assembly->findMate(mateId);
+    if (mate == nullptr) return say(QStringLiteral("That mate is gone."));
+    if (FreedomOf(mate->type()).total() == 0)
+        return say(QStringLiteral("A %1 mate leaves nothing to drive.")
+                       .arg(QString::fromUtf8(std::string(toString(mate->type())).c_str())));
+
+    document_->beginTransaction("Drive mate");
+    // DRIVEN, and said so in the model -- not merely given a value. A value set
+    // on a mate the solver is free to move is a value the next solve overwrites,
+    // which is the defect examples/four-bar.ep3ds shipped with (ADR-M25-006).
+    const bool set = assembly->setMateValue(mateId, value) &&
+                     assembly->setMateDriven(mateId, true);
+    if (!set || !document_->commitTransaction())
+        return say(QStringLiteral("That mate would not take that value."));
+    (void)document_->recompute();
+    refreshAll();
+    const AssemblyDocument::MateSolveReport& report = assembly->mateSolveReport();
+    if (!report.ok)
+        return say(QStringLiteral("Driven, but the assembly will not solve: %1")
+                       .arg(QString::fromStdString(report.message)));
+    return say(QStringLiteral("%1 driven to %2")
+                   .arg(QString::fromStdString(mate->name()))
+                   .arg(value, 0, 'f', 3));
+}
+
+QString MainWindow::limitSelectedMate(double minimum, double maximum) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId mateId = selectedMate();
+    if (assembly == nullptr || mateId == kInvalidObjectId)
+        return say(QStringLiteral("Select a mate to limit."));
+    if (minimum > maximum)
+        return say(QStringLiteral("A limit's lower bound cannot be above its upper one."));
+    const Mate* mate = assembly->findMate(mateId);
+    if (mate == nullptr) return say(QStringLiteral("That mate is gone."));
+
+    // THE FIRST FREE COMPONENT, which is the one a single-freedom mate means.
+    const MateFreedom freedom = FreedomOf(mate->type());
+    int component = -1;
+    for (int i = 0; i < 6; ++i)
+        if (freedom.free[i]) { component = i; break; }
+    if (component < 0)
+        return say(QStringLiteral("A %1 mate has no freedom to limit.")
+                       .arg(QString::fromUtf8(std::string(toString(mate->type())).c_str())));
+
+    document_->beginTransaction("Limit mate");
+    const bool set = assembly->setMateLimit(mateId, static_cast<MateComponent>(component),
+                                            minimum, maximum);
+    if (!set || !document_->commitTransaction())
+        return say(QStringLiteral("That limit was refused."));
+    (void)document_->recompute();
+    refreshAll();
+    // CLAMPED, NOT REFUSED (§22). A driven value outside its limits is held at
+    // the limit, so a user who types 200 on a 0..90 hinge sees 90 and the arm
+    // at 90 -- not an error and not a hinge bent past its stop.
+    return say(QStringLiteral("%1 limited to %2 .. %3. A value outside that is held at the "
+                              "nearer end rather than refused.")
+                   .arg(QString::fromStdString(mate->name()))
+                   .arg(minimum, 0, 'f', 3)
+                   .arg(maximum, 0, 'f', 3));
+}
+
+QString MainWindow::clearLimitOnSelectedMate() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId mateId = selectedMate();
+    if (assembly == nullptr || mateId == kInvalidObjectId)
+        return say(QStringLiteral("Select a mate."));
+    const Mate* mate = assembly->findMate(mateId);
+    if (mate == nullptr) return say(QStringLiteral("That mate is gone."));
+    const MateFreedom freedom = FreedomOf(mate->type());
+    int component = -1;
+    for (int i = 0; i < 6; ++i)
+        if (freedom.free[i]) { component = i; break; }
+    if (component < 0) return say(QStringLiteral("That mate has no limit to clear."));
+
+    document_->beginTransaction("Clear mate limit");
+    assembly->clearMateLimit(mateId, static_cast<MateComponent>(component));
+    if (!document_->commitTransaction()) return say(QStringLiteral("That was refused."));
+    (void)document_->recompute();
+    refreshAll();
+    return say(QStringLiteral("%1 moves freely again").arg(QString::fromStdString(mate->name())));
+}
+
 QString MainWindow::insertInstanceCommand(const QString& sourcePath, const QString& bodyName) {
     const auto say = [this](const QString& message) {
         statusLeft_->setText(message);
@@ -855,6 +1170,97 @@ QString MainWindow::deleteSelectedInstance() {
 }
 
 // --- The slots: the dialogs, and nothing else --------------------------------
+
+void MainWindow::onAddMateRequested() {
+    const std::vector<ObjectId> chosen = selectedInstances();
+    if (chosen.size() != 2) return;
+
+    // THE DIALOG IS THREE CHOICES, and the type is one of them. Roadmap §20.6
+    // is explicit that EP3D must not decide the mate type for the user: every
+    // one of the seven is a different machine, and a hinge chosen for you when
+    // you wanted a slider is a constraint you did not ask for.
+    //
+    // Assembled from QInputDialog rather than a designed form, which is a real
+    // limitation and is named in the milestone's own notes: there is no
+    // red-title "cannot commit yet" state (§10.1) because there is no title to
+    // colour. What IS true is that each step can be cancelled and nothing
+    // happens, and the command below re-checks every input anyway.
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return;
+
+    static const struct { const char* label; MateType type; } kTypes[] = {
+        {"Fastened -- no freedom left", MateType::Fastened},
+        {"Revolute -- turns about the shared axis", MateType::Revolute},
+        {"Slider -- slides along the shared axis", MateType::Slider},
+        {"Cylindrical -- turns and slides", MateType::Cylindrical},
+        {"Ball -- turns about a shared point", MateType::Ball},
+        {"Planar -- slides and spins in a plane", MateType::Planar},
+        {"Parallel -- axes stay parallel", MateType::Parallel},
+    };
+    QStringList typeLabels;
+    for (const auto& entry : kTypes) typeLabels << QString::fromUtf8(entry.label);
+    bool ok = false;
+    const QString pickedType =
+        QInputDialog::getItem(this, QStringLiteral("Add Mate"), QStringLiteral("Mate type"),
+                              typeLabels, 1, false, &ok);
+    if (!ok) return;
+    MateType type = MateType::Revolute;
+    for (const auto& entry : kTypes)
+        if (pickedType == QString::fromUtf8(entry.label)) type = entry.type;
+
+    const auto pickConnector = [&](ObjectId instanceId, const QString& which) -> QString {
+        const std::vector<std::string> names = connectorsOfInstance(instanceId);
+        const Instance* instance = assembly->findInstance(instanceId);
+        const QString owner =
+            instance != nullptr ? QString::fromStdString(instance->name()) : which;
+        if (names.empty()) {
+            // NAMED, not silent. A part with no connectors cannot be mated, and
+            // the fix is in the PART (§21) -- so the message says where to go.
+            statusLeft_->setText(
+                QStringLiteral("%1 has no mate connectors. Add one to its part first.")
+                    .arg(owner));
+            return QString();
+        }
+        QStringList options;
+        for (const std::string& name : names) options << QString::fromStdString(name);
+        bool chose = false;
+        const QString picked = QInputDialog::getItem(
+            this, QStringLiteral("Add Mate"),
+            QStringLiteral("Connector on %1").arg(owner), options, 0, false, &chose);
+        return chose ? picked : QString();
+    };
+
+    const QString leading = pickConnector(chosen[0], QStringLiteral("the first"));
+    if (leading.isEmpty()) return;
+    const QString following = pickConnector(chosen[1], QStringLiteral("the second"));
+    if (following.isEmpty()) return;
+
+    createMateCommand(type, chosen[0], leading, chosen[1], following);
+}
+
+void MainWindow::onDeleteMateRequested() { deleteSelectedMate(); }
+
+void MainWindow::onDriveMateRequested() {
+    bool ok = false;
+    const double value = QInputDialog::getDouble(
+        this, QStringLiteral("Drive Mate"),
+        QStringLiteral("Value (degrees for a turn, mm for a slide)"), 0.0, -1e6, 1e6, 3, &ok);
+    if (!ok) return;
+    driveSelectedMate(value);
+}
+
+void MainWindow::onLimitMateRequested() {
+    bool ok = false;
+    const double lower = QInputDialog::getDouble(this, QStringLiteral("Limit Mate"),
+                                                 QStringLiteral("Lower bound"), 0.0, -1e6, 1e6,
+                                                 3, &ok);
+    if (!ok) return;
+    const double upper = QInputDialog::getDouble(this, QStringLiteral("Limit Mate"),
+                                                 QStringLiteral("Upper bound"), 90.0, -1e6, 1e6,
+                                                 3, &ok);
+    if (!ok) return;
+    limitSelectedMate(lower, upper);
+}
 
 void MainWindow::onInsertInstanceRequested() {
     const QString path = QFileDialog::getOpenFileName(
@@ -1620,6 +2026,16 @@ void MainWindow::refreshCommandStates() {
             patternInstanceAction_->setEnabled(isAssembly && haveInstance);
         if (deleteInstanceAction_ != nullptr)
             deleteInstanceAction_->setEnabled(isAssembly && haveInstance);
+
+        // A MATE NEEDS TWO INSTANCES SELECTED, which is the selection the
+        // command actually consumes -- so the menu offers it exactly when it
+        // would work, rather than refusing after the click.
+        const bool haveTwo = isAssembly && selectedInstances().size() == 2;
+        const bool haveMate = isAssembly && selectedMate() != kInvalidObjectId;
+        if (addMateAction_ != nullptr) addMateAction_->setEnabled(haveTwo);
+        if (driveMateAction_ != nullptr) driveMateAction_->setEnabled(haveMate);
+        if (limitMateAction_ != nullptr) limitMateAction_->setEnabled(haveMate);
+        if (deleteMateAction_ != nullptr) deleteMateAction_->setEnabled(haveMate);
     }
 
     if (partOrNull() == nullptr) {

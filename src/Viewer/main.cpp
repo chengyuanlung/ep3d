@@ -3847,6 +3847,184 @@ int main(int argc, char** argv) {
                     fail("the mate outlived the instance it named");
             }
 
+            // --- M29's GATE: mate a hinge with the SHELL, and turn it -------
+            //
+            // The parts come from examples/hinge.ep3ds, which defines their
+            // connectors ON THE PARTS (§21). What is built here is the ASSEMBLY
+            // side: insert, ground, mate, drive, limit -- through the command
+            // methods, because the dialogs are the only part a self test cannot
+            // work.
+            {
+                const QString base = QDir::tempPath() +
+                                     QStringLiteral("/ep3d-selftest/m29-bracket.ep3d");
+                const QString arm = QDir::tempPath() +
+                                    QStringLiteral("/ep3d-selftest/m29-arm.ep3d");
+                {
+                    // TWO SEPARATE DOCUMENTS, one per file. `part` in the
+                    // script language switches BACK to the same part document
+                    // rather than starting a new one -- so writing both halves
+                    // in one script gave the arm file the bracket's connector
+                    // too, and the gate caught it.
+                    const auto buildPart = [&](const QString& scriptName, const std::string& body,
+                                               const std::string& connector,
+                                               const QString& savePath) {
+                        const QString script =
+                            QDir::tempPath() + QStringLiteral("/ep3d-selftest/") + scriptName;
+                        QFile out(script);
+                        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                            fail("could not write one of M29's part scripts");
+                        out.write(("sketch S\ntool rect\nclick -20 -10\nclick 44 10\n"
+                                   "pad " + body + " 12 as " + body + "T\n" + connector +
+                                   "\nsolve\nsave " + savePath.toStdString() + "\n").c_str());
+                        out.close();
+                        window.newDocumentCommand();
+                        const QString made = window.runScriptFile(script);
+                        if (made.contains(QStringLiteral("stopped")))
+                            fail(("M29's part did not build: " + made.toStdString()).c_str());
+                    };
+                    // Their +Z SHARED, which is what makes a revolute a hinge
+                    // rather than a random rotation (examples/hinge.ep3ds says
+                    // the same).
+                    buildPart(QStringLiteral("m29-bracket.ep3ds"), "Bracket",
+                              "connector Pivot 0 0 12 0 0 1", base);
+                    // OFF THE ARM'S OWN ORIGIN. A connector AT the origin means
+                    // the hinge axis runs through it, so turning the arm moves
+                    // nothing measurable -- which is how the first draft of
+                    // this gate managed to assert a rotation that never showed.
+                    buildPart(QStringLiteral("m29-arm.ep3ds"), "Arm",
+                              "connector Eye -20 0 0 0 0 1", arm);
+                }
+
+                window.adoptAssemblyForTesting("M29Hinge");
+                if (!window.insertInstanceCommand(base, QStringLiteral("Bracket"))
+                         .contains(QStringLiteral("Inserted")))
+                    fail("M29 could not insert the bracket");
+                if (!window.insertInstanceCommand(arm, QStringLiteral("Arm"))
+                         .contains(QStringLiteral("Inserted")))
+                    fail("M29 could not insert the arm");
+
+                const std::vector<ObjectId> made = window.allInstancesForTesting();
+                if (made.size() != 2) fail("M29 did not end up with two instances");
+
+                // WHAT EACH OFFERS TO BE MATED BY -- its part's connectors,
+                // re-read from the part file (§21). The shell lists them; it
+                // does not invent them.
+                if (window.connectorsOfInstance(made[0]).size() != 1)
+                    fail("the bracket instance does not offer its part's connector");
+                if (window.connectorsOfInstance(made[1]).size() != 1)
+                    fail("the arm instance does not offer its part's connector");
+
+                // SOMETHING HAS TO BE FIXED, or a mate says where a thing is
+                // relative to nothing.
+                window.selectObject(made[0]);
+                window.toggleGroundSelectedInstance();
+
+                // A CONNECTOR THAT IS NOT THERE is refused BY NAME, before the
+                // solve -- a mate that resolves to nothing fails later naming
+                // an id, which is a message about the wrong thing.
+                const QString wrong = window.createMateCommand(
+                    MateType::Revolute, made[0], QStringLiteral("NoSuchConnector"), made[1],
+                    QStringLiteral("Eye"));
+                if (!wrong.contains(QStringLiteral("no connector called")))
+                    fail(("a bad connector name was not refused by name: " +
+                          wrong.toStdString())
+                             .c_str());
+                if (window.mateCountForTesting() != 0)
+                    fail("a refused mate was created anyway");
+
+                // ...AND THE REAL ONE.
+                const QString mated = window.createMateCommand(
+                    MateType::Revolute, made[0], QStringLiteral("Pivot"), made[1],
+                    QStringLiteral("Eye"));
+                if (!mated.contains(QStringLiteral("Mated")))
+                    fail(("the hinge would not mate: " + mated.toStdString()).c_str());
+                if (window.mateCountForTesting() != 1) fail("the mate was not created");
+
+                // IT IS A HINGE, not a weld: the arm has exactly one freedom
+                // left, and it turns. §20.3 asks for this PER INSTANCE.
+                if (window.instanceFreedomForTesting(made[1]) != 1)
+                    fail("a revolute mate did not leave the arm exactly one degree of freedom");
+
+                // DRIVEN, and the arm actually moves. Asserting the message
+                // alone is what M28's mutation run caught, so this asks the
+                // geometry.
+                const Vec3 atZero = window.instanceWorldPlaceForTesting(made[1]);
+                const QString driven = window.driveSelectedMateForTesting(0.6);
+                if (!driven.contains(QStringLiteral("driven")))
+                    fail(("the mate would not drive: " + driven.toStdString()).c_str());
+                const Vec3 turned = window.instanceWorldPlaceForTesting(made[1]);
+                if (std::fabs(atZero.x - turned.x) < 1e-6 &&
+                    std::fabs(atZero.y - turned.y) < 1e-6 &&
+                    std::fabs(atZero.z - turned.z) < 1e-6)
+                    fail("the mate reported driving and the arm did not move");
+
+                // ...AND THE VALUE STICKS. A value set on a mate the solver is
+                // still free to move is a value the next solve overwrites --
+                // which is the defect examples/four-bar.ep3ds shipped with
+                // (ADR-M25-006). Driving must MARK the mate driven, and the
+                // only way to see the difference is to solve again and look.
+                (void)window.recomputeForTesting();
+                if (std::fabs(window.mateValueForTesting() - 0.6) > 1e-6)
+                    fail("a driven mate did not keep its value across a solve");
+                // THE FLAG, not only its consequence -- and that is a deliberate
+                // weakening, said out loud. The consequence (a solve overwriting
+                // the value) is only observable in a CLOSED LOOP, which is what
+                // ADR-M25-006 is about; a single revolute off a grounded base
+                // has nothing to overwrite it, so the value check above passes
+                // either way. Asserting the flag pins the intent until this gate
+                // grows a loop to show it in.
+                if (!window.mateIsDrivenForTesting())
+                    fail("driving a mate did not mark it driven, so a loop would overwrite it");
+
+                // AN INSTANCE CANNOT BE MATED TO ITSELF. A mate holds two
+                // things; one thing is not two, and the solve would be
+                // trivially satisfied by doing nothing.
+                const QString itself = window.createMateCommand(
+                    MateType::Revolute, made[1], QStringLiteral("Eye"), made[1],
+                    QStringLiteral("Eye"));
+                if (!itself.contains(QStringLiteral("that is one")))
+                    fail(("mating an instance to itself was allowed: " + itself.toStdString())
+                             .c_str());
+
+                // TWO SELECTED ROWS COME BACK IN DOCUMENT ORDER, whichever
+                // order they were clicked in. Which instance is LEADING decides
+                // which one the mate moves, and Qt does not keep click order --
+                // so an answer that depended on it would place the wrong part
+                // on alternate attempts.
+                window.selectInstancesForTesting({made[1], made[0]});
+                const std::vector<ObjectId> both = window.selectedInstancesForTesting();
+                if (both.size() != 2) fail("two selected instances did not come back as two");
+                if (both[0] != made[0] || both[1] != made[1])
+                    fail("selected instances came back in click order, not document order");
+
+                // LIMITED, AND CLAMPED RATHER THAN REFUSED (§22). Asking for
+                // more than the stop allows leaves it AT the stop -- not an
+                // error, and not a hinge bent past its stop.
+                const QString limited = window.limitSelectedMateForTesting(0.0, 0.5);
+                if (!limited.contains(QStringLiteral("held at the nearer end")))
+                    fail(("Limit did not say what happens outside it: " +
+                          limited.toStdString())
+                             .c_str());
+                window.driveSelectedMateForTesting(2.0);
+                const Vec3 clamped = window.instanceWorldPlaceForTesting(made[1]);
+                window.driveSelectedMateForTesting(0.5);
+                const Vec3 atStop = window.instanceWorldPlaceForTesting(made[1]);
+                if (std::fabs(clamped.x - atStop.x) > 1e-6 ||
+                    std::fabs(clamped.y - atStop.y) > 1e-6 ||
+                    std::fabs(clamped.z - atStop.z) > 1e-6)
+                    fail("driving past the limit did not stop at the limit");
+
+                // DELETING A MATE FREES ITS INSTANCES rather than taking them.
+                window.selectFirstMateForTesting();
+                const QString unmated = window.deleteSelectedMate();
+                if (!unmated.contains(QStringLiteral("free again")))
+                    fail(("deleting a mate did not say the instances survive: " +
+                          unmated.toStdString())
+                             .c_str());
+                if (window.instanceCountForTesting() != 2)
+                    fail("deleting a mate took its instances with it");
+            }
+
             window.newDocumentCommand();
             if (window.openedDocumentType() != DocumentType::Part)
                 fail("the self test did not get back to a part document");
