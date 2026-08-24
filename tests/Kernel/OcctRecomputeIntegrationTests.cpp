@@ -1,4 +1,5 @@
 #include "Core/Assembly/AssemblyDocument.h"
+#include "Solver/GaussNewtonAssemblySolver.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
@@ -60,6 +61,12 @@ public:
     ShapeResult rotateShape(const KernelShape& shape, const Vec3& axisOriginMm,
                             const Vec3& axisDirection, double angleRad) override {
         return inner_.rotateShape(shape, axisOriginMm, axisDirection, angleRad);
+    }
+    KernelInterferenceResult measureInterference(const KernelShape& a,
+                                                 const KernelShape& b) override {
+        (void)a;
+        (void)b;
+        return KernelInterferenceResult{false, "this kernel does not measure interference", 0.0};
     }
     ShapeResult intersectShapes(const KernelShape& a, const KernelShape& b) override {
         return inner_.intersectShapes(a, b);
@@ -2050,18 +2057,20 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_006_AnInstanceStrandedFromEveryGrou
     EXPECT_NE(why.find("not connected to any ground"), std::string::npos) << why;
 }
 
-TEST(OcctRecomputeIntegrationTest, M24_HINGE_007_AClosedLoopIsREFUSEDByName) {
-    // A tree solve is exact and needs no iteration; a closed loop cannot be
-    // solved that way at all. Refused by name rather than approximated,
-    // because an approximation would silently produce an assembly that does
-    // not close. That is M25's work, and this is what not having done it
-    // looks like.
+TEST(OcctRecomputeIntegrationTest, M25_LOOP_001_AClosedLoopIsSOLVEDNowRatherThanRefused) {
+    // M24 refused this by name and said why: a tree solve cannot close a loop,
+    // and approximating one would silently produce an assembly that does not
+    // close. M25 buys the iterative solver, so the same three mates now solve
+    // -- and the test that pinned the refusal is replaced rather than deleted,
+    // because the behaviour it described is the behaviour that changed.
     OcctGeometryKernel kernel;
+    GaussNewtonAssemblySolver solver;
     ScratchPart part{"loop.ep3d"};
     WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
 
     AssemblyDocument assembly{"Loop"};
     assembly.setGeometryKernel(&kernel);
+    assembly.setAssemblySolver(&solver);
     PartInstance& a = assembly.addInstance("A", part.path);
     PartInstance& b = assembly.addInstance("B", part.path);
     PartInstance& c = assembly.addInstance("C", part.path);
@@ -2070,10 +2079,43 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_007_AClosedLoopIsREFUSEDByName) {
     assembly.addMate("BC", MateType::Fastened, b.id(), "P", c.id(), "P");
     assembly.addMate("CA", MateType::Fastened, c.id(), "P", a.id(), "P");
 
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    // All three connectors coincide, which is what those three mates say.
+    EXPECT_NEAR(ConnectorGap(assembly, a.id(), "P", c.id(), "P"), 0.0, 1e-9);
+    EXPECT_NEAR(ConnectorGap(assembly, b.id(), "P", c.id(), "P"), 0.0, 1e-9);
+    // Nothing is free: every mate in the loop is fastened.
+    EXPECT_EQ(assembly.mateSolveReport().mechanismDegreesOfFreedom, 0);
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_LOOP_002_ALoopThatCANNOTCloseSaysSo) {
+    // The other half, and the one that makes the first mean something: a
+    // mechanism with no configuration that satisfies its mates is REFUSED, not
+    // approximated to the nearest miss. An assembly quietly 40 mm from closing
+    // is worse than one that fails, because only one of them gets fixed.
+    OcctGeometryKernel kernel;
+    GaussNewtonAssemblySolver solver;
+    ScratchPart part{"impossible.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Impossible"};
+    assembly.setGeometryKernel(&kernel);
+    assembly.setAssemblySolver(&solver);
+    PartInstance& a = assembly.addInstance("A", part.path);
+    PartInstance& b = assembly.addInstance("B", part.path);
+    PartInstance& c = assembly.addInstance("C", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
+
+    // Two DRIVEN sliders push C forty millimetres away from A...
+    Mate& ab = assembly.addMate("AB", MateType::Slider, a.id(), "P", b.id(), "P", 20.0);
+    Mate& bc = assembly.addMate("BC", MateType::Slider, b.id(), "P", c.id(), "P", 20.0);
+    ASSERT_TRUE(assembly.setMateDriven(ab.id(), true));
+    ASSERT_TRUE(assembly.setMateDriven(bc.id(), true));
+    // ...and a fastened mate insists they are in the same place.
+    assembly.addMate("CA", MateType::Fastened, c.id(), "P", a.id(), "P");
+
     EXPECT_FALSE(assembly.recompute().success);
     const std::string why = SolveMessage(assembly);
-    EXPECT_NE(why.find("closes a loop"), std::string::npos) << why;
-    EXPECT_NE(why.find("iterative solver"), std::string::npos) << why;
+    EXPECT_NE(why.find("does not close"), std::string::npos) << why;
 }
 
 TEST(OcctRecomputeIntegrationTest, M24_HINGE_008_AConnectorNameThatDoesNotResolveIsNAMED) {
@@ -2236,4 +2278,575 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_012_DrivingAMateMarksWhatItAffectsD
     // direction that is not stored anywhere (ADR-M24-002).
     EXPECT_EQ(assembly.dependencyGraph().state(arm.id()), ComputeState::Dirty);
     EXPECT_EQ(assembly.dependencyGraph().state(base.id()), ComputeState::Dirty);
+}
+
+// --- M25: the four-bar linkage, and the rest of the mate family --------------
+
+namespace {
+
+// A link: a bar of `length` with a connector at EACH end, both pointing +Z so
+// the pins are parallel and the linkage stays planar. `A` sits at the bar's
+// near end and `B` at its far end.
+void WriteLinkPart(const std::string& path, double length, const std::string& bodyName) {
+    PartDocument part{"Link"};
+    Sketch& sketch = part.addSketch("Bar");
+    const double half = 4.0;
+    part.addSketchEntity(sketch.id(), SketchLine{Vec2{0, -half}, Vec2{length, -half}});
+    part.addSketchEntity(sketch.id(), SketchLine{Vec2{length, -half}, Vec2{length, half}});
+    part.addSketchEntity(sketch.id(), SketchLine{Vec2{length, half}, Vec2{0, half}});
+    part.addSketchEntity(sketch.id(), SketchLine{Vec2{0, half}, Vec2{0, -half}});
+    Parameter& thick = part.addParameter("T", 6.0, UnitType::Millimeter);
+    Body& body = part.addBody(bodyName);
+    part.addPadFeature(body, "Pad1", sketch.id(), thick.id());
+
+    for (const auto& [name, x] : {std::pair<std::string, double>{"A", 0.0},
+                                  std::pair<std::string, double>{"B", length}}) {
+        ReferenceFrame& frame = part.addFrame(name + " frame");
+        Transform3D at;
+        at.translation = Vec3{x, 0.0, 0.0};
+        part.setFrameTransform(frame.id(), at);
+        part.addConnector(name, ConnectorRole::Generic, frame.id());
+    }
+    ASSERT_TRUE(savePartDocumentToFile(part, path));
+}
+
+} // namespace
+
+TEST(OcctRecomputeIntegrationTest, M25_FOURBAR_001_DriveONELinkAndTheOtherTHREEFollow) {
+    // THE M25 GATE.
+    //
+    // Four links in a closed loop: ground, crank, coupler, rocker. Turning the
+    // crank has to move the other two to configurations nobody typed -- and
+    // the loop has to STAY CLOSED, which is what a tree solve cannot do at all
+    // and what M24 refused by name rather than approximate.
+    //
+    // The evidence is the gap at the closing joint. It is zero if and only if
+    // the linkage is a linkage; an approximate solve would leave a millimetre
+    // there and produce a picture that looks perfectly convincing.
+    OcctGeometryKernel kernel;
+    GaussNewtonAssemblySolver solver;
+    ScratchPart groundPart{"fourbar-ground.ep3d"};
+    ScratchPart crankPart{"fourbar-crank.ep3d"};
+    ScratchPart couplerPart{"fourbar-coupler.ep3d"};
+    ScratchPart rockerPart{"fourbar-rocker.ep3d"};
+    // A GRASHOF crank-rocker: the shortest link plus the longest is less than
+    // the other two, so the crank turns all the way round. Anything else and
+    // "turn it a full circle" would be a demand the mechanism cannot meet, and
+    // the test would be wrong rather than the solver.
+    WriteLinkPart(groundPart.path, 100.0, "Ground");
+    WriteLinkPart(crankPart.path, 30.0, "Crank");
+    WriteLinkPart(couplerPart.path, 110.0, "Coupler");
+    WriteLinkPart(rockerPart.path, 60.0, "Rocker");
+
+    AssemblyDocument assembly{"FourBar"};
+    assembly.setGeometryKernel(&kernel);
+    assembly.setAssemblySolver(&solver);
+    PartInstance& ground = assembly.addInstance("Ground", groundPart.path);
+    PartInstance& crank = assembly.addInstance("Crank", crankPart.path);
+    PartInstance& coupler = assembly.addInstance("Coupler", couplerPart.path);
+    PartInstance& rocker = assembly.addInstance("Rocker", rockerPart.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(ground.id(), true));
+
+    // Ground.A -- Crank.A -- Crank.B -- Coupler.A -- Coupler.B -- Rocker.A --
+    // Rocker.B -- Ground.B, and round.
+    Mate& j1 = assembly.addMate("J1", MateType::Revolute, ground.id(), "A", crank.id(), "A");
+    assembly.addMate("J2", MateType::Revolute, crank.id(), "B", coupler.id(), "A");
+    assembly.addMate("J3", MateType::Revolute, coupler.id(), "B", rocker.id(), "A");
+    assembly.addMate("J4", MateType::Revolute, rocker.id(), "B", ground.id(), "B");
+    // The crank is the one the user turns; the rest are what the solve moves.
+    ASSERT_TRUE(assembly.setMateDriven(j1.id(), true));
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+
+    // A four-bar has exactly ONE freedom, and it is the crank's. Measured from
+    // the rank of the Jacobian, not counted: this linkage writes fifteen
+    // equations of which most are the identically-zero out-of-plane ones.
+    EXPECT_EQ(assembly.mateSolveReport().mechanismDegreesOfFreedom, 0)
+        << "the crank is driven, so nothing should be left over";
+
+    std::vector<double> rockerAngles;
+    for (int step = 0; step <= 8; ++step) {
+        const double crankAngle = step * kPiM24 / 4.0;
+        ASSERT_TRUE(assembly.setMateValue(j1.id(), crankAngle));
+        ASSERT_TRUE(assembly.recompute().success)
+            << "step " << step << ": " << SolveMessage(assembly);
+
+        // EVERY JOINT STILL A JOINT. Four gaps, all zero, at every crank angle.
+        EXPECT_NEAR(ConnectorGap(assembly, ground.id(), "A", crank.id(), "A"), 0.0, 1e-6)
+            << "J1 came apart at step " << step;
+        EXPECT_NEAR(ConnectorGap(assembly, crank.id(), "B", coupler.id(), "A"), 0.0, 1e-6)
+            << "J2 came apart at step " << step;
+        EXPECT_NEAR(ConnectorGap(assembly, coupler.id(), "B", rocker.id(), "A"), 0.0, 1e-6)
+            << "J3 came apart at step " << step;
+        EXPECT_NEAR(ConnectorGap(assembly, rocker.id(), "B", ground.id(), "B"), 0.0, 1e-6)
+            << "J4 closed by " << ConnectorGap(assembly, rocker.id(), "B", ground.id(), "B")
+            << " mm at step " << step;
+
+        // ...and the crank really is where it was put, rather than having been
+        // moved by the solve to make the numbers work.
+        EXPECT_NEAR(assembly.findMate(j1.id())->value(), crankAngle, 1e-9)
+            << "the solve moved the driven crank at step " << step;
+
+        rockerAngles.push_back(assembly.findMateNamed("J4")->value());
+    }
+
+    // THE OTHER THREE FOLLOWED. A rocker that never moved would satisfy every
+    // gap check above if the coupler happened to absorb everything, so the
+    // claim that this is a MECHANISM and not four coincident points needs its
+    // own evidence.
+    const double lowest = *std::min_element(rockerAngles.begin(), rockerAngles.end());
+    const double highest = *std::max_element(rockerAngles.begin(), rockerAngles.end());
+    EXPECT_GT(highest - lowest, 0.5)
+        << "the rocker barely moved, so nothing was following anything";
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_FOURBAR_002_AnUndrivenLinkageReportsITSOneFreedom) {
+    // Roadmap §20.3 wants freedom to be readable. For a mechanism the freedom
+    // belongs to the LINKAGE, not to any one link -- a four-bar whose three
+    // moving links each "have one rotation" reads as three when it has one.
+    OcctGeometryKernel kernel;
+    GaussNewtonAssemblySolver solver;
+    ScratchPart groundPart{"free-ground.ep3d"};
+    ScratchPart crankPart{"free-crank.ep3d"};
+    ScratchPart couplerPart{"free-coupler.ep3d"};
+    ScratchPart rockerPart{"free-rocker.ep3d"};
+    WriteLinkPart(groundPart.path, 100.0, "Ground");
+    WriteLinkPart(crankPart.path, 30.0, "Crank");
+    WriteLinkPart(couplerPart.path, 110.0, "Coupler");
+    WriteLinkPart(rockerPart.path, 60.0, "Rocker");
+
+    AssemblyDocument assembly{"FourBar"};
+    assembly.setGeometryKernel(&kernel);
+    assembly.setAssemblySolver(&solver);
+    PartInstance& ground = assembly.addInstance("Ground", groundPart.path);
+    PartInstance& crank = assembly.addInstance("Crank", crankPart.path);
+    PartInstance& coupler = assembly.addInstance("Coupler", couplerPart.path);
+    PartInstance& rocker = assembly.addInstance("Rocker", rockerPart.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(ground.id(), true));
+    assembly.addMate("J1", MateType::Revolute, ground.id(), "A", crank.id(), "A");
+    assembly.addMate("J2", MateType::Revolute, crank.id(), "B", coupler.id(), "A");
+    assembly.addMate("J3", MateType::Revolute, coupler.id(), "B", rocker.id(), "A");
+    assembly.addMate("J4", MateType::Revolute, rocker.id(), "B", ground.id(), "B");
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    EXPECT_EQ(assembly.mateSolveReport().mechanismDegreesOfFreedom, 1)
+        << "a four-bar with nothing driven has exactly one freedom";
+
+    // And the per-instance report says the freedom is the linkage's rather
+    // than pretending to divide it up.
+    const auto freedomOf = [&](ObjectId id) {
+        for (const auto& one : assembly.mateSolveReport().freedoms)
+            if (one.instanceId == id) return one;
+        ADD_FAILURE() << "no freedom reported";
+        return AssemblyDocument::MateSolveReport::InstanceFreedom{};
+    };
+    EXPECT_EQ(freedomOf(ground.id()).describedBy, "ground");
+    EXPECT_EQ(freedomOf(crank.id()).describedBy, "in a closed loop");
+    EXPECT_EQ(freedomOf(coupler.id()).describedBy, "in a closed loop");
+    EXPECT_EQ(freedomOf(rocker.id()).describedBy, "in a closed loop");
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_MATE_004_ACylindricalMateTurnsANDSlides) {
+    // The first mate with TWO freedoms, which is what forced the value to
+    // become one number per component. A revolute and a slider each free half
+    // of what this frees, so the three together are the whole test of the
+    // freedom table doing real work.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"cyl.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Cyl"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& base = assembly.addInstance("Base", part.path);
+    PartInstance& shaft = assembly.addInstance("Shaft", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
+    Mate& joint =
+        assembly.addMate("Joint", MateType::Cylindrical, base.id(), "P", shaft.id(), "P");
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties home = MassOf(kernel, shaft.currentShape());
+
+    // SLIDE it, without turning it.
+    ASSERT_TRUE(assembly.setMateComponentValue(joint.id(), MateComponent::TZ, 30.0));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties slid = MassOf(kernel, shaft.currentShape());
+    EXPECT_NEAR(slid.centerOfMassMm.z - home.centerOfMassMm.z, 30.0, 1e-6);
+    EXPECT_NEAR(assembly.instanceWorldTransform(shaft.id()).rotation.w, 1.0, 1e-9)
+        << "sliding a cylindrical mate turned it";
+
+    // ...and TURN it, without losing the slide. Both at once is the point: a
+    // model that kept one number would have lost the 30 here.
+    ASSERT_TRUE(assembly.setMateComponentValue(joint.id(), MateComponent::RZ, kPiM24 / 2.0));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties both = MassOf(kernel, shaft.currentShape());
+    EXPECT_NEAR(both.centerOfMassMm.z - home.centerOfMassMm.z, 30.0, 1e-6)
+        << "turning it forgot how far it had slid";
+    EXPECT_NEAR(assembly.instanceWorldTransform(shaft.id()).rotation.z, std::sin(kPiM24 / 4.0),
+                1e-9);
+
+    EXPECT_EQ(assembly.findMate(joint.id())->values()[2], 30.0);
+    EXPECT_NEAR(assembly.findMate(joint.id())->values()[5], kPiM24 / 2.0, 1e-12);
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_MATE_005_ABallMateHoldsThePointAndFreesTheTurns) {
+    // Three rotations, no translation. Checked by what it REFUSES to let move
+    // as much as by what it allows: a ball joint whose centre drifted would be
+    // a ball joint that had come out of its socket.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"ball.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 30});
+
+    AssemblyDocument assembly{"Ball"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& socket = assembly.addInstance("Socket", part.path);
+    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(socket.id(), true));
+    Mate& joint = assembly.addMate("Joint", MateType::Ball, socket.id(), "P", arm.id(), "P");
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    EXPECT_NEAR(ConnectorGap(assembly, socket.id(), "P", arm.id(), "P"), 0.0, 1e-9);
+
+    // Turned about X and about Y -- neither of which a revolute would allow.
+    ASSERT_TRUE(assembly.setMateComponentValue(joint.id(), MateComponent::RX, 0.4));
+    ASSERT_TRUE(assembly.setMateComponentValue(joint.id(), MateComponent::RY, -0.3));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    EXPECT_NEAR(ConnectorGap(assembly, socket.id(), "P", arm.id(), "P"), 0.0, 1e-9)
+        << "the ball joint came apart when it turned";
+    // It really did turn: an untouched arm would still be at identity.
+    EXPECT_LT(assembly.instanceWorldTransform(arm.id()).rotation.w, 0.999)
+        << "a ball mate given two angles did not turn";
+
+    // A translation is not its to give.
+    EXPECT_FALSE(assembly.setMateComponentValue(joint.id(), MateComponent::TZ, 5.0))
+        << "a ball mate accepted a translation";
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_LIMIT_001_ALimitSTOPSAMotionRatherThanRefusingIt) {
+    // Roadmap §22 is explicit: a drag past a limit stops at the limit rather
+    // than erroring. But the stop is REPORTED, because a control that silently
+    // ignores what it was told is a control that appears to be broken.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"limited.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Limited"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& base = assembly.addInstance("Base", part.path);
+    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
+    Mate& hinge = assembly.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "P");
+
+    ASSERT_TRUE(assembly.setMateLimit(hinge.id(), MateComponent::RZ, 0.0, 1.0));
+    double became = 0.0;
+    EXPECT_TRUE(assembly.setMateComponentValue(hinge.id(), MateComponent::RZ, 5.0, &became));
+    EXPECT_NEAR(became, 1.0, 1e-12) << "the drive was not stopped at the limit";
+    EXPECT_NEAR(assembly.findMate(hinge.id())->value(), 1.0, 1e-12);
+
+    // The other end of the range, and a value INSIDE it, which must pass
+    // through untouched -- a clamp that always clamped would be a lock.
+    EXPECT_TRUE(assembly.setMateComponentValue(hinge.id(), MateComponent::RZ, -3.0, &became));
+    EXPECT_NEAR(became, 0.0, 1e-12);
+    EXPECT_TRUE(assembly.setMateComponentValue(hinge.id(), MateComponent::RZ, 0.5, &became));
+    EXPECT_NEAR(became, 0.5, 1e-12);
+
+    // A limit on a freedom the mate does not have is refused: a bound on
+    // something that cannot move is a control with nothing behind it.
+    EXPECT_FALSE(assembly.setMateLimit(hinge.id(), MateComponent::TX, 0.0, 1.0));
+    // ...and one whose minimum is above its maximum can never be obeyed.
+    EXPECT_FALSE(assembly.setMateLimit(hinge.id(), MateComponent::RZ, 2.0, 1.0));
+
+    // Setting a limit around a value that is already outside it brings the
+    // value in AT ONCE. A limit that only took effect on the next drive would
+    // leave the model in a state its own rules forbid.
+    ASSERT_TRUE(assembly.setMateComponentValue(hinge.id(), MateComponent::RZ, 0.9));
+    ASSERT_TRUE(assembly.setMateLimit(hinge.id(), MateComponent::RZ, 0.0, 0.2));
+    EXPECT_NEAR(assembly.findMate(hinge.id())->value(), 0.2, 1e-12);
+
+    ASSERT_TRUE(assembly.clearMateLimit(hinge.id(), MateComponent::RZ));
+    EXPECT_TRUE(assembly.setMateComponentValue(hinge.id(), MateComponent::RZ, 3.0, &became));
+    EXPECT_NEAR(became, 3.0, 1e-12) << "a cleared limit still clamped";
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_001_TwoPartsInsideEachOtherAreREPORTED) {
+    // Roadmap §23: interference is SEPARATE from mates, because a perfectly
+    // legal set of mates can still drive two parts through each other. This is
+    // exactly that case -- a fastened mate that puts one block inside another.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"clash.ep3d"};
+    WriteConnectedPart(part.path, 40.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Clash"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& first = assembly.addInstance("First", part.path);
+    PartInstance& second = assembly.addInstance("Second", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(first.id(), true));
+    // Both connectors at their parts' origins, fastened -- so the two blocks
+    // occupy exactly the same space. Every mate is satisfied.
+    assembly.addMate("Bolt", MateType::Fastened, first.id(), "P", second.id(), "P");
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+
+    const AssemblyDocument::InterferenceReport report = assembly.checkInterference();
+    ASSERT_TRUE(report.ok) << report.message;
+    ASSERT_EQ(report.overlaps.size(), 1u) << "two coincident blocks did not interfere";
+    EXPECT_NEAR(report.overlaps.front().volumeMm3, 40.0 * 40.0 * 40.0, 1e-6 * 64000.0)
+        << "the overlap was measured as something other than the whole block";
+
+    // MOVE THEM APART and it goes away -- which is what makes the number above
+    // a measurement rather than a constant.
+    ASSERT_TRUE(assembly.setInstanceGrounded(first.id(), true));
+    ASSERT_TRUE(assembly.removeObject(assembly.findMateNamed("Bolt")->id()));
+    Transform3D away;
+    away.translation = Vec3{500, 0, 0};
+    ASSERT_TRUE(assembly.setInstanceTransform(second.id(), away));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    EXPECT_TRUE(assembly.checkInterference().overlaps.empty())
+        << "two blocks half a metre apart were reported as interfering";
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_002_TouchingIsNotInterfering) {
+    // Two faces resting on each other share a surface and no volume. Reporting
+    // that as interference would make every assembly that actually fits report
+    // a problem, which is the fastest way to make a check ignored.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"touch.ep3d"};
+    WriteConnectedPart(part.path, 40.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Touch"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& lower = assembly.addInstance("Lower", part.path);
+    PartInstance& upper = assembly.addInstance("Upper", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(lower.id(), true));
+    // The part is 40 tall from z=0, so stacking the second exactly 40 up puts
+    // its underside on the first's top face.
+    Transform3D stacked;
+    stacked.translation = Vec3{0, 0, 40};
+    ASSERT_TRUE(assembly.setInstanceTransform(upper.id(), stacked));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+
+    const AssemblyDocument::InterferenceReport report = assembly.checkInterference();
+    ASSERT_TRUE(report.ok) << report.message;
+    EXPECT_TRUE(report.overlaps.empty()) << "two parts resting on each other were called a clash";
+
+    // ...and one millimetre INTO each other is a clash, so the line is where
+    // it should be rather than merely somewhere.
+    Transform3D sunk;
+    sunk.translation = Vec3{0, 0, 39.0};
+    ASSERT_TRUE(assembly.setInstanceTransform(upper.id(), sunk));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const AssemblyDocument::InterferenceReport clash = assembly.checkInterference();
+    ASSERT_EQ(clash.overlaps.size(), 1u);
+    EXPECT_NEAR(clash.overlaps.front().volumeMm3, 40.0 * 40.0 * 1.0, 1e-3);
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_003_AnUnbuiltInstanceIsNotReportedAsCLEAR) {
+    // The one thing this must never say by accident. "No interference" and "I
+    // could not look" are different sentences, and only one of them is safe to
+    // act on.
+    OcctGeometryKernel kernel;
+    AssemblyDocument assembly{"Unbuilt"};
+    assembly.setGeometryKernel(&kernel);
+    assembly.addInstance("Ghost", "no-such-part.ep3d");
+
+    const AssemblyDocument::InterferenceReport report = assembly.checkInterference();
+    EXPECT_FALSE(report.ok);
+    EXPECT_NE(report.message.find("not been built"), std::string::npos) << report.message;
+    EXPECT_TRUE(report.overlaps.empty());
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_MATE_006_APlanarMateFreesTheConnectorsOwnXY) {
+    // WHICH plane, not merely how many freedoms. The count alone -- two
+    // translations and a turn -- is satisfied by a mate that frees Y and Z
+    // instead of X and Y, which would let a part sink through the surface it
+    // is supposed to be lying on.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"planar.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Planar"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& table = assembly.addInstance("Table", part.path);
+    PartInstance& puck = assembly.addInstance("Puck", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(table.id(), true));
+    Mate& lying = assembly.addMate("Lying", MateType::Planar, table.id(), "P", puck.id(), "P");
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties home = MassOf(kernel, puck.currentShape());
+
+    // SLIDING IN X AND Y IS ALLOWED, and moves the part by exactly that.
+    ASSERT_TRUE(assembly.setMateComponentValue(lying.id(), MateComponent::TX, 40.0));
+    ASSERT_TRUE(assembly.setMateComponentValue(lying.id(), MateComponent::TY, -25.0));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties slid = MassOf(kernel, puck.currentShape());
+    EXPECT_NEAR(slid.centerOfMassMm.x - home.centerOfMassMm.x, 40.0, 1e-6);
+    EXPECT_NEAR(slid.centerOfMassMm.y - home.centerOfMassMm.y, -25.0, 1e-6);
+    // AND Z DID NOT MOVE, which is the half a count cannot see: the puck stays
+    // on the table.
+    EXPECT_NEAR(slid.centerOfMassMm.z, home.centerOfMassMm.z, 1e-9)
+        << "a planar mate let the part leave its plane";
+
+    // Lifting it off is not this mate's to give.
+    EXPECT_FALSE(assembly.setMateComponentValue(lying.id(), MateComponent::TZ, 5.0))
+        << "a planar mate accepted a translation out of its plane";
+    // ...and neither is tipping it over.
+    EXPECT_FALSE(assembly.setMateComponentValue(lying.id(), MateComponent::RX, 0.2));
+    // Spinning in the plane IS.
+    EXPECT_TRUE(assembly.setMateComponentValue(lying.id(), MateComponent::RZ, 0.5));
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_LOOP_003_ALoopCloserRespectsWhatItsMateASKSFor) {
+    // A loop-closing mate's residual is how far the follower is from where THE
+    // MATE WANTS IT -- not from where the leader is. With every mate value at
+    // zero the two are the same sentence, which is why every earlier loop test
+    // passes either way.
+    //
+    // So this loop closes only at a NON-ZERO offset: a fastened ring of three
+    // whose closing mate is a driven slider 25 mm along its axis. A residual
+    // that compared against the bare relative transform would demand zero and
+    // report the mechanism impossible.
+    OcctGeometryKernel kernel;
+    GaussNewtonAssemblySolver solver;
+    ScratchPart part{"offsetloop.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"OffsetLoop"};
+    assembly.setGeometryKernel(&kernel);
+    assembly.setAssemblySolver(&solver);
+    PartInstance& a = assembly.addInstance("A", part.path);
+    PartInstance& b = assembly.addInstance("B", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
+
+    // One tree step puts B 25 mm along A's axis...
+    Mate& tree = assembly.addMate("Tree", MateType::Slider, a.id(), "P", b.id(), "P", 25.0);
+    ASSERT_TRUE(assembly.setMateDriven(tree.id(), true));
+    // ...and a second mate between the SAME pair closes the loop, asking for
+    // the same 25 mm. Consistent, and only because the mate's own value is
+    // part of the question.
+    Mate& closer = assembly.addMate("Closer", MateType::Slider, a.id(), "P", b.id(), "P", 25.0);
+    ASSERT_TRUE(assembly.setMateDriven(closer.id(), true));
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties placed = MassOf(kernel, b.currentShape());
+    EXPECT_NEAR(placed.centerOfMassMm.z, 10.0 + 25.0, 1e-6)
+        << "the loop closed somewhere its mates did not ask for";
+
+    // ...and asking the closing mate for something ELSE makes it impossible,
+    // which is the evidence that its value was really being read.
+    ASSERT_TRUE(assembly.setMateValue(closer.id(), 60.0));
+    EXPECT_FALSE(assembly.recompute().success);
+    EXPECT_NE(SolveMessage(assembly).find("does not close"), std::string::npos)
+        << SolveMessage(assembly);
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_LOOP_004_AMateWalkedBACKWARDSIsInverted) {
+    // A mate can be reached from either end -- the ground decides which -- and
+    // its middle transform is stated from the LEADING end. Walking it the
+    // other way therefore means inverting it.
+    //
+    // Getting this wrong places a hinge at minus its angle whenever the chain
+    // happens to run the other way, which is a defect that shows up in some
+    // assemblies and not others. Here the mate is declared Arm -> Base and the
+    // GROUND is Base, so the walk is guaranteed to run backwards.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"backwards.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Backwards"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& base = assembly.addInstance("Base", part.path);
+    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
+    // LEADING is Arm, FOLLOWING is Base -- the opposite of the direction the
+    // solve will walk.
+    assembly.addMate("Slide", MateType::Slider, arm.id(), "P", base.id(), "P", 30.0);
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+
+    // The mate says "Base's connector is 30 mm along Arm's", so the arm has to
+    // be 30 mm the OTHER way: at -30, not +30. Both are the same distance, so
+    // a test that measured the gap would pass either way -- the SIGN is the
+    // whole claim.
+    const KernelMassProperties placed = MassOf(kernel, arm.currentShape());
+    EXPECT_NEAR(placed.centerOfMassMm.z, 10.0 - 30.0, 1e-6)
+        << "a mate walked from its following end was not inverted";
+    EXPECT_NEAR(ConnectorGap(assembly, base.id(), "P", arm.id(), "P"), 30.0, 1e-9);
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_004_ACheckThatCouldNotRunIsNotACLEARANswer) {
+    // "No interference" and "I could not compare them" are different
+    // sentences. An empty overlap list from a check that failed reads exactly
+    // like an empty one from a check that passed, so `ok` has to carry it.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"clear.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Clear"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& a = assembly.addInstance("A", part.path);
+    PartInstance& b = assembly.addInstance("B", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
+    Transform3D away;
+    away.translation = Vec3{500, 0, 0};
+    ASSERT_TRUE(assembly.setInstanceTransform(b.id(), away));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+
+    const AssemblyDocument::InterferenceReport report = assembly.checkInterference();
+    EXPECT_TRUE(report.overlaps.empty());
+    // THE OTHER HALF: the check ran. Without this the same assertion passes on
+    // a kernel that refused every comparison.
+    EXPECT_TRUE(report.ok) << report.message;
+    EXPECT_TRUE(report.message.empty()) << report.message;
+}
+
+TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_005_TheBroadPhaseIsAFilterAndNotTheANSWER) {
+    // Two round bars whose BOXES overlap and whose SOLIDS do not.
+    //
+    // Every other interference test has axis-aligned blocks, and for those the
+    // boxes and the solids agree -- so they pass whether the precise phase
+    // runs or not, and whether it reports "empty" as an answer or as an error.
+    // Round corners are where the two stop agreeing, and that is the whole
+    // reason roadmap §23 puts a precise stage after the cheap one.
+    //
+    // Radius 10 at the origin and at (18, 18): the centres are 25.5 mm apart
+    // and the bars are 20 mm across, so they miss. Their boxes -- [-10,10] and
+    // [8,28] on each axis -- overlap in a 2 mm corner.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"round.ep3d"};
+    {
+        PartDocument source{"Round"};
+        Sketch& sketch = source.addSketch("Circle");
+        source.addSketchEntity(sketch.id(), SketchCircle{Vec2{0, 0}, 10.0});
+        Parameter& tall = source.addParameter("H", 30.0, UnitType::Millimeter);
+        Body& body = source.addBody("Bar");
+        source.addPadFeature(body, "Pad1", sketch.id(), tall.id());
+        ReferenceFrame& frame = source.addFrame("P frame");
+        source.addConnector("P", ConnectorRole::Generic, frame.id());
+        ASSERT_TRUE(savePartDocumentToFile(source, part.path));
+    }
+
+    AssemblyDocument assembly{"Round"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& first = assembly.addInstance("First", part.path);
+    PartInstance& second = assembly.addInstance("Second", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(first.id(), true));
+    Transform3D across;
+    across.translation = Vec3{18.0, 18.0, 0.0};
+    ASSERT_TRUE(assembly.setInstanceTransform(second.id(), across));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+
+    const AssemblyDocument::InterferenceReport report = assembly.checkInterference();
+    EXPECT_TRUE(report.overlaps.empty()) << "two bars that miss were called a clash";
+    // AND THE CHECK RAN. The broad phase let this pair through -- the boxes do
+    // overlap -- so the precise phase was asked, and its empty answer has to
+    // come back as "they do not touch" rather than as "I could not tell".
+    EXPECT_TRUE(report.ok) << report.message;
+    EXPECT_TRUE(report.message.empty()) << report.message;
+
+    // ...and sliding them together IS a clash, so the line is where it should
+    // be rather than merely somewhere.
+    Transform3D closer;
+    closer.translation = Vec3{12.0, 0.0, 0.0};
+    ASSERT_TRUE(assembly.setInstanceTransform(second.id(), closer));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const AssemblyDocument::InterferenceReport clash = assembly.checkInterference();
+    ASSERT_EQ(clash.overlaps.size(), 1u) << "two overlapping bars were not reported";
+    EXPECT_GT(clash.overlaps.front().volumeMm3, 100.0);
 }

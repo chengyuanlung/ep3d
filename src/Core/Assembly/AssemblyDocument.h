@@ -1,11 +1,14 @@
 #pragma once
 
+#include "Core/Assembly/IAssemblySolver.h"
 #include "Core/Assembly/Mate.h"
 #include "Core/Assembly/PartInstance.h"
 #include "Core/Document/DocumentBase.h"
 #include "Core/Geometry/MathTypes.h"
 
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <vector>
 
@@ -104,6 +107,16 @@ public:
     Mate& restoreMate(ObjectId id, std::string name, MateType type, ObjectId leadingInstanceId,
                       std::string leadingConnector, ObjectId followingInstanceId,
                       std::string followingConnector, double value);
+    // The full form: a value per component, for mates that leave more than one
+    // freedom (a cylindrical turns AND slides).
+    Mate& addMateWithValues(std::string name, MateType type, ObjectId leadingInstanceId,
+                            std::string leadingConnector, ObjectId followingInstanceId,
+                            std::string followingConnector, MateValues values);
+    Mate& restoreMateWithValues(ObjectId id, std::string name, MateType type,
+                                ObjectId leadingInstanceId, std::string leadingConnector,
+                                ObjectId followingInstanceId, std::string followingConnector,
+                                MateValues values, bool driven,
+                                const std::array<Mate::Limit, kMateComponentCount>& limits);
 
     std::vector<const Mate*> mates() const;
     const Mate* findMate(ObjectId id) const noexcept;
@@ -113,6 +126,28 @@ public:
     // is an ordinary undoable edit, and the next rebuild moves everything
     // downstream of it. False if the id is not a mate; refused for Fastened.
     bool setMateValue(ObjectId mateId, double value);
+    // The same, for a named component -- what a cylindrical mate needs, since
+    // "the value" is ambiguous when a mate leaves two freedoms.
+    //
+    // `clampedTo` is filled with what the value actually became: a limit stops
+    // the motion rather than refusing it (roadmap §22), and a stop nobody is
+    // told about is a control that appears to be broken.
+    bool setMateComponentValue(ObjectId mateId, MateComponent component, double value,
+                               double* clampedTo = nullptr);
+
+    // --- Motion limits (M25, roadmap §22) ------------------------------------
+    //
+    // Refused for a component this kind of mate does not free: a limit on
+    // something that cannot move is a control with nothing behind it.
+    bool setMateLimit(ObjectId mateId, MateComponent component, double minimum, double maximum);
+    bool clearMateLimit(ObjectId mateId, MateComponent component);
+
+    // --- Driving (M25) --------------------------------------------------------
+    //
+    // A driven mate holds its values through a closed-loop solve; an undriven
+    // one is what the solve is allowed to move. In an assembly with no loops
+    // this changes nothing.
+    bool setMateDriven(ObjectId mateId, bool driven);
 
     // WHERE A MATE CONNECTOR ACTUALLY IS, in the assembly (M24).
     //
@@ -146,8 +181,47 @@ public:
             std::string describedBy; // the mate that decided it, or "ground"
         };
         std::vector<InstanceFreedom> freedoms;
+
+        // M25. How many freedoms the CLOSED LOOPS leave, measured from the
+        // rank of the solve's Jacobian rather than counted from unknowns minus
+        // equations -- a planar four-bar writes three equations that are
+        // identically zero at every configuration, and counting would call it
+        // over-constrained while it turns perfectly well.
+        //
+        // Reported once, for the mechanism, because inside a loop the freedom
+        // does not belong to any one instance: a four-bar whose three moving
+        // links each "have one rotation" reads as three when the linkage has
+        // one.
+        int mechanismDegreesOfFreedom = 0;
+        int iterations = 0;
     };
+
+    // --- Interference (M25, roadmap §23) -------------------------------------
+    //
+    // Kept SEPARATE from mates, because §23 is right that a perfectly legal set
+    // of mates can still drive two parts through each other. Broad phase on
+    // bounding boxes, then a precise kernel intersection on what survives.
+    struct Interference {
+        ObjectId firstInstanceId = kInvalidObjectId;
+        ObjectId secondInstanceId = kInvalidObjectId;
+        double volumeMm3 = 0.0;
+    };
+    // Every overlapping pair, in instance order. Requires a kernel and a built
+    // assembly; an instance that has not been built is skipped rather than
+    // reported as clear, and `message` says so.
+    struct InterferenceReport {
+        bool ok = true;
+        std::string message;
+        std::vector<Interference> overlaps;
+    };
+    InterferenceReport checkInterference() const;
     const MateSolveReport& mateSolveReport() const noexcept { return solveReport_; }
+
+    // The solver that closes loops. Injected the same way and for the same
+    // reason as the kernel and the sketch solver (ADR-M3-003): nullptr is a
+    // normal, tested state, and an assembly with no loops never needs one.
+    void setAssemblySolver(IAssemblySolver* solver) noexcept { assemblySolver_ = solver; }
+    IAssemblySolver* assemblySolver() const noexcept { return assemblySolver_; }
 
     DocumentRecomputeReport recompute() override;
 
@@ -171,7 +245,33 @@ private:
     // restore so the two doors cannot come to disagree about what a legal mate
     // is -- which is how a document that saves cleanly stops loading.
     void requireMatable(ObjectId leadingInstanceId, ObjectId followingInstanceId, MateType type,
-                        double value, const char* who) const;
+                        const MateValues& values, const char* who) const;
+    // WHICH MATE PLACES WHICH INSTANCE, and which mates are left over.
+    //
+    // Built once per solve and reused for every probe a closed-loop search
+    // makes: the shape of the walk does not change when the angles do.
+    struct MateForest {
+        struct Step {
+            ObjectId mateId = kInvalidObjectId;
+            ObjectId from = kInvalidObjectId;
+            ObjectId to = kInvalidObjectId;
+        };
+        std::vector<ObjectId> roots;
+        std::vector<Step> steps;
+        std::vector<ObjectId> loopClosers;
+        std::unordered_set<ObjectId> reached;
+        std::string message;
+    };
+    bool buildMateForest(MateForest& forest) const;
+    bool placeThroughForest(const MateForest& forest, const std::vector<MateValues>& mateValues,
+                            std::unordered_map<ObjectId, Transform3D>& placed,
+                            std::string* whyNot) const;
+    bool loopResiduals(const MateForest& forest, const std::vector<MateValues>& mateValues,
+                       const std::unordered_map<ObjectId, Transform3D>& placed, double* out,
+                       std::size_t* count) const;
+    // Position in mates_, which is how the value vectors are indexed.
+    std::size_t mateIndex(ObjectId mateId) const noexcept;
+
     // Places every instance the mates reach, starting from the grounded ones.
     // Returns false and fills `solveReport_` when it cannot.
     bool solveMates();
@@ -180,6 +280,7 @@ private:
     std::vector<std::unique_ptr<Mate>> mates_;
     std::vector<ObjectId> groundedInstances_;
     MateSolveReport solveReport_;
+    IAssemblySolver* assemblySolver_ = nullptr;
 };
 
 } // namespace paramcad

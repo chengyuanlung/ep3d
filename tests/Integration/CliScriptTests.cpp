@@ -13,6 +13,7 @@
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Core/Sketch/Sketch.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
+#include "Solver/GaussNewtonAssemblySolver.h"
 #include "Solver/GaussNewtonSketchSolver.h"
 #include "Viewer/SketchCanvas.h"
 
@@ -1347,8 +1348,13 @@ TEST(CliScriptTest, M24_CLI_003_AnUnknownMateKindListsTheOnesThatExist) {
     const ScriptOutcome outcome =
         run("assembly Rig\nmate hinge Elbow A/P B/Q\n");
     EXPECT_FALSE(outcome.ok);
-    EXPECT_NE(outcome.message.find("fastened, revolute or slider"), std::string::npos)
-        << outcome.message;
+    // EVERY kind it does know, because the reader's next move is to type one
+    // of them -- and the list grew in M25, which is exactly when a hard-coded
+    // three would have started lying.
+    for (const char* kind : {"fastened", "revolute", "slider", "cylindrical", "ball", "planar",
+                             "parallel"})
+        EXPECT_NE(outcome.message.find(kind), std::string::npos) << kind << ": "
+                                                                 << outcome.message;
 }
 
 TEST(CliScriptTest, M24_CLI_004_AnEndThatIsNotAnInstanceSlashConnectorIsREFUSED) {
@@ -1397,5 +1403,178 @@ TEST(CliScriptTest, M24_CLI_007_AnUngroundedAssemblySaysWhatToDoAboutIt) {
             "mate fastened Bolt A/P B/P\nsolve\n");
     EXPECT_FALSE(outcome.ok);
     EXPECT_NE(outcome.message.find("Ground one instance"), std::string::npos)
+        << outcome.message;
+}
+
+// --- M25: mechanisms, limits and interference from a script ------------------
+
+namespace {
+
+// The script layer links no solver, so one is handed in -- exactly as the
+// sketch solver is. A script that mates a linkage without one is told so.
+struct MechanismRun {
+    OcctGeometryKernel kernel;
+    GaussNewtonSketchSolver sketchSolver;
+    GaussNewtonAssemblySolver assemblySolver;
+    PartDocument document{"ScriptDoc"};
+
+    MechanismRun() {
+        document.setGeometryKernel(&kernel);
+        document.setSketchSolver(&sketchSolver);
+    }
+    ScriptOutcome operator()(const std::string& text) {
+        return RunSketchScript(document, text, &assemblySolver);
+    }
+};
+
+// The four links of examples/four-bar.ep3ds, as a script prefix.
+std::string FourBarParts(const std::string& path) {
+    return "sketch GroundBar\ntool rect\nclick 0 -4\nclick 100 4\npad Ground 6\n"
+           "connector GroundA 0 0 0 0 0 1\nconnector GroundB 100 0 0 0 0 1\n"
+           "sketch CrankBar\ntool rect\nclick 0 -4\nclick 30 4\npad Crank 6\n"
+           "connector CrankA 0 0 0 0 0 1\nconnector CrankB 30 0 0 0 0 1\n"
+           "sketch CouplerBar\ntool rect\nclick 0 -4\nclick 110 4\npad Coupler 6\n"
+           "connector CouplerA 0 0 0 0 0 1\nconnector CouplerB 110 0 0 0 0 1\n"
+           "sketch RockerBar\ntool rect\nclick 0 -4\nclick 60 4\npad Rocker 6\n"
+           "connector RockerA 0 0 0 0 0 1\nconnector RockerB 60 0 0 0 0 1\n"
+           "solve\nsave " + path + "\n";
+}
+
+std::string FourBarAssembly(const std::string& path) {
+    return "assembly FourBar\n"
+           "insert Ground " + path + " Ground\n"
+           "insert Crank " + path + " Crank\n"
+           "insert Coupler " + path + " Coupler\n"
+           "insert Rocker " + path + " Rocker\n"
+           "ground Ground\n"
+           "mate revolute J1 Ground/GroundA Crank/CrankA\n"
+           "mate revolute J2 Crank/CrankB Coupler/CouplerA\n"
+           "mate revolute J3 Coupler/CouplerB Rocker/RockerA\n"
+           "mate revolute J4 Rocker/RockerB Ground/GroundB\n";
+}
+
+} // namespace
+
+TEST(CliScriptTest, M25_CLI_001_TheWorkedFourBarTurnsAndTheOtherLinksFOLLOW) {
+    // The regression test for examples/four-bar.ep3ds, and the M25 gate seen
+    // from where a user stands.
+    //
+    // The crank has to end up EXACTLY where it was told -- that is what
+    // `drive` means -- and the rocker has to end up somewhere nobody typed.
+    // Both halves matter: a solver that moved the crank would satisfy the
+    // second claim while breaking the first, which is the bug this example
+    // found.
+    ScratchIo parts{"cli-fourbar.ep3d"};
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(FourBarParts(parts.path) + FourBarAssembly(parts.path) +
+            "drive J1 0\nsolve\nmeasure\n"
+            "drive J1 90\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+
+    // The crank is 30 long and pinned at the ground's origin, so its centre of
+    // mass is 15 mm out along it: at 0 degrees that is (15, 0), at 90 it is
+    // (0, 15). Anything else and `drive` did not mean driven.
+    EXPECT_TRUE(LogMentions(outcome, "Crank: volume = 1440 mm^3, centre = 15, 0, 3 mm"))
+        << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "Crank: volume = 1440 mm^3, centre = 0, 15, 3 mm"))
+        << "the solve moved the driven crank: " << outcome.message;
+
+    // ...and the rocker moved, which is the linkage being a linkage.
+    const std::vector<double> volumes = MeasuredVolumes(outcome);
+    EXPECT_FALSE(volumes.empty());
+}
+
+TEST(CliScriptTest, M25_CLI_002_AMechanismWithNoSolverSaysSoByName) {
+    // The script library links no backend on purpose (ADR-M5-003). A closed
+    // loop without one is refused with the reason, not with a wrong answer.
+    ScratchIo parts{"cli-nosolver.ep3d"};
+    ScriptRun run; // deliberately the plain runner, which injects no solver
+    const ScriptOutcome outcome =
+        run(FourBarParts(parts.path) + FourBarAssembly(parts.path) + "solve\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("no assembly solver is configured"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M25_CLI_003_ALimitCLAMPSAndTheClampIsSAID) {
+    // Roadmap §22: the drag stops rather than erroring. The message is what
+    // keeps that from being a control that appears broken.
+    ScratchIo parts{"cli-limit.ep3d"};
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(FourBarParts(parts.path) + FourBarAssembly(parts.path) +
+            "limit J1 0 90\ndrive J1 200\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "clamped to its limit at 90")) << outcome.message;
+    // ...and it really stopped at 90 rather than merely saying so.
+    EXPECT_TRUE(LogMentions(outcome, "Crank: volume = 1440 mm^3, centre = 0, 15, 3 mm"))
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M25_CLI_004_LimitsAreTypedInTheUnitTheFreedomHAS) {
+    // Degrees for a hinge, millimetres for a slide -- read off the freedom
+    // table rather than from a second list of "the rotational kinds", which
+    // would be a second thing to keep in step.
+    ScratchIo parts{"cli-units.ep3d"};
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(FourBarParts(parts.path) + FourBarAssembly(parts.path) +
+            "limit J1 -45 45\ndrive J1 30\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    // 30 degrees is inside a limit of plus or minus 45 degrees, so nothing is
+    // clamped. Read as RADIANS the limit would be plus or minus 45 radians and
+    // 30 would still pass -- so the claim needs the other side too.
+    EXPECT_FALSE(LogMentions(outcome, "clamped")) << outcome.message;
+
+    MechanismRun tighter;
+    const ScriptOutcome clamped =
+        tighter(FourBarParts(parts.path) + FourBarAssembly(parts.path) +
+                "limit J1 -10 10\ndrive J1 30\nsolve\n");
+    ASSERT_TRUE(clamped.ok) << clamped.message;
+    EXPECT_TRUE(LogMentions(clamped, "clamped to its limit at 10"))
+        << "the limit was not read in degrees: " << clamped.message;
+}
+
+TEST(CliScriptTest, M25_CLI_005_InterferenceIsItsOwnQuestion) {
+    // Separate from mates, because a legal set of mates can still drive two
+    // parts through each other -- which a four-bar's links, all in one plane,
+    // certainly do.
+    ScratchIo parts{"cli-interfere.ep3d"};
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(FourBarParts(parts.path) + FourBarAssembly(parts.path) +
+            "drive J1 90\nsolve\ninterference\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "overlap by")) << outcome.message;
+
+    // Two parts far apart report nothing, so the answer above is a
+    // measurement rather than a constant.
+    ScratchIo apart{"cli-apart.ep3d"};
+    MechanismRun clear;
+    const ScriptOutcome none =
+        clear(std::string("sketch Base\ntool rect\nclick -10 -10\nclick 10 10\npad Block 5\n"
+                          "solve\nsave ") + apart.path + "\n"
+              "assembly Rig\n"
+              "insert A " + apart.path + " Block\n"
+              "insert B " + apart.path + " Block\n"
+              "place B 500 0 0\nsolve\ninterference\n");
+    ASSERT_TRUE(none.ok) << none.message;
+    EXPECT_TRUE(LogMentions(none, "no interference")) << none.message;
+}
+
+TEST(CliScriptTest, M25_CLI_006_TwoConnectorsCannotShareANameInOneDocument) {
+    // A mate names its ends by connector NAME, so two with one name make every
+    // mate mean whichever came first. Found by writing the four-bar example,
+    // where one script drew four links into one document and called every
+    // link's ends the same two things.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch A\ntool rect\nclick 0 0\nclick 10 10\npad One 5\n"
+            "connector P 0 0 0\n"
+            "sketch B\ntool rect\nclick 20 0\nclick 30 10\npad Two 5\n"
+            "connector P 20 0 0\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("already a connector called"), std::string::npos)
         << outcome.message;
 }

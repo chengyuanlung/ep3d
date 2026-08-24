@@ -267,6 +267,9 @@ protected:
     // The duplicate-id rule at the door, for EVERY restore path. Checks the
     // document's own id, then the registry, then asks the subclass.
     void requireUnusedId(ObjectId id, const char* who) const;
+    // A mate names a connector by NAME, so two with one name make a mate
+    // mean whichever comes first. Throws, like the id rule does.
+    void requireUnusedConnectorName(const std::string& name, const char* who) const;
 
     // Refuses a parent that is not a frame, or that would close a loop (M10).
     // Pass kInvalidObjectId as `frameId` when the frame does not exist yet --

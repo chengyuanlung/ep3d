@@ -70,6 +70,12 @@ public:
                             const Vec3& axisDirection, double angleRad) override {
         return inner_.rotateShape(shape, axisOriginMm, axisDirection, angleRad);
     }
+    KernelInterferenceResult measureInterference(const KernelShape& a,
+                                                 const KernelShape& b) override {
+        (void)a;
+        (void)b;
+        return KernelInterferenceResult{false, "this kernel does not measure interference", 0.0};
+    }
     ShapeResult intersectShapes(const KernelShape& a, const KernelShape& b) override {
         return inner_.intersectShapes(a, b);
     }

@@ -8,6 +8,8 @@
 
 namespace paramcad {
 
+class IAssemblySolver;
+
 // A text script that drives the sketch tools (M17.27).
 //
 // WHY THIS EXISTS, and it is not convenience: nothing in this project has ever
@@ -105,6 +107,11 @@ public:
     // `document` must outlive the session, and must already have a solver (and
     // a kernel, if the script pads or solves).
     explicit SketchScriptSession(PartDocument& document);
+    // WITH A SOLVER FOR CLOSED LOOPS (M25). Injected rather than constructed
+    // here for the same reason the sketch solver is (ADR-M5-003): this library
+    // links no backend, and an assembly with no mechanism in it never needs
+    // one. A script that mates a linkage without one is told so by name.
+    SketchScriptSession(PartDocument& document, IAssemblySolver* assemblySolver);
     ~SketchScriptSession();
 
     SketchScriptSession(const SketchScriptSession&) = delete;
@@ -127,6 +134,8 @@ private:
 // past a refused command would build something the author did not write, and
 // the surprise would arrive several commands later.
 ScriptOutcome RunSketchScript(PartDocument& document, const std::string& text);
+ScriptOutcome RunSketchScript(PartDocument& document, const std::string& text,
+                              IAssemblySolver* assemblySolver);
 
 // The tool names a script may use, and the constraint and dimension kinds.
 // Exported so the CLI's help text and the error messages are the same list --

@@ -193,6 +193,7 @@ Connector& DocumentBase::addConnector(std::string name, ConnectorRole role, Obje
     if (findFrame(frameId) == nullptr)
         throw std::runtime_error("addConnector: frame " + std::to_string(frameId) +
                                  " is not a reference frame in this document");
+    requireUnusedConnectorName(name, "addConnector");
     auto item = std::make_unique<Connector>(std::move(name), role, frameId, owner);
     auto& ref = *item;
     connectors_.push_back(std::move(item));
@@ -215,11 +216,35 @@ Connector& DocumentBase::restoreConnector(ObjectId id, std::string name, Connect
     if (findFrame(frameId) == nullptr)
         throw std::runtime_error("restoreConnector: frame " + std::to_string(frameId) +
                                  " is not a reference frame in this document");
+    requireUnusedConnectorName(name, "restoreConnector");
     auto item = std::make_unique<Connector>(id, std::move(name), role, frameId, owner);
     auto& ref = *item;
     connectors_.push_back(std::move(item));
     registry_.registerObject(ref.id(), &ref);
     return ref; // NOT recorded: deserialization is not a user edit (ADR-M9-001)
+}
+
+// A CONNECTOR NAME IS A REFERENCE, so it has to be unique (M25).
+//
+// A mate names its two ends by connector NAME across a document boundary
+// (ADR-M24-001): there is no id to point at, because the connector lives in the
+// part file and every instance of that part reuses it. Two connectors sharing a
+// name therefore make a mate mean whichever one comes first -- which is
+// position as identity, the thing ADR-M4-004 exists to forbid, arriving by a
+// route nobody had checked.
+//
+// Found by running examples/four-bar.ep3ds: one script drew four links into one
+// document, called every link's ends "A" and "B", and every mate in the linkage
+// quietly resolved to the first link's. The parts were placed at angles nobody
+// had asked for and the solve reported success.
+//
+// The general rename rule (`renameObject`) already refused a duplicate. This is
+// the same rule at the OTHER door, which is where it was missing.
+void DocumentBase::requireUnusedConnectorName(const std::string& name, const char* who) const {
+    for (const std::unique_ptr<Connector>& existing : connectors_)
+        if (existing->name() == name)
+            throw std::runtime_error(std::string(who) + ": there is already a connector called '" +
+                                     name + "' in this document, and a mate names one by name");
 }
 
 std::vector<const Connector*> DocumentBase::connectors() const {

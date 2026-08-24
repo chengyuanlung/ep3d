@@ -7,6 +7,8 @@
 // something.
 
 #include "Core/Assembly/AssemblyDocument.h"
+#include <algorithm>
+#include "Core/Assembly/MateFreedom.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Geometry/Transform.h"
 #include "Core/Serialization/AssemblyDocumentSerializer.h"
@@ -541,22 +543,143 @@ TEST(AssemblyDocumentTest, M24_MATE_006_GroundingIsUndoableAndDefaultsToNothing)
 TEST(AssemblyDocumentTest, M24_MATE_007_ONEFormulaDecidesWhatEachMateKindMeans) {
     // Every mate type is MateTransform plus a placement rule written once, so
     // a new kind cannot arrive with its own idea of what "connected" means.
-    const Transform3D fastened = MateTransform(MateType::Fastened, 7.0);
-    EXPECT_NEAR(fastened.translation.z, 0.0, 1e-12);
-    EXPECT_NEAR(fastened.rotation.w, 1.0, 1e-12) << "a fastened mate moved something";
+    // M25 generalised the values to one per component; the claim is unchanged.
+    const auto only = [](MateComponent component, double value) {
+        MateValues values{};
+        values[static_cast<std::size_t>(component)] = value;
+        return values;
+    };
+
+    const Transform3D fastened = MateTransform(MateType::Fastened, only(MateComponent::TZ, 7.0));
+    EXPECT_NEAR(fastened.translation.z, 0.0, 1e-12) << "a fastened mate moved something";
+    EXPECT_NEAR(fastened.rotation.w, 1.0, 1e-12);
 
     const double quarter = 3.14159265358979323846 / 2.0;
-    const Transform3D turned = MateTransform(MateType::Revolute, quarter);
+    const Transform3D turned = MateTransform(MateType::Revolute, only(MateComponent::RZ, quarter));
     EXPECT_NEAR(turned.translation.z, 0.0, 1e-12) << "a revolute translated";
     // A quarter turn about +Z takes +X to +Y, and nothing else would.
     const Vec3 moved = RotateByQuaternion(turned.rotation, Vec3{1, 0, 0});
     EXPECT_NEAR(moved.x, 0.0, 1e-9);
     EXPECT_NEAR(moved.y, 1.0, 1e-9);
 
-    const Transform3D slid = MateTransform(MateType::Slider, 12.0);
+    const Transform3D slid = MateTransform(MateType::Slider, only(MateComponent::TZ, 12.0));
     EXPECT_NEAR(slid.rotation.w, 1.0, 1e-12) << "a slider turned";
     EXPECT_NEAR(slid.translation.z, 12.0, 1e-12);
     EXPECT_NEAR(slid.translation.x, 0.0, 1e-12) << "a slider slid along the wrong axis";
+}
+
+TEST(AssemblyDocumentTest, M25_MATE_001_TheFreedomTableISTheMateTypeTable) {
+    // Roadmap section 20.1, column by column. This is the ONE place a mate type
+    // says what it is, so the table is checked here rather than inferred from
+    // behaviour somewhere downstream.
+    struct Expected {
+        MateType type;
+        int rotational;
+        int translational;
+    };
+    const Expected table[] = {
+        {MateType::Fastened, 0, 0},    {MateType::Revolute, 1, 0}, {MateType::Slider, 0, 1},
+        {MateType::Cylindrical, 1, 1}, {MateType::Ball, 3, 0},     {MateType::Planar, 1, 2},
+    };
+    for (const Expected& row : table) {
+        const MateFreedom freedom = FreedomOf(row.type);
+        EXPECT_EQ(freedom.rotational(), row.rotational) << toString(row.type);
+        EXPECT_EQ(freedom.translational(), row.translational) << toString(row.type);
+    }
+
+    // A revolute and a slider free DIFFERENT components of the same axis --
+    // which is the whole reason one formula is enough.
+    EXPECT_TRUE(FreedomOf(MateType::Revolute).isFree(MateComponent::RZ));
+    EXPECT_FALSE(FreedomOf(MateType::Revolute).isFree(MateComponent::TZ));
+    EXPECT_TRUE(FreedomOf(MateType::Slider).isFree(MateComponent::TZ));
+    EXPECT_FALSE(FreedomOf(MateType::Slider).isFree(MateComponent::RZ));
+    // A cylindrical frees both, and that is the only difference between it and
+    // the two of them.
+    EXPECT_TRUE(FreedomOf(MateType::Cylindrical).isFree(MateComponent::TZ));
+    EXPECT_TRUE(FreedomOf(MateType::Cylindrical).isFree(MateComponent::RZ));
+    // Parallel is an ALIGNMENT mate: it pins the two tilts and nothing else.
+    EXPECT_FALSE(FreedomOf(MateType::Parallel).isFree(MateComponent::RX));
+    EXPECT_FALSE(FreedomOf(MateType::Parallel).isFree(MateComponent::RY));
+    EXPECT_TRUE(FreedomOf(MateType::Parallel).isFree(MateComponent::TX));
+    EXPECT_TRUE(FreedomOf(MateType::Parallel).isFree(MateComponent::TZ));
+}
+
+TEST(AssemblyDocumentTest, M25_MATE_002_ComponentsAndTransformsAreEachOthersInverse) {
+    // The six numbers a residual is made of, and the transform they describe.
+    // If these two disagreed, a solve would drive the wrong thing to zero.
+    Transform3D t;
+    t.translation = Vec3{3.0, -7.0, 11.0};
+    const double angle = 0.9;
+    t.rotation = Quaternion{std::cos(angle / 2.0), 0.0, std::sin(angle / 2.0), 0.0};
+
+    const std::array<double, kMateComponentCount> components = ComponentsOf(t);
+    EXPECT_NEAR(components[0], 3.0, 1e-12);
+    EXPECT_NEAR(components[1], -7.0, 1e-12);
+    EXPECT_NEAR(components[2], 11.0, 1e-12);
+    // The rotation is 0.9 rad about +Y, so the axis-angle vector is (0, 0.9, 0).
+    EXPECT_NEAR(components[3], 0.0, 1e-12);
+    EXPECT_NEAR(components[4], 0.9, 1e-12);
+    EXPECT_NEAR(components[5], 0.0, 1e-12);
+
+    const Transform3D back = TransformOfComponents(components);
+    EXPECT_NEAR(back.translation.x, t.translation.x, 1e-12);
+    EXPECT_NEAR(back.rotation.w, t.rotation.w, 1e-12);
+    EXPECT_NEAR(back.rotation.y, t.rotation.y, 1e-12);
+
+    // IDENTITY IS ALL ZEROES, which is what makes these usable as residuals --
+    // and it has to be smooth through zero, not merely correct at it.
+    const std::array<double, kMateComponentCount> none = ComponentsOf(Transform3D::Identity());
+    for (double one : none) EXPECT_NEAR(one, 0.0, 1e-15);
+    // BELOW THE CUT where dividing by the sine would be dividing by nothing.
+    // 1e-12 does not reach it -- the ordinary path handles that perfectly --
+    // so the number here is small enough to take the other branch, which is
+    // the branch that has to give the same answer.
+    Transform3D tiny;
+    tiny.rotation = Quaternion{1.0, 1e-16, 0.0, 0.0};
+    const std::array<double, kMateComponentCount> small = ComponentsOf(tiny);
+    EXPECT_NEAR(small[3], 2e-16, 1e-22) << "the axis-angle vector is not smooth through zero";
+    // ...and the ordinary path, just above the cut, agrees with it.
+    Transform3D justAbove;
+    justAbove.rotation = Quaternion{1.0, 1e-12, 0.0, 0.0};
+    EXPECT_NEAR(ComponentsOf(justAbove)[3], 2e-12, 1e-18);
+}
+
+TEST(AssemblyDocumentTest, M25_MATE_003_ResidualsAreTheComponentsTheMatePINS) {
+    // A mate is satisfied exactly when its pinned components are zero, and its
+    // free ones are exactly what it does not care about. A residual list that
+    // included a free component would fight the freedom it is meant to leave.
+    double out[kMateComponentCount] = {};
+
+    // A revolute, turned to 0.5, with the follower ACTUALLY at 0.5: satisfied.
+    MateValues values{};
+    values[5] = 0.5;
+    Transform3D relative;
+    relative.rotation = Quaternion{std::cos(0.25), 0.0, 0.0, std::sin(0.25)};
+    int written = MateResiduals(MateType::Revolute, values, relative, out);
+    EXPECT_EQ(written, 5) << "a revolute pins five of the six";
+    for (int i = 0; i < written; ++i) EXPECT_NEAR(out[i], 0.0, 1e-12) << "component " << i;
+
+    // The same revolute with the follower turned somewhere ELSE about +Z is
+    // STILL satisfied in every pinned component -- that rotation is the
+    // freedom, and the solve is free to choose it.
+    relative.rotation = Quaternion{std::cos(1.0), 0.0, 0.0, std::sin(1.0)};
+    written = MateResiduals(MateType::Revolute, values, relative, out);
+    for (int i = 0; i < written; ++i) EXPECT_NEAR(out[i], 0.0, 1e-12) << "component " << i;
+
+    // But a follower that has slid along the pin is NOT satisfied.
+    relative.translation = Vec3{0, 0, 4.0};
+    written = MateResiduals(MateType::Revolute, values, relative, out);
+    double worst = 0.0;
+    for (int i = 0; i < written; ++i) worst = std::max(worst, std::fabs(out[i]));
+    EXPECT_NEAR(worst, 4.0, 1e-9) << "a revolute did not notice the follower sliding off it";
+
+    // ...and a CYLINDRICAL mate, which frees that slide, is satisfied by the
+    // very same relative transform. Same numbers, different mate, different
+    // answer -- which is the freedom table doing its job.
+    MateValues cylindrical{};
+    written = MateResiduals(MateType::Cylindrical, cylindrical, relative, out);
+    EXPECT_EQ(written, 4) << "a cylindrical pins four of the six";
+    for (int i = 0; i < written; ++i) EXPECT_NEAR(out[i], 0.0, 1e-12) << "component " << i;
 }
 
 TEST(AssemblyDocumentTest, M24_MATE_008_InverseUndoesAComposeExactly) {
@@ -661,14 +784,52 @@ TEST(AssemblyDocumentTest, M24_SER_013_AFastenedMateCarryingAValueInTheFileIsREF
     PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     document.addMate("Fixed", MateType::Fastened, base.id(), "A", arm.id(), "B");
 
+    // A fastened mate frees nothing, so every one of its six values is zero.
+    // Putting a number on any of them by hand is refused at the door.
     std::string text = SaveToString(document);
-    const std::size_t at = text.find("\"value\": 0");
+    const std::size_t at = text.find("\"values\"");
     ASSERT_NE(at, std::string::npos) << text;
-    text.replace(at, std::string("\"value\": 0").size(), "\"value\": 4");
+    const std::size_t zero = text.find('0', at);
+    ASSERT_NE(zero, std::string::npos) << text;
+    text.replace(zero, 1, "4");
 
     const AssemblyLoadResult loaded = LoadFromString(text);
     EXPECT_FALSE(loaded);
     EXPECT_NE(loaded.message.find("no freedom"), std::string::npos) << loaded.message;
+}
+
+TEST(AssemblyDocumentTest, M25_SER_001_AV30FileWithASINGLEValueStillLoads) {
+    // v30 wrote one number per mate; v31 writes six. An old file is read by
+    // putting its number on the first free component, which is exactly what it
+    // meant -- every mate type v30 knew about has one freedom.
+    //
+    // Written by hand rather than by an old serializer, because there is no
+    // old serializer any more: this is what those files look like, and if that
+    // ever stops being true this test is how it is found out.
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "Eye", 0.75);
+
+    std::string text = SaveToString(document);
+    // Strip the v31 fields and put back the v30 one.
+    const std::size_t at = text.find("\"values\"");
+    ASSERT_NE(at, std::string::npos) << text;
+    const std::size_t end = text.find(']', at);
+    ASSERT_NE(end, std::string::npos);
+    text.replace(at, end - at + 1, "\"value\": 0.75");
+    text.replace(text.find("\"schemaVersion\": 31"), std::string("\"schemaVersion\": 31").size(),
+                 "\"schemaVersion\": 30");
+
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    ASSERT_TRUE(loaded) << loaded.message;
+    const Mate* elbow = loaded.document->findMateNamed("Elbow");
+    ASSERT_NE(elbow, nullptr);
+    EXPECT_NEAR(elbow->value(), 0.75, 1e-12) << "a v30 mate value was lost";
+    // A revolute's freedom is the rotation about z, and that is where the
+    // number went -- not into component zero, which is a translation.
+    EXPECT_NEAR(elbow->values()[5], 0.75, 1e-12);
+    EXPECT_NEAR(elbow->values()[0], 0.0, 1e-12);
 }
 
 TEST(AssemblyDocumentTest, M24_SER_014_ADocumentWithABrokenMateIsRefusedAtSAVE) {
@@ -695,4 +856,78 @@ TEST(AssemblyDocumentTest, M24_SER_014_ADocumentWithABrokenMateIsRefusedAtSAVE) 
     // which IS the invariant, stated as the outcome rather than as a rule.
     EXPECT_TRUE(TrySave(hand));
     EXPECT_EQ(hand.mates().size(), 0u);
+}
+
+TEST(AssemblyDocumentTest, M25_SER_002_LimitsAndDrivingSurviveASaveAndAReopen) {
+    // A limit that was not written down is a limit that stops existing when
+    // the file is closed -- and the model that comes back is then free to sit
+    // in a state its own rules forbade five minutes ago. Same for driving: a
+    // mechanism reopened with nothing driven is a mechanism the solver is free
+    // to rearrange.
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Mate& hinge = document.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "Q",
+                                   0.5);
+    Mate& slide = document.addMate("Slide", MateType::Slider, base.id(), "R", arm.id(), "S");
+    Mate& joint = document.addMateWithValues("Joint", MateType::Cylindrical, base.id(), "T",
+                                             arm.id(), "U", MateValues{0, 0, 12.0, 0, 0, 0.25});
+
+    ASSERT_TRUE(document.setMateDriven(hinge.id(), true));
+    ASSERT_TRUE(document.setMateLimit(hinge.id(), MateComponent::RZ, -1.0, 1.0));
+    ASSERT_TRUE(document.setMateLimit(joint.id(), MateComponent::TZ, 0.0, 50.0));
+    ASSERT_TRUE(document.setMateLimit(joint.id(), MateComponent::RZ, -2.0, 2.0));
+
+    const std::string text = SaveToString(document);
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    ASSERT_TRUE(loaded) << loaded.message;
+    const AssemblyDocument& back = *loaded.document;
+
+    const Mate* hingeBack = back.findMateNamed("Hinge");
+    ASSERT_NE(hingeBack, nullptr);
+    EXPECT_TRUE(hingeBack->isDriven()) << "driving was lost";
+    EXPECT_TRUE(hingeBack->limits()[5].enabled) << "a limit was lost";
+    EXPECT_NEAR(hingeBack->limits()[5].min, -1.0, 1e-12);
+    EXPECT_NEAR(hingeBack->limits()[5].max, 1.0, 1e-12);
+
+    // ...and the mates that had NEITHER come back with neither, so this is not
+    // a test that would pass on a loader that enabled everything.
+    const Mate* slideBack = back.findMateNamed("Slide");
+    ASSERT_NE(slideBack, nullptr);
+    EXPECT_FALSE(slideBack->isDriven());
+    EXPECT_FALSE(slideBack->limits()[2].enabled);
+
+    // A CYLINDRICAL MATE'S TWO VALUES AND TWO LIMITS, which is the case a
+    // single number per mate could not carry at all.
+    const Mate* jointBack = back.findMateNamed("Joint");
+    ASSERT_NE(jointBack, nullptr);
+    EXPECT_NEAR(jointBack->values()[2], 12.0, 1e-12);
+    EXPECT_NEAR(jointBack->values()[5], 0.25, 1e-12);
+    EXPECT_TRUE(jointBack->limits()[2].enabled);
+    EXPECT_NEAR(jointBack->limits()[2].max, 50.0, 1e-12);
+    EXPECT_TRUE(jointBack->limits()[5].enabled);
+    EXPECT_NEAR(jointBack->limits()[5].min, -2.0, 1e-12);
+
+    EXPECT_EQ(SaveToString(back), text);
+    (void)slide;
+}
+
+TEST(AssemblyDocumentTest, M25_SER_003_ALimitOnAFreedomTheMateDoesNotHaveIsREFUSED) {
+    // Both doors, because two doors that disagree about what is legal is how a
+    // document saves and then refuses to open (ADR-M3-008).
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Mate& hinge = document.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "Q");
+    ASSERT_TRUE(document.setMateLimit(hinge.id(), MateComponent::RZ, -1.0, 1.0));
+
+    std::string text = SaveToString(document);
+    // Move the limit onto a component a revolute pins.
+    const std::size_t at = text.find("\"component\": 5");
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, std::string("\"component\": 5").size(), "\"component\": 0");
+
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_NE(loaded.message.find("does not have"), std::string::npos) << loaded.message;
 }

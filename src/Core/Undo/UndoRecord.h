@@ -290,8 +290,31 @@ struct MateExistenceEdit {
 // the delta will be the parameter's, not this.
 struct MateValueEdit {
     ObjectId mateId = kInvalidObjectId;
+    // WHICH freedom (M25). A cylindrical mate turns and slides, so "the value"
+    // stopped being a single thing the moment there was more than one.
+    int component = 0;
     double before = 0.0;
     double after = 0.0;
+};
+
+// M25: a motion limit was set or cleared (roadmap §22).
+struct MateLimitEdit {
+    ObjectId mateId = kInvalidObjectId;
+    int component = 0;
+    bool beforeEnabled = false;
+    double beforeMin = 0.0;
+    double beforeMax = 0.0;
+    bool afterEnabled = false;
+    double afterMin = 0.0;
+    double afterMax = 0.0;
+};
+
+// M25: a mate was made the one that holds its value through a loop solve, or
+// released back to being something the solve may move.
+struct MateDrivenEdit {
+    ObjectId mateId = kInvalidObjectId;
+    bool before = false;
+    bool after = false;
 };
 
 // M24: an instance was grounded, or let go.
@@ -309,7 +332,7 @@ using UndoDelta =
                  SketchDimensionPlacementEdit, SketchDimensionFormatEdit,
                  SketchEntityConstructionEdit, SketchEntityGeometryEdit, ObjectNameEdit,
                  SketchConstraintDrivenEdit, InstanceExistenceEdit, MateExistenceEdit,
-                 MateValueEdit, InstanceGroundEdit>;
+                 MateValueEdit, InstanceGroundEdit, MateLimitEdit, MateDrivenEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

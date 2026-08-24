@@ -1,0 +1,148 @@
+# A FOUR-BAR LINKAGE (M25).
+#
+# The M25 gate: drive one link, and the other three follow correctly.
+#
+# This is the thing M24 could not do and said so by name. A tree of mates is
+# solved exactly, one step at a time, outwards from the ground -- but a four-bar
+# is a CLOSED LOOP, and a loop has no first step. M24 refused it rather than
+# approximating, because an approximate linkage is one that does not close, and
+# it looks perfectly convincing in a picture.
+#
+# M25 buys the iterative solver that closes it.
+#
+# Run it:
+#   ep3d --script examples/four-bar.ep3ds
+
+# --- one part, four sizes -----------------------------------------------------
+#
+# Every link is a bar with a pin hole at each end. The same script draws all
+# four because they differ only in length -- and the two connectors are what
+# make a bar a LINK: one connector at the near end, one at the far end, both
+# axes pointing +Z so the pins are parallel and the linkage stays planar.
+#
+# THE NAMES CARRY THE LINK'S NAME because this script keeps ONE document -- each
+# `save` writes everything drawn so far -- and a connector name has to be unique
+# in a document. It has to be, because a mate names its ends by NAME: two
+# connectors called "A" would make every mate mean whichever came first. That
+# is refused now; it used to be accepted, and this example is what found it.
+
+sketch GroundBar
+tool rect
+click 0 -4
+click 100 4
+pad Ground 6
+connector GroundA 0 0 0 0 0 1
+connector GroundB 100 0 0 0 0 1
+solve
+save build/fourbar-ground.ep3d
+
+sketch CrankBar
+tool rect
+click 0 -4
+click 30 4
+pad Crank 6
+connector CrankA 0 0 0 0 0 1
+connector CrankB 30 0 0 0 0 1
+solve
+save build/fourbar-crank.ep3d
+
+sketch CouplerBar
+tool rect
+click 0 -4
+click 110 4
+pad Coupler 6
+connector CouplerA 0 0 0 0 0 1
+connector CouplerB 110 0 0 0 0 1
+solve
+save build/fourbar-coupler.ep3d
+
+sketch RockerBar
+tool rect
+click 0 -4
+click 60 4
+pad Rocker 6
+connector RockerA 0 0 0 0 0 1
+connector RockerB 60 0 0 0 0 1
+solve
+save build/fourbar-rocker.ep3d
+
+# --- the linkage --------------------------------------------------------------
+#
+# Lengths 100, 30, 110, 60. That is a GRASHOF crank-rocker: the shortest link
+# plus the longest (30 + 110 = 140) is less than the other two (100 + 60 = 160),
+# and the shortest is next to the ground -- so the crank goes all the way round
+# and the rocker swings back and forth. Pick the lengths wrong and "turn it a
+# full circle" is a demand the mechanism cannot meet.
+
+assembly FourBar
+
+insert Ground build/fourbar-ground.ep3d Ground
+insert Crank build/fourbar-crank.ep3d Crank
+insert Coupler build/fourbar-coupler.ep3d Coupler
+insert Rocker build/fourbar-rocker.ep3d Rocker
+
+ground Ground
+
+# Four pins, in a ring: Ground.A - Crank.A, Crank.B - Coupler.A,
+# Coupler.B - Rocker.A, Rocker.B - Ground.B. The fourth one closes the loop.
+mate revolute J1 Ground/GroundA Crank/CrankA 0
+mate revolute J2 Crank/CrankB Coupler/CouplerA
+mate revolute J3 Coupler/CouplerB Rocker/RockerA
+mate revolute J4 Rocker/RockerB Ground/GroundB
+
+# THE CRANK IS THE ONE THE USER TURNS. Everything else is what the solve is
+# allowed to move -- and saying which is which is the whole difference between
+# a mechanism and a contradiction: four revolutes with four fixed angles is
+# almost never a closed loop.
+drive J1 0
+
+echo --- the linkage, crank at 0 ---
+solve
+measure
+
+# --- and now turn the crank ---------------------------------------------------
+#
+# One number changes. The coupler and the rocker go to angles nobody typed, and
+# every one of the four pins stays a pin.
+#
+# The rocker's centre of mass is what to watch: it swings back and forth while
+# the crank goes round, which is what a crank-rocker IS.
+
+drive J1 60
+echo --- crank at 60 ---
+solve
+measure
+
+drive J1 120
+echo --- crank at 120 ---
+solve
+measure
+
+drive J1 240
+echo --- crank at 240 ---
+solve
+measure
+
+# --- limits and interference ---------------------------------------------------
+#
+# A limit STOPS a motion rather than refusing it (roadmap section 22): dragging
+# past a stop should stop, not error. But the stop is said out loud -- a control
+# that silently ignores what it was told is a control that appears broken.
+
+limit J1 0 90
+drive J1 200
+echo --- driven past the stop ---
+solve
+measure
+
+limit J1 off
+
+# Interference is SEPARATE from mates, because a perfectly legal set of mates
+# can still drive two parts through each other. Bounding boxes first, then a
+# real intersection on whatever survives that.
+drive J1 90
+solve
+echo --- does anything collide? ---
+interference
+
+save build/four-bar.ep3da

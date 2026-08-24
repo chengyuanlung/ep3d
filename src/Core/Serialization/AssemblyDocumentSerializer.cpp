@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <sstream>
+#include <array>
 #include <optional>
 #include <unordered_set>
 #include <utility>
@@ -85,10 +86,32 @@ SaveResult validateSaveable(const AssemblyDocument& document) {
         // part file, which may not even be present at save time. A name that
         // no longer resolves is a recompute failure that says so, not a
         // reason to refuse to write the document down.
-        if (mate->type() == MateType::Fastened && mate->value() != 0.0)
+        // A NUMBER ON A COMPONENT THIS MATE PINS can never be read back as
+        // anything, so it is refused before it reaches the file rather than
+        // when the file is opened again (ADR-M3-008).
+        const MateFreedom freedom = mate->freedom();
+        for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+            if (freedom.free[c] || mate->values()[c] == 0.0) continue;
             return SaveResult{SerializationError::InvalidFieldType,
-                              "mate '" + mate->name() +
-                                  "' is fastened and has no freedom to give a value to"};
+                              "mate '" + mate->name() + "' is " +
+                                  std::string(toString(mate->type())) +
+                                  " and has no freedom " +
+                                  std::string(toString(static_cast<MateComponent>(c))) +
+                                  " to give a value to"};
+        }
+        // ...and the same for a limit: a bound on something that cannot move
+        // is a control with nothing behind it.
+        for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+            if (!mate->limits()[c].enabled) continue;
+            if (!freedom.free[c])
+                return SaveResult{SerializationError::InvalidFieldType,
+                                  "mate '" + mate->name() + "' has a limit on a freedom it "
+                                                            "does not have"};
+            if (!(mate->limits()[c].min <= mate->limits()[c].max))
+                return SaveResult{SerializationError::InvalidFieldType,
+                                  "mate '" + mate->name() + "' has a limit whose minimum is "
+                                                            "above its maximum"};
+        }
     }
     return SaveResult{};
 }
@@ -139,10 +162,37 @@ JsonValue toJson(const AssemblyDocument& document) {
         entry.set("followingInstanceId",
                   JsonValue::makeString(idToString(mate->followingInstanceId())));
         entry.set("followingConnector", JsonValue::makeString(mate->followingConnector()));
-        // RADIANS for a revolute, millimetres for a slider -- the unit the
-        // freedom has, written as the number it is. Degrees would be a second
-        // unit in a file that has none.
-        entry.set("value", JsonValue::makeNumber(mate->value()));
+        // v31: ONE NUMBER PER COMPONENT, because a cylindrical mate turns and
+        // slides and "the value" stopped being a single thing. RADIANS for the
+        // rotations, millimetres for the translations -- the unit each freedom
+        // has, written as the number it is. Degrees would be a second unit in a
+        // file that has none.
+        //
+        // ONLY `values` is written, never the v30 `value` as well. Writing
+        // both would put TWO answers to one question in the file, and the
+        // first thing a hand edit would do is make them disagree -- which is
+        // the seam this project spends its milestones removing. Backward
+        // compatibility runs one way only: v30 files are still READ, and there
+        // is no reader of this format but EP3D, so writing for an older one is
+        // speculation with a cost.
+        JsonValue values = JsonValue::makeArray();
+        for (std::size_t c = 0; c < kMateComponentCount; ++c)
+            values.add(JsonValue::makeNumber(mate->values()[c]));
+        entry.set("values", std::move(values));
+        entry.set("driven", JsonValue::makeBool(mate->isDriven()));
+
+        // Limits, written only where there is one -- an array of six mostly
+        // empty objects would make the common file harder to read for nothing.
+        JsonValue limits = JsonValue::makeArray();
+        for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+            if (!mate->limits()[c].enabled) continue;
+            JsonValue one = JsonValue::makeObject();
+            one.set("component", JsonValue::makeNumber(static_cast<double>(c)));
+            one.set("min", JsonValue::makeNumber(mate->limits()[c].min));
+            one.set("max", JsonValue::makeNumber(mate->limits()[c].max));
+            limits.add(std::move(one));
+        }
+        entry.set("limits", std::move(limits));
         mates.add(std::move(entry));
     }
     root.set("mates", std::move(mates));
@@ -166,13 +216,19 @@ struct MateData {
     std::string leadingConnector;
     ObjectId followingInstanceId = kInvalidObjectId;
     std::string followingConnector;
-    double value = 0.0;
+    MateValues values{};
+    bool driven = false;
+    std::array<Mate::Limit, kMateComponentCount> limits{};
 };
 
 std::optional<MateType> mateTypeFromString(std::string_view text) {
     if (text == "Fastened") return MateType::Fastened;
     if (text == "Revolute") return MateType::Revolute;
     if (text == "Slider") return MateType::Slider;
+    if (text == "Cylindrical") return MateType::Cylindrical;
+    if (text == "Ball") return MateType::Ball;
+    if (text == "Planar") return MateType::Planar;
+    if (text == "Parallel") return MateType::Parallel;
     return std::nullopt;
 }
 
@@ -381,13 +437,90 @@ AssemblyLoadResult loadAssemblyDocument(std::istream& in) {
                 return loadFailure(SerializationError::InvalidDependency,
                                    context + ": both ends are the same instance");
 
-            const JsonValue* value = requireField(entry, "value", JsonType::Number, context, err);
-            if (value == nullptr) return loadFailure(err.error, err.message);
-            if (mate.type == MateType::Fastened && value->asNumber() != 0.0)
-                return loadFailure(
-                    SerializationError::InvalidFieldType,
-                    context + ": a fastened mate has no freedom to give a value to");
-            mate.value = value->asNumber();
+            // v31 writes `values`; v30 wrote a single `value`. A v30 file is
+            // read by putting its number on the first free component, which is
+            // exactly what it meant -- every mate type v30 knew about has one
+            // freedom.
+            const MateFreedom freedom = FreedomOf(mate.type);
+            if (const JsonValue* values = entry.find("values")) {
+                if (values->type() != JsonType::Array ||
+                    values->items().size() != kMateComponentCount)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'values' is not six numbers");
+                for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+                    if (values->items()[c].type() != JsonType::Number)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'values' is not six numbers");
+                    mate.values[c] = values->items()[c].asNumber();
+                }
+            } else {
+                const JsonValue* value =
+                    requireField(entry, "value", JsonType::Number, context, err);
+                if (value == nullptr) return loadFailure(err.error, err.message);
+                for (std::size_t c = 0; c < kMateComponentCount; ++c)
+                    if (freedom.free[c]) {
+                        mate.values[c] = value->asNumber();
+                        break;
+                    }
+                // A v30 fastened mate with a value was already refused when it
+                // was written, so a file carrying one has been edited by hand.
+                // Refused with the same sentence the facade uses.
+                if (freedom.total() == 0 && value->asNumber() != 0.0)
+                    return loadFailure(
+                        SerializationError::InvalidFieldType,
+                        context + ": a fastened mate has no freedom to give a value to");
+            }
+            for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+                if (freedom.free[c] || mate.values[c] == 0.0) continue;
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": this mate has no freedom " +
+                                       std::string(toString(static_cast<MateComponent>(c))) +
+                                       " to give a value to");
+            }
+
+            if (const JsonValue* driven = entry.find("driven")) {
+                if (driven->type() != JsonType::Bool)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'driven' is not a boolean");
+                mate.driven = driven->asBool();
+            }
+            if (const JsonValue* limits = entry.find("limits")) {
+                if (limits->type() != JsonType::Array)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'limits' is not an array");
+                for (const JsonValue& one : limits->items()) {
+                    if (one.type() != JsonType::Object)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": a limit is not an object");
+                    const JsonValue* which =
+                        requireField(one, "component", JsonType::Number, context, err);
+                    if (which == nullptr) return loadFailure(err.error, err.message);
+                    const JsonValue* low =
+                        requireField(one, "min", JsonType::Number, context, err);
+                    if (low == nullptr) return loadFailure(err.error, err.message);
+                    const JsonValue* high =
+                        requireField(one, "max", JsonType::Number, context, err);
+                    if (high == nullptr) return loadFailure(err.error, err.message);
+                    const double index = which->asNumber();
+                    if (index < 0.0 || index >= static_cast<double>(kMateComponentCount) ||
+                        index != static_cast<double>(static_cast<int>(index)))
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": a limit names no component");
+                    const std::size_t c = static_cast<std::size_t>(index);
+                    // The same two rules the facade enforces, at the other
+                    // door: a limit on a pinned component, or one whose
+                    // minimum is above its maximum, can never be obeyed.
+                    if (!freedom.free[c])
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": a limit on a freedom this mate does "
+                                                     "not have");
+                    if (!(low->asNumber() <= high->asNumber()))
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": a limit whose minimum is above its "
+                                                     "maximum");
+                    mate.limits[c] = Mate::Limit{true, low->asNumber(), high->asNumber()};
+                }
+            }
             mateData.push_back(std::move(mate));
         }
     }
@@ -412,9 +545,11 @@ AssemblyLoadResult loadAssemblyDocument(std::istream& in) {
     }
     // MATES AFTER INSTANCES, because a mate names two of them.
     for (auto& mate : mateData)
-        document->restoreMate(mate.id, std::move(mate.name), mate.type, mate.leadingInstanceId,
-                              std::move(mate.leadingConnector), mate.followingInstanceId,
-                              std::move(mate.followingConnector), mate.value);
+        document->restoreMateWithValues(mate.id, std::move(mate.name), mate.type,
+                                        mate.leadingInstanceId, std::move(mate.leadingConnector),
+                                        mate.followingInstanceId,
+                                        std::move(mate.followingConnector), mate.values,
+                                        mate.driven, mate.limits);
 
     // A loaded document starts with an EMPTY history: the load is not
     // something the user did, and "Undo" on a freshly opened file must not

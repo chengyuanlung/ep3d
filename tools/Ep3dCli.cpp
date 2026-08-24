@@ -17,6 +17,7 @@
 #include "Core/Document/PartDocument.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
+#include "Solver/GaussNewtonAssemblySolver.h"
 #include "Solver/GaussNewtonSketchSolver.h"
 
 #include <cstdio>
@@ -236,7 +237,11 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "could not read %s\n", scriptPath);
             return 1;
         }
-        const ScriptOutcome outcome = RunSketchScript(*document, text);
+        // A CLOSED-LOOP SOLVER, because a script can mate a linkage. It is
+        // handed in here rather than made inside the script library for the
+        // same reason the sketch solver is: that library links no backend.
+        GaussNewtonAssemblySolver assemblySolver;
+        const ScriptOutcome outcome = RunSketchScript(*document, text, &assemblySolver);
         if (!quiet)
             for (const ScriptLogEntry& entry : outcome.log)
                 std::printf("line %d: %s\n", entry.line, entry.text.c_str());

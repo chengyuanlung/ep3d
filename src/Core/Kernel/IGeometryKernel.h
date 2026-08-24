@@ -36,6 +36,15 @@ struct KernelBoundsResult {
     Vec3 max{};
 };
 
+// M25. See measureInterference.
+struct KernelInterferenceResult {
+    bool ok{false};
+    std::string message;
+    double volumeMm3{0.0};
+
+    explicit operator bool() const noexcept { return ok; }
+};
+
 struct ShapeResult {
     KernelShape shape;
     KernelError error = KernelError::None;
@@ -337,6 +346,23 @@ public:
     // and a chain carrying an empty shape forward looks exactly like a chain
     // that worked.
     virtual ShapeResult intersectShapes(const KernelShape& a, const KernelShape& b) = 0;
+
+    // HOW MUCH TWO SOLIDS OVERLAP (M25, roadmap §23).
+    //
+    // Its own verb rather than a reading of intersectShapes, and the reason is
+    // that the two want OPPOSITE things from an empty answer. A boolean
+    // intersect that comes out empty is a feature that built nothing, and M21
+    // refuses it (ADR-M21-*). An interference check that comes out empty is
+    // the good news -- it is what "these parts do not collide" looks like.
+    //
+    // Reading one as the other would mean deciding from an error message
+    // whether a failure was a failure, which is exactly the sort of second
+    // meaning this project keeps taking out.
+    //
+    // Zero volume and ok means no overlap. Not ok means the question could not
+    // be answered, which is never the same as "no".
+    virtual KernelInterferenceResult measureInterference(const KernelShape& a,
+                                                         const KernelShape& b) = 0;
     virtual ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) = 0;
 };
 

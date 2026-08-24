@@ -272,3 +272,35 @@ the test and the picture is not.
 ```
 ep3d --script examples/hinge.ep3ds
 ```
+
+## `four-bar.ep3ds` (M25)
+
+A four-bar linkage. Drive one link and the other three follow.
+
+This is what M24 could not do and said so by name: a tree of mates is solved
+exactly, one step at a time outwards from the ground, but a closed loop has no
+first step. M24 refused it rather than approximating, because an approximate
+linkage is one that does not close and it looks perfectly convincing in a
+picture. M25 buys the iterative solver.
+
+The lengths are 100, 30, 110, 60 -- a **Grashof crank-rocker**, so the crank
+goes all the way round. Pick them wrong and "turn it a full circle" is a demand
+the mechanism cannot meet.
+
+`drive` means **driven**: that mate holds its value and the solve moves the
+rest. Saying which is which is the difference between a mechanism and a
+contradiction -- four revolutes with four fixed angles is almost never a closed
+loop.
+
+The script also shows a **limit** (a drag past a stop stops, and says so) and an
+**interference** check (separate from mates, because a perfectly legal set of
+mates can still drive two parts through each other).
+
+Two defects this example found, both of which it now guards:
+`drive` used to set the number without marking the mate driven, so the solver
+moved the crank anyway; and two connectors could share a name in one document,
+which made every mate in the linkage resolve to the first link's pin.
+
+```
+ep3d --script examples/four-bar.ep3ds
+```

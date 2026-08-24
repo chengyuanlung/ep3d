@@ -38,6 +38,8 @@ public:
     ShapeResult importStep(const std::string& path) override;
     IoResult exportStl(const KernelShape& shape, const std::string& path,
                        double deflectionMm) override;
+    KernelInterferenceResult measureInterference(const KernelShape& a,
+                                                 const KernelShape& b) override;
     KernelBoundsResult boundsOfShape(const KernelShape& shape) override;
     ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
                             double radiusMm) override;

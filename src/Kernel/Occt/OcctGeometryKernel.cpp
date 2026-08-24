@@ -1286,6 +1286,48 @@ IoResult OcctGeometryKernel::exportStl(const KernelShape& shape, const std::stri
     }
 }
 
+KernelInterferenceResult OcctGeometryKernel::measureInterference(const KernelShape& a,
+                                                                const KernelShape& b) {
+    KernelInterferenceResult out;
+    const auto* first = dynamic_cast<const OcctShape*>(a.handle());
+    const auto* second = dynamic_cast<const OcctShape*>(b.handle());
+    if (first == nullptr || second == nullptr || first->shape().IsNull() ||
+        second->shape().IsNull()) {
+        out.message = "one of these is not a solid this kernel can measure";
+        return out;
+    }
+    try {
+        BRepAlgoAPI_Common common(first->shape(), second->shape());
+        common.Build();
+        if (!common.IsDone()) {
+            out.message = "OCCT could not intersect these two solids";
+            return out;
+        }
+        const TopoDS_Shape shared = common.Shape();
+        if (shared.IsNull()) {
+            // Not an error: two solids that do not touch have an empty
+            // intersection, and that is the answer rather than the absence of
+            // one.
+            out.ok = true;
+            return out;
+        }
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shared, props);
+        out.ok = true;
+        // A CONTACT rather than an overlap -- two faces resting on each other
+        // -- gives a shared shape with no volume. Reported as zero, because
+        // touching is not interfering.
+        out.volumeMm3 = std::fabs(props.Mass());
+        if (out.volumeMm3 < kMinExtrusionDistanceMm) out.volumeMm3 = 0.0;
+        return out;
+    } catch (const Standard_Failure& error) {
+        out.message = std::string("OCCT refused the interference check: ") +
+                      (error.GetMessageString() != nullptr ? error.GetMessageString()
+                                                           : "no message");
+        return out;
+    }
+}
+
 KernelBoundsResult OcctGeometryKernel::boundsOfShape(const KernelShape& shape) {
     KernelBoundsResult out;
     const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());

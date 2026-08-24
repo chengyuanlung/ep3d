@@ -232,6 +232,13 @@ public:
 
 private:
     PartDocument& document_;
+    // Set once, before anything runs. Public on the runner because the session
+    // is what injects it, and the runner is file-local.
+public:
+    void setAssemblySolver(IAssemblySolver* solver) noexcept { assemblySolver_ = solver; }
+
+private:
+    IAssemblySolver* assemblySolver_ = nullptr;
     // THE ASSEMBLY THIS SCRIPT IS BUILDING, if it is building one (M23).
     // Owned here rather than passed in, because a script that never says
     // `assembly` must behave exactly as it did before this existed.
@@ -390,6 +397,8 @@ private:
         if (verb == "ground") return doGround(tokens);
         if (verb == "mate") return doMate(tokens);
         if (verb == "drive") return doDrive(tokens);
+        if (verb == "limit") return doLimit(tokens);
+        if (verb == "interference") return doInterference(tokens);
         if (verb == "insert") return doInsert(tokens);
         if (verb == "place") return doPlace(tokens);
         if (verb == "solve") return doSolve();
@@ -404,7 +413,7 @@ private:
             note("commands: sketch, tool, click, finish, constrain, dimension, pad, sweep, "
                  "loft, shell, draft, hole, union, subtract, intersect, ring, along, "
                  "export, import, connector, assembly, insert, place, ground, mate, "
-                 "drive, solve, save, measure, "
+                 "drive, limit, interference, solve, save, measure, "
                  "handle, echo, help");
             return true;
         }
@@ -1218,6 +1227,43 @@ private:
         return true;
     }
 
+    static bool ParseMateKind(const std::string& text, MateType* out) {
+        // ONE TABLE, so a kind that exists in the model and not in the script
+        // is a compile-time hole rather than a silent one.
+        static const struct {
+            const char* text;
+            MateType type;
+        } kKinds[] = {
+            {"fastened", MateType::Fastened},       {"revolute", MateType::Revolute},
+            {"slider", MateType::Slider},           {"cylindrical", MateType::Cylindrical},
+            {"ball", MateType::Ball},               {"planar", MateType::Planar},
+            {"parallel", MateType::Parallel},
+        };
+        for (const auto& kind : kKinds)
+            if (text == kind.text) {
+                *out = kind.type;
+                return true;
+            }
+        return false;
+    }
+
+    // A mate value is typed in the unit its FREEDOM has: degrees when that
+    // freedom is a rotation, millimetres when it is a distance. Which one is
+    // read off the freedom table rather than from a second list of "the
+    // rotational kinds", because a second list is a second thing to keep right.
+    static bool MatePrimaryIsAnAngle(MateType type) {
+        const MateFreedom freedom = FreedomOf(type);
+        for (std::size_t i = 0; i < kMateComponentCount; ++i)
+            if (freedom.free[i]) return i >= 3;
+        return false;
+    }
+    static double InMateUnits(MateType type, double typed) {
+        return MatePrimaryIsAnAngle(type) ? typed * 3.14159265358979323846 / 180.0 : typed;
+    }
+    static double FromMateUnits(MateType type, double stored) {
+        return MatePrimaryIsAnAngle(type) ? stored * 180.0 / 3.14159265358979323846 : stored;
+    }
+
     bool doConnector(const std::vector<std::string>& tokens) {
         // connector NAME X Y Z [AX AY AZ]
         //
@@ -1286,11 +1332,10 @@ private:
         if (tokens.size() != 5 && tokens.size() != 6)
             return fail("mate needs a kind, a name, and two INSTANCE/CONNECTOR ends");
         MateType type = MateType::Fastened;
-        if (tokens[1] == "fastened") type = MateType::Fastened;
-        else if (tokens[1] == "revolute") type = MateType::Revolute;
-        else if (tokens[1] == "slider") type = MateType::Slider;
-        else return fail("'" + tokens[1] + "' is not a mate kind; use fastened, revolute or "
-                         "slider");
+        if (!ParseMateKind(tokens[1], &type))
+            return fail("'" + tokens[1] +
+                        "' is not a mate kind; use fastened, revolute, slider, cylindrical, "
+                        "ball, planar or parallel");
 
         ObjectId ends[2] = {kInvalidObjectId, kInvalidObjectId};
         std::string connectors[2];
@@ -1310,9 +1355,13 @@ private:
         double value = 0.0;
         if (tokens.size() == 6) {
             if (!ParseNumber(tokens[5], &value)) return fail("a mate value is a number");
-            if (type == MateType::Fastened)
+            if (FreedomOf(type).total() == 0)
                 return fail("a fastened mate has no freedom to give a value to");
-            if (type == MateType::Revolute) value = value * 3.14159265358979323846 / 180.0;
+            // DEGREES IF THE FREEDOM IS AN ANGLE, millimetres if it is a
+            // distance -- decided from the freedom table rather than from a
+            // list of "the rotational mate kinds", which would be a second
+            // table to keep in step.
+            value = InMateUnits(type, value);
         }
         if (assembly_->findMateNamed(tokens[2]) != nullptr)
             return fail("there is already a mate called '" + tokens[2] + "'");
@@ -1332,10 +1381,78 @@ private:
         if (mate == nullptr) return fail("there is no mate called '" + tokens[1] + "'");
         double value = 0.0;
         if (!ParseNumber(tokens[2], &value)) return fail("a mate value is a number");
-        if (mate->type() == MateType::Revolute) value = value * 3.14159265358979323846 / 180.0;
-        if (!assembly_->setMateValue(mate->id(), value))
+        // `drive` MEANS DRIVEN. Setting the number without saying so would let
+        // a closed-loop solve treat it as one more unknown and move it -- so
+        // typing `drive J1 240` on a four-bar would leave the crank wherever
+        // the solver preferred, which is the opposite of what the word says.
+        // Found by running examples/four-bar.ep3ds and reading the crank's
+        // centre of mass, which was 24 degrees from where it was told to be.
+        if (!assembly_->setMateDriven(mate->id(), true))
+            return fail("could not drive '" + tokens[1] + "'");
+        const double wanted = InMateUnits(mate->type(), value);
+        double became = wanted;
+        if (!assembly_->setMateComponentValue(
+                mate->id(), static_cast<MateComponent>(mate->primaryComponent()), wanted,
+                &became))
             return fail("'" + tokens[1] + "' has no freedom to drive");
-        note("drive " + tokens[1] + " to " + tokens[2]);
+        // A LIMIT STOPS THE MOTION rather than refusing it (roadmap §22), and
+        // the stop is SAID -- a control that silently ignores what it was told
+        // is a control that appears to be broken.
+        if (became != wanted)
+            note("drive " + tokens[1] + " to " + tokens[2] + " -- clamped to its limit at " +
+                 FormatNumber(FromMateUnits(mate->type(), became)));
+        else
+            note("drive " + tokens[1] + " to " + tokens[2]);
+        return true;
+    }
+
+    bool doLimit(const std::vector<std::string>& tokens) {
+        // limit MATE MIN MAX     -- bound its freedom
+        // limit MATE off         -- take the bounds away
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 3 && tokens.size() != 4)
+            return fail("limit needs a mate and either `off` or a minimum and a maximum");
+        const Mate* mate = assembly_->findMateNamed(tokens[1]);
+        if (mate == nullptr) return fail("there is no mate called '" + tokens[1] + "'");
+        const int component = mate->primaryComponent();
+        if (component == static_cast<int>(kMateComponentCount))
+            return fail("'" + tokens[1] + "' has no freedom to limit");
+
+        if (tokens.size() == 3 && tokens[2] == "off") {
+            assembly_->clearMateLimit(mate->id(), static_cast<MateComponent>(component));
+            note("limit " + tokens[1] + " off");
+            return true;
+        }
+        if (tokens.size() != 4) return fail("limit needs a minimum and a maximum");
+        double low = 0.0;
+        double high = 0.0;
+        if (!ParseNumber(tokens[2], &low) || !ParseNumber(tokens[3], &high))
+            return fail("a limit is two numbers");
+        if (low > high) return fail("a limit's minimum cannot be above its maximum");
+        if (!assembly_->setMateLimit(mate->id(), static_cast<MateComponent>(component),
+                                     InMateUnits(mate->type(), low),
+                                     InMateUnits(mate->type(), high)))
+            return fail("could not limit '" + tokens[1] + "'");
+        note("limit " + tokens[1] + " to " + tokens[2] + " .. " + tokens[3]);
+        return true;
+    }
+
+    bool doInterference(const std::vector<std::string>& tokens) {
+        // interference   -- which instances are inside each other
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 1) return fail("interference takes no arguments");
+        const AssemblyDocument::InterferenceReport report = assembly_->checkInterference();
+        if (!report.ok) return fail(report.message);
+        if (report.overlaps.empty()) {
+            note("  no interference");
+            return true;
+        }
+        for (const AssemblyDocument::Interference& one : report.overlaps)
+            note("  " + assembly_->objectName(one.firstInstanceId) + " and " +
+                 assembly_->objectName(one.secondInstanceId) + " overlap by " +
+                 FormatNumber(one.volumeMm3) + " mm^3");
         return true;
     }
 
@@ -1356,6 +1473,7 @@ private:
         assembly_ = std::make_unique<AssemblyDocument>(tokens[1]);
         assembly_->setGeometryKernel(document_.geometryKernel());
         assembly_->setSketchSolver(document_.sketchSolver());
+        assembly_->setAssemblySolver(assemblySolver_);
         note("assembly " + tokens[1] + " (solve, measure and save now mean the assembly)");
         return true;
     }
@@ -1480,7 +1598,13 @@ struct SketchScriptSession::State {
 };
 
 SketchScriptSession::SketchScriptSession(PartDocument& document)
-    : state_(std::make_unique<State>(document)) {}
+    : SketchScriptSession(document, nullptr) {}
+
+SketchScriptSession::SketchScriptSession(PartDocument& document,
+                                         IAssemblySolver* assemblySolver)
+    : state_(std::make_unique<State>(document)) {
+    state_->runner.setAssemblySolver(assemblySolver);
+}
 
 SketchScriptSession::~SketchScriptSession() = default;
 
@@ -1491,6 +1615,11 @@ ScriptOutcome SketchScriptSession::run(const std::string& text) {
 ScriptOutcome RunSketchScript(PartDocument& document, const std::string& text) {
     // ONE session, one call. A file is the degenerate connection.
     return SketchScriptSession(document).run(text);
+}
+
+ScriptOutcome RunSketchScript(PartDocument& document, const std::string& text,
+                              IAssemblySolver* assemblySolver) {
+    return SketchScriptSession(document, assemblySolver).run(text);
 }
 
 } // namespace paramcad

@@ -13,6 +13,7 @@ add_library(ParametricCADCore
     src/Core/Document/ObjectRegistry.cpp
     src/Core/Assembly/AssemblyDocument.cpp
     src/Core/Assembly/Mate.cpp
+    src/Core/Assembly/MateFreedom.cpp
     src/Core/Assembly/PartInstance.cpp
     src/Core/Document/DocumentBase.cpp
     src/Core/Document/PartDocument.cpp
@@ -152,7 +153,8 @@ find_package(Eigen3 CONFIG QUIET
 )
 
 if(Eigen3_FOUND)
-    add_library(ParametricCADSolver src/Solver/GaussNewtonSketchSolver.cpp)
+    add_library(ParametricCADSolver src/Solver/GaussNewtonSketchSolver.cpp
+                                    src/Solver/GaussNewtonAssemblySolver.cpp)
     target_include_directories(ParametricCADSolver PUBLIC src)
     target_link_libraries(ParametricCADSolver
         PUBLIC ParametricCADCore
@@ -661,6 +663,12 @@ if(PARAMCAD_BUILD_TESTS)
         target_link_libraries(ParametricCADKernelOcctTests
             PRIVATE ParametricCADCore ParametricCADKernelOcct GTest::gtest_main
         )
+        # M25: the assembly loop tests need a real solver, the same way the
+        # sketch tests need a real one. Linked here rather than faked, because
+        # a closed loop that closes is the claim.
+        if(TARGET ParametricCADSolver)
+            target_link_libraries(ParametricCADKernelOcctTests PRIVATE ParametricCADSolver)
+        endif()
         if(MSVC)
             target_compile_options(ParametricCADKernelOcctTests PRIVATE /utf-8)
         endif()

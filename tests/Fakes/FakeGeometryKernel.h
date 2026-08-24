@@ -330,6 +330,12 @@ public:
     // INTERSECT is refused: the fake tracks volume and nothing about WHERE, so
     // it cannot say how much two solids share. Inventing a number would let a
     // feature that intersects the wrong pair pass every Core-side test.
+    KernelInterferenceResult measureInterference(const KernelShape& a,
+                                                 const KernelShape& b) override {
+        (void)a;
+        (void)b;
+        return KernelInterferenceResult{false, "this kernel does not measure interference", 0.0};
+    }
     ShapeResult intersectShapes(const KernelShape& a, const KernelShape& b) override {
         ++intersectShapesCallCount;
         (void)a;

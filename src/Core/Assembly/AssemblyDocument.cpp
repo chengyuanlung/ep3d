@@ -1,6 +1,8 @@
 #include "Core/Assembly/AssemblyDocument.h"
 
+#include "Core/Assembly/IAssemblySolver.h"
 #include "Core/Geometry/Transform.h"
+#include "Core/Kernel/IGeometryKernel.h"
 
 #include <cmath>
 #include <stdexcept>
@@ -211,13 +213,48 @@ bool AssemblyDocument::restoreInstanceGrounded(ObjectId instanceId) {
 // between two graph passes, and the graph never sees a mate at all. What
 // the graph DOES see is the frames the solve writes, which dirty exactly
 // the instances that moved.
+namespace {
+
+// A single number placed on the mate's FIRST free component -- what every
+// one-freedom mate means by "the angle" or "the offset". A fastened mate has no
+// free component, so a non-zero number has nowhere to go and requireMatable
+// refuses it rather than dropping it here.
+MateValues ValuesFromSingle(MateType type, double value) {
+    MateValues values{};
+    const MateFreedom freedom = FreedomOf(type);
+    for (std::size_t i = 0; i < kMateComponentCount; ++i)
+        if (freedom.free[i]) {
+            values[i] = value;
+            return values;
+        }
+    // NO FREE COMPONENT AT ALL -- a fastened mate. The number is put on a
+    // PINNED component rather than dropped, so that requireMatable refuses it
+    // with the rest. Dropping it here would make the refusal disappear the day
+    // this convenience overload was written, which is exactly what happened
+    // and what M24_MATE_003 caught.
+    values[0] = value;
+    return values;
+}
+
+} // namespace
+
 Mate& AssemblyDocument::addMate(std::string name, MateType type, ObjectId leadingInstanceId,
                                 std::string leadingConnector, ObjectId followingInstanceId,
                                 std::string followingConnector, double value) {
-    requireMatable(leadingInstanceId, followingInstanceId, type, value, "addMate");
+    return addMateWithValues(std::move(name), type, leadingInstanceId,
+                             std::move(leadingConnector), followingInstanceId,
+                             std::move(followingConnector), ValuesFromSingle(type, value));
+}
+
+Mate& AssemblyDocument::addMateWithValues(std::string name, MateType type,
+                                          ObjectId leadingInstanceId,
+                                          std::string leadingConnector,
+                                          ObjectId followingInstanceId,
+                                          std::string followingConnector, MateValues values) {
+    requireMatable(leadingInstanceId, followingInstanceId, type, values, "addMate");
     auto item = std::make_unique<Mate>(std::move(name), type, leadingInstanceId,
                                        std::move(leadingConnector), followingInstanceId,
-                                       std::move(followingConnector), value);
+                                       std::move(followingConnector), values);
     auto& ref = *item;
     mates_.push_back(std::move(item));
     registry_.registerObject(ref.id(), &ref);
@@ -241,11 +278,25 @@ Mate& AssemblyDocument::restoreMate(ObjectId id, std::string name, MateType type
                                     ObjectId leadingInstanceId, std::string leadingConnector,
                                     ObjectId followingInstanceId, std::string followingConnector,
                                     double value) {
+    return restoreMateWithValues(id, std::move(name), type, leadingInstanceId,
+                                 std::move(leadingConnector), followingInstanceId,
+                                 std::move(followingConnector), ValuesFromSingle(type, value),
+                                 false, std::array<Mate::Limit, kMateComponentCount>{});
+}
+
+Mate& AssemblyDocument::restoreMateWithValues(
+    ObjectId id, std::string name, MateType type, ObjectId leadingInstanceId,
+    std::string leadingConnector, ObjectId followingInstanceId, std::string followingConnector,
+    MateValues values, bool driven,
+    const std::array<Mate::Limit, kMateComponentCount>& limits) {
     requireUnusedId(id, "restoreMate");
-    requireMatable(leadingInstanceId, followingInstanceId, type, value, "restoreMate");
+    requireMatable(leadingInstanceId, followingInstanceId, type, values, "restoreMate");
     auto item = std::make_unique<Mate>(id, std::move(name), type, leadingInstanceId,
                                        std::move(leadingConnector), followingInstanceId,
-                                       std::move(followingConnector), value);
+                                       std::move(followingConnector), values);
+    item->setDriven(driven);
+    for (std::size_t c = 0; c < kMateComponentCount; ++c)
+        item->setLimit(static_cast<int>(c), limits[c]);
     auto& ref = *item;
     mates_.push_back(std::move(item));
     registry_.registerObject(ref.id(), &ref);
@@ -253,7 +304,8 @@ Mate& AssemblyDocument::restoreMate(ObjectId id, std::string name, MateType type
 }
 
 void AssemblyDocument::requireMatable(ObjectId leadingInstanceId, ObjectId followingInstanceId,
-                                      MateType type, double value, const char* who) const {
+                                      MateType type, const MateValues& values,
+                                      const char* who) const {
     if (findInstance(leadingInstanceId) == nullptr)
         throw std::runtime_error(std::string(who) + ": " + std::to_string(leadingInstanceId) +
                                  " is not an instance in this assembly");
@@ -266,11 +318,19 @@ void AssemblyDocument::requireMatable(ObjectId leadingInstanceId, ObjectId follo
     if (leadingInstanceId == followingInstanceId)
         throw std::runtime_error(std::string(who) +
                                  ": an instance cannot be mated to itself");
-    // A VALUE ON A FASTENED MATE is refused rather than ignored: ignoring it
-    // would leave the writer believing they had offset something.
-    if (type == MateType::Fastened && value != 0.0)
-        throw std::runtime_error(std::string(who) +
-                                 ": a fastened mate has no freedom to give a value to");
+    // A VALUE ON A COMPONENT THE MATE PINS is refused rather than ignored:
+    // ignoring it would leave the writer believing they had offset something.
+    // (An offset on a pinned component is a real feature -- roadmap §20.2 --
+    // and it is not this one. Not done, said out loud.)
+    const MateFreedom freedom = FreedomOf(type);
+    for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+        if (freedom.free[c] || values[c] == 0.0) continue;
+        throw std::runtime_error(std::string(who) + ": a " +
+                                 std::string(toString(type)) +
+                                 " mate has no freedom " +
+                                 std::string(toString(static_cast<MateComponent>(c))) +
+                                 " to give a value to");
+    }
 }
 
 std::vector<const Mate*> AssemblyDocument::mates() const {
@@ -298,13 +358,34 @@ Mate* AssemblyDocument::findMateForEdit(ObjectId id) noexcept {
     return nullptr;
 }
 
+std::size_t AssemblyDocument::mateIndex(ObjectId mateId) const noexcept {
+    for (std::size_t i = 0; i < mates_.size(); ++i)
+        if (mates_[i]->id() == mateId) return i;
+    return mates_.size();
+}
+
 bool AssemblyDocument::setMateValue(ObjectId mateId, double value) {
+    const Mate* mate = findMate(mateId);
+    if (mate == nullptr) return false;
+    const int component = mate->primaryComponent();
+    if (component == static_cast<int>(kMateComponentCount)) return false;
+    return setMateComponentValue(mateId, static_cast<MateComponent>(component), value);
+}
+
+bool AssemblyDocument::setMateComponentValue(ObjectId mateId, MateComponent component,
+                                             double value, double* clampedTo) {
     Mate* mate = findMateForEdit(mateId);
     if (mate == nullptr) return false;
-    if (mate->type() == MateType::Fastened) return false;
-    const double before = mate->value();
-    if (before == value) return true;
-    mate->setValue(value);
+    const std::size_t index = static_cast<std::size_t>(component);
+    if (!mate->freedom().free[index]) return false;
+    // CLAMPED, not refused (roadmap §22), and reported so it is never silent.
+    const double allowed = mate->clampToLimit(static_cast<int>(index), value);
+    if (clampedTo != nullptr) *clampedTo = allowed;
+    MateValues before = mate->values();
+    if (before[index] == allowed) return true;
+    MateValues after = before;
+    after[index] = allowed;
+    mate->setValues(after);
     // The FOLLOWER moves. Which end that is depends on the ground, and the
     // solve works it out -- so both ends are dirtied and the pass sorts it
     // out. Dirtying only one would be a guess about a direction that is not
@@ -314,13 +395,258 @@ bool AssemblyDocument::setMateValue(ObjectId mateId, double value) {
 
     MateValueEdit edit;
     edit.mateId = mateId;
-    edit.before = before;
-    edit.after = value;
+    edit.component = static_cast<int>(index);
+    edit.before = before[index];
+    edit.after = allowed;
     recordDelta(edit, "Drive " + mate->name());
     return true;
 }
 
+bool AssemblyDocument::setMateLimit(ObjectId mateId, MateComponent component, double minimum,
+                                    double maximum) {
+    Mate* mate = findMateForEdit(mateId);
+    if (mate == nullptr) return false;
+    const std::size_t index = static_cast<std::size_t>(component);
+    // A LIMIT ON SOMETHING THAT CANNOT MOVE is a control with nothing behind
+    // it. Refused rather than stored where it would never be read.
+    if (!mate->freedom().free[index]) return false;
+    if (!(minimum <= maximum)) return false;
+
+    const Mate::Limit before = mate->limits()[index];
+    Mate::Limit after;
+    after.enabled = true;
+    after.min = minimum;
+    after.max = maximum;
+    mate->setLimit(static_cast<int>(index), after);
+    // The value may now be outside its own limit. Brought inside immediately,
+    // because a limit that only takes effect on the NEXT drive would let a
+    // model sit in a state its own rules forbid.
+    const double allowed = mate->clampToLimit(static_cast<int>(index), mate->values()[index]);
+    if (allowed != mate->values()[index]) {
+        MateValues values = mate->values();
+        values[index] = allowed;
+        mate->setValues(values);
+        graph_.markDirty(mate->leadingInstanceId());
+        graph_.markDirty(mate->followingInstanceId());
+    }
+
+    MateLimitEdit edit;
+    edit.mateId = mateId;
+    edit.component = static_cast<int>(index);
+    edit.beforeEnabled = before.enabled;
+    edit.beforeMin = before.min;
+    edit.beforeMax = before.max;
+    edit.afterEnabled = true;
+    edit.afterMin = minimum;
+    edit.afterMax = maximum;
+    recordDelta(edit, "Limit " + mate->name());
+    return true;
+}
+
+bool AssemblyDocument::clearMateLimit(ObjectId mateId, MateComponent component) {
+    Mate* mate = findMateForEdit(mateId);
+    if (mate == nullptr) return false;
+    const std::size_t index = static_cast<std::size_t>(component);
+    const Mate::Limit before = mate->limits()[index];
+    if (!before.enabled) return true;
+    mate->setLimit(static_cast<int>(index), Mate::Limit{});
+
+    MateLimitEdit edit;
+    edit.mateId = mateId;
+    edit.component = static_cast<int>(index);
+    edit.beforeEnabled = before.enabled;
+    edit.beforeMin = before.min;
+    edit.beforeMax = before.max;
+    edit.afterEnabled = false;
+    recordDelta(edit, "Unlimit " + mate->name());
+    return true;
+}
+
+bool AssemblyDocument::setMateDriven(ObjectId mateId, bool driven) {
+    Mate* mate = findMateForEdit(mateId);
+    if (mate == nullptr) return false;
+    if (mate->isDriven() == driven) return true;
+    mate->setDriven(driven);
+    graph_.markDirty(mate->leadingInstanceId());
+    graph_.markDirty(mate->followingInstanceId());
+
+    MateDrivenEdit edit;
+    edit.mateId = mateId;
+    edit.before = !driven;
+    edit.after = driven;
+    recordDelta(edit, (driven ? "Drive " : "Release ") + mate->name());
+    return true;
+}
+
 // --- The solve (M24, ADR-M24-003/004) ----------------------------------------
+
+// THE SPANNING FOREST, BUILT ONCE (M25, ADR-M25-002).
+//
+// Which mate places which instance, walking outwards from the grounded ones.
+// M24 did this and placed as it went; M25 separates the two, because a closed
+// loop has to place EVERYTHING many times with different mate values, and the
+// shape of the walk does not change between attempts.
+//
+// The mates NOT in the forest are the ones that close loops. In M24 there could
+// be none -- one was a refusal. Now they are the equations.
+bool AssemblyDocument::buildMateForest(MateForest& forest) const {
+    forest = MateForest{};
+    for (const ObjectId grounded : groundedInstances_) {
+        if (findInstance(grounded) == nullptr) continue;
+        forest.roots.push_back(grounded);
+        forest.reached.insert(grounded);
+    }
+    if (forest.roots.empty() && !mates_.empty()) {
+        forest.message =
+            "these mates start from nowhere: nothing in this assembly is grounded, so there is "
+            "no answer to where any of it goes. Ground one instance.";
+        return false;
+    }
+
+    std::vector<ObjectId> frontier = forest.roots;
+    // EVERY MATE IS SPENT ONCE. Without this the walk turns round at the far
+    // end of a mate and comes straight back down it, finds the instance it
+    // started from already reached, and calls the way it came a loop.
+    std::unordered_set<ObjectId> spent;
+    while (!frontier.empty()) {
+        const ObjectId from = frontier.back();
+        frontier.pop_back();
+        for (const std::unique_ptr<Mate>& mate : mates_) {
+            const ObjectId to = mate->otherEnd(from);
+            if (to == kInvalidObjectId) continue;
+            if (spent.count(mate->id()) != 0) continue;
+            if (findInstance(to) == nullptr) continue;
+            if (forest.reached.count(to) != 0) continue; // a loop closer; kept below
+            spent.insert(mate->id());
+            forest.reached.insert(to);
+            forest.steps.push_back(MateForest::Step{mate->id(), from, to});
+            frontier.push_back(to);
+        }
+    }
+    for (const std::unique_ptr<Mate>& mate : mates_) {
+        if (spent.count(mate->id()) != 0) continue;
+        // Both ends reached, but this mate was not the one that reached
+        // either: it says something ELSE about a pair the forest already
+        // placed. That is a closed loop, and it is now an equation rather
+        // than a refusal (M24 could only refuse).
+        if (forest.reached.count(mate->leadingInstanceId()) != 0 &&
+            forest.reached.count(mate->followingInstanceId()) != 0)
+            forest.loopClosers.push_back(mate->id());
+    }
+
+    // Anything a mate touches that the ground does not reach has no answer.
+    for (const std::unique_ptr<Mate>& mate : mates_) {
+        for (const ObjectId end : {mate->leadingInstanceId(), mate->followingInstanceId()}) {
+            if (forest.reached.count(end) != 0) continue;
+            const PartInstance* stranded = findInstance(end);
+            forest.message =
+                "'" + (stranded == nullptr ? std::string("an instance") : stranded->name()) +
+                "' is mated to things that are not connected to any ground, so there is no "
+                "answer to where it goes";
+            return false;
+        }
+    }
+    return true;
+}
+
+// WHERE EVERYTHING ENDS UP, given a value for every mate.
+//
+// Exact: each step places one instance from one already-placed neighbour, with
+// no iteration and no tolerance. Called once for a tree assembly, and once per
+// solver probe for a mechanism.
+bool AssemblyDocument::placeThroughForest(const MateForest& forest,
+                                          const std::vector<MateValues>& mateValues,
+                                          std::unordered_map<ObjectId, Transform3D>& placed,
+                                          std::string* whyNot) const {
+    placed.clear();
+    for (const ObjectId root : forest.roots) placed[root] = instanceTransform(root);
+
+    for (const MateForest::Step& step : forest.steps) {
+        const Mate* mate = findMate(step.mateId);
+        const PartInstance* leader = findInstance(step.from);
+        const PartInstance* follower = findInstance(step.to);
+        if (mate == nullptr || leader == nullptr || follower == nullptr) continue;
+
+        // Both connectors have to still exist on the parts. A name that no
+        // longer resolves is the mate's failure, not a reason to place the
+        // follower somewhere plausible.
+        const PartInstance::MateConnector* leaderConnector =
+            leader->findConnector(mate->connectorOn(step.from));
+        const PartInstance::MateConnector* followerConnector =
+            follower->findConnector(mate->connectorOn(step.to));
+        if (leaderConnector == nullptr) {
+            if (whyNot != nullptr)
+                *whyNot = "'" + mate->name() + "': '" + leader->name() +
+                          "' has no mate connector called '" + mate->connectorOn(step.from) + "'";
+            return false;
+        }
+        if (followerConnector == nullptr) {
+            if (whyNot != nullptr)
+                *whyNot = "'" + mate->name() + "': '" + follower->name() +
+                          "' has no mate connector called '" + mate->connectorOn(step.to) + "'";
+            return false;
+        }
+
+        // THE ONE FORMULA (ADR-M24-003). Where the leader's connector is in the
+        // world, then whatever freedom the mate still has, then backwards from
+        // the follower's connector to the follower itself.
+        //
+        // A mate can be walked from EITHER end -- the ground decides which --
+        // and the middle transform is stated from the leading end, so walking
+        // it backwards means inverting it. Getting this wrong would place a
+        // hinge at minus its angle whenever the chain happened to run the
+        // other way, which is a defect that only shows up in some assemblies.
+        const bool forwards = step.from == mate->leadingInstanceId();
+        const Transform3D middle = MateTransform(mate->type(), mateValues[mateIndex(step.mateId)]);
+        const Transform3D leaderConnectorWorld =
+            Compose(placed[step.from], leaderConnector->localTransform);
+        placed[step.to] = Compose(Compose(leaderConnectorWorld, forwards ? middle
+                                                                         : Inverse(middle)),
+                                  Inverse(followerConnector->localTransform));
+    }
+    return true;
+}
+
+// HOW FAR THE LOOP-CLOSING MATES ARE FROM HOLDING.
+//
+// One residual per component each of them PINS. Zero everywhere means the
+// mechanism closes.
+bool AssemblyDocument::loopResiduals(const MateForest& forest,
+                                     const std::vector<MateValues>& mateValues,
+                                     const std::unordered_map<ObjectId, Transform3D>& placed,
+                                     double* out, std::size_t* count) const {
+    std::size_t written = 0;
+    for (const ObjectId mateId : forest.loopClosers) {
+        const Mate* mate = findMate(mateId);
+        if (mate == nullptr) continue;
+        const PartInstance* leader = findInstance(mate->leadingInstanceId());
+        const PartInstance* follower = findInstance(mate->followingInstanceId());
+        if (leader == nullptr || follower == nullptr) return false;
+        const PartInstance::MateConnector* leaderConnector =
+            leader->findConnector(mate->leadingConnector());
+        const PartInstance::MateConnector* followerConnector =
+            follower->findConnector(mate->followingConnector());
+        if (leaderConnector == nullptr || followerConnector == nullptr) return false;
+
+        const auto leaderPlaced = placed.find(mate->leadingInstanceId());
+        const auto followerPlaced = placed.find(mate->followingInstanceId());
+        if (leaderPlaced == placed.end() || followerPlaced == placed.end()) return false;
+
+        // Where the follower's connector actually sits, seen from the leader's.
+        const Transform3D relative =
+            Compose(Inverse(Compose(leaderPlaced->second, leaderConnector->localTransform)),
+                    Compose(followerPlaced->second, followerConnector->localTransform));
+        // A DRIVEN mate pins its freedoms too. Otherwise a driven slider that
+        // happened to be the mate closing the loop would absorb the whole
+        // mismatch in its own travel, report success, and overwrite the number
+        // the user typed with whatever the slack turned out to be.
+        written += static_cast<std::size_t>(MateResiduals(mate->type(),
+                                                          mateValues[mateIndex(mateId)], relative,
+                                                          out + written, mate->isDriven()));
+    }
+    if (count != nullptr) *count = written;
+    return true;
+}
 
 bool AssemblyDocument::solveMates() {
     solveReport_ = MateSolveReport{};
@@ -337,123 +663,230 @@ bool AssemblyDocument::solveMates() {
         return true;
     }
 
-    // WHERE EACH INSTANCE ENDS UP, worked out from the grounded ones outwards.
-    //
-    // This is a TREE solve and it is exact: each step places one instance from
-    // one already-placed neighbour, with no iteration and no tolerance. A
-    // closed loop -- a four-bar linkage -- cannot be solved this way and is
-    // REFUSED by name rather than approximated, because an approximation here
-    // would silently produce an assembly that does not close. That is M25's
-    // work, and this is what it looks like to not have done it yet.
-    std::unordered_map<ObjectId, Transform3D> placed;
-    std::unordered_map<ObjectId, MateSolveReport::InstanceFreedom> freedom;
-    std::vector<ObjectId> frontier;
-
-    for (const ObjectId grounded : groundedInstances_) {
-        if (findInstance(grounded) == nullptr) continue;
-        placed[grounded] = instanceTransform(grounded);
-        freedom[grounded] = MateSolveReport::InstanceFreedom{grounded, 0, 0, "ground"};
-        frontier.push_back(grounded);
-    }
-
-    if (frontier.empty()) {
+    MateForest forest;
+    if (!buildMateForest(forest)) {
         solveReport_.ok = false;
-        solveReport_.message =
-            "these mates start from nowhere: nothing in this assembly is grounded, so there is "
-            "no answer to where any of it goes. Ground one instance.";
+        solveReport_.message = forest.message;
         return false;
     }
 
-    // EVERY MATE IS SPENT ONCE. Without this the walk turns round at the far
-    // end of a mate and comes straight back down it, finds the instance it
-    // started from already placed, and reports the loop it just made itself.
-    // A mate that has been spent is the way we came; a mate that has NOT and
-    // whose far end is already placed is a real closed loop.
-    std::unordered_set<ObjectId> spentMates;
+    // The values every mate currently holds, indexed the same way mates_ is.
+    std::vector<MateValues> mateValues;
+    mateValues.reserve(mates_.size());
+    for (const std::unique_ptr<Mate>& mate : mates_) mateValues.push_back(mate->values());
 
-    while (!frontier.empty()) {
-        const ObjectId from = frontier.back();
-        frontier.pop_back();
-        for (const std::unique_ptr<Mate>& mate : mates_) {
-            const ObjectId to = mate->otherEnd(from);
-            if (to == kInvalidObjectId) continue;
-            if (spentMates.count(mate->id()) != 0) continue;
-
-            const PartInstance* leader = findInstance(from);
-            const PartInstance* follower = findInstance(to);
-            if (leader == nullptr || follower == nullptr) continue;
-
-            // Both connectors have to still exist on the parts. A name that no
-            // longer resolves is the mate's failure, not a reason to place the
-            // follower somewhere plausible.
-            const PartInstance::MateConnector* leaderConnector =
-                leader->findConnector(mate->connectorOn(from));
-            const PartInstance::MateConnector* followerConnector =
-                follower->findConnector(mate->connectorOn(to));
-            if (leaderConnector == nullptr) {
-                solveReport_.ok = false;
-                solveReport_.message = "'" + mate->name() + "': '" + leader->name() +
-                                       "' has no mate connector called '" +
-                                       mate->connectorOn(from) + "'";
-                return false;
-            }
-            if (followerConnector == nullptr) {
-                solveReport_.ok = false;
-                solveReport_.message = "'" + mate->name() + "': '" + follower->name() +
-                                       "' has no mate connector called '" +
-                                       mate->connectorOn(to) + "'";
-                return false;
-            }
-
-            // THE ONE FORMULA (ADR-M24-003). Where the leader's connector is in
-            // the world, then whatever freedom the mate still has, then
-            // backwards from the follower's connector to the follower itself.
-            const Transform3D leaderConnectorWorld =
-                Compose(placed[from], leaderConnector->localTransform);
-            const Transform3D wanted =
-                Compose(Compose(leaderConnectorWorld, MateTransform(mate->type(), mate->value())),
-                        Inverse(followerConnector->localTransform));
-
-            const auto already = placed.find(to);
-            if (already != placed.end()) {
-                // Reached twice. In a tree that cannot happen, so this IS the
-                // closed loop -- refused with both ends named, because the
-                // reader's next move is to delete one of these mates or wait
-                // for M25.
-                solveReport_.ok = false;
-                solveReport_.message =
-                    "'" + mate->name() + "' closes a loop: '" + follower->name() +
-                    "' is already placed by another chain of mates, and solving a closed loop "
-                    "needs an iterative solver this does not have yet";
-                return false;
-            }
-
-            spentMates.insert(mate->id());
-            placed[to] = wanted;
-            int rotational = 0;
-            int translational = 0;
-            switch (mate->type()) {
-                case MateType::Fastened: break;
-                case MateType::Revolute: rotational = 1; break;
-                case MateType::Slider: translational = 1; break;
-            }
-            freedom[to] = MateSolveReport::InstanceFreedom{to, rotational, translational,
-                                                           mate->name()};
-            frontier.push_back(to);
+    // WHICH NUMBERS THE SOLVE MAY CHOOSE.
+    //
+    // Only the free components of mates that PLACE something (the forest's
+    // steps) and are not driven. A loop-closing mate's own freedom moves
+    // nothing, so it is not an unknown -- it is read back afterwards from
+    // where the loop actually ended up.
+    struct Unknown {
+        std::size_t mateIndex;
+        std::size_t component;
+    };
+    std::vector<Unknown> unknowns;
+    if (!forest.loopClosers.empty()) {
+        for (const MateForest::Step& step : forest.steps) {
+            const Mate* mate = findMate(step.mateId);
+            if (mate == nullptr || mate->isDriven()) continue;
+            const MateFreedom freedom = mate->freedom();
+            for (std::size_t c = 0; c < kMateComponentCount; ++c)
+                if (freedom.free[c]) unknowns.push_back(Unknown{mateIndex(step.mateId), c});
         }
     }
 
-    // Anything the mates touch but the ground does not reach has no answer.
-    for (const std::unique_ptr<Mate>& mate : mates_) {
-        for (const ObjectId end : {mate->leadingInstanceId(), mate->followingInstanceId()}) {
-            if (placed.count(end) != 0) continue;
+    std::unordered_map<ObjectId, Transform3D> placed;
+    std::string whyNot;
+
+    if (forest.loopClosers.empty()) {
+        // A TREE. Exact, one pass, no solver -- which is what almost every
+        // assembly is, and what M24 shipped.
+        if (!placeThroughForest(forest, mateValues, placed, &whyNot)) {
             solveReport_.ok = false;
-            const PartInstance* stranded = findInstance(end);
-            solveReport_.message =
-                "'" + (stranded == nullptr ? std::string("an instance") : stranded->name()) +
-                "' is mated to things that are not connected to any ground, so there is no "
-                "answer to where it goes";
+            solveReport_.message = whyNot;
             return false;
+        }
+    } else {
+        // A MECHANISM. The loop-closing mates are equations, the undriven
+        // freedoms along the tree are the unknowns, and the seed is where
+        // everything currently sits -- which is not a convenience: it is what
+        // picks WHICH of a mechanism's several valid configurations comes
+        // back. A four-bar has two for most crank angles, and jumping between
+        // them between frames is the classic assembly-solver misbehaviour.
+        if (assemblySolver_ == nullptr) {
+            solveReport_.ok = false;
+            solveReport_.message =
+                "these mates form a closed loop and no assembly solver is configured";
+            return false;
+        }
+
+        // How many equations, asked once at the current configuration so a
+        // failure to resolve a connector is reported here rather than from
+        // inside the solver's callback where there is nothing to say it with.
+        if (!placeThroughForest(forest, mateValues, placed, &whyNot)) {
+            solveReport_.ok = false;
+            solveReport_.message = whyNot;
+            return false;
+        }
+        std::array<double, kMateComponentCount * 64> scratch{};
+        std::size_t residualCount = 0;
+        if (!loopResiduals(forest, mateValues, placed, scratch.data(), &residualCount)) {
+            solveReport_.ok = false;
+            solveReport_.message = "a mate in the loop names a connector that does not resolve";
+            return false;
+        }
+
+        AssemblySolveProblem problem;
+        problem.residualCount = residualCount;
+        problem.initial.reserve(unknowns.size());
+        for (const Unknown& unknown : unknowns)
+            problem.initial.push_back(mateValues[unknown.mateIndex][unknown.component]);
+
+        // The callback owns copies, so a probe cannot leave the document's
+        // mate values disturbed if the solve gives up half way.
+        std::vector<MateValues> probeValues = mateValues;
+        problem.evaluate = [&](const double* x, double* residuals) {
+            for (std::size_t i = 0; i < unknowns.size(); ++i)
+                probeValues[unknowns[i].mateIndex][unknowns[i].component] = x[i];
+            std::unordered_map<ObjectId, Transform3D> probePlaced;
+            if (!placeThroughForest(forest, probeValues, probePlaced, nullptr)) {
+                for (std::size_t i = 0; i < residualCount; ++i) residuals[i] = 0.0;
+                return;
+            }
+            std::size_t written = 0;
+            loopResiduals(forest, probeValues, probePlaced, residuals, &written);
+            for (std::size_t i = written; i < residualCount; ++i) residuals[i] = 0.0;
+        };
+
+        // WHERE THE SEARCH STARTS, AND WHY IT SOMETIMES HAS TO START AGAIN.
+        //
+        // The seed is the assembly's current configuration, and that is the
+        // right first guess: a mechanism being dragged is already nearly
+        // solved, and starting from where it is picks the configuration
+        // NEAREST to the one on screen. A four-bar has two solutions for most
+        // crank angles, and jumping between them between frames is the classic
+        // assembly-solver misbehaviour.
+        //
+        // But a freshly-mated linkage starts with every angle at zero, which
+        // puts all its links collinear -- a DEAD POINT, where the Jacobian
+        // loses rank and the search has no downhill direction to take. That is
+        // not a mechanism that cannot close; it is a start that cannot move.
+        //
+        // So a failed solve is retried from a few deterministic offsets. Not
+        // random ones: a solver whose answer depends on a random seed gives a
+        // different assembly on different runs of the same file, and this
+        // project has no place for that. The offsets fan out because a dead
+        // point is escaped by leaving it, and which direction does not matter.
+        static constexpr double kRestarts[] = {0.0, 0.35, -0.35, 1.1, -1.1, 2.2};
+        AssemblySolveResult solved;
+        bool anySolved = false;
+        for (const double offset : kRestarts) {
+            if (offset != 0.0) {
+                for (std::size_t i = 0; i < unknowns.size(); ++i) {
+                    // ALTERNATING, so the restarts explore shapes rather than
+                    // sliding the whole linkage along one direction -- which
+                    // for a loop is a move that changes nothing.
+                    const double sign = (i % 2 == 0) ? 1.0 : -1.0;
+                    problem.initial[i] =
+                        mateValues[unknowns[i].mateIndex][unknowns[i].component] + sign * offset;
+                }
+            }
+            solved = assemblySolver_->solve(problem);
+            if (solved) {
+                anySolved = true;
+                break;
+            }
+        }
+        if (!anySolved) {
+            solveReport_.ok = false;
+            solveReport_.message =
+                std::string("this mechanism does not close: the solve ") +
+                std::string(toString(solved.status)) +
+                (solved.message.empty() ? "" : " -- " + solved.message);
+            return false;
+        }
+        for (std::size_t i = 0; i < unknowns.size(); ++i)
+            mateValues[unknowns[i].mateIndex][unknowns[i].component] = solved.values[i];
+        if (!placeThroughForest(forest, mateValues, placed, &whyNot)) {
+            solveReport_.ok = false;
+            solveReport_.message = whyNot;
+            return false;
+        }
+        solveReport_.mechanismDegreesOfFreedom = solved.degreesOfFreedom;
+        solveReport_.iterations = solved.iterations;
+
+        // WRITE THE SOLVED ANGLES BACK. The model has to say where things are:
+        // a hinge whose stored angle disagreed with the arm on screen would be
+        // two answers to one question, which is the thing this project spends
+        // its milestones removing. The sketch solver does exactly this with
+        // geometry, for exactly this reason.
+        const bool wasApplying = applyingHistory_;
+        applyingHistory_ = true;
+        for (const Unknown& unknown : unknowns)
+            mates_[unknown.mateIndex]->setValues(mateValues[unknown.mateIndex]);
+        // ...and the loop closers, read back from where the loop actually
+        // ended up, so THEIR angles are true as well.
+        for (const ObjectId mateId : forest.loopClosers) {
+            Mate* mate = findMateForEdit(mateId);
+            if (mate == nullptr) continue;
+            // A DRIVEN mate says where it is; the solve does not get to
+            // re-decide that, whichever side of the spanning tree it fell on.
+            if (mate->isDriven()) continue;
+            const PartInstance* leader = findInstance(mate->leadingInstanceId());
+            const PartInstance* follower = findInstance(mate->followingInstanceId());
+            if (leader == nullptr || follower == nullptr) continue;
+            const PartInstance::MateConnector* leaderConnector =
+                leader->findConnector(mate->leadingConnector());
+            const PartInstance::MateConnector* followerConnector =
+                follower->findConnector(mate->followingConnector());
+            if (leaderConnector == nullptr || followerConnector == nullptr) continue;
+            const Transform3D relative = Compose(
+                Inverse(Compose(placed[mate->leadingInstanceId()], leaderConnector->localTransform)),
+                Compose(placed[mate->followingInstanceId()], followerConnector->localTransform));
+            const std::array<double, kMateComponentCount> achieved = ComponentsOf(relative);
+            MateValues values = mate->values();
+            const MateFreedom freedom = mate->freedom();
+            for (std::size_t c = 0; c < kMateComponentCount; ++c)
+                if (freedom.free[c]) values[c] = achieved[c];
+            mate->setValues(values);
+        }
+        applyingHistory_ = wasApplying;
+    }
+
+    // --- what the solve concluded, per instance ------------------------------
+    std::unordered_map<ObjectId, MateSolveReport::InstanceFreedom> freedom;
+    for (const ObjectId root : forest.roots)
+        freedom[root] = MateSolveReport::InstanceFreedom{root, 0, 0, "ground"};
+    for (const MateForest::Step& step : forest.steps) {
+        const Mate* mate = findMate(step.mateId);
+        if (mate == nullptr) continue;
+        const MateFreedom left = mate->freedom();
+        freedom[step.to] = MateSolveReport::InstanceFreedom{
+            step.to, left.rotational(), left.translational(), mate->name()};
+    }
+    // INSIDE A CLOSED LOOP, per-instance freedom is not a meaningful thing to
+    // report and saying it anyway would be worse than saying nothing: the
+    // freedom belongs to the MECHANISM, not to any one part of it. A four-bar
+    // whose three moving links each "have one rotation" reads as three
+    // freedoms when the linkage has one. So the loop's members are marked as
+    // such and the number is reported once, for the mechanism.
+    if (!forest.loopClosers.empty()) {
+        std::unordered_set<ObjectId> inLoop;
+        for (const ObjectId mateId : forest.loopClosers) {
+            const Mate* mate = findMate(mateId);
+            if (mate == nullptr) continue;
+            inLoop.insert(mate->leadingInstanceId());
+            inLoop.insert(mate->followingInstanceId());
+        }
+        for (const MateForest::Step& step : forest.steps) inLoop.insert(step.to);
+        for (const ObjectId id : inLoop) {
+            if (isInstanceGrounded(id)) continue;
+            auto found = freedom.find(id);
+            if (found == freedom.end()) continue;
+            found->second.rotational = 0;
+            found->second.translational = 0;
+            found->second.describedBy = "in a closed loop";
         }
     }
 
@@ -511,6 +944,71 @@ DocumentRecomputeReport AssemblyDocument::recompute() {
     // The items of the second pass are the ones that moved; the first pass's
     // are what built. Returned together so a caller sees the whole rebuild.
     for (RecomputeItemReport& item : second.items) report.items.push_back(std::move(item));
+    return report;
+}
+
+AssemblyDocument::InterferenceReport AssemblyDocument::checkInterference() const {
+    InterferenceReport report;
+    IGeometryKernel* kernel = geometryKernel();
+    if (kernel == nullptr) {
+        report.ok = false;
+        report.message = "no geometry kernel configured";
+        return report;
+    }
+
+    // WHAT IS ACTUALLY THERE. An instance that has not been built is skipped
+    // and SAID SO -- reporting it as clear would be the same sentence as "no
+    // interference", which is the one thing this must never say by accident.
+    std::vector<const PartInstance*> built;
+    std::vector<KernelBoundsResult> bounds;
+    int skipped = 0;
+    for (const std::unique_ptr<PartInstance>& one : instances_) {
+        if (one->currentState() != ComputeState::Valid || !one->currentShape().isValid()) {
+            ++skipped;
+            continue;
+        }
+        const KernelBoundsResult box = kernel->boundsOfShape(one->currentShape());
+        if (!box.ok) {
+            ++skipped;
+            continue;
+        }
+        built.push_back(one.get());
+        bounds.push_back(box);
+    }
+    if (skipped > 0) {
+        report.ok = false;
+        report.message = std::to_string(skipped) +
+                         " instance(s) have not been built, so this is not a full answer -- "
+                         "solve first";
+    }
+
+    for (std::size_t i = 0; i < built.size(); ++i) {
+        for (std::size_t j = i + 1; j < built.size(); ++j) {
+            // BROAD PHASE (roadmap §23): boxes that do not overlap cannot,
+            // and this is the difference between an assembly that can be
+            // checked while it moves and one that cannot. The tolerance is
+            // one-sided on purpose -- boxes that merely touch are let
+            // through to the precise phase, which is the cheap direction to
+            // be wrong in.
+            const KernelBoundsResult& a = bounds[i];
+            const KernelBoundsResult& b = bounds[j];
+            if (a.max.x < b.min.x || b.max.x < a.min.x) continue;
+            if (a.max.y < b.min.y || b.max.y < a.min.y) continue;
+            if (a.max.z < b.min.z || b.max.z < a.min.z) continue;
+
+            const KernelInterferenceResult measured =
+                kernel->measureInterference(built[i]->currentShape(), built[j]->currentShape());
+            if (!measured) {
+                report.ok = false;
+                report.message = "'" + built[i]->name() + "' and '" + built[j]->name() +
+                                 "' could not be compared: " + measured.message;
+                continue;
+            }
+            if (measured.volumeMm3 <= 0.0) continue;
+            report.overlaps.push_back(
+                Interference{built[i]->id(), built[j]->id(), measured.volumeMm3});
+        }
+    }
     return report;
 }
 
