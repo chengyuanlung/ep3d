@@ -6,6 +6,9 @@
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/TransformFeatures.h"
 #include "Core/Feature/DraftFeature.h"
+#include "Core/Feature/ImportFeature.h"
+#include <filesystem>
+#include <cstdio>
 #include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/PadFeature.h"
@@ -58,6 +61,16 @@ public:
     ShapeResult draftFaces(const KernelShape& base, const FaceSelection& faces,
                            const FaceQuery& neutral, double angleRad) override {
         return inner_.draftFaces(base, faces, neutral, angleRad);
+    }
+    IoResult exportStep(const KernelShape& shape, const std::string& path) override {
+        return inner_.exportStep(shape, path);
+    }
+    ShapeResult importStep(const std::string& path) override {
+        return inner_.importStep(path);
+    }
+    IoResult exportStl(const KernelShape& shape, const std::string& path,
+                       double deflectionMm) override {
+        return inner_.exportStl(shape, path, deflectionMm);
     }
     KernelBoundsResult boundsOfShape(const KernelShape& shape) override {
         return inner_.boundsOfShape(shape);
@@ -1301,4 +1314,165 @@ TEST(OcctRecomputeIntegrationTest, M21_FEAT_011_EVERYChainFeatureRefusesAnAlread
         // The TOOL side, which a guard on the target alone would let through.
         d.addBooleanFeature(b, "X", BooleanOperation::Union, other, base);
     });
+}
+
+// --- M22: IMPORT as a feature, through a real document -----------------------
+
+TEST(OcctRecomputeIntegrationTest, M22_FEAT_001_AnImportedSolidIsAChainBase) {
+    // The whole path: build a part, write it, read it back as a feature, and
+    // dress the result. An import that could not be a base would be a picture
+    // rather than a part.
+    OcctGeometryKernel kernel;
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "ep3d-feature-import.step").string();
+    std::remove(path.c_str());
+
+    {
+        PartDocument source{"Source"};
+        source.setGeometryKernel(&kernel);
+        Sketch& sketch = source.addSketch("Base");
+        AddSquare(source, sketch.id(), 60.0);
+        Parameter& tall = source.addParameter("H", 40.0, UnitType::Millimeter);
+        Body& body = source.addBody("Body");
+        const ObjectId pad = source.addPadFeature(body, "Pad1", sketch.id(), tall.id()).id();
+        ASSERT_TRUE(source.recompute().success);
+        const ISolidFeature* solid = dynamic_cast<const ISolidFeature*>(
+            source.bodies().front()->features().front().get());
+        ASSERT_NE(solid, nullptr);
+        (void)pad;
+        ASSERT_TRUE(kernel.exportStep(solid->currentShape(), path));
+    }
+
+    PartDocument document{"Imported"};
+    document.setGeometryKernel(&kernel);
+    Body& body = document.addBody("Body");
+    ImportFeature& brought = document.addImportFeature(body, "Ghost", path);
+
+    // ...and something downstream of it, to prove it is a base like any other.
+    Parameter& wall = document.addParameter("W", 5.0, UnitType::Millimeter);
+    FaceQuery top;
+    top.extremeTowards = Vec3{0, 0, 1};
+    ShellFeature& hollow =
+        document.addShellFeature(body, "Shell1", brought.id(), {top}, wall.id());
+
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_EQ(brought.currentState(), ComputeState::Valid);
+    EXPECT_EQ(hollow.currentState(), ComputeState::Valid);
+
+    const double expected = 60.0 * 60.0 * 40.0 - 50.0 * 50.0 * 35.0;
+    EXPECT_NEAR(VolumeOfFeature(kernel, hollow), expected, 1e-6 * expected);
+    std::remove(path.c_str());
+}
+
+TEST(OcctRecomputeIntegrationTest, M22_FEAT_002_AMissingSourceFileFAILSLoudly) {
+    // The consequence of storing the path rather than the geometry, and it is
+    // the point rather than a cost: a part that quietly kept working after its
+    // source vanished is a part nobody can reproduce.
+    OcctGeometryKernel kernel;
+    PartDocument document{"Imported"};
+    document.setGeometryKernel(&kernel);
+    Body& body = document.addBody("Body");
+    ImportFeature& brought = document.addImportFeature(body, "Ghost", "no-such-file.step");
+
+    const DocumentRecomputeReport report = document.recompute();
+    EXPECT_EQ(brought.currentState(), ComputeState::Failed);
+    EXPECT_NE(FailureMessageFor(report, brought.id()).find("could not read"), std::string::npos)
+        << FailureMessageFor(report, brought.id());
+}
+
+TEST(OcctRecomputeIntegrationTest, M22_FEAT_003_ReExportingTheSourceCHANGESTheModel) {
+    // The other consequence, and the reason the file is re-read every rebuild
+    // rather than cached: a user who fixed the source expects the model to
+    // follow it.
+    OcctGeometryKernel kernel;
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "ep3d-reexport.step").string();
+    std::remove(path.c_str());
+
+    const auto writeCube = [&](double side) {
+        PartDocument source{"Source"};
+        source.setGeometryKernel(&kernel);
+        Sketch& sketch = source.addSketch("Base");
+        AddSquare(source, sketch.id(), side);
+        Parameter& tall = source.addParameter("H", side, UnitType::Millimeter);
+        Body& body = source.addBody("Body");
+        source.addPadFeature(body, "Pad1", sketch.id(), tall.id());
+        EXPECT_TRUE(source.recompute().success);
+        const ISolidFeature* solid = dynamic_cast<const ISolidFeature*>(
+            source.bodies().front()->features().front().get());
+        EXPECT_NE(solid, nullptr);
+        EXPECT_TRUE(kernel.exportStep(solid->currentShape(), path));
+    };
+
+    writeCube(40.0);
+    PartDocument document{"Imported"};
+    document.setGeometryKernel(&kernel);
+    Body& body = document.addBody("Body");
+    ImportFeature& brought = document.addImportFeature(body, "Ghost", path);
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_NEAR(VolumeOfFeature(kernel, brought), 40.0 * 40.0 * 40.0, 1e-3);
+
+    // The source changes under it, and the model follows on the next rebuild.
+    writeCube(20.0);
+    // NOTHING DIRTIES AN IMPORT ON ITS OWN: its input is a file, and the
+    // graph has no node for something outside the document. Saying so here
+    // is the honest version of what wireImportFeature records.
+    ASSERT_TRUE(document.markDirty(brought.id()));
+    ASSERT_TRUE(document.recompute().success);
+    EXPECT_NEAR(VolumeOfFeature(kernel, brought), 20.0 * 20.0 * 20.0, 1e-3);
+    std::remove(path.c_str());
+}
+
+
+TEST(OcctRecomputeIntegrationTest, M22_FEAT_004_AnImportsFacesAreTaggedAsITSOwn) {
+    // Every other chain base tags the faces it makes with its own id, so a
+    // downstream feature can say "the face THIS made" and keep meaning it after
+    // the geometry moves (ADR-M17-035). An import that skipped the tagging
+    // would still measure, still round-trip and still take a `facing:` query --
+    // and would silently be the ONE base in the tree that cannot be referred to
+    // by provenance. A volume assertion cannot see that; only asking a
+    // CreatedBy question can.
+    OcctGeometryKernel kernel;
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "ep3d-tagged-import.step").string();
+    std::remove(path.c_str());
+
+    {
+        PartDocument source{"Source"};
+        source.setGeometryKernel(&kernel);
+        Sketch& sketch = source.addSketch("Base");
+        AddSquare(source, sketch.id(), 60.0);
+        Parameter& tall = source.addParameter("H", 40.0, UnitType::Millimeter);
+        Body& body = source.addBody("Body");
+        source.addPadFeature(body, "Pad1", sketch.id(), tall.id());
+        ASSERT_TRUE(source.recompute().success);
+        const auto* solid = dynamic_cast<const ISolidFeature*>(
+            source.bodies().front()->features().front().get());
+        ASSERT_NE(solid, nullptr);
+        ASSERT_TRUE(kernel.exportStep(solid->currentShape(), path));
+    }
+
+    PartDocument document{"Imported"};
+    document.setGeometryKernel(&kernel);
+    Body& body = document.addBody("Body");
+    ImportFeature& brought = document.addImportFeature(body, "Ghost", path);
+    ASSERT_TRUE(document.recompute().success);
+
+    // "The top face of what the import made" -- both halves, because createdBy
+    // alone matches all six.
+    FaceQuery mine;
+    mine.createdBy = brought.id();
+    mine.extremeTowards = Vec3{0, 0, 1};
+    const FaceQueryResult found = kernel.resolveFace(brought.currentShape(), mine);
+    EXPECT_TRUE(found.ok) << found.message;
+    EXPECT_NEAR(found.face.point.z, 40.0, 1e-6) << found.message;
+
+    // ...and the tag is the import's OWN id, not merely some id: a query naming
+    // a different feature has to find nothing.
+    FaceQuery somebodyElses;
+    somebodyElses.createdBy = brought.id() + 1000;
+    EXPECT_FALSE(kernel.resolveFace(brought.currentShape(), somebodyElses).ok)
+        << "the import's faces answered to a feature that never touched them";
+
+    std::remove(path.c_str());
 }

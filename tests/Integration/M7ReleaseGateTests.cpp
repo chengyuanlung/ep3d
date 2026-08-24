@@ -816,6 +816,16 @@ public:
                            const FaceQuery& neutral, double angleRad) override {
         return inner.draftFaces(base, faces, neutral, angleRad);
     }
+    IoResult exportStep(const KernelShape& shape, const std::string& path) override {
+        return inner.exportStep(shape, path);
+    }
+    ShapeResult importStep(const std::string& path) override {
+        return inner.importStep(path);
+    }
+    IoResult exportStl(const KernelShape& shape, const std::string& path,
+                       double deflectionMm) override {
+        return inner.exportStl(shape, path, deflectionMm);
+    }
     KernelBoundsResult boundsOfShape(const KernelShape& shape) override {
         return inner.boundsOfShape(shape);
     }

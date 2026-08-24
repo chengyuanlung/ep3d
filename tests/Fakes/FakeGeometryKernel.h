@@ -361,6 +361,33 @@ public:
     // it does not know WHERE any of its shapes are. Returning a box would be
     // inventing one, and a hole that reads "how deep is this part" would then
     // be drilled to an invented depth.
+    // FILE I/O IS REFUSED. The fake has no representation to write: its shapes
+    // are mass properties and nothing else, so a STEP file made from one would
+    // describe nothing. Every claim about what lands on disk is made against
+    // real OCCT in the kernel suite.
+    IoResult exportStep(const KernelShape& shape, const std::string& path) override {
+        ++exportStepCallCount;
+        (void)shape;
+        (void)path;
+        return IoResult{false, "the fake kernel has no representation to export"};
+    }
+
+    ShapeResult importStep(const std::string& path) override {
+        ++importStepCallCount;
+        (void)path;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel cannot read STEP"};
+    }
+
+    IoResult exportStl(const KernelShape& shape, const std::string& path,
+                       double deflectionMm) override {
+        ++exportStlCallCount;
+        (void)shape;
+        (void)path;
+        (void)deflectionMm;
+        return IoResult{false, "the fake kernel has no representation to export"};
+    }
+
     KernelBoundsResult boundsOfShape(const KernelShape& shape) override {
         ++boundsOfShapeCallCount;
         (void)shape;
@@ -525,6 +552,9 @@ public:
     int boundsOfShapeCallCount = 0;
     int rotateShapeCallCount = 0;
     int intersectShapesCallCount = 0;
+    int exportStepCallCount = 0;
+    int importStepCallCount = 0;
+    int exportStlCallCount = 0;
     int loftProfilesCallCount = 0;
     int filletCallCount = 0;
     int chamferCallCount = 0;

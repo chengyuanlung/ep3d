@@ -25,7 +25,13 @@
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <Bnd_Box.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <Interface_Static.hxx>
+#include <STEPControl_Reader.hxx>
+#include <STEPControl_Writer.hxx>
+#include <StlAPI_Writer.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -1115,6 +1121,125 @@ ShapeResult OcctGeometryKernel::draftFaces(const KernelShape& base, const FaceSe
                                (failure.GetMessageString() != nullptr
                                     ? failure.GetMessageString()
                                     : "no message")};
+    }
+}
+
+IoResult OcctGeometryKernel::exportStep(const KernelShape& shape, const std::string& path) {
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull())
+        return IoResult{false, "there is no solid to export"};
+    if (path.empty()) return IoResult{false, "no file name to export to"};
+
+    try {
+        // MILLIMETRES, said out loud. STEP carries its own unit and OCCT's
+        // default depends on a static resource file -- so a part exported on
+        // one machine could arrive a thousand times too big on another, which
+        // is a failure that looks like a modelling mistake. Setting it here
+        // makes the file say what this program means.
+        Interface_Static::SetCVal("write.step.unit", "MM");
+        // AP214 rather than AP203: it carries colour and assembly structure,
+        // both of which this will grow into, and every reader that takes 203
+        // takes 214.
+        Interface_Static::SetCVal("write.step.schema", "AP214IS");
+
+        STEPControl_Writer writer;
+        const IFSelect_ReturnStatus transferred =
+            writer.Transfer(occt->shape(), STEPControl_AsIs);
+        if (transferred != IFSelect_RetDone)
+            return IoResult{false, "OCCT could not translate that solid into STEP"};
+        const IFSelect_ReturnStatus written = writer.Write(path.c_str());
+        if (written != IFSelect_RetDone)
+            return IoResult{false, "OCCT could not write '" + path + "'"};
+        return IoResult{true, {}};
+    } catch (const Standard_Failure& failure) {
+        return IoResult{false, std::string("OCCT refused the STEP export: ") +
+                                   (failure.GetMessageString() != nullptr
+                                        ? failure.GetMessageString()
+                                        : "no message")};
+    }
+}
+
+ShapeResult OcctGeometryKernel::importStep(const std::string& path) {
+    if (path.empty())
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "no file name to import from"};
+    try {
+        STEPControl_Reader reader;
+        if (reader.ReadFile(path.c_str()) != IFSelect_RetDone)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "could not read '" + path + "' as STEP"};
+        const Standard_Integer roots = reader.NbRootsForTransfer();
+        if (roots < 1)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "'" + path + "' holds no geometry"};
+        reader.TransferRoots();
+
+        // ONE SOLID, or a refusal naming how many there were.
+        //
+        // Taking the first would import a different part than the file holds,
+        // and fusing them would invent material between parts that were
+        // deliberately apart. Both look like success.
+        TopoDS_Shape only;
+        int solids = 0;
+        for (Standard_Integer i = 1; i <= reader.NbShapes(); ++i) {
+            const TopoDS_Shape one = reader.Shape(i);
+            if (one.IsNull()) continue;
+            for (TopExp_Explorer it(one, TopAbs_SOLID); it.More(); it.Next()) {
+                ++solids;
+                if (solids == 1) only = it.Current();
+            }
+        }
+        if (solids == 0)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "'" + path + "' holds no solid -- surfaces and wireframe cannot "
+                               "be imported as a part yet"};
+        if (solids > 1)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "'" + path + "' holds " + std::to_string(solids) +
+                                   " solids, and importing several as one part is not "
+                                   "supported yet"};
+
+        auto handle = std::make_shared<OcctShape>(only);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused the STEP import: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
+    }
+}
+
+IoResult OcctGeometryKernel::exportStl(const KernelShape& shape, const std::string& path,
+                                       double deflectionMm) {
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull())
+        return IoResult{false, "there is no solid to export"};
+    if (path.empty()) return IoResult{false, "no file name to export to"};
+    if (!std::isfinite(deflectionMm) || deflectionMm < kMinExtrusionDistanceMm)
+        return IoResult{false, "an STL deflection must be finite and at least " +
+                                   std::to_string(kMinExtrusionDistanceMm) + " mm"};
+
+    try {
+        // TESSELLATED FIRST, EXPLICITLY. StlAPI_Writer meshes whatever it is
+        // given, but only if a mesh is absent -- so a shape that was already
+        // meshed for the screen at a coarse deflection would be written at THAT
+        // deflection, and the file would silently depend on whether the part
+        // had been looked at.
+        BRepMesh_IncrementalMesh mesh(occt->shape(), deflectionMm);
+        mesh.Perform();
+        if (!mesh.IsDone()) return IoResult{false, "OCCT could not tessellate that solid"};
+
+        StlAPI_Writer writer;
+        writer.ASCIIMode() = Standard_False; // binary: an order of magnitude smaller
+        if (!writer.Write(occt->shape(), path.c_str()))
+            return IoResult{false, "OCCT could not write '" + path + "'"};
+        return IoResult{true, {}};
+    } catch (const Standard_Failure& failure) {
+        return IoResult{false, std::string("OCCT refused the STL export: ") +
+                                   (failure.GetMessageString() != nullptr
+                                        ? failure.GetMessageString()
+                                        : "no message")};
     }
 }
 

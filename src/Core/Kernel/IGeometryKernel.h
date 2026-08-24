@@ -12,6 +12,17 @@
 
 namespace paramcad {
 
+// Whether a file was written, and why not (M22).
+//
+// Its own type rather than ShapeResult, because writing produces no shape and
+// a caller that got one back would have to ignore it -- and a result nobody
+// reads is a result nobody checks.
+struct IoResult {
+    bool ok{false};
+    std::string message;
+    explicit operator bool() const noexcept { return ok; }
+};
+
 // Where a shape reaches, and whether the question could be answered at all.
 //
 // `ok` is false for an empty or foreign handle: an empty shape has no extent,
@@ -217,6 +228,39 @@ public:
     // intents.
     virtual ShapeResult draftFaces(const KernelShape& base, const FaceSelection& faces,
                                    const FaceQuery& neutral, double angleRad) = 0;
+
+    // --- The outside world (M22) ------------------------------------------
+    //
+    // Reading and writing files is a KERNEL capability, not a document one: the
+    // kernel owns the representation, and a different kernel would write STEP
+    // from a different one. What crosses this boundary is still only a
+    // KernelShape and a path -- no topology, no OCCT type (ADR-M4-004).
+    //
+    // PATHS, not streams. STEP writing is a multi-pass operation in OCCT and
+    // the reader is happier with a file than with anything else; wrapping that
+    // in a stream would be an abstraction over one implementation's convenience
+    // rather than over a real choice.
+
+    // Writes `shape` as AP214 STEP. The one exchange format every mechanical
+    // CAD system reads, which is the whole reason it comes before STL.
+    virtual IoResult exportStep(const KernelShape& shape, const std::string& path) = 0;
+
+    // Reads a STEP file back as ONE solid.
+    //
+    // A file holding several solids is REFUSED rather than silently reduced to
+    // the first or fused into one: "which of these did you mean" has no
+    // defensible default, and a fuse would invent material between parts that
+    // were deliberately apart. Multi-solid import is a real feature and it is
+    // not this one.
+    virtual ShapeResult importStep(const std::string& path) = 0;
+
+    // Writes `shape` as binary STL, tessellated to `deflectionMm`.
+    //
+    // LOSSY BY CONSTRUCTION, and the deflection says how lossy: STL is
+    // triangles, so a cylinder becomes a fan of flats and there is no setting
+    // that makes it not so. It is here because it is what a 3D printer eats.
+    virtual IoResult exportStl(const KernelShape& shape, const std::string& path,
+                               double deflectionMm) = 0;
 
     // The axis-aligned extent of a shape, in part-local XYZ (M20).
     //

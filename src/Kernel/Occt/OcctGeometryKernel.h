@@ -33,6 +33,10 @@ public:
                            double thicknessMm) override;
     ShapeResult draftFaces(const KernelShape& base, const FaceSelection& faces,
                            const FaceQuery& neutral, double angleRad) override;
+    IoResult exportStep(const KernelShape& shape, const std::string& path) override;
+    ShapeResult importStep(const std::string& path) override;
+    IoResult exportStl(const KernelShape& shape, const std::string& path,
+                       double deflectionMm) override;
     KernelBoundsResult boundsOfShape(const KernelShape& shape) override;
     ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
                             double radiusMm) override;

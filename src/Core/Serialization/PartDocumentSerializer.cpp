@@ -11,6 +11,7 @@
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
+#include "Core/Feature/ImportFeature.h"
 #include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/ShellFeature.h"
 #include "Core/Feature/RevolveFeature.h"
@@ -129,7 +130,7 @@ void WriteSketchGeometry(JsonValue& entry, const SketchGeometry& geometry) {
 }
 
 
-constexpr int kSchemaVersion = 27;          // v27 adds boolean and two patterns (M21)
+constexpr int kSchemaVersion = 28;          // v28 adds STEP import (M22)
 // v15 added PointLineDistance (M17).
 // v14 added construction geometry (M17).
 // v13 added Horizontal/VerticalDistance (M17).
@@ -443,6 +444,22 @@ JsonValue toJson(const PartDocument& document) {
                 featureEntry.set("lengthParameterId",
                                  JsonValue::makeString(idToString(pad->lengthParameterId())));
                 featureEntry.set("materialId", JsonValue::makeString(idToString(pad->materialId())));
+            } else if (const auto* imported =
+                           dynamic_cast<const ImportFeature*>(feature.get())) {
+                // v28 (M22). A PATH, which is the first string a feature record
+                // has ever carried -- and it is still a reference, just one to
+                // something outside the document. What is NOT written is the
+                // imported geometry: no topology ever crosses into this file
+                // (ADR-M4-004), so the sentence is stored and answered again on
+                // every rebuild.
+                //
+                // Written VERBATIM, including whether it is relative. Turning a
+                // relative path absolute at save time would bind the document
+                // to the machine that saved it, which is the opposite of what a
+                // relative path was chosen for.
+                featureEntry.set("path", JsonValue::makeString(imported->path()));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(imported->materialId())));
             } else if (const auto* boolean =
                            dynamic_cast<const BooleanFeature*>(feature.get())) {
                 // v27 (M21). TWO operands, and the ORDER is written because
@@ -1240,7 +1257,7 @@ constexpr std::string_view kSolidFeatureTypeNames[] = {"Box",     "Pad",     "Po
                                                        "Mirror",  "Pattern", "Sweep",
                                                        "Loft",    "Shell",   "Draft",
                                                        "Hole",    "Boolean", "CircularPattern",
-                                                       "CurvePattern"};
+                                                       "CurvePattern", "Import"};
 
 bool IsSolidFeatureTypeName(std::string_view name) {
     for (const std::string_view solid : kSolidFeatureTypeNames)
@@ -2281,6 +2298,25 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.sketchId = *sketchRef;
                 featureData.depthParameterId = *depthRef;
                 featureData.materialId = *pocketMaterialId;
+            } else if (featureData.typeName == "Import") {
+                const JsonValue* pathField = requireField(featureEntry, "path", JsonType::String,
+                                                          featureContext, err);
+                if (pathField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* importMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (importMaterialField == nullptr) return loadFailure(err.error, err.message);
+                // AN EMPTY PATH names no file, so the feature it describes can
+                // never build. Refused at the door rather than at recompute
+                // time, where the reason would be a long way from the cause.
+                if (pathField->asString().empty())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": an import names no file");
+                featureData.importPath = pathField->asString();
+                const auto importMaterialId = idFromString(importMaterialField->asString());
+                if (!importMaterialId || *importMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": import materialId is not a valid id");
+                featureData.materialId = *importMaterialId;
             } else if (featureData.typeName == "Boolean") {
                 const JsonValue* targetField = requireField(featureEntry, "baseFeatureId",
                                                             JsonType::String, featureContext, err);

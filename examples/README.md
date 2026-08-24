@@ -198,3 +198,24 @@ as arithmetic, so the numbers can be checked by reading.
 ```
 ep3d --script examples/patterns-and-booleans.ep3ds
 ```
+
+## `step-round-trip.ep3ds` (M22)
+
+The way **out**, and the way back. A shelled, drilled part goes out as STEP and
+comes back as an import; the same part goes out twice as STL at two
+deflections, coarse and fine, and the coarse file is visibly the smaller one.
+
+The format comes from the **extension**, because there is no format argument:
+a `.step` written as STL would be a file whose name lies about it, and the
+reader at the far end would refuse it for a reason naming neither EP3D nor the
+choice that caused it.
+
+An import stores the **path**, not the geometry -- the same decision as a face
+query storing `the top face` rather than face #4. So the file is re-read on
+every rebuild, a re-exported source shows up in the model, and a source that
+went away stops the feature by name. The script ends by drilling the imported
+solid, which is the part a mesh could not have done.
+
+```
+ep3d --script examples/step-round-trip.ep3ds
+```

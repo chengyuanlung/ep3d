@@ -11,6 +11,7 @@
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
+#include "Core/Feature/ImportFeature.h"
 #include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/ShellFeature.h"
 #include "Core/Feature/RevolveFeature.h"
@@ -54,6 +55,9 @@ FeatureSnapshot SnapshotFeature(const Feature& feature) {
     } else if (const auto* loft = dynamic_cast<const LoftFeature*>(&feature)) {
         snapshot.sectionSketchIds = loft->sectionSketchIds();
         snapshot.materialId = loft->materialId();
+    } else if (const auto* imported = dynamic_cast<const ImportFeature*>(&feature)) {
+        snapshot.importPath = imported->path();
+        snapshot.materialId = imported->materialId();
     } else if (const auto* boolean = dynamic_cast<const BooleanFeature*>(&feature)) {
         snapshot.baseFeatureId = boolean->targetFeatureId();
         snapshot.toolFeatureId = boolean->toolFeatureId();
@@ -145,6 +149,9 @@ Feature& RestoreFeatureFromSnapshot(PartDocument& document, Body& body,
             body, snapshot.id, snapshot.name, snapshot.state, snapshot.sketchId,
             static_cast<SketchEntityId>(snapshot.axisEntityId), snapshot.angleParameterId,
             snapshot.materialId);
+    if (type == "Import")
+        return document.restoreImportFeature(body, snapshot.id, snapshot.name, snapshot.state,
+                                             snapshot.importPath, snapshot.materialId);
     if (type == "Boolean")
         return document.restoreBooleanFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                               snapshot.booleanOperation, snapshot.baseFeatureId,

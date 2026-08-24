@@ -26,6 +26,7 @@ add_library(ParametricCADCore
     src/Core/Feature/DraftFeature.cpp
     src/Core/Feature/LoftFeature.cpp
     src/Core/Feature/HoleFeature.cpp
+    src/Core/Feature/ImportFeature.cpp
     src/Core/Feature/ShellFeature.cpp
     src/Core/Feature/PadFeature.cpp
     src/Core/Feature/SweepFeature.cpp

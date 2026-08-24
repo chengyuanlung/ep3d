@@ -1,6 +1,7 @@
 #include "Cli/SketchScript.h"
 
 #include "Core/Feature/BooleanFeature.h"
+#include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Measure/SketchMeasure.h"
 
@@ -19,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -373,6 +375,8 @@ private:
             return doBoolean(tokens);
         if (verb == "ring") return doRing(tokens);
         if (verb == "along") return doAlong(tokens);
+        if (verb == "export") return doExport(tokens);
+        if (verb == "import") return doImport(tokens);
         if (verb == "solve") return doSolve();
         if (verb == "save") return doSave(tokens);
         if (verb == "help") {
@@ -384,7 +388,7 @@ private:
             note("dimensions: " + Join(ScriptDimensionNames()));
             note("commands: sketch, tool, click, finish, constrain, dimension, pad, sweep, "
                  "loft, shell, draft, hole, union, subtract, intersect, ring, along, "
-                 "solve, save, measure, handle, echo, help");
+                 "export, import, solve, save, measure, handle, echo, help");
             return true;
         }
         if (verb == "handle") {
@@ -767,6 +771,70 @@ private:
                     "' is not a face; use top, bottom, +x, -x, +y, -y, +z, -z, or facing:DIR");
     }
 
+    bool doExport(const std::vector<std::string>& tokens) {
+        // export BODY FILE [DEFLECTION]
+        //
+        // The format is chosen by the EXTENSION, because that is what the file
+        // is going to be read as at the far end. Asking for it separately would
+        // let a .step be written as STL, which every reader would then refuse
+        // for a reason that names neither this program nor the choice.
+        if (tokens.size() != 3 && tokens.size() != 4)
+            return fail("export needs a body and a file name");
+        Body* body = document_.findBodyNamed(tokens[1]);
+        if (body == nullptr) return fail("there is no body called '" + tokens[1] + "'");
+        const ObjectId tip = lastSolidIn(*body);
+        if (tip == kInvalidObjectId) return fail("'" + tokens[1] + "' has no solid to export");
+
+        const ISolidFeature* solid = solidFeature(tip);
+        if (solid == nullptr) return fail("'" + tokens[1] + "' has no solid to export");
+        if (solid->currentState() != ComputeState::Valid || !solid->currentShape().isValid())
+            return fail("'" + tokens[1] +
+                        "' has not been built yet -- `solve` before exporting");
+
+        IGeometryKernel* kernel = document_.geometryKernel();
+        if (kernel == nullptr) return fail("no geometry kernel configured");
+
+        const std::string& path = tokens[2];
+        const std::string suffix = LowerSuffix(path);
+        IoResult written;
+        if (suffix == "stl") {
+            // A DEFAULT DEFLECTION, said out loud in the log rather than
+            // silent: STL is triangles and the number decides how many, so a
+            // file written at a deflection nobody chose is a file nobody can
+            // reproduce.
+            double deflection = 0.05;
+            if (tokens.size() == 4 && !ParseNumber(tokens[3], &deflection))
+                return fail("an STL deflection is a distance in mm");
+            written = kernel->exportStl(solid->currentShape(), path, deflection);
+            if (written) note("export " + tokens[1] + " -> " + path + " (STL, deflection " +
+                              FormatNumber(deflection) + " mm)");
+        } else if (suffix == "step" || suffix == "stp") {
+            if (tokens.size() == 4)
+                return fail("only an STL export takes a deflection");
+            written = kernel->exportStep(solid->currentShape(), path);
+            if (written) note("export " + tokens[1] + " -> " + path + " (STEP AP214, mm)");
+        } else {
+            return fail("'" + path + "' has no extension this can write; use .step or .stl");
+        }
+        if (!written) return fail(written.message);
+        return true;
+    }
+
+    bool doImport(const std::vector<std::string>& tokens) {
+        // import FILE as BODY
+        if (tokens.size() != 4 || tokens[2] != "as")
+            return fail("import needs `import FILE as BODY`");
+        const std::string suffix = LowerSuffix(tokens[1]);
+        if (suffix != "step" && suffix != "stp")
+            return fail("'" + tokens[1] + "' is not a STEP file; only STEP can be imported");
+        Body& body = bodyNamed(tokens[3]);
+        // THE PATH IS STORED, not the geometry: the file is the source of
+        // truth and is read again on every rebuild.
+        document_.addImportFeature(body, tokens[3] + "Import", tokens[1]);
+        note("import " + tokens[1] + " as " + tokens[3]);
+        return true;
+    }
+
     bool doBoolean(const std::vector<std::string>& tokens) {
         // union BODY | subtract BODY | intersect BODY
         //
@@ -952,6 +1020,46 @@ private:
     int draftCount_{0};
     int holeCount_{0};
 
+    // A file's extension, lower-cased, or empty. One place, so `export` and
+    // `import` cannot disagree about what a `.STEP` is.
+    static std::string LowerSuffix(const std::string& path) {
+        const std::size_t dot = path.rfind('.');
+        if (dot == std::string::npos || dot + 1 >= path.size()) return {};
+        std::string suffix = path.substr(dot + 1);
+        for (char& c : suffix)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return suffix;
+    }
+
+    // WHAT A READER CALLED IT. An id in a failure message names nothing a
+    // person typed, so every failure that can name a feature or a sketch does.
+    std::string nameOfObject(ObjectId id) const {
+        for (const auto& body : document_.bodies())
+            for (const auto& feature : body->features())
+                if (feature->id() == id) return feature->name();
+        for (const Sketch* one : document_.sketches())
+            if (one->id() == id) return one->name();
+        return {};
+    }
+
+    static const char* RecomputeStatusName(RecomputeStatus status) {
+        switch (status) {
+            case RecomputeStatus::Success: return "ok";
+            case RecomputeStatus::Failed: return "failed with no reason given";
+            case RecomputeStatus::BlockedByDependency: return "blocked by something upstream";
+            case RecomputeStatus::SkippedSuppressed: return "suppressed";
+        }
+        return "unknown";
+    }
+
+    const ISolidFeature* solidFeature(ObjectId id) const {
+        for (const auto& body : document_.bodies())
+            for (const auto& feature : body->features())
+                if (feature->id() == id)
+                    return dynamic_cast<const ISolidFeature*>(feature.get());
+        return nullptr;
+    }
+
     // THE SOLIDS NOTHING HAS EATEN, in the order they were made -- the body's
     // separate parts. Two of them is multi-body; a boolean turns two into one.
     std::vector<ObjectId> unconsumedSolidsIn(const Body& body) const {
@@ -1025,7 +1133,21 @@ private:
             if (!one->solveMessage().empty()) what += " -- " + one->solveMessage();
             outcome_->log.push_back(ScriptLogEntry{line_, what});
         }
-        if (!report.success) return fail("recompute failed; see the log above");
+        if (!report.success) {
+            // THE REASON, not a pointer at a log that never got it. The report
+            // carries a message per failed item and this used to throw all of
+            // them away and say "see the log above", which was the one thing
+            // above that was not there.
+            std::string why;
+            for (const RecomputeItemReport& item : report.items) {
+                if (item.status == RecomputeStatus::Success) continue;
+                std::string named = nameOfObject(item.id);
+                if (named.empty()) named = "#" + std::to_string(item.id);
+                why += (why.empty() ? "" : "; ") + named + ": " +
+                       (item.message.empty() ? RecomputeStatusName(item.status) : item.message);
+            }
+            return fail(why.empty() ? "recompute failed" : "recompute failed -- " + why);
+        }
         note("solve");
         return true;
     }

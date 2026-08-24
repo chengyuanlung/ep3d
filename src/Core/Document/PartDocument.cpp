@@ -13,6 +13,7 @@
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
+#include "Core/Feature/ImportFeature.h"
 #include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/ShellFeature.h"
 #include "Core/Feature/RevolveFeature.h"
@@ -2456,6 +2457,38 @@ PocketFeature& PartDocument::restorePocketFeature(Body& body, ObjectId id, std::
     return feature;
 }
 
+
+void PartDocument::wireImportFeature(ImportFeature& feature, ObjectId materialId) {
+    addRecomputableNode(feature);
+    // NO DEPENDENCY EDGES. An import's input is a FILE, and the graph tracks
+    // objects in this document -- it has no node for something outside it.
+    //
+    // What that costs is honest and worth stating: editing the STEP file does
+    // not dirty this feature, so the model does not follow it until something
+    // else asks for a rebuild. A file watcher would be a second thing that has
+    // to agree with the graph about when to recompute, and this milestone did
+    // not buy one.
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+ImportFeature& PartDocument::addImportFeature(Body& body, std::string name, std::string path) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    ImportFeature& feature =
+        body.addFeature<ImportFeature>(std::move(name), std::move(path), materialId);
+    wireImportFeature(feature, materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+ImportFeature& PartDocument::restoreImportFeature(Body& body, ObjectId id, std::string name,
+                                                  ComputeState state, std::string path,
+                                                  ObjectId materialId) {
+    requireUnusedId(id, "restoreImportFeature");
+    ImportFeature& feature = body.addFeature<ImportFeature>(id, std::move(name), state,
+                                                            std::move(path), materialId);
+    wireImportFeature(feature, materialId);
+    return feature;
+}
 
 void PartDocument::wireBooleanFeature(BooleanFeature& feature, ObjectId targetFeatureId,
                                       ObjectId toolFeatureId, ObjectId materialId) {

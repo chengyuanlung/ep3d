@@ -41,6 +41,7 @@ class ShellFeature;
 class DraftFeature;
 class HoleFeature;
 class BooleanFeature;
+class ImportFeature;
 class CircularPatternFeature;
 class CurvePatternFeature;
 class FilletFeature;
@@ -642,6 +643,12 @@ public:
     // --- Revolve feature (M8.2, ADR-M8-005) --------------------------------
     // Base-capable like Pad: revolves `sketchId`'s profile about the sketch's
     // own line `axisEntityId` by the Radian Parameter `angleParameterId`.
+    // AN IMPORT reads a solid from a STEP file. A chain BASE, like a Box.
+    ImportFeature& addImportFeature(Body& body, std::string name, std::string path);
+    ImportFeature& restoreImportFeature(Body& body, ObjectId id, std::string name,
+                                        ComputeState state, std::string path,
+                                        ObjectId materialId);
+
     // A BOOLEAN combines TWO solids -- the first feature here to consume two.
     BooleanFeature& addBooleanFeature(Body& body, std::string name, BooleanOperation operation,
                                       ObjectId targetFeatureId, ObjectId toolFeatureId);
@@ -901,6 +908,7 @@ private:
     // (single registration path, spec 13).
     void wirePocketFeature(PocketFeature& feature, ObjectId baseFeatureId, ObjectId sketchId,
                            ObjectId depthParameterId, ObjectId materialId);
+    void wireImportFeature(ImportFeature& feature, ObjectId materialId);
     void wireBooleanFeature(BooleanFeature& feature, ObjectId targetFeatureId,
                             ObjectId toolFeatureId, ObjectId materialId);
     void wireCurvePatternFeature(CurvePatternFeature& feature, ObjectId baseFeatureId,

@@ -87,6 +87,10 @@ struct FeatureSnapshot {
     // `frameId` is unused here -- a boolean has no frame.
     ObjectId toolFeatureId = kInvalidObjectId;
     BooleanOperation booleanOperation = BooleanOperation::Union;
+    // Import (M22): the file the solid comes from. The ONE string field here,
+    // and it is a reference like every other -- just one to something outside
+    // the document.
+    std::string importPath;
     // Curve pattern (M21): `sketchId` above is the path, `countParameterId` the
     // number of instances. Nothing new needed; the fields already existed and
     // mean the same things.

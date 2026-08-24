@@ -1,0 +1,100 @@
+# STEP IN AND OUT, AND STL OUT (M22).
+#
+# The M22 gate. Everything before this milestone stayed inside EP3D: a part
+# could be built, measured and saved, and there was no way to hand it to
+# anybody. This script is the proof that there is now a way OUT and a way BACK.
+#
+# Run it:
+#   ep3d --script examples/step-round-trip.ep3ds
+#
+# It writes three files under build/ and reads one of them back.
+
+# --- a part worth exporting --------------------------------------------------
+#
+# Not a plain block: a shelled box with a hole, so the round trip has curved
+# faces and an inner shell to lose. A cube would round-trip through almost
+# anything, including a writer that quietly threw the geometry away.
+
+sketch Base
+tool rect
+click -40 -40
+click 40 40
+pad Case 50
+
+shell Case 4 top
+
+sketch Bores xy 50
+tool point
+click -22 0
+tool point
+click 22 0
+
+hole Case Bores 10
+
+echo --- the part, before it leaves ---
+solve
+measure
+
+# --- out as STEP -------------------------------------------------------------
+#
+# The FORMAT COMES FROM THE EXTENSION. There is no format argument, because a
+# .step written as STL is a file whose name lies about it, and the reader at
+# the far end would refuse it for a reason that names neither EP3D nor the
+# choice that caused it.
+#
+# What goes out is AP214 in MILLIMETRES, both written into the file itself --
+# not left to the reader to assume. A STEP file that omits its unit is read as
+# metres by some readers and millimetres by others, and the part arrives either
+# right or a thousand times too big with nothing to say which.
+
+export Case build/case.step
+
+# --- out as STL, twice, at two deflections -----------------------------------
+#
+# STL is TRIANGLES, so it is not the same kind of file at all: it is an
+# approximation, and the deflection is how wrong it is allowed to be. Both
+# numbers are said out loud in the log rather than defaulted silently, because
+# a mesh written at a tolerance nobody chose is a mesh nobody can reproduce.
+#
+# The coarse one is smaller. That is the whole trade, in two lines.
+
+export Case build/case-coarse.stl 0.5
+export Case build/case-fine.stl 0.02
+
+# --- and back in -------------------------------------------------------------
+#
+# An import stores the PATH, not the geometry. What the document keeps is the
+# sentence "the solid in that file", and it is answered again on every rebuild
+# -- exactly like a face query, which keeps "the top face" and not face #4.
+#
+# The cost is honest: if that file is deleted, this feature FAILS, loudly and
+# by name. A part that quietly kept working after its source vanished would be
+# a part nobody could ever reproduce.
+
+import build/case.step as Ghost
+
+# The same number as before it left. Not "a file appeared" -- a file can appear
+# holding a part at a thousand times the size, and only the volume can tell.
+echo --- the same part, after the round trip ---
+solve
+measure
+
+# --- and it is a base like any other -----------------------------------------
+#
+# An import that could not be built on would be a picture rather than a part.
+# This drills the imported solid, which needs its real FACES -- the flat top
+# face the bore starts from, and the far wall it stops at. A STEP file carries
+# those; the STL written a few lines up threw them away and kept triangles, and
+# that is exactly why STL is a way out of EP3D and not a way back in.
+
+sketch Late xy 50
+tool point
+click 0 25
+
+hole Ghost Late 6
+
+echo --- drilled, on geometry that came from a file ---
+solve
+measure
+
+save build/step-round-trip.ep3d

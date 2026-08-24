@@ -9,9 +9,12 @@
 #include "Kernel/Occt/OcctGeometryKernel.h"
 #include "Kernel/Occt/OcctSketchWireframe.h"
 #include "Kernel/Occt/OcctSplineCurve.h"
+#include <memory>
 #include <gtest/gtest.h>
 #include <cstdio>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -1316,4 +1319,209 @@ TEST(OcctExtrudeTest, M21_BOOL_003_IntersectIsNOTUnionAndNOTSubtract) {
     ASSERT_TRUE(shared) << shared.message;
     ExpectRel(kernel.calculateMassProperties(shared.shape).properties.volumeMm3, overlap,
               kVolumeRelTol);
+}
+
+// --- M22: STEP and STL, against real OCCT ------------------------------------
+
+namespace {
+
+// A scratch file that removes itself. Every I/O test here writes one, and a
+// test that left them behind would eventually run out of somewhere to write.
+struct ScratchFile {
+    std::string path;
+    explicit ScratchFile(const char* name) {
+        path = std::string(std::filesystem::temp_directory_path().string()) + "/ep3d-" + name;
+        std::remove(path.c_str());
+    }
+    ~ScratchFile() { std::remove(path.c_str()); }
+    bool exists() const { return std::filesystem::exists(path); }
+    std::uintmax_t size() const { return exists() ? std::filesystem::file_size(path) : 0; }
+    std::string head(std::size_t bytes) const {
+        std::ifstream in(path, std::ios::binary);
+        std::string text(bytes, '\0');
+        in.read(text.data(), static_cast<std::streamsize>(bytes));
+        text.resize(static_cast<std::size_t>(in.gcount()));
+        return text;
+    }
+};
+
+} // namespace
+
+TEST(OcctExtrudeTest, M22_IO_001_ASolidSurvivesAStepRoundTrip) {
+    // THE ONE TEST THAT MATTERS for an exchange format: what comes back is what
+    // went out. Not "a file appeared" -- a file can appear and be empty, or
+    // hold a shape a thousand times too big, and both look like success.
+    //
+    // Volume AND centroid, because a unit mix-up scales the volume by a
+    // thousand and moves the centroid by ten; either alone can miss one of
+    // those.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+    const KernelMassPropertiesResult before = kernel.calculateMassProperties(box);
+    ASSERT_TRUE(before) << before.message;
+
+    ScratchFile file{"roundtrip.step"};
+    const IoResult written = kernel.exportStep(box, file.path);
+    ASSERT_TRUE(written) << written.message;
+    ASSERT_TRUE(file.exists());
+
+    const ShapeResult read = kernel.importStep(file.path);
+    ASSERT_TRUE(read) << read.message;
+    const KernelMassPropertiesResult after = kernel.calculateMassProperties(read.shape);
+    ASSERT_TRUE(after) << after.message;
+
+    ExpectRel(after.properties.volumeMm3, before.properties.volumeMm3, 1e-9);
+    EXPECT_NEAR(after.properties.centerOfMassMm.x, before.properties.centerOfMassMm.x, 1e-6);
+    EXPECT_NEAR(after.properties.centerOfMassMm.y, before.properties.centerOfMassMm.y, 1e-6);
+    EXPECT_NEAR(after.properties.centerOfMassMm.z, before.properties.centerOfMassMm.z, 1e-6);
+}
+
+TEST(OcctExtrudeTest, M22_IO_002_TheFileSaysMILLIMETRESAndSaysAP214) {
+    // OCCT's default unit comes from a static resource file, so a part exported
+    // on one machine can arrive a thousand times too big on another -- a
+    // failure that looks like a modelling mistake at the far end and cannot be
+    // diagnosed from the model.
+    //
+    // Read out of the file's own header rather than trusted from the call that
+    // set it.
+    OcctGeometryKernel kernel;
+    const KernelShape box = TaggedBox(kernel, 100.0, 60.0, 40.0);
+
+    ScratchFile file{"units.step"};
+    ASSERT_TRUE(kernel.exportStep(box, file.path));
+    const std::string text = file.head(200000);
+
+    // AP214 is written as its ISO number inside FILE_SCHEMA, not as the string
+    // "AP214" -- the name people use for it appears nowhere in the file. Read
+    // off a real export rather than assumed, which is why this check is worth
+    // having at all.
+    EXPECT_NE(text.find("AUTOMOTIVE_DESIGN"), std::string::npos) << text.substr(0, 400);
+    EXPECT_NE(text.find("10303 214"), std::string::npos) << text.substr(0, 400);
+    // The unit is an SI prefix on the length unit, in the geometric context.
+    EXPECT_NE(text.find(".MILLI."), std::string::npos)
+        << "the file does not say millimetres";
+}
+
+TEST(OcctExtrudeTest, M22_IO_003_ACurvedSolidRoundTripsToo) {
+    // A box is all planes, and planes are the easy half of STEP. A revolve
+    // brings cylinders, which is where a units or a tolerance mistake shows.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition profile;
+    profile.plane = PlaneOf(SketchFrame::WorldXY());
+    profile.segments = {ProfileLineSegment{Vec2{10, 0}, Vec2{30, 0}},
+                        ProfileLineSegment{Vec2{30, 0}, Vec2{30, 50}},
+                        ProfileLineSegment{Vec2{30, 50}, Vec2{10, 50}},
+                        ProfileLineSegment{Vec2{10, 50}, Vec2{10, 0}}};
+    const ShapeResult tube =
+        kernel.revolveProfile(profile, Vec3{0, 0, 0}, Vec3{0, 1, 0}, 2.0 * kPi);
+    ASSERT_TRUE(tube) << tube.message;
+    const KernelMassPropertiesResult before = kernel.calculateMassProperties(tube.shape);
+    ASSERT_TRUE(before) << before.message;
+
+    ScratchFile file{"tube.step"};
+    ASSERT_TRUE(kernel.exportStep(tube.shape, file.path));
+    const ShapeResult read = kernel.importStep(file.path);
+    ASSERT_TRUE(read) << read.message;
+    const KernelMassPropertiesResult after = kernel.calculateMassProperties(read.shape);
+    ASSERT_TRUE(after) << after.message;
+    ExpectRel(after.properties.volumeMm3, before.properties.volumeMm3, 1e-9);
+}
+
+TEST(OcctExtrudeTest, M22_IO_004_ImportingAFileThatIsNotThereIsREFUSED) {
+    OcctGeometryKernel kernel;
+    const ShapeResult read = kernel.importStep("no-such-file-anywhere.step");
+    EXPECT_FALSE(read);
+    EXPECT_NE(read.message.find("could not read"), std::string::npos) << read.message;
+}
+
+TEST(OcctExtrudeTest, M22_IO_005_AFileWithSEVERALSolidsIsREFUSEDNotReducedToOne) {
+    // Taking the first would import a different part than the file holds, and
+    // fusing them would invent material between parts that were deliberately
+    // apart. Both look like success, and the count is what the user needs.
+    OcctGeometryKernel kernel;
+    const KernelShape first = TaggedBox(kernel, 40.0, 40.0, 40.0);
+    const ShapeResult second =
+        kernel.translateShape(TaggedBox(kernel, 40.0, 40.0, 40.0), Vec3{200, 0, 0});
+    ASSERT_TRUE(second) << second.message;
+    // Disjoint, so the fuse gives a compound of two solids -- which is exactly
+    // what a STEP file holding two parts looks like on the way back in.
+    const ShapeResult pair = kernel.fuseShapes(first, second.shape);
+    ASSERT_TRUE(pair) << pair.message;
+
+    ScratchFile file{"two.step"};
+    ASSERT_TRUE(kernel.exportStep(pair.shape, file.path));
+    const ShapeResult read = kernel.importStep(file.path);
+    EXPECT_FALSE(read);
+    EXPECT_NE(read.message.find("2 solids"), std::string::npos) << read.message;
+}
+
+TEST(OcctExtrudeTest, M22_IO_006_AnSTLIsBinaryAndItsSizeFollowsTheDeflection) {
+    // STL is triangles, so a finer deflection means more of them and a bigger
+    // file. That relationship is the only thing about an STL that can be
+    // checked without parsing it -- and it is enough to tell "tessellated at
+    // the deflection asked for" from "written at whatever mesh was lying
+    // around", which is what StlAPI_Writer does on its own.
+    OcctGeometryKernel kernel;
+    PlanarProfileDefinition profile;
+    profile.plane = PlaneOf(SketchFrame::WorldXY());
+    profile.segments = {ProfileCircleSegment{Vec2{0, 0}, 40.0}};
+    const ShapeResult cylinder = kernel.extrudeProfile(profile, 20.0);
+    ASSERT_TRUE(cylinder) << cylinder.message;
+
+    ScratchFile coarse{"coarse.stl"};
+    ScratchFile fine{"fine.stl"};
+    ASSERT_TRUE(kernel.exportStl(cylinder.shape, coarse.path, 2.0));
+    ASSERT_TRUE(kernel.exportStl(cylinder.shape, fine.path, 0.05));
+
+    ASSERT_TRUE(coarse.exists());
+    ASSERT_TRUE(fine.exists());
+    EXPECT_GT(fine.size(), coarse.size() * 2)
+        << "the deflection did not reach the mesh: " << fine.size() << " vs " << coarse.size();
+
+    // BINARY, not ASCII: an order of magnitude smaller, and an ASCII file
+    // starts with the word "solid".
+    EXPECT_NE(coarse.head(5), "solid");
+}
+
+TEST(OcctExtrudeTest, M22_IO_007_ExportingNothingIsREFUSED) {
+    OcctGeometryKernel kernel;
+    ScratchFile file{"empty.step"};
+    const IoResult step = kernel.exportStep(KernelShape{}, file.path);
+    EXPECT_FALSE(step);
+    EXPECT_FALSE(file.exists()) << "a refused export still wrote a file";
+
+    ScratchFile stl{"empty.stl"};
+    EXPECT_FALSE(kernel.exportStl(KernelShape{}, stl.path, 0.1));
+    EXPECT_FALSE(stl.exists());
+}
+
+TEST(OcctExtrudeTest, M22_IO_008_AFileWithNOSolidIsREFUSEDNotImportedAsNothing) {
+    // STEP carries surfaces and wireframe as happily as solids, and a CAD user
+    // handed one of those files has done nothing wrong -- it is simply not a
+    // part. Importing it as an empty shape would put a feature in the tree that
+    // is Valid and holds nothing, which is the kind of bug that gets noticed
+    // three features later.
+    //
+    // The non-solid comes from BuildSketchWireframe rather than from OCCT
+    // directly, because OCCT's headers are PRIVATE to the kernel target on
+    // purpose (ADR-M4-003) -- and a sketch wireframe is exactly the sort of
+    // edges-and-vertices file that turns up in the wild.
+    OcctGeometryKernel kernel;
+    ProfilePlane plane = PlaneOf(SketchFrame::WorldXY());
+    const std::vector<SketchGeometry> lines = {
+        SketchLine{Vec2{0, 0}, Vec2{40, 0}},
+        SketchLine{Vec2{40, 0}, Vec2{40, 30}},
+        SketchLine{Vec2{40, 30}, Vec2{0, 0}},
+    };
+    const SketchWireframe wire = BuildSketchWireframe(lines, plane);
+    ASSERT_EQ(wire.edges, 3);
+    ASSERT_TRUE(wire.shape.isValid());
+
+    ScratchFile file{"wireframe-only.step"};
+    ASSERT_TRUE(kernel.exportStep(wire.shape, file.path));
+    ASSERT_TRUE(file.exists());
+
+    const ShapeResult read = kernel.importStep(file.path);
+    EXPECT_FALSE(read) << "a wireframe came back as if it were a part";
+    EXPECT_NE(read.message.find("holds no solid"), std::string::npos) << read.message;
 }

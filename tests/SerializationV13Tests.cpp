@@ -23,6 +23,7 @@
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/TransformFeatures.h"
 #include "Core/Feature/DraftFeature.h"
+#include "Core/Feature/ImportFeature.h"
 #include "Core/Feature/HoleFeature.h"
 #include "Core/Feature/SweepFeature.h"
 #include "Core/Feature/LoftFeature.h"
@@ -94,7 +95,7 @@ TEST(SerializationV13Test, M17_SER_001_TheSchemaVersionIsStamped) {
     // so a bump lands here and nowhere else -- and it has to land somewhere, or
     // a format change that forgot to bump would write files an older loader
     // silently mis-reads.
-    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 27"), std::string::npos);
+    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 28"), std::string::npos);
 }
 
 TEST(SerializationV13Test, M17_SER_002_BothKindsAreWrittenUnderTheirOwnNames) {
@@ -1357,4 +1358,55 @@ TEST(SerializationV13Test, M21_SER_005_ABooleanEatingAnAlreadyEatenSolidCannotBe
     // that state some other way.
     EXPECT_THROW(document.addBooleanFeature(body, "Second", BooleanOperation::Union, padA, padB),
                  std::runtime_error);
+}
+
+TEST(SerializationV13Test, M22_SER_001_AnImportKeepsItsPATHAndNotItsGeometry) {
+    // No topology ever crosses into this file (ADR-M4-004), so what comes back
+    // is the sentence -- and the file has to stay small and diffable, which a
+    // saved solid would end.
+    PartDocument document{"ImportDoc"};
+    Body& body = document.addBody("Body");
+    document.addImportFeature(body, "Ghost", "parts/bracket.step");
+
+    const std::string text = SaveToString(document);
+    EXPECT_NE(text.find("parts/bracket.step"), std::string::npos) << text;
+    // Nothing that smells of geometry.
+    EXPECT_EQ(text.find("CARTESIAN_POINT"), std::string::npos);
+    EXPECT_EQ(text.find("ADVANCED_FACE"), std::string::npos);
+
+    const LoadResult loaded = LoadFromString(text);
+    ASSERT_TRUE(loaded) << loaded.message;
+    const auto* brought =
+        dynamic_cast<const ImportFeature*>(loaded.document->bodies().front()->features().front().get());
+    ASSERT_NE(brought, nullptr) << "an Import came back as something else";
+    EXPECT_EQ(brought->path(), "parts/bracket.step");
+}
+
+TEST(SerializationV13Test, M22_SER_002_ARelativePathStaysRELATIVE) {
+    // Turning it absolute at save time would bind the document to the machine
+    // that saved it, which is the opposite of what a relative path is for.
+    PartDocument document{"ImportDoc"};
+    Body& body = document.addBody("Body");
+    document.addImportFeature(body, "Ghost", "../shared/bracket.step");
+
+    const std::string text = SaveToString(document);
+    EXPECT_NE(text.find("../shared/bracket.step"), std::string::npos) << text;
+    EXPECT_EQ(text.find(":\\\\"), std::string::npos) << "a drive letter got into the file";
+}
+
+TEST(SerializationV13Test, M22_SER_003_AnImportWithNOPathIsREFUSEDAtTheDoor) {
+    // A feature that names no file can never build. Refused where the reason is
+    // near the cause rather than at recompute time.
+    PartDocument document{"ImportDoc"};
+    Body& body = document.addBody("Body");
+    document.addImportFeature(body, "Ghost", "parts/bracket.step");
+
+    std::string text = SaveToString(document);
+    const std::size_t at = text.find("\"parts/bracket.step\"");
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, std::string("\"parts/bracket.step\"").size(), "\"\"");
+
+    const LoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_NE(loaded.message.find("names no file"), std::string::npos) << loaded.message;
 }

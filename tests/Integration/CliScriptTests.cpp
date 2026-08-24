@@ -4,6 +4,7 @@
 // drives the SAME path a mouse does, so checking it against anything but a real
 // document, a real solver and a real kernel would be checking it against a stub.
 
+#include <cstdio>
 #include "Cli/SketchScript.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Body/Body.h"
@@ -980,4 +981,176 @@ TEST(CliScriptTest, M21_CLI_005_CopiesAreSpacedAlongThePathSketch) {
             "along Rail Track 5\nsolve\nmeasure\n");
     ASSERT_TRUE(outcome.ok) << outcome.message;
     EXPECT_TRUE(LogMentions(outcome, "volume = 4000 mm^3")) << outcome.message;
+}
+
+// --- M22: EXPORT and IMPORT from a script ------------------------------------
+
+namespace {
+
+// A scratch file that removes itself, so a suite that runs twice does not read
+// what the previous run left behind.
+struct ScratchIo {
+    std::string path;
+    explicit ScratchIo(const char* name) {
+        path = (std::filesystem::temp_directory_path() / (std::string("ep3d-cli-") + name))
+                   .string();
+        std::remove(path.c_str());
+    }
+    ~ScratchIo() { std::remove(path.c_str()); }
+    bool exists() const { return std::filesystem::exists(path); }
+};
+
+// Every volume `measure` reported, in order. A test that looks at only the
+// last one cannot see a step that changed nothing.
+std::vector<double> MeasuredVolumes(const ScriptOutcome& outcome) {
+    std::vector<double> found;
+    for (const ScriptLogEntry& entry : outcome.log) {
+        const std::size_t at = entry.text.find("volume = ");
+        if (at != std::string::npos) found.push_back(std::stod(entry.text.substr(at + 9)));
+    }
+    return found;
+}
+
+double LastMeasuredVolume(const ScriptOutcome& outcome) {
+    const std::vector<double> all = MeasuredVolumes(outcome);
+    return all.empty() ? -1.0 : all.back();
+}
+
+} // namespace
+
+TEST(CliScriptTest, M22_CLI_001_APartCanGoOutAndComeBackTheSameSize) {
+    // The gate for the whole milestone: what EP3D writes, EP3D reads, and the
+    // volume is the same on both sides. Not "a file appeared" -- a file can
+    // appear holding a part a thousand times too big.
+    ScratchIo step{"roundtrip.step"};
+
+    ScriptRun out;
+    const ScriptOutcome written =
+        out(std::string("sketch A\ntool rect\nclick -30 -30\nclick 30 30\npad Block 40\n"
+                        "solve\nexport Block ") + step.path + "\n");
+    ASSERT_TRUE(written.ok) << written.message;
+    ASSERT_TRUE(step.exists());
+
+    ScriptRun back;
+    const ScriptOutcome read =
+        back(std::string("import ") + step.path + " as Ghost\nsolve\nmeasure\n");
+    ASSERT_TRUE(read.ok) << read.message;
+    EXPECT_TRUE(LogMentions(read, "volume = 144000 mm^3")) << read.message;
+}
+
+TEST(CliScriptTest, M22_CLI_002_TheEXTENSIONChoosesTheFormat) {
+    // Asking for the format separately would let a .step be written as STL,
+    // which every reader at the far end would refuse for a reason that names
+    // neither this program nor the choice.
+    ScratchIo stl{"chooses.stl"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -30 -30\nclick 30 30\npad Block 40\n"
+                        "solve\nexport Block ") + stl.path + "\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "(STL, deflection")) << outcome.message;
+    EXPECT_TRUE(stl.exists());
+}
+
+TEST(CliScriptTest, M22_CLI_003_AnUnknownExtensionIsREFUSED) {
+    // Guessing STEP would write a file the name says is something else.
+    ScratchIo odd{"mystery.iges"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -30 -30\nclick 30 30\npad Block 40\n"
+                        "solve\nexport Block ") + odd.path + "\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("use .step or .stl"), std::string::npos) << outcome.message;
+    EXPECT_FALSE(odd.exists());
+}
+
+TEST(CliScriptTest, M22_CLI_004_ExportingBeforeSolvingSaysSo) {
+    // The features exist and the geometry does not. "Nothing to export" would
+    // be true and useless; naming the missing step is what a reader can act on.
+    ScratchIo step{"unsolved.step"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -30 -30\nclick 30 30\npad Block 40\n"
+                        "export Block ") + step.path + "\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("`solve` before exporting"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M22_CLI_005_OnlySTEPCanBeImported) {
+    // STL is triangles: importing one would give a faceted mesh pretending to
+    // be a solid, and every downstream face query would then find hundreds of
+    // faces where the part has six.
+    ScriptRun run;
+    const ScriptOutcome outcome = run("import parts/thing.stl as Ghost\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("only STEP can be imported"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M22_CLI_006_AnSTLDeflectionIsOnlyForSTL) {
+    // A STEP export has no deflection -- it is exact -- so a number after the
+    // file name means the writer misunderstood something, and accepting and
+    // ignoring it would leave them believing it did something.
+    ScratchIo step{"deflected.step"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -30 -30\nclick 30 30\npad Block 40\n"
+                        "solve\nexport Block ") + step.path + " 0.1\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("only an STL export takes a deflection"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M22_CLI_007_TheWorkedRoundTripExampleRunsAndKeepsTheSameSolid) {
+    // The regression test for examples/step-round-trip.ep3ds. A block would
+    // round-trip through almost anything, including a writer that threw the
+    // geometry away and a reader that rebuilt a bounding box -- so the part
+    // that goes out here is SHELLED AND DRILLED, and what comes back has to be
+    // buildable, which needs its real faces and not a mesh of them.
+    ScratchIo step{"worked.step"};
+
+    ScriptRun out;
+    const ScriptOutcome written =
+        out(std::string("sketch Base\ntool rect\nclick -40 -40\nclick 40 40\npad Case 50\n"
+                        "shell Case 4 top\n"
+                        "sketch Bores xy 50\ntool point\nclick -22 0\ntool point\nclick 22 0\n"
+                        "hole Case Bores 10\nsolve\nmeasure\nexport Case ") + step.path + "\n");
+    ASSERT_TRUE(written.ok) << written.message;
+    const double before = LastMeasuredVolume(written);
+
+    ScriptRun back;
+    const ScriptOutcome read =
+        back(std::string("import ") + step.path +
+             " as Ghost\nsolve\nmeasure\n"
+             "sketch Late xy 50\ntool point\nclick 0 25\nhole Ghost Late 6\nsolve\nmeasure\n");
+    ASSERT_TRUE(read.ok) << read.message;
+
+    // Two claims, and the second is the one a bounding-box reader would fail:
+    // the imported solid still has the flat top face a bore can start from.
+    const std::vector<double> measured = MeasuredVolumes(read);
+    ASSERT_EQ(measured.size(), 2u) << read.message;
+    EXPECT_NEAR(measured[0], before, 1e-6 * before) << "the round trip changed the part";
+    EXPECT_LT(measured[1], measured[0]) << "drilling the imported solid removed nothing";
+    EXPECT_GT(measured[1], 0.9 * measured[0]) << "drilling one 6 mm bore removed far too much";
+}
+
+TEST(CliScriptTest, M22_CLI_008_AFailedRecomputeNAMESWhatFailedAndWhy) {
+    // What this used to say was "recompute failed; see the log above", and the
+    // log above was the one place the reason was not. Found writing the M22
+    // example: a draft refused a face query that matched two faces, and the
+    // screen said nothing that could be acted on.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Base\ntool rect\nclick -40 -30\nclick 40 30\npad Case 50\n"
+            "shell Case 3 top\n"
+            "draft Case 4 bottom facing:+x\n"
+            "solve\n");
+    ASSERT_FALSE(outcome.ok) << "the draft was expected to refuse an ambiguous face";
+
+    // Three claims, and each one is a thing a reader needs: WHICH feature,
+    // WHY, and no instruction to go and look somewhere the reason is not.
+    EXPECT_NE(outcome.message.find("CaseDraft"), std::string::npos) << outcome.message;
+    EXPECT_NE(outcome.message.find("matches 2 faces"), std::string::npos) << outcome.message;
+    EXPECT_EQ(outcome.message.find("see the log above"), std::string::npos) << outcome.message;
 }
