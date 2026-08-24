@@ -51,6 +51,7 @@ enum class SketchIcon {
     Diameter,
     HorizontalDistance,
     VerticalDistance,
+    HVDistance,
     PointLineDistance,
     Offset,
     Trim,

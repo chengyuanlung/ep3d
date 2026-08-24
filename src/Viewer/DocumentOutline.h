@@ -2,6 +2,7 @@
 
 #include "Core/Document/ObjectId.h"
 #include "Core/Sketch/ISketchSolver.h"
+#include "Core/Sketch/SketchTypes.h"
 #include <set>
 #include <string>
 #include <vector>
@@ -111,6 +112,27 @@ public:
     // document-unique and a selected constraint row can be described here
     // exactly like any other object.
     std::vector<PropertyRow> propertiesOf(ObjectId id) const;
+
+    // Properties of ONE THING PICKED ON THE SKETCH CANVAS (M26.7): a line, an
+    // arc, a circle, a point, a spline, an ellipse -- or one endpoint of any
+    // of them.
+    //
+    // A SEPARATE ENTRY POINT from propertiesOf(id), even though entity ids come
+    // from the same generator and would be findable by id alone. A canvas pick
+    // is a SketchElementRef, and the sub-element is half of what was picked:
+    // "Line1" and "Line1's end" are different answers to "what did I click",
+    // and an id-only lookup would have to throw that half away before it began.
+    //
+    // Empty when the ref names nothing this sketch holds.
+    //
+    // READ-ONLY, and deliberately. Sketch geometry is what the solver WRITES;
+    // a cell that took a typed coordinate would be overwritten by the next
+    // solve whenever a constraint disagreed with it, and a field that silently
+    // reverts is the thing this project refuses to ship (ADR-M17-042 says the
+    // same about a driven dimension). Moving geometry is what dragging and
+    // dimensions are for.
+    std::vector<PropertyRow> propertiesOfSketchElement(ObjectId sketchId,
+                                                       const SketchElementRef& ref) const;
 
     // Human-facing solve status, e.g. "Solved", "Over-constrained". Spec 18
     // requires the status to be readable as TEXT: a status conveyed only by a

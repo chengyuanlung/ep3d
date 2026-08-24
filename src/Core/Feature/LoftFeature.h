@@ -50,8 +50,14 @@ public:
     // the one the solid starts at. Every section is a real dependency and the
     // graph carries an edge for each; those edges are wired explicitly, not
     // derived from this method, so nothing is lost by it answering narrowly.
-    ObjectId consumedSketchId() const noexcept override {
-        return sectionSketchIds_.empty() ? kInvalidObjectId : sectionSketchIds_.front();
+    // EVERY SECTION, not just the first. Naming one left the others
+    // deletable out from under the loft that runs through them.
+    std::vector<ConsumedSketch> consumedSketches() const override {
+        std::vector<ConsumedSketch> all;
+        all.reserve(sectionSketchIds_.size());
+        for (const ObjectId section : sectionSketchIds_)
+            all.push_back(ConsumedSketch{section, true});
+        return all;
     }
 
     ObjectId materialId() const noexcept override { return materialId_; }

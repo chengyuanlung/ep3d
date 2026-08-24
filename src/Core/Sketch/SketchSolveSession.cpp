@@ -685,6 +685,33 @@ BuildProblemResult BuildSolveProblem(const Sketch& sketch, const ObjectRegistry&
             residual.vars[1] = s->endU;
             out.problem.residuals.push_back(residual);
 
+        } else if (const auto* c = std::get_if<PointsHorizontalConstraint>(&data)) {
+            int au = -1, av = -1, bu = -1, bv = -1;
+            if (const char* why = resolveRef(c->a, au, av)) { reject(id, why); continue; }
+            if (const char* why = resolveRef(c->b, bu, bv)) { reject(id, why); continue; }
+            // HORIZONTAL IS EQUAL V -- the same equation LineHorizontal drives
+            // between a line's own two endpoints, so there is one formula for
+            // "these two share an axis" rather than a second one that could
+            // disagree about which axis is which.
+            //
+            // The U slots are resolved only to prove both refs name real
+            // POINTS: a ref that resolves to half a point is a modelling error,
+            // and finding it here beats meeting it as a column of zeros in the
+            // Jacobian (the same reason HorizontalDistance resolves both).
+            residual.kind = SolveResidual::Kind::PointsEqualV;
+            residual.vars[0] = av;
+            residual.vars[1] = bv;
+            out.problem.residuals.push_back(residual);
+
+        } else if (const auto* c = std::get_if<PointsVerticalConstraint>(&data)) {
+            int au = -1, av = -1, bu = -1, bv = -1;
+            if (const char* why = resolveRef(c->a, au, av)) { reject(id, why); continue; }
+            if (const char* why = resolveRef(c->b, bu, bv)) { reject(id, why); continue; }
+            residual.kind = SolveResidual::Kind::PointsEqualU;
+            residual.vars[0] = au;
+            residual.vars[1] = bu;
+            out.problem.residuals.push_back(residual);
+
         } else if (const auto* c = std::get_if<FixConstraint>(&data)) {
             int u = -1, v = -1;
             if (const char* why = resolveRef(c->target, u, v)) { reject(id, why); continue; }

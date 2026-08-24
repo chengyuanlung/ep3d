@@ -1599,7 +1599,13 @@ std::vector<ObjectId> PartDocument::featuresReferencingSketch(ObjectId sketchId)
         for (const std::unique_ptr<Feature>& feature : body->features()) {
             const auto* consumer = dynamic_cast<const ISketchConsuming*>(feature.get());
             if (consumer == nullptr) continue; // Fillet, Chamfer: no sketch at all
-            if (consumer->consumedSketchId() == sketchId) ids.push_back(feature->id());
+            // EVERY sketch it reads, not just its primary one. A loft's
+            // second and third sections, a sweep's path and a curve
+            // pattern's path were all invisible here -- so this function's
+            // own contract ("empty is exactly when the sketch can be
+            // deleted") was false for each of them, which is the same trap
+            // it was written to close one level up.
+            if (consumer->reads(sketchId)) ids.push_back(feature->id());
         }
     return ids;
 }

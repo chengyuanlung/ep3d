@@ -15,6 +15,7 @@
 #include "Kernel/Occt/OcctGeometryKernel.h"
 #include "Solver/GaussNewtonSketchSolver.h"
 #include "Viewer/DocumentOutline.h"
+#include "Viewer/SketchCommands.h"
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <functional>
@@ -166,51 +167,57 @@ TEST(M5Ui, M5_UI_003_StatusIsTextNotOnlyAColour) {
 
 // --- The constraint list (spec 18) -------------------------------------------
 
-TEST(M5Ui, M5_UI_004_EveryConstraintAppearsInTheTreeUnderItsSketch) {
+TEST(M5Ui, M5_UI_004_EveryConstraintAppearsInTheConstraintPanel) {
+    // MOVED OFF THE TREE (M26.10). The tree listed one row per constraint, and
+    // a plain rectangle carries eight before a dimension is added -- so a view
+    // meant to show a PART's structure was mostly Coincidents.
+    //
+    // Spec 18's requirement is that every constraint is REACHABLE and
+    // individually identified. That is the Constraints panel's job now, and
+    // this asks the panel.
     UiDoc doc;
     ASSERT_TRUE(doc.document.recompute().success);
 
-    const DocumentOutline outline(doc.document);
-    const std::vector<OutlineNode> sketches = NodesOfKind(outline, OutlineKind::Sketch);
-    ASSERT_EQ(sketches.size(), 1u);
-
-    // Under ITS SKETCH, not at document level: a constraint is a sub-object of
-    // one sketch, and a flat list would lose that the moment a second sketch
-    // exists.
-    EXPECT_EQ(sketches.front().children.size(), doc.solved().constraints().size());
-    for (const OutlineNode& child : sketches.front().children)
-        EXPECT_EQ(child.kind, OutlineKind::Constraint);
+    const std::vector<ConstraintRow> rows = ConstraintRowsFor(doc.document, doc.solved());
+    EXPECT_EQ(rows.size(), doc.solved().constraints().size());
 
     // Every constraint id is reachable, so none is silently missing.
     for (const SketchConstraint& constraint : doc.solved().constraints()) {
-        const bool present =
-            std::any_of(sketches.front().children.begin(), sketches.front().children.end(),
-                        [&](const OutlineNode& n) { return n.id == ToObjectId(constraint.id); });
+        const bool present = std::any_of(rows.begin(), rows.end(), [&](const ConstraintRow& r) {
+            return r.id == constraint.id;
+        });
         EXPECT_TRUE(present) << "constraint " << ToObjectId(constraint.id) << " is not listed";
     }
+
+    // ...and the TREE no longer carries them, which is the point of the move.
+    const DocumentOutline outline(doc.document);
+    const std::vector<OutlineNode> sketches = NodesOfKind(outline, OutlineKind::Sketch);
+    ASSERT_EQ(sketches.size(), 1u);
+    EXPECT_TRUE(sketches.front().children.empty())
+        << "the model tree is listing constraints again";
 }
 
 TEST(M5Ui, M5_UI_005_DimensionalConstraintRowsNameTheirParameterAndValue) {
     UiDoc doc;
     ASSERT_TRUE(doc.document.recompute().success);
 
-    const DocumentOutline outline(doc.document);
-    const std::vector<OutlineNode> constraints =
-        NodesOfKind(outline, OutlineKind::Constraint);
+    const std::vector<ConstraintRow> constraints = ConstraintRowsFor(doc.document, doc.solved());
 
-    const auto rowFor = [&](SketchConstraintId id) -> std::optional<OutlineNode> {
-        for (const OutlineNode& node : constraints)
-            if (node.id == ToObjectId(id)) return node;
+    const auto rowFor = [&](SketchConstraintId id) -> std::optional<ConstraintRow> {
+        for (const ConstraintRow& row : constraints)
+            if (row.id == id) return row;
         return std::nullopt;
     };
-    const std::optional<OutlineNode> lengthRow = rowFor(doc.widthLength);
+    const std::optional<ConstraintRow> lengthRow = rowFor(doc.widthLength);
     ASSERT_TRUE(lengthRow.has_value());
 
     // "Length" alone is useless in a list of two Lengths -- the parameter name
-    // is what a user recognises.
-    EXPECT_NE(lengthRow->name.find("Width"), std::string::npos) << lengthRow->name;
-    EXPECT_NE(lengthRow->name.find("100.000"), std::string::npos) << lengthRow->name;
-    EXPECT_NE(lengthRow->name.find("mm"), std::string::npos) << lengthRow->name;
+    // is what a user recognises. The panel gives it its own column, which the
+    // tree row had to spell into one string.
+    EXPECT_EQ(lengthRow->kind, "Length");
+    EXPECT_NE(lengthRow->parameter.find("Width"), std::string::npos) << lengthRow->parameter;
+    EXPECT_NE(lengthRow->parameter.find("100"), std::string::npos) << lengthRow->parameter;
+    EXPECT_NE(lengthRow->parameter.find("mm"), std::string::npos) << lengthRow->parameter;
 }
 
 TEST(M5Ui, M5_UI_006_SelectingAConstraintDescribesIt) {
@@ -304,24 +311,32 @@ TEST(M5Ui, M5_UI_010_BlamedConstraintRowsAreMarkedIndividually) {
               kInvalidSketchConstraintId);
     EXPECT_FALSE(doc.document.recompute().success);
 
-    const DocumentOutline outline(doc.document);
-    const std::vector<OutlineNode> constraints =
-        NodesOfKind(outline, OutlineKind::Constraint);
+    // ASKED OF THE CONSTRAINT PANEL (M26.10), which is where a blamed
+    // constraint is now marked -- and where a user can act on it, because the
+    // Delete Constraint button is on that panel.
+    const std::vector<ConstraintRow> constraints = ConstraintRowsFor(doc.document, doc.solved());
     const std::vector<SketchConstraintId>& offenders = doc.solved().offendingConstraints();
     ASSERT_FALSE(offenders.empty());
+    ASSERT_FALSE(constraints.empty());
 
-    for (const OutlineNode& node : constraints) {
-        const bool blamed =
-            std::any_of(offenders.begin(), offenders.end(),
-                        [&](SketchConstraintId id) { return ToObjectId(id) == node.id; });
-        EXPECT_EQ(node.state == OutlineState::Failed, blamed)
-            << "constraint " << node.id << " is marked inconsistently with the solver's blame";
-        // Marked by TEXT as well as state, never by colour alone.
-        if (blamed) {
-            EXPECT_STRNE(DocumentOutline::stateMarker(node.state), "");
-            EXPECT_FALSE(node.diagnostic.empty());
-        }
+    bool sawABlamedRow = false;
+    for (const ConstraintRow& row : constraints) {
+        const bool blamed = std::any_of(offenders.begin(), offenders.end(),
+                                        [&](SketchConstraintId id) { return id == row.id; });
+        EXPECT_EQ(row.offending, blamed)
+            << "constraint " << ToObjectId(row.id)
+            << " is marked inconsistently with the solver's blame";
+        if (blamed) sawABlamedRow = true;
     }
+    EXPECT_TRUE(sawABlamedRow) << "no row carried the solver's blame";
+
+    // INDIVIDUALLY, which is the whole requirement: "the sketch failed" does
+    // not tell anyone which constraint to remove.
+    const std::size_t blamedRows =
+        static_cast<std::size_t>(std::count_if(constraints.begin(), constraints.end(),
+                                               [](const ConstraintRow& r) { return r.offending; }));
+    EXPECT_LT(blamedRows, constraints.size())
+        << "every row was blamed, which names nothing";
 }
 
 TEST(M5Ui, M5_UI_011_SolveFailureIsReportedAheadOfAProfileComplaint) {

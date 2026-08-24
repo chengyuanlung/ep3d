@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
+#include "Core/Feature/IParameterisedFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISketchConsuming.h"
 #include "Core/Feature/ISolidFeature.h"
@@ -42,8 +43,15 @@ class HoleFeature final : public Feature,
                           public IRecomputable,
                           public ISolidFeature,
                           public ISketchConsuming,
-                          public IMaterialReferencing {
+                          public IMaterialReferencing, public IParameterisedFeature {
 public:
+    // BOTH numbers. A hole is a diameter AND a depth, and a depth of
+    // nought means THROUGH ALL -- which a user needs to be able to read
+    // as well as type.
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{"Diameter", diameterParameterId_, false},
+                FeatureParameter{"Depth", depthParameterId_, false}};
+    }
     HoleFeature(std::string name, ObjectId baseFeatureId, ObjectId sketchId,
                 ObjectId diameterParameterId, ObjectId depthParameterId, ObjectId materialId);
     // Restore constructor (deserialization): keeps the persisted id/state.
@@ -57,7 +65,11 @@ public:
     ObjectId baseFeatureId() const noexcept { return baseFeatureId_; }
     std::vector<ObjectId> consumedSolidIds() const override { return {baseFeatureId_}; }
     ObjectId sketchId() const noexcept { return sketchId_; }
-    ObjectId consumedSketchId() const noexcept override { return sketchId_; }
+    // A hole reads POINTS. Four dots that never join into a loop is the
+    // drawing it wants, not a broken one.
+    std::vector<ConsumedSketch> consumedSketches() const override {
+        return {ConsumedSketch{sketchId_, false}};
+    }
     ObjectId diameterParameterId() const noexcept { return diameterParameterId_; }
     ObjectId depthParameterId() const noexcept { return depthParameterId_; }
 

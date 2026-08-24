@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <variant>
@@ -1762,4 +1764,133 @@ TEST(CliScriptTest, M26_CLI_006_GoingBackToAnEarlierAssemblyReturnsToTHATOne) {
     EXPECT_NE(loaded.document->findInstanceNamed("Two"), nullptr);
     // ...and the OTHER assembly's instance did not leak into it.
     EXPECT_EQ(loaded.document->findInstanceNamed("Elsewhere"), nullptr);
+}
+
+TEST(CliScriptTest, M26_CLI_007_VerticalPutsTwoLineENDSOnOneVerticalLine) {
+    // Two lines, one END of each, `constrain vertical`. The two ends must come
+    // to share a u -- on one vertical line -- and the LINES must keep their own
+    // slopes. Before M26.3 both refs named line entities, so this made each
+    // line vertical instead, which is a different drawing entirely.
+    ScriptRun run;
+    const ScriptOutcome outcome = run(R"(
+sketch Frame
+tool line
+click 0 0
+click 40 30
+tool line
+click 90 5
+click 130 55
+constrain vertical Line1.end Line2.start
+solve
+)");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+
+    const Sketch& sketch = run.only();
+    ASSERT_EQ(sketch.entities().size(), 2u);
+    const SketchLine& a = std::get<SketchLine>(sketch.entities()[0].geometry);
+    const SketchLine& b = std::get<SketchLine>(sketch.entities()[1].geometry);
+
+    EXPECT_NEAR(a.end.x, b.start.x, 1e-6) << "the two ends are not on one vertical line";
+    // NOT coincident -- an alignment leaves the v separation alone.
+    EXPECT_GT(std::fabs(a.end.y - b.start.y), 1.0);
+    // NEITHER LINE became vertical.
+    EXPECT_GT(std::fabs(a.start.x - a.end.x), 1.0);
+    EXPECT_GT(std::fabs(b.start.x - b.end.x), 1.0);
+}
+
+TEST(CliScriptTest, M26_CLI_008_TheStepperMotorExampleDrillsFOURWholeHoles) {
+    // The regression test for examples/stepper-motor.ep3ds.
+    //
+    // It checks the VOLUME against a closed form at each stage, because that is
+    // the only thing that caught the defect the example was written with: at an
+    // 8 mm corner chamfer the bolt-hole bores break OUT through the corners,
+    // and the part still builds, still saves, and still looks right from the
+    // front. Only the arithmetic said that 2.87 holes' worth of material had
+    // gone where four holes were asked for.
+    //
+    // Counting features cannot see it. Counting solids cannot see it. Asking
+    // the bounding box cannot see it. This test exists at the one place the
+    // difference is visible.
+    ScriptRun run;
+    const ScriptOutcome outcome = run(R"(
+sketch Frame
+tool line
+click 24.2 28.2
+click -24.2 28.2
+click -28.2 24.2
+click -28.2 -24.2
+click -24.2 -28.2
+click 24.2 -28.2
+click 28.2 -24.2
+click 28.2 24.2
+click 24.2 28.2
+pad Motor 76 as BodyLength
+sketch Boss xy 76
+tool circle
+click 0 0
+click 19.05 0
+dimension diameter Circle1 38.1 as BossDiameter
+pad Motor 1.6 as BossHeight
+union Motor
+sketch Shaft xy 76
+tool circle
+click 0 0
+click 3.175 0
+dimension diameter Circle1 6.35 as ShaftDiameter
+pad Motor 21 as ShaftLength
+union Motor
+sketch Mounts xy 76
+tool point
+click -23.57 -23.57
+click 23.57 -23.57
+click 23.57 23.57
+click -23.57 23.57
+constrain fix Point1
+constrain horizontal Point1 Point2
+constrain horizontal Point4 Point3
+constrain vertical Point1 Point4
+constrain vertical Point2 Point3
+dimension hdistance Point1 Point2 47.14 as BoltSpacing
+dimension vdistance Point1 Point4 47.14 as BoltRise
+hole Motor Mounts 5.1 -12
+solve
+measure
+)");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+
+    // The bolt pattern is held SQUARE by constraints, not by four typed
+    // coordinates -- so it solves to zero degrees of freedom.
+    const Sketch* mounts = nullptr;
+    for (const Sketch* one : run.document.sketches())
+        if (one->name() == "Mounts") mounts = one;
+    ASSERT_NE(mounts, nullptr);
+    EXPECT_EQ(mounts->degreesOfFreedom(), 0) << mounts->solveMessage();
+
+    // THE CLOSED FORM:
+    //   frame   (56.4^2 - 4 * 1/2 * 4 * 4) * 76
+    //   + boss   pi * 19.05^2 * 1.6
+    //   + shaft  pi * 3.175^2 * 21          (it starts at the mounting face...)
+    //   - overlap pi * 3.175^2 * 1.6        (...so it runs through the boss)
+    //   - holes  4 * pi * 2.55^2 * 12
+    constexpr double kPi = 3.14159265358979323846;
+    const double frame = (56.4 * 56.4 - 4.0 * 0.5 * 4.0 * 4.0) * 76.0;
+    const double boss = kPi * 19.05 * 19.05 * 1.6;
+    const double shaft = kPi * 3.175 * 3.175 * 21.0;
+    const double overlap = kPi * 3.175 * 3.175 * 1.6;
+    const double holes = 4.0 * kPi * 2.55 * 2.55 * 12.0;
+    const double expected = frame + boss + shaft - overlap - holes;
+
+    // The LAST `volume =` the run logged, which is the finished part.
+    double measured = -1.0;
+    std::string line;
+    for (const ScriptLogEntry& entry : outcome.log) {
+        const std::size_t at = entry.text.find("volume = ");
+        if (at == std::string::npos) continue;
+        measured = std::atof(entry.text.c_str() + at + std::strlen("volume = "));
+        line = entry.text;
+    }
+    ASSERT_GT(measured, 0.0) << "the run logged no volume at all";
+    // A part per million. Anything looser would pass with a hole missing.
+    EXPECT_NEAR(measured, expected, expected * 1e-6)
+        << "the bores are not all fully inside the material: " << line;
 }

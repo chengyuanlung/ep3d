@@ -1379,3 +1379,98 @@ TEST(SketchGeometricConstraintTest, M18_HAN_010_ACONSTRAINTFREESketchStillCounts
     // equations that tie the tip to its point.
     EXPECT_EQ(handled.degreesOfFreedom(), 8) << handled.solveMessage();
 }
+
+// =============================================================================
+// M26.3 -- Horizontal and Vertical between two POINTS
+//
+// Both forms mean one thing, so these tests assert the RELATIONSHIP and the
+// degrees of freedom, never which struct was stored. A test that checked the
+// storage would pass for a constraint that held the wrong pair of scalars.
+// =============================================================================
+
+TEST(SketchGeometricConstraintTest, M26_PHV_001_TwoLoosePointsBecomeHorizontal) {
+    Fixture fx;
+    const SketchEntityId a = fx.point(Vec2{10, 5});
+    const SketchEntityId b = fx.point(Vec2{80, 60}); // 55 mm apart in v
+    ASSERT_NE(fx.add(PointsHorizontalConstraint{SketchElementRef{a}, SketchElementRef{b}}),
+              kInvalidSketchConstraintId);
+
+    const SketchSolveResult result = fx.solve();
+    ASSERT_TRUE(result) << result.message;
+
+    // SAME v -- and the u's are left alone, which is what makes this
+    // horizontal alignment rather than coincidence.
+    EXPECT_NEAR(fx.pointOf(a).y, fx.pointOf(b).y, kTol);
+    EXPECT_GT(std::fabs(fx.pointOf(a).x - fx.pointOf(b).x), 1.0);
+}
+
+TEST(SketchGeometricConstraintTest, M26_PHV_002_TwoLoosePointsBecomeVertical) {
+    Fixture fx;
+    const SketchEntityId a = fx.point(Vec2{10, 5});
+    const SketchEntityId b = fx.point(Vec2{80, 60});
+    ASSERT_NE(fx.add(PointsVerticalConstraint{SketchElementRef{a}, SketchElementRef{b}}),
+              kInvalidSketchConstraintId);
+
+    const SketchSolveResult result = fx.solve();
+    ASSERT_TRUE(result) << result.message;
+
+    EXPECT_NEAR(fx.pointOf(a).x, fx.pointOf(b).x, kTol);
+    EXPECT_GT(std::fabs(fx.pointOf(a).y - fx.pointOf(b).y), 1.0);
+}
+
+TEST(SketchGeometricConstraintTest, M26_PHV_003_HorizontalAndVerticalDriveDIFFERENTAxes) {
+    // The one mistake this pair invites is swapping u for v -- and it would
+    // pass every "did it solve" check while producing the other constraint.
+    // Two points started off BOTH relations, so only the right axis moving
+    // can satisfy this.
+    Fixture fx;
+    const SketchEntityId a = fx.point(Vec2{0, 0});
+    const SketchEntityId b = fx.point(Vec2{50, 50});
+    ASSERT_NE(fx.add(PointsHorizontalConstraint{SketchElementRef{a}, SketchElementRef{b}}),
+              kInvalidSketchConstraintId);
+    ASSERT_TRUE(fx.solve());
+    EXPECT_NEAR(fx.pointOf(a).y, fx.pointOf(b).y, kTol);
+    // The u separation SURVIVED. If Horizontal had been wired to u, this is
+    // the assertion that would fail.
+    EXPECT_NEAR(std::fabs(fx.pointOf(a).x - fx.pointOf(b).x), 50.0, 1e-3);
+}
+
+TEST(SketchGeometricConstraintTest, M26_PHV_004_ItTakesExactlyOneDegreeOfFreedom) {
+    PartDocument document{"DofDoc"};
+    GaussNewtonSketchSolver solver;
+    document.setSketchSolver(&solver);
+
+    Sketch& sketch = document.addSketch("Points");
+    const SketchEntityId a = sketch.addPoint(Vec2{10, 5});
+    const SketchEntityId b = sketch.addPoint(Vec2{80, 60});
+    ASSERT_TRUE(document.recompute().success) << sketch.solveMessage();
+    ASSERT_EQ(sketch.degreesOfFreedom(), 4); // two loose points
+
+    ASSERT_NE(document.addSketchConstraint(
+                  sketch.id(),
+                  PointsHorizontalConstraint{SketchElementRef{a}, SketchElementRef{b}}),
+              kInvalidSketchConstraintId);
+    ASSERT_TRUE(document.recompute().success) << sketch.solveMessage();
+    // ONE equation, one degree of freedom. A residual packed with the same
+    // variable twice would be rank-deficient and leave 4.
+    EXPECT_EQ(sketch.degreesOfFreedom(), 3) << sketch.solveMessage();
+}
+
+TEST(SketchGeometricConstraintTest, M26_PHV_005_ItHoldsAnEndpointAgainstACircleCentre) {
+    // The point form's whole reason to exist: two points that NO line joins.
+    // A line's endpoint and a circle's centre cannot be said with the line
+    // form at all.
+    Fixture fx;
+    const SketchEntityId line = fx.line(Vec2{0, 0}, Vec2{60, 10});
+    const SketchEntityId circle = fx.circle(Vec2{90, 70}, 12.0);
+    ASSERT_NE(fx.add(PointsHorizontalConstraint{
+                  SketchElementRef{line, SketchSubElement::EndPoint},
+                  SketchElementRef{circle, SketchSubElement::CenterPoint}}),
+              kInvalidSketchConstraintId);
+
+    const SketchSolveResult result = fx.solve();
+    ASSERT_TRUE(result) << result.message;
+    EXPECT_NEAR(fx.lineOf(line).end.y, fx.circleOf(circle).center.y, kTol);
+    // The RADIUS was not touched -- an alignment is not a resize.
+    EXPECT_NEAR(fx.circleOf(circle).radiusMm, 12.0, kTol);
+}

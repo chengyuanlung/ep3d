@@ -725,11 +725,24 @@ SketchEditOutcome ApplySketchEdit(PartDocument& document, ObjectId sketchId,
     }
     case SketchEditKind::AddHorizontal:
     case SketchEditKind::AddVertical: {
+        const bool horizontal = edit.kind == SketchEditKind::AddHorizontal;
+        // WHICH FORM, through the SAME function requestConstraint used to
+        // decide it. Asking it a second way here is what made this apply one
+        // constraint per line for a selection that meant one alignment.
+        if (IsPointPairAlignment(*current, edit.refs)) {
+            const SketchConstraintId id =
+                horizontal ? addConstraint(PointsHorizontalConstraint{edit.refs[0], edit.refs[1]})
+                           : addConstraint(PointsVerticalConstraint{edit.refs[0], edit.refs[1]});
+            if (id == kInvalidSketchConstraintId)
+                return fail(std::string("The sketch refused that ") +
+                                SketchEditKindName(edit.kind) + " constraint.",
+                            "");
+            break;
+        }
         for (const SketchElementRef& ref : edit.refs) {
             const SketchConstraintId id =
-                edit.kind == SketchEditKind::AddHorizontal
-                    ? addConstraint(HorizontalConstraint{ref.entityId})
-                    : addConstraint(VerticalConstraint{ref.entityId});
+                horizontal ? addConstraint(HorizontalConstraint{ref.entityId})
+                           : addConstraint(VerticalConstraint{ref.entityId});
             if (id == kInvalidSketchConstraintId)
                 return fail(std::string("The sketch refused that ") +
                                 SketchEditKindName(edit.kind) + " constraint.",
@@ -831,6 +844,7 @@ SketchEditOutcome ApplySketchEdit(PartDocument& document, ObjectId sketchId,
         const bool pairKind = edit.kind == SketchEditKind::AddDistance ||
                               edit.kind == SketchEditKind::AddHorizontalDistance ||
                               edit.kind == SketchEditKind::AddVerticalDistance ||
+                              edit.kind == SketchEditKind::AddHVDistance ||
                               edit.kind == SketchEditKind::AddPointLineDistance ||
                               edit.kind == SketchEditKind::AddAngle;
         const std::size_t needed = pairKind ? 2u : 1u;
@@ -840,191 +854,207 @@ SketchEditOutcome ApplySketchEdit(PartDocument& document, ObjectId sketchId,
                             (needed == 1 ? "" : "s") + ".",
                         "");
 
-        double seed = 0.0;
-        UnitType unit = UnitType::Millimeter;
-        const char* prefix = "d";
-        SketchConstraintData data{};
-
-        switch (edit.kind) {
-        case SketchEditKind::AddLength: {
-            const SketchLine* line = LineOf(*sketch, edit.refs.front().entityId);
-            if (line == nullptr) return fail("Length needs a line.", "");
-            seed = Distance(line->start, line->end);
-            break;
-        }
-        case SketchEditKind::AddDistance: {
-            bool okA = false;
-            bool okB = false;
-            const Vec2 a = ResolveElementPoint(*sketch, edit.refs[0], &okA);
-            const Vec2 b = ResolveElementPoint(*sketch, edit.refs[1], &okB);
-            if (!okA || !okB) return fail("Distance needs two resolvable points.", "");
-            seed = Distance(a, b);
-            break;
-        }
-        case SketchEditKind::AddHorizontalDistance:
-        case SketchEditKind::AddVerticalDistance: {
-            bool okA = false;
-            bool okB = false;
-            const Vec2 a = ResolveElementPoint(*sketch, edit.refs[0], &okA);
-            const Vec2 b = ResolveElementPoint(*sketch, edit.refs[1], &okB);
-            if (!okA || !okB)
-                return fail(std::string(SketchEditKindName(edit.kind)) +
-                                " needs two resolvable points.",
-                            "");
-            // SIGNED, matching the residual exactly. requestDimension has
-            // already ordered the pair so this comes out positive; seeding from
-            // the same formula the solver uses is what makes "adding a
-            // dimension never moves anything" true for these two as well.
-            seed = edit.kind == SketchEditKind::AddHorizontalDistance ? b.x - a.x : b.y - a.y;
-            break;
-        }
-        case SketchEditKind::AddPointLineDistance: {
-            bool okPoint = false;
-            const Vec2 point = ResolveElementPoint(*sketch, edit.refs[0], &okPoint);
-            const SketchLine* line = LineOf(*sketch, edit.refs[1].entityId);
-            if (!okPoint || line == nullptr)
-                return fail("Distance to a line needs a point and a line.", "");
-            // The SAME formula the residual uses, so the seeded value is the
-            // number the solver will read back. Deriving it any other way is
-            // how "adding a dimension moves the geometry" starts.
-            const double du = line->end.x - line->start.x;
-            const double dv = line->end.y - line->start.y;
-            const double length = std::sqrt(du * du + dv * dv);
-            if (length <= kSketchToleranceMm)
-                return fail("That line is too short to measure a distance to.", "");
-            const double pu = point.x - line->start.x;
-            const double pv = point.y - line->start.y;
-            seed = (pu * dv - pv * du) / length;
-            break;
-        }
-        case SketchEditKind::AddRadius:
-        case SketchEditKind::AddDiameter: {
-            double radius = 0.0;
-            if (!CurveCircle(*sketch, edit.refs.front().entityId, nullptr, &radius, nullptr))
-                return fail("Radius and diameter need a circle or an arc.", "");
-            seed = edit.kind == SketchEditKind::AddDiameter ? radius * 2.0 : radius;
-            break;
-        }
-        case SketchEditKind::AddMajorAxis:
-        case SketchEditKind::AddMinorAxis: {
-            // MEASURED THROUGH MeasureConstraint, the one measurement site, by
-            // building the constraint this is about to add and asking it what
-            // it currently reads. Reaching into the geometry here would be a
-            // second formula for the same number (ADR-M17-042).
-            const bool minor = edit.kind == SketchEditKind::AddMinorAxis;
-            const std::optional<double> measured = MeasureConstraint(
-                *sketch,
-                EllipseAxisConstraint{edit.refs.front().entityId, kInvalidObjectId, minor});
-            if (!measured) return fail("A major or minor axis dimension needs an ellipse.", "");
-            seed = *measured;
-            prefix = minor ? "b" : "a";
-            break;
-        }
-        case SketchEditKind::AddEllipseRotation: {
-            const std::optional<double> measured = MeasureConstraint(
-                *sketch, EllipseRotationConstraint{edit.refs.front().entityId, kInvalidObjectId});
-            if (!measured) return fail("An orientation dimension needs an ellipse.", "");
-            seed = *measured;
-            unit = UnitType::Radian;
-            prefix = "a";
-            break;
-        }
-        case SketchEditKind::AddAngle: {
-            const SketchLine* a = LineOf(*sketch, edit.refs[0].entityId);
-            const SketchLine* b = LineOf(*sketch, edit.refs[1].entityId);
-            if (a == nullptr || b == nullptr) return fail("Angle needs two lines.", "");
-            // FROM a TO b, counter-clockwise, in radians -- ADR-M5-006's
-            // convention, reproduced here so the seeded value is the angle the
-            // solver will read rather than its supplement.
-            const double angleA = std::atan2(a->end.y - a->start.y, a->end.x - a->start.x);
-            const double angleB = std::atan2(b->end.y - b->start.y, b->end.x - b->start.x);
-            seed = WrapSigned(angleB - angleA);
-            unit = UnitType::Radian;
-            prefix = "a";
-            break;
-        }
-        default:
-            break;
-        }
-
-        // MAGNITUDE, not value. Two of these kinds are signed -- a point on the
-        // far side of a line measures negative, and refusing that would refuse
-        // half the plane for being "too small".
+        // ONE COMMAND, TWO LEGS (M26.5). The legs ARE the existing kinds, run
+        // through the existing code -- so the seeding formula, the sign
+        // convention, the zero rule and the parameter naming are the ones
+        // already proven, not a second copy that could drift from them.
         //
-        // ...AND ZERO IS A REAL ANSWER for the signed ones (M18). A horizontal
-        // distance of nought says "these two are level", a vertical one says
-        // "these two are side by side", and a point-line distance of nought
-        // says "this point is on that line". Those are three of the most
-        // ordinary things a user asks for, and this guard refused all of them
-        // for being too small -- the same magnitude assumption DimensionValueValid
-        // was corrected for, living on in a second place that never heard.
-        //
-        // A LENGTH or a DISTANCE of nought really is degenerate: it describes
-        // geometry with no extent, which the solver cannot orient. Those keep
-        // the minimum.
-        const bool signedSeparation = edit.kind == SketchEditKind::AddHorizontalDistance ||
-                                      edit.kind == SketchEditKind::AddVerticalDistance ||
-                                      edit.kind == SketchEditKind::AddPointLineDistance;
-        if (unit == UnitType::Millimeter && !signedSeparation &&
-            !(std::abs(seed) >= kMinSketchDimensionMm))
-            return fail("That geometry is too small to dimension.",
-                        "The measured value is below the smallest dimension the solver "
-                        "accepts (kMinSketchDimensionMm).");
-        // ZERO IS ONLY MEANINGLESS FOR AN ANGLE BETWEEN TWO LINES. An ellipse
-        // whose major axis happens to lie along +u has a rotation of exactly
-        // zero, and that is a number worth pinning -- refusing it would have
-        // told the user their ellipse was "parallel to itself".
-        if (edit.kind == SketchEditKind::AddAngle && std::abs(seed) < 1e-9)
-            return fail("Those two lines are parallel; there is no angle to dimension.", "");
+        // Both are built inside the transaction opened above, so H&V is ONE
+        // undo step: a user who presses Ctrl+Z after it expects the pair to go,
+        // not to be left holding half of what they asked for.
+        std::vector<SketchEditKind> legs{edit.kind};
+        if (edit.kind == SketchEditKind::AddHVDistance)
+            legs = {SketchEditKind::AddHorizontalDistance, SketchEditKind::AddVerticalDistance};
 
-        const Parameter& parameter =
-            document.addParameter(UnusedParameterName(document, prefix), seed, unit);
-        outcome.createdParameter = parameter.id();
+        std::string legStatus;
+        for (const SketchEditKind leg : legs) {
+            double seed = 0.0;
+            UnitType unit = UnitType::Millimeter;
+            const char* prefix = "d";
+            SketchConstraintData data{};
 
-        switch (edit.kind) {
-        case SketchEditKind::AddLength:
-            data = LengthConstraint{edit.refs.front().entityId, parameter.id()};
-            break;
-        case SketchEditKind::AddDistance:
-            data = DistanceConstraint{edit.refs[0], edit.refs[1], parameter.id()};
-            break;
-        case SketchEditKind::AddHorizontalDistance:
-            data = HorizontalDistanceConstraint{edit.refs[0], edit.refs[1], parameter.id()};
-            break;
-        case SketchEditKind::AddVerticalDistance:
-            data = VerticalDistanceConstraint{edit.refs[0], edit.refs[1], parameter.id()};
-            break;
-        case SketchEditKind::AddPointLineDistance:
-            data = PointLineDistanceConstraint{edit.refs[0], edit.refs[1].entityId,
-                                               parameter.id()};
-            break;
-        case SketchEditKind::AddRadius:
-            data = RadiusConstraint{edit.refs.front().entityId, parameter.id()};
-            break;
-        case SketchEditKind::AddDiameter:
-            data = DiameterConstraint{edit.refs.front().entityId, parameter.id()};
-            break;
-        case SketchEditKind::AddMajorAxis:
-        case SketchEditKind::AddMinorAxis:
-            data = EllipseAxisConstraint{edit.refs.front().entityId, parameter.id(),
-                                         edit.kind == SketchEditKind::AddMinorAxis};
-            break;
-        case SketchEditKind::AddEllipseRotation:
-            data = EllipseRotationConstraint{edit.refs.front().entityId, parameter.id()};
-            break;
-        case SketchEditKind::AddAngle:
-            data = AngleConstraint{edit.refs[0].entityId, edit.refs[1].entityId, parameter.id()};
-            break;
-        default:
-            break;
-        }
-        if (addConstraint(std::move(data)) == kInvalidSketchConstraintId)
-            return fail("The sketch refused that dimension.", "");
+            switch (leg) {
+            case SketchEditKind::AddLength: {
+                const SketchLine* line = LineOf(*sketch, edit.refs.front().entityId);
+                if (line == nullptr) return fail("Length needs a line.", "");
+                seed = Distance(line->start, line->end);
+                break;
+            }
+            case SketchEditKind::AddDistance: {
+                bool okA = false;
+                bool okB = false;
+                const Vec2 a = ResolveElementPoint(*sketch, edit.refs[0], &okA);
+                const Vec2 b = ResolveElementPoint(*sketch, edit.refs[1], &okB);
+                if (!okA || !okB) return fail("Distance needs two resolvable points.", "");
+                seed = Distance(a, b);
+                break;
+            }
+            case SketchEditKind::AddHorizontalDistance:
+            case SketchEditKind::AddVerticalDistance: {
+                bool okA = false;
+                bool okB = false;
+                const Vec2 a = ResolveElementPoint(*sketch, edit.refs[0], &okA);
+                const Vec2 b = ResolveElementPoint(*sketch, edit.refs[1], &okB);
+                if (!okA || !okB)
+                    return fail(std::string(SketchEditKindName(leg)) +
+                                    " needs two resolvable points.",
+                                "");
+                // SIGNED, matching the residual exactly. requestDimension has
+                // already ordered the pair so this comes out positive; seeding from
+                // the same formula the solver uses is what makes "adding a
+                // dimension never moves anything" true for these two as well.
+                seed = leg == SketchEditKind::AddHorizontalDistance ? b.x - a.x : b.y - a.y;
+                break;
+            }
+            case SketchEditKind::AddPointLineDistance: {
+                bool okPoint = false;
+                const Vec2 point = ResolveElementPoint(*sketch, edit.refs[0], &okPoint);
+                const SketchLine* line = LineOf(*sketch, edit.refs[1].entityId);
+                if (!okPoint || line == nullptr)
+                    return fail("Distance to a line needs a point and a line.", "");
+                // The SAME formula the residual uses, so the seeded value is the
+                // number the solver will read back. Deriving it any other way is
+                // how "adding a dimension moves the geometry" starts.
+                const double du = line->end.x - line->start.x;
+                const double dv = line->end.y - line->start.y;
+                const double length = std::sqrt(du * du + dv * dv);
+                if (length <= kSketchToleranceMm)
+                    return fail("That line is too short to measure a distance to.", "");
+                const double pu = point.x - line->start.x;
+                const double pv = point.y - line->start.y;
+                seed = (pu * dv - pv * du) / length;
+                break;
+            }
+            case SketchEditKind::AddRadius:
+            case SketchEditKind::AddDiameter: {
+                double radius = 0.0;
+                if (!CurveCircle(*sketch, edit.refs.front().entityId, nullptr, &radius, nullptr))
+                    return fail("Radius and diameter need a circle or an arc.", "");
+                seed = leg == SketchEditKind::AddDiameter ? radius * 2.0 : radius;
+                break;
+            }
+            case SketchEditKind::AddMajorAxis:
+            case SketchEditKind::AddMinorAxis: {
+                // MEASURED THROUGH MeasureConstraint, the one measurement site, by
+                // building the constraint this is about to add and asking it what
+                // it currently reads. Reaching into the geometry here would be a
+                // second formula for the same number (ADR-M17-042).
+                const bool minor = leg == SketchEditKind::AddMinorAxis;
+                const std::optional<double> measured = MeasureConstraint(
+                    *sketch,
+                    EllipseAxisConstraint{edit.refs.front().entityId, kInvalidObjectId, minor});
+                if (!measured) return fail("A major or minor axis dimension needs an ellipse.", "");
+                seed = *measured;
+                prefix = minor ? "b" : "a";
+                break;
+            }
+            case SketchEditKind::AddEllipseRotation: {
+                const std::optional<double> measured = MeasureConstraint(
+                    *sketch, EllipseRotationConstraint{edit.refs.front().entityId, kInvalidObjectId});
+                if (!measured) return fail("An orientation dimension needs an ellipse.", "");
+                seed = *measured;
+                unit = UnitType::Radian;
+                prefix = "a";
+                break;
+            }
+            case SketchEditKind::AddAngle: {
+                const SketchLine* a = LineOf(*sketch, edit.refs[0].entityId);
+                const SketchLine* b = LineOf(*sketch, edit.refs[1].entityId);
+                if (a == nullptr || b == nullptr) return fail("Angle needs two lines.", "");
+                // FROM a TO b, counter-clockwise, in radians -- ADR-M5-006's
+                // convention, reproduced here so the seeded value is the angle the
+                // solver will read rather than its supplement.
+                const double angleA = std::atan2(a->end.y - a->start.y, a->end.x - a->start.x);
+                const double angleB = std::atan2(b->end.y - b->start.y, b->end.x - b->start.x);
+                seed = WrapSigned(angleB - angleA);
+                unit = UnitType::Radian;
+                prefix = "a";
+                break;
+            }
+            default:
+                break;
+            }
 
-        outcome.status = std::string(SketchEditKindName(edit.kind)) + " " + parameter.name() +
-                         " = " +
+            // MAGNITUDE, not value. Two of these kinds are signed -- a point on the
+            // far side of a line measures negative, and refusing that would refuse
+            // half the plane for being "too small".
+            //
+            // ...AND ZERO IS A REAL ANSWER for the signed ones (M18). A horizontal
+            // distance of nought says "these two are level", a vertical one says
+            // "these two are side by side", and a point-line distance of nought
+            // says "this point is on that line". Those are three of the most
+            // ordinary things a user asks for, and this guard refused all of them
+            // for being too small -- the same magnitude assumption DimensionValueValid
+            // was corrected for, living on in a second place that never heard.
+            //
+            // A LENGTH or a DISTANCE of nought really is degenerate: it describes
+            // geometry with no extent, which the solver cannot orient. Those keep
+            // the minimum.
+            const bool signedSeparation = leg == SketchEditKind::AddHorizontalDistance ||
+                                          leg == SketchEditKind::AddVerticalDistance ||
+                                          leg == SketchEditKind::AddPointLineDistance;
+            if (unit == UnitType::Millimeter && !signedSeparation &&
+                !(std::abs(seed) >= kMinSketchDimensionMm))
+                return fail("That geometry is too small to dimension.",
+                            "The measured value is below the smallest dimension the solver "
+                            "accepts (kMinSketchDimensionMm).");
+            // ZERO IS ONLY MEANINGLESS FOR AN ANGLE BETWEEN TWO LINES. An ellipse
+            // whose major axis happens to lie along +u has a rotation of exactly
+            // zero, and that is a number worth pinning -- refusing it would have
+            // told the user their ellipse was "parallel to itself".
+            if (leg == SketchEditKind::AddAngle && std::abs(seed) < 1e-9)
+                return fail("Those two lines are parallel; there is no angle to dimension.", "");
+
+            const Parameter& parameter =
+                document.addParameter(UnusedParameterName(document, prefix), seed, unit);
+            outcome.createdParameter = parameter.id();
+
+            switch (leg) {
+            case SketchEditKind::AddLength:
+                data = LengthConstraint{edit.refs.front().entityId, parameter.id()};
+                break;
+            case SketchEditKind::AddDistance:
+                data = DistanceConstraint{edit.refs[0], edit.refs[1], parameter.id()};
+                break;
+            case SketchEditKind::AddHorizontalDistance:
+                data = HorizontalDistanceConstraint{edit.refs[0], edit.refs[1], parameter.id()};
+                break;
+            case SketchEditKind::AddVerticalDistance:
+                data = VerticalDistanceConstraint{edit.refs[0], edit.refs[1], parameter.id()};
+                break;
+            case SketchEditKind::AddPointLineDistance:
+                data = PointLineDistanceConstraint{edit.refs[0], edit.refs[1].entityId,
+                                                   parameter.id()};
+                break;
+            case SketchEditKind::AddRadius:
+                data = RadiusConstraint{edit.refs.front().entityId, parameter.id()};
+                break;
+            case SketchEditKind::AddDiameter:
+                data = DiameterConstraint{edit.refs.front().entityId, parameter.id()};
+                break;
+            case SketchEditKind::AddMajorAxis:
+            case SketchEditKind::AddMinorAxis:
+                data = EllipseAxisConstraint{edit.refs.front().entityId, parameter.id(),
+                                             leg == SketchEditKind::AddMinorAxis};
+                break;
+            case SketchEditKind::AddEllipseRotation:
+                data = EllipseRotationConstraint{edit.refs.front().entityId, parameter.id()};
+                break;
+            case SketchEditKind::AddAngle:
+                data = AngleConstraint{edit.refs[0].entityId, edit.refs[1].entityId, parameter.id()};
+                break;
+            default:
+                break;
+            }
+            if (addConstraint(std::move(data)) == kInvalidSketchConstraintId)
+                return fail("The sketch refused that dimension.", "");
+
+            if (!legStatus.empty()) legStatus += ", ";
+            legStatus += parameter.name() + " = " +
                          (unit == UnitType::Radian ? FormatNumber(seed * 180.0 / kPi) + " deg"
                                                    : FormatNumber(seed) + " mm");
+        }
+        outcome.status = std::string(SketchEditKindName(edit.kind)) + " " + legStatus;
     }
 
     // --- Deletions ----------------------------------------------------------
@@ -1146,6 +1176,10 @@ std::string ElementsText(const Sketch& sketch, const SketchConstraintData& data)
         text = DescribeElementRef(sketch, dx->a) + ", " + DescribeElementRef(sketch, dx->b);
     } else if (const auto* dy = std::get_if<VerticalDistanceConstraint>(&data)) {
         text = DescribeElementRef(sketch, dy->a) + ", " + DescribeElementRef(sketch, dy->b);
+    } else if (const auto* ph = std::get_if<PointsHorizontalConstraint>(&data)) {
+        text = DescribeElementRef(sketch, ph->a) + ", " + DescribeElementRef(sketch, ph->b);
+    } else if (const auto* pv = std::get_if<PointsVerticalConstraint>(&data)) {
+        text = DescribeElementRef(sketch, pv->a) + ", " + DescribeElementRef(sketch, pv->b);
     } else if (const auto* symmetric = std::get_if<SymmetricConstraint>(&data)) {
         text = DescribeElementRef(sketch, symmetric->a) + ", " +
                DescribeElementRef(sketch, symmetric->b) + " about " +
@@ -1883,6 +1917,11 @@ namespace {
 const char* GlyphFor(const SketchConstraintData& data) {
     if (std::holds_alternative<HorizontalConstraint>(data)) return "H";
     if (std::holds_alternative<VerticalConstraint>(data)) return "V";
+    // THE SAME GLYPHS: what the badge says is what the constraint MEANS, and
+    // both forms mean the same thing. A separate glyph would ask the user to
+    // learn a distinction that only exists in the storage.
+    if (std::holds_alternative<PointsHorizontalConstraint>(data)) return "H";
+    if (std::holds_alternative<PointsVerticalConstraint>(data)) return "V";
     if (std::holds_alternative<CoincidentConstraint>(data)) return "o";
     if (std::holds_alternative<FixConstraint>(data)) return "X";
     if (std::holds_alternative<ParallelConstraint>(data)) return "//";

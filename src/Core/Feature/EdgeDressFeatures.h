@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
+#include "Core/Feature/IParameterisedFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Kernel/EdgeQuery.h"
@@ -39,8 +40,15 @@ namespace paramcad {
 class EdgeDressFeature : public Feature,
                          public IRecomputable,
                          public ISolidFeature,
-                         public IMaterialReferencing {
+                         public IMaterialReferencing, public IParameterisedFeature {
 public:
+    // The LABEL is the subclass's, because a fillet quotes a RADIUS and a
+    // chamfer quotes a DISTANCE -- the same stored number, and two
+    // different things to call it on a drawing.
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{typeName() == "Fillet" ? "Radius" : "Distance",
+                                 sizeParameterId_, false}};
+    }
     ObjectId id() const noexcept override { return Feature::id(); }
 
     ObjectId baseFeatureId() const noexcept { return baseFeatureId_; }

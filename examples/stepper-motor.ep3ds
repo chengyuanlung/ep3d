@@ -1,0 +1,124 @@
+# A NEMA 23 STEPPER MOTOR.
+#
+# A real catalogue part rather than a shape invented to exercise a feature:
+# every number below is a NEMA 23 dimension, so the result can be checked
+# against a datasheet instead of against itself.
+#
+#   frame              56.4 mm square, corners cut back 4 mm
+#   body length        76 mm
+#   pilot boss         38.1 mm diameter, 1.6 mm proud of the face
+#   shaft              6.35 mm diameter, 21 mm from the mounting face
+#   mounting holes     5.1 mm on a 47.14 mm square, 12 mm deep
+#
+# It is built along +Z with the MOUNTING FACE ON TOP, at z = 76. That choice
+# is not cosmetic: the boss, the shaft and the four tapped holes all belong to
+# that one face, so putting it at a known height lets every later sketch name
+# it by number instead of by picking.
+
+echo --- the frame ---
+
+# THE BODY IS AN OCTAGON, not a square: a stepper's corners are cut back so
+# the four mounting bolts can pass the laminations. Eight clicks with the line
+# tool, and the ninth returns to the first point -- the chain gives every
+# corner a real Coincident constraint, so the profile closes because the
+# geometry says so rather than because the numbers happen to agree.
+#
+# THE 4 mm CUT IS LOAD-BEARING, and it was wrong first. At 8 mm the corner
+# chamfer passes 0.9 mm from each bolt-hole centre, so all four bores break
+# out through it -- and the part still builds, still saves and still looks
+# right from the front. What caught it was `measure`: the volume said only
+# 2.87 holes' worth of material had gone. Arithmetic against a closed form is
+# the only check that could have.
+sketch Frame
+tool line
+click 24.2 28.2
+click -24.2 28.2
+click -28.2 24.2
+click -28.2 -24.2
+click -24.2 -28.2
+click 24.2 -28.2
+click 28.2 -24.2
+click 28.2 24.2
+click 24.2 28.2
+
+# The laminated stack and both end caps in one prism. A real motor's caps are
+# aluminium and its middle is steel, but they share this cross-section exactly
+# -- and EP3D has no per-face material to tell them apart with, so modelling
+# them as three solids would add two booleans and describe nothing extra.
+pad Motor 76 as BodyLength
+
+solve
+echo --- the bare frame ---
+measure
+
+echo --- the front of the motor ---
+
+# THE PILOT BOSS. What actually locates a stepper is this spigot, not the
+# bolts: the bolt holes are clearance, and the boss is what the machine's
+# mounting plate is bored for.
+sketch Boss xy 76
+tool circle
+click 0 0
+click 19.05 0
+dimension diameter Circle1 38.1 as BossDiameter
+pad Motor 1.6 as BossHeight
+union Motor
+
+# THE SHAFT, measured from the MOUNTING FACE like every datasheet quotes it --
+# so it starts at z = 76 and runs up through the boss. The overlap is the
+# union's problem, not the author's.
+sketch Shaft xy 76
+tool circle
+click 0 0
+click 3.175 0
+dimension diameter Circle1 6.35 as ShaftDiameter
+pad Motor 21 as ShaftLength
+union Motor
+
+solve
+echo --- with the boss and the shaft ---
+measure
+
+echo --- the mounting holes ---
+
+# THE BOLT PATTERN, said as CONSTRAINTS rather than as four typed coordinates.
+#
+# Four points that merely happen to sit on a square are four points that come
+# apart the moment one is dragged. These four are held square by the geometry:
+# the bottom pair share a v, the top pair share a v, the left pair share a u,
+# the right pair share a u -- and then ONE dimension across and ONE up fixes
+# the size of the whole pattern.
+#
+# `constrain horizontal` and `constrain vertical` take TWO POINTS here, which
+# is the point-pair form: it says "these two are level" about points no line
+# joins.
+sketch Mounts xy 76
+tool point
+click -23.57 -23.57
+click 23.57 -23.57
+click 23.57 23.57
+click -23.57 23.57
+
+# One corner is pinned because nothing else in this sketch says WHERE the
+# pattern sits -- only how big and how square it is. Centring it on the shaft
+# axis would need construction geometry, which is a gap named honestly rather
+# than papered over with two more typed numbers.
+constrain fix Point1
+constrain horizontal Point1 Point2
+constrain horizontal Point4 Point3
+constrain vertical Point1 Point4
+constrain vertical Point2 Point3
+dimension hdistance Point1 Point2 47.14 as BoltSpacing
+dimension vdistance Point1 Point4 47.14 as BoltRise
+
+# A NEGATIVE DEPTH DRILLS THE OTHER WAY along the sketch normal -- down into
+# the end cap, not up into the air above it. These are the tapped blind holes
+# a stepper is bolted through; a through hole here would run the length of the
+# motor and out of the back, which is a different and much worse part.
+hole Motor Mounts 5.1 -12
+
+solve
+echo --- the finished motor ---
+measure
+
+save build/stepper-motor.ep3d

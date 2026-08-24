@@ -140,6 +140,18 @@ Vec2 ResolveElementPoint(const Sketch& sketch, const SketchElementRef& ref, bool
 // which constraints a selection admits.
 bool IsPointRef(const Sketch& sketch, const SketchElementRef& ref) noexcept;
 bool IsLineRef(const Sketch& sketch, const SketchElementRef& ref) noexcept;
+
+// Whether these refs mean "align these two POINTS" rather than "hold these
+// LINES" -- the one question Horizontal and Vertical now have two answers to
+// (M26.3).
+//
+// ONE function, called both where the command is built and where it is
+// applied, because the two must agree and IsLineRef cannot be used to ask it:
+// IsLineRef ignores the sub-element, so a line's ENDPOINT answers yes to it.
+// Deciding this separately in the two places is exactly how the applier came to
+// make one constraint per line for a selection that meant one alignment.
+bool IsPointPairAlignment(const Sketch& sketch,
+                          const std::vector<SketchElementRef>& refs) noexcept;
 // Distance from `query` to a piece of sketch geometry, and the nearest point on
 // it. Negative when the question has no answer (a query dead on a circle's
 // centre, say). Exported so picking, deleting and snapping all measure the same
@@ -273,6 +285,14 @@ enum class SketchEditKind {
     // guess section 26 forbids. Reached by their own commands.
     AddHorizontalDistance,
     AddVerticalDistance,
+    // M26.5 -- BOTH legs of a point-to-point separation, in one command.
+    //
+    // Not a third constraint type: it builds the two above, in one
+    // transaction, so each leg is listed, edited, deleted and solved exactly
+    // as it would have been typed separately. What it saves is the second
+    // selection, which is the whole of what a user is doing when they place
+    // an ordinate pair.
+    AddHVDistance,
     // M17.25 -- an ellipse's two semi-axes. Two kinds rather than one with a
     // flag, because they are two different commands on the toolbar and two
     // different numbers on the drawing.

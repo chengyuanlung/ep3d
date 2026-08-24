@@ -783,17 +783,26 @@ int main(int argc, char** argv) {
                 if (rowValue("Solve status").empty()) fail("the sketch shows no solve status");
                 if (rowValue("Degrees of freedom").empty())
                     fail("the sketch shows no degrees of freedom");
-                // The constraint list is in the tree, under its sketch.
-                const OutlineNode root = outline.build();
-                std::size_t constraintRows = 0;
-                const std::function<void(const OutlineNode&)> count =
-                    [&](const OutlineNode& node) {
-                        if (node.kind == OutlineKind::Constraint) ++constraintRows;
-                        for (const OutlineNode& child : node.children) count(child);
-                    };
-                count(root);
-                if (constraintRows != sketch->constraints().size())
-                    fail("the constraint list does not show every constraint");
+                // THE CONSTRAINT LIST IS THE PANEL'S, not the tree's (M26.10).
+                // Every constraint still has a row, and the row still says
+                // whether the solver blamed it -- which is spec 18's actual
+                // requirement, and it is now asked of the surface that carries
+                // it.
+                if (ConstraintRowsFor(model->document, *sketch).size() !=
+                    sketch->constraints().size())
+                    fail("the constraint panel does not show every constraint");
+                {
+                    const OutlineNode root = outline.build();
+                    std::size_t constraintRows = 0;
+                    const std::function<void(const OutlineNode&)> count =
+                        [&](const OutlineNode& node) {
+                            if (node.kind == OutlineKind::Constraint) ++constraintRows;
+                            for (const OutlineNode& child : node.children) count(child);
+                        };
+                    count(root);
+                    if (constraintRows != 0)
+                        fail("the model tree is listing constraints again");
+                }
 
                 if (built == Sample::M5Circle) {
                     if (sketch->solveStatus() != SketchSolveStatus::Solved)
@@ -1366,6 +1375,60 @@ int main(int argc, char** argv) {
             if (window.inSketchMode())
                 fail("a refused Sketch on Face opened a sketch anyway");
 
+            // --- M26.6: File > Run Script, driven end to end -----------------
+            //
+            // The dialog is the only part that cannot be driven, so everything
+            // below it is. What this proves that no unit test can: the SHELL
+            // reaches the same interpreter the CLI and the socket use, the
+            // window is refreshed afterwards, and a script that fails says
+            // WHICH LINE.
+            {
+                const QString directory = QDir::tempPath() + QStringLiteral("/ep3d-selftest");
+                QDir().mkpath(directory);
+                const QString good = directory + QStringLiteral("/run-ok.ep3ds");
+                const QString bad = directory + QStringLiteral("/run-bad.ep3ds");
+                const auto put = [](const QString& where, const char* text) {
+                    QFile out(where);
+                    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+                    out.write(text);
+                    return true;
+                };
+                if (!put(good, "sketch RunScriptCheck\ntool rect\nclick 0 0\nclick 30 20\n"))
+                    fail("could not write the script the self test runs");
+                if (!put(bad, "sketch RunScriptBad\ntool rect\nwobble 1 2\n"))
+                    fail("could not write the failing script the self test runs");
+
+                const std::size_t before = window.openedSketches().size();
+                const std::string ran = window.runScriptFile(good).toStdString();
+                if (ran.empty()) fail("Run Script said nothing at all");
+                if (window.openedSketches().size() != before + 1)
+                    fail(("Run Script did not add the sketch its script draws: " + ran).c_str());
+                // It says how many undo steps it left, because it is not one.
+                if (ran.find("undo") == std::string::npos)
+                    fail(("Run Script did not say what undo will do: " + ran).c_str());
+
+                // A FAILING SCRIPT NAMES ITS LINE. `wobble` is line 3.
+                const std::string stopped = window.runScriptFile(bad).toStdString();
+                if (stopped.find("line 3") == std::string::npos)
+                    fail(("a failing script did not name the line it stopped on: " + stopped)
+                             .c_str());
+                if (stopped.find("wobble") == std::string::npos)
+                    fail(("a failing script did not say what it did not understand: " + stopped)
+                             .c_str());
+                // ...and the lines BEFORE the failure stayed. A run that rolled
+                // them back would throw away the only clue to what went wrong.
+                if (window.openedSketches().size() != before + 2)
+                    fail("a failing script discarded the lines that had already worked");
+
+                // A PATH THAT IS NOT THERE is a named refusal, not a crash and
+                // not silence.
+                const std::string missing =
+                    window.runScriptFile(directory + QStringLiteral("/not-here.ep3ds"))
+                        .toStdString();
+                if (missing.find("not-here") == std::string::npos)
+                    fail(("a missing script did not name the file: " + missing).c_str());
+            }
+
             // --- AND THE MIRROR OF IT ---------------------------------------
             //
             // A button that is never enabled is a command that does not exist.
@@ -1434,6 +1497,21 @@ int main(int argc, char** argv) {
             window.newSketchCommand();
             if (!window.inSketchMode()) fail("New Sketch did not open the sketch canvas");
 
+            // --- M26.2: the shell around a sketch, not just the canvas -----
+            //
+            // The model toolbar and the tree act on FEATURES -- neither means
+            // anything while a sketch is open -- and the constraint panel
+            // moves into the column the tree just vacated rather than
+            // crowding the properties dock. None of this is visible to a unit
+            // test of the canvas; it is a property of the SHELL, so it is
+            // checked here the same way M6.14's lesson is checked here.
+            if (window.modelToolBarVisible())
+                fail("the model toolbar is still on screen with a sketch open");
+            if (window.modelTreeVisible())
+                fail("the model tree is still on screen with a sketch open");
+            if (!window.constraintPanelOnLeft())
+                fail("the constraint panel did not move into the tree's column");
+
             // --- M15: the icon toolbar ----------------------------------
             //
             // The bar is icon-only, so an action without an icon is a blank
@@ -1491,6 +1569,74 @@ int main(int argc, char** argv) {
                 if (canvas->paintedEntities() != 5)
                     fail("the sketch canvas is not drawing the origin and the rectangle's 4 "
                          "lines");
+
+                // --- M26.7: clicking sketch geometry fills the PROPERTY PANEL ----
+                //
+                // In sketch mode the model tree is hidden, so the panel's only
+                // other source of rows is not even on screen. Before this, every
+                // click inside a sketch left it blank -- the geometry was
+                // selectable, highlighted and constrainable, and the one place
+                // that says WHAT IT IS said nothing.
+                //
+                // Driven through selectAt() at real coordinates, because that is
+                // the path a mouse takes. A check that called the describer
+                // directly would pass with the panel never wired to the canvas
+                // at all, which is the M6.14 defect exactly. What each KIND of
+                // geometry reports is unit-tested in DocumentOutlineTests; what
+                // is proved here is the wiring.
+                //
+                // IT ADDS NO GEOMETRY. Everything below reads the rectangle that
+                // is already there and puts the selection back as it found it --
+                // an extra entity here would change the counts and the degrees of
+                // freedom that the rest of this block goes on to assert.
+                {
+                    canvas->setTool(SketchTool::Select);
+                    canvas->clearSelection();
+
+                    // A LINE, picked mid-edge where no endpoint can win.
+                    const Vec2 middle{40.0, 0.0};
+                    if (!canvas->selectAt(middle))
+                        fail("clicking the rectangle's bottom edge selected nothing");
+                    canvas->repaint();
+                    if (window.propertyRowValue("Type") != "Line")
+                        fail(("clicking a line did not describe a Line: got '" +
+                              window.propertyRowValue("Type") + "'")
+                                 .c_str());
+                    if (window.propertyRowValue("Length").empty())
+                        fail("a picked line has no Length in the property panel");
+                    if (!window.hasPropertyRow("Angle"))
+                        fail("a picked line has no Angle in the property panel");
+                    // How many constraints hold it -- the row a user wants when
+                    // geometry will not drag.
+                    if (!window.hasPropertyRow("On this"))
+                        fail("the panel does not say how many constraints hold the picked line");
+
+                    // AN ENDPOINT of a line is a DIFFERENT answer from the line,
+                    // and the panel has to say which one the click meant.
+                    canvas->clearSelection();
+                    if (!canvas->selectAt(Vec2{80.0, 0.0}))
+                        fail("clicking the rectangle's corner selected nothing");
+                    canvas->repaint();
+                    if (!window.hasPropertyRow("Picked"))
+                        fail("picking an endpoint did not say WHICH part was picked");
+                    if (window.propertyRowValue("Picked").find("point") == std::string::npos)
+                        fail(("picking an endpoint described it as '" +
+                              window.propertyRowValue("Picked") + "'")
+                                 .c_str());
+
+                    // TWO SELECTED is a selection for a CONSTRAINT, not one thing
+                    // to describe. Showing the first of them would be quietly
+                    // describing half of what is highlighted.
+                    canvas->clearSelection();
+                    canvas->selectAt(middle);
+                    canvas->selectAt(Vec2{0.0, 20.0});
+                    canvas->repaint();
+                    if (canvas->selectionCount() == 2 && window.hasPropertyRow("Length"))
+                        fail("with two things picked the panel described just one of them");
+
+                    canvas->clearSelection();
+                    canvas->repaint();
+                }
 
                 // The colour the geometry was STROKED with while the sketch is
                 // still under-constrained. Kept for the comparison at the end of
@@ -3324,6 +3470,14 @@ int main(int argc, char** argv) {
 
                 window.finishSketchCommand();
                 if (window.inSketchMode()) fail("Finish Sketch did not leave sketch mode");
+                // ...and the shell reverts, rather than leaving the tree
+                // hidden and the constraint panel parked on the left forever.
+                if (!window.modelToolBarVisible())
+                    fail("the model toolbar did not come back when the sketch closed");
+                if (!window.modelTreeVisible())
+                    fail("the model tree did not come back when the sketch closed");
+                if (window.constraintPanelOnLeft())
+                    fail("the constraint panel stayed in the tree's column after closing");
             }
         }
 

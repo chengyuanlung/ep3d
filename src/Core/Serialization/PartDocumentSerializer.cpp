@@ -714,6 +714,14 @@ JsonValue toJson(const PartDocument& document) {
                     } else if constexpr (std::is_same_v<T, HorizontalConstraint> ||
                                          std::is_same_v<T, VerticalConstraint>) {
                         writeEntity("line", c.line);
+                    } else if constexpr (std::is_same_v<T, PointsHorizontalConstraint> ||
+                                         std::is_same_v<T, PointsVerticalConstraint>) {
+                        // UNORDERED, unlike the signed axis distances below:
+                        // "these two share a v" is the same statement either
+                        // way round, so nothing here needs to preserve which
+                        // point the user picked first.
+                        writeRef("a", c.a);
+                        writeRef("b", c.b);
                     } else if constexpr (std::is_same_v<T, FixConstraint>) {
                         writeRef("target", c.target);
                     } else if constexpr (std::is_same_v<T, DistanceConstraint> ||
@@ -2868,6 +2876,16 @@ LoadResult loadPartDocument(std::istream& in) {
                         parsed.data = HorizontalConstraint{entityRef("line")};
                     } else if (kind == "Vertical") {
                         parsed.data = VerticalConstraint{entityRef("line")};
+                    } else if (kind == "PointsHorizontal") {
+                        PointsHorizontalConstraint c;
+                        c.a = elementRef("a");
+                        c.b = elementRef("b");
+                        parsed.data = c;
+                    } else if (kind == "PointsVertical") {
+                        PointsVerticalConstraint c;
+                        c.a = elementRef("a");
+                        c.b = elementRef("b");
+                        parsed.data = c;
                     } else if (kind == "Fix") {
                         parsed.data = FixConstraint{elementRef("target")};
                     } else if (kind == "Distance") {

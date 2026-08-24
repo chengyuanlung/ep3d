@@ -2,6 +2,8 @@
 
 #include "Core/Feature/Feature.h"
 #include "Core/Feature/IMaterialReferencing.h"
+#include "Core/Feature/IParameterisedFeature.h"
+#include "Core/Feature/ISketchConsuming.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Geometry/MathTypes.h"
 #include "Core/Kernel/KernelShape.h"
@@ -115,8 +117,12 @@ protected:
 // count cannot be driven is not parametric -- and because M9's undo, M8's
 // selective recompute and M5's expressions all work on Parameters and on
 // nothing else.
-class PatternFeature final : public TransformFeature {
+class PatternFeature final : public TransformFeature, public IParameterisedFeature {
 public:
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{"Count", countParameterId_, false},
+                FeatureParameter{"Spacing", spacingParameterId_, true}};
+    }
     PatternFeature(std::string name, ObjectId baseFeatureId, ObjectId frameId,
                    ObjectId countParameterId, ObjectId spacingParameterId,
                    ObjectId materialId = kInvalidObjectId);
@@ -156,8 +162,12 @@ private:
 // revolve's angle is checked. A step of 60 stored as millimetres reads as 60
 // radians, which is nine and a half turns and lands nowhere near where the
 // drawing said.
-class CircularPatternFeature final : public TransformFeature {
+class CircularPatternFeature final : public TransformFeature, public IParameterisedFeature {
 public:
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{"Count", countParameterId_, false},
+                FeatureParameter{"Step", stepParameterId_, true}};
+    }
     CircularPatternFeature(std::string name, ObjectId baseFeatureId, ObjectId frameId,
                            ObjectId countParameterId, ObjectId stepParameterId,
                            ObjectId materialId = kInvalidObjectId);
@@ -189,8 +199,11 @@ private:
 // The copies are TRANSLATED, not swept: each one is the base moved from the
 // path's start to the i-th station along it. They are not turned to follow the
 // curve's tangent, and that is a limit rather than a decision -- see the ADR.
-class CurvePatternFeature final : public TransformFeature {
+class CurvePatternFeature final : public TransformFeature, public ISketchConsuming, public IParameterisedFeature {
 public:
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{"Count", countParameterId_, false}};
+    }
     CurvePatternFeature(std::string name, ObjectId baseFeatureId, ObjectId pathSketchId,
                         ObjectId countParameterId, ObjectId materialId = kInvalidObjectId);
     CurvePatternFeature(ObjectId id, std::string name, ComputeState state,
@@ -199,6 +212,16 @@ public:
 
     ObjectId pathSketchId() const noexcept { return pathSketchId_; }
     ObjectId countParameterId() const noexcept { return countParameterId_; }
+
+    // IT READS A SKETCH, and until M26.8 it did not say so. That left its
+    // path DELETABLE while the pattern still walked it, and had the tree
+    // mark the path "Failed" for not closing into a loop a path is never
+    // meant to close into.
+    //
+    // A PATH IS A CURVE, so it does not need a closed profile.
+    std::vector<ConsumedSketch> consumedSketches() const override {
+        return {ConsumedSketch{pathSketchId_, false}};
+    }
 
     std::string_view typeName() const noexcept override { return "CurvePattern"; }
 

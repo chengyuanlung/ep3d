@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
+#include "Core/Feature/IParameterisedFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISketchConsuming.h"
 #include "Core/Feature/ISolidFeature.h"
@@ -27,8 +28,11 @@ class PadFeature final : public Feature,
                         public IRecomputable,
                         public ISolidFeature,
                         public ISketchConsuming,
-                        public IMaterialReferencing {
+                        public IMaterialReferencing, public IParameterisedFeature {
 public:
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{"Length", lengthParameterId_, true}};
+    }
     PadFeature(std::string name, ObjectId sketchId, ObjectId lengthParameterId,
                ObjectId materialId);
     // Restore constructor (deserialization): keeps the persisted id/state.
@@ -43,7 +47,10 @@ public:
     ObjectId sketchId() const noexcept { return sketchId_; }
     // ISketchConsuming: the same answer, asked the way code that does not know
     // this type has to ask it.
-    ObjectId consumedSketchId() const noexcept override { return sketchId_; }
+    // A pad sweeps an AREA, so an unclosed sketch really is a failure here.
+    std::vector<ConsumedSketch> consumedSketches() const override {
+        return {ConsumedSketch{sketchId_, true}};
+    }
     ObjectId lengthParameterId() const noexcept { return lengthParameterId_; }
     ObjectId materialId() const noexcept override { return materialId_; }
     void clearMaterialReference() noexcept override { materialId_ = kInvalidObjectId; }

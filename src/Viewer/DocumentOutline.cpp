@@ -1,6 +1,10 @@
 #include "Viewer/DocumentOutline.h"
-#include <set>
+#include <cmath>
 #include <map>
+#include <optional>
+#include <set>
+#include <variant>
+#include "Core/Feature/IParameterisedFeature.h"
 #include "Core/Feature/ISketchConsuming.h"
 
 #include "Core/Body/Body.h"
@@ -50,7 +54,16 @@ std::string_view RoleName(ConnectorRole role) {
 std::string Number(double value, int decimals = 3) {
     char buffer[64];
     std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
-    return buffer;
+    std::string text = buffer;
+    // NO NEGATIVE ZERO. A coordinate of -1e-17 -- which is what a solver
+    // returns for "on the axis" about half the time -- printed as "-0.000",
+    // and a panel showing "-0.000 mm" next to "0.000 mm" is showing two
+    // numbers where the model has one. The minus survives for anything that
+    // actually rounds to a non-zero digit.
+    if (text.size() > 1 && text[0] == '-' &&
+        text.find_first_of("123456789") == std::string::npos)
+        text.erase(0, 1);
+    return text;
 }
 
 const char* UnitLabel(UnitType unit) noexcept {
@@ -108,24 +121,6 @@ PropertyRow EditableValueRow(std::string group, std::string label, const Paramet
     return PropertyRow{std::move(group),  std::move(label), Number(parameter.value()),
                        UnitLabel(parameter.unit()), true, parameter.id(), parameter.value(),
                        PropertyField::Value};
-}
-
-// The row text for one constraint. A dimensional constraint shows its
-// PARAMETER NAME and current value, because "Length" alone in a list of four
-// Lengths tells a user nothing about which one they are looking at -- and the
-// parameter name is the thing they recognise from the parameter list.
-std::string ConstraintLabel(const PartDocument& document, const SketchConstraint& constraint) {
-    std::string label = ConstraintKindName(constraint.data);
-    const ObjectId parameterId = BoundParameterId(constraint.data);
-    if (parameterId == kInvalidObjectId) return label;
-
-    const Parameter* parameter = document.parameters().findById(parameterId);
-    if (parameter == nullptr) return label + " (unresolved parameter)";
-
-    label += " = " + parameter->name() + " (" + Number(parameter->value());
-    const char* unit = UnitLabel(parameter->unit());
-    if (unit[0] != '\0') label += std::string(" ") + unit; // unitless -> no trailing space
-    return label + ")";
 }
 
 OutlineState FromComputeState(ComputeState state) noexcept {
@@ -316,6 +311,16 @@ OutlineNode DocumentOutline::build(const std::set<ObjectId>& hiddenIds) const {
     //
     // The two builders below make the nodes; the emit loop decides where they
     // go.
+    // One feature by id, across every body. The dependency graph deals in
+    // ObjectIds and the capability question below has to be put to the FEATURE,
+    // so something has to turn one into the other.
+    const auto featureById = [&document](ObjectId id) -> const Feature* {
+        for (const auto& body : document.bodies())
+            for (const auto& feature : body->features())
+                if (feature->id() == id) return feature.get();
+        return nullptr;
+    };
+
     const auto buildSketchNode = [&](const Sketch* sketch) {
         OutlineNode node;
         node.id = sketch->id();
@@ -350,32 +355,51 @@ OutlineNode DocumentOutline::build(const std::set<ObjectId>& hiddenIds) const {
                 // "Failed" after a successful import learns to distrust the
                 // marker, which costs more than the marker is worth.
                 node.diagnostic = profile.message;
-                const bool somethingNeedsTheProfile = !graph.dependentsOf(sketch->id()).empty();
+                // ...AND WHETHER ANYTHING WANTED A PROFILE OUT OF IT (M26.8).
+                //
+                // This asked only whether ANYTHING depended on the sketch,
+                // which is a different question. A Hole depends on its sketch
+                // and reads POINTS from it: four dots that never join is
+                // exactly the drawing it wants. `examples/stepper-motor.ep3ds`
+                // therefore showed `[Skt] ! Mounts  Failed` beside a hole
+                // feature that had drilled four correct bores -- a red marker
+                // on a part with nothing wrong with it, which is how a marker
+                // stops being believed.
+                //
+                // Asked of the FEATURE through its capability, so a new
+                // sketch-consuming feature answers for itself instead of
+                // needing a branch here (ADR-M3-007).
+                bool somethingNeedsTheProfile = false;
+                for (const ObjectId dependentId : graph.dependentsOf(sketch->id())) {
+                    const auto* consumer =
+                        dynamic_cast<const ISketchConsuming*>(featureById(dependentId));
+                    if (consumer == nullptr) continue;
+                    if (consumer->needsClosedProfileOf(sketch->id()))
+                        somethingNeedsTheProfile = true;
+                }
                 if (somethingNeedsTheProfile) node.state = OutlineState::Failed;
             }
         }
 
-        // The constraint list (spec 18) lives in the tree under its sketch,
-        // because that is where its identity lives: a constraint is a
-        // sub-object of one sketch, not a document-level peer.
-        const std::vector<SketchConstraintId>& offenders = sketch->offendingConstraints();
-        for (const SketchConstraint& constraint : sketch->constraints()) {
-            OutlineNode child;
-            child.id = ToObjectId(constraint.id);
-            child.name = ConstraintLabel(document, constraint);
-            child.typeLabel = ConstraintKindName(constraint.data);
-            child.kind = OutlineKind::Constraint;
-            // Constraints are not graph nodes, so they have no ComputeState of
-            // their own. What a user needs is whether THIS constraint is one
-            // the solver blamed -- named individually, because "the sketch
-            // failed" does not tell anyone which constraint to remove.
-            const bool blamed =
-                std::find(offenders.begin(), offenders.end(), constraint.id) != offenders.end();
-            child.state = blamed ? OutlineState::Failed : OutlineState::Normal;
-            if (blamed) child.diagnostic = sketch->solveMessage();
-            node.children.push_back(std::move(child));
-        }
-
+        // THE CONSTRAINT LIST IS NOT IN THE TREE (M26.10).
+        //
+        // It used to be, one row per constraint under its sketch. A rectangle
+        // drawn with the tool carries eight of them before a single dimension
+        // is added, so the tree that is meant to show a PART's structure was
+        // mostly a list of Coincidents, each row saying "Not computed" because
+        // a constraint is not a graph node and has no state of its own.
+        //
+        // Spec 18's requirement -- that the solver's blame is readable PER
+        // CONSTRAINT, never just "the sketch failed" -- has not gone anywhere.
+        // It is met by the Constraints panel, which says it better: kind, what
+        // it is ON, its value, and OK or AT FAULT per row, with a Delete
+        // Constraint button beside it. That panel is open exactly when a user
+        // can act on a constraint, which is while the sketch is.
+        //
+        // What the tree keeps is the SKETCH's own verdict: its state, its
+        // solve message, and -- in the property panel -- its constraint count
+        // and the ids of any the solver blamed. That is what belongs in a
+        // structure view; twelve rows of "Coincident" is not.
         return node;
     };
 
@@ -502,6 +526,151 @@ OutlineNode DocumentOutline::build(const std::set<ObjectId>& hiddenIds) const {
     rollUp(root);
 
     return root;
+}
+
+namespace {
+
+// A read-only row. Every row a picked sketch element produces is one of these:
+// the geometry belongs to the solver, and a cell that took a typed coordinate
+// would be overwritten by the next solve that disagreed with it.
+PropertyRow ReadOnlyRow(std::string group, std::string label, std::string value,
+                        std::string unit = std::string()) {
+    return PropertyRow{std::move(group), std::move(label), std::move(value), std::move(unit),
+                       false, kInvalidObjectId, 0.0, PropertyField::None};
+}
+
+std::string Degrees(double radians) {
+    return Number(radians * 180.0 / 3.14159265358979323846, 2);
+}
+
+const char* SubElementLabel(SketchSubElement part) noexcept {
+    switch (part) {
+        case SketchSubElement::Whole: return "the whole thing";
+        case SketchSubElement::StartPoint: return "its start point";
+        case SketchSubElement::EndPoint: return "its end point";
+        case SketchSubElement::CenterPoint: return "its centre";
+        case SketchSubElement::SplinePoint: return "one of its points";
+        case SketchSubElement::SplineHandle: return "a tangent handle";
+    }
+    return "part of it";
+}
+
+} // namespace
+
+std::vector<PropertyRow> DocumentOutline::propertiesOfSketchElement(
+    ObjectId sketchId, const SketchElementRef& ref) const {
+    std::vector<PropertyRow> rows;
+    const Sketch* sketch = document_->findSketch(sketchId);
+    if (sketch == nullptr) return rows;
+    const SketchEntity* entity = sketch->findEntity(ref.entityId);
+    if (entity == nullptr) return rows;
+
+    const auto point = [&rows](const char* label, Vec2 at) {
+        rows.push_back(ReadOnlyRow("Geometry", std::string(label) + " u", Number(at.x), "mm"));
+        rows.push_back(ReadOnlyRow("Geometry", std::string(label) + " v", Number(at.y), "mm"));
+    };
+
+    // WHAT IT IS, first, because that is the question a click asks.
+    const char* kind = "Geometry";
+    std::visit(
+        [&kind](const auto& geometry) {
+            using T = std::decay_t<decltype(geometry)>;
+            if constexpr (std::is_same_v<T, SketchPoint>) kind = "Point";
+            else if constexpr (std::is_same_v<T, SketchLine>) kind = "Line";
+            else if constexpr (std::is_same_v<T, SketchCircle>) kind = "Circle";
+            else if constexpr (std::is_same_v<T, SketchArc>) kind = "Arc";
+            else if constexpr (std::is_same_v<T, SketchEllipse>) kind = "Ellipse";
+            else if constexpr (std::is_same_v<T, SketchEllipticalArc>) kind = "Elliptical arc";
+            else kind = "Spline";
+        },
+        entity->geometry);
+    rows.push_back(ReadOnlyRow("General", "Type", kind));
+    rows.push_back(ReadOnlyRow(
+        "General", "Id",
+        "#" + std::to_string(static_cast<unsigned long long>(ToObjectId(entity->id)))));
+    // WHAT WAS PICKED. A line and one end of that line are different answers,
+    // and the panel is the only place that can say which one the click meant.
+    if (ref.subElement != SketchSubElement::Whole)
+        rows.push_back(ReadOnlyRow("General", "Picked", SubElementLabel(ref.subElement)));
+    // CONSTRUCTION IS A PROPERTY OF THE ENTITY, and the one that decides
+    // whether a pad will sweep it -- so a user staring at a profile that will
+    // not extrude needs to be able to read it here.
+    rows.push_back(ReadOnlyRow("General", "Construction", entity->construction ? "yes" : "no"));
+
+    std::visit(
+        [&](const auto& geometry) {
+            using T = std::decay_t<decltype(geometry)>;
+            if constexpr (std::is_same_v<T, SketchPoint>) {
+                point("Position", geometry.position);
+            } else if constexpr (std::is_same_v<T, SketchLine>) {
+                point("Start", geometry.start);
+                point("End", geometry.end);
+                const double du = geometry.end.x - geometry.start.x;
+                const double dv = geometry.end.y - geometry.start.y;
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "Length", Number(std::sqrt(du * du + dv * dv)), "mm"));
+                // MEASURED, not stored. A line has no angle of its own -- this
+                // is what its two ends currently say, and it moves when they do.
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "Angle", Degrees(std::atan2(dv, du)), "deg"));
+            } else if constexpr (std::is_same_v<T, SketchCircle>) {
+                point("Centre", geometry.center);
+                rows.push_back(ReadOnlyRow("Geometry", "Radius", Number(geometry.radiusMm), "mm"));
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "Diameter", Number(geometry.radiusMm * 2.0), "mm"));
+            } else if constexpr (std::is_same_v<T, SketchArc>) {
+                point("Centre", geometry.center);
+                rows.push_back(ReadOnlyRow("Geometry", "Radius", Number(geometry.radiusMm), "mm"));
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "Start angle", Degrees(geometry.startAngleRad), "deg"));
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "End angle", Degrees(geometry.endAngleRad), "deg"));
+                // WHICH OF THE TWO ARCS between those angles is meant. Without
+                // it the two rows above describe two different shapes equally
+                // well, which is the ambiguity SketchArc stores this flag to
+                // avoid in the first place.
+                rows.push_back(ReadOnlyRow("Geometry", "Direction",
+                                           geometry.counterClockwise ? "counter-clockwise"
+                                                                     : "clockwise"));
+            } else if constexpr (std::is_same_v<T, SketchEllipse> ||
+                                 std::is_same_v<T, SketchEllipticalArc>) {
+                point("Centre", geometry.center);
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "Major radius", Number(geometry.majorRadiusMm), "mm"));
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "Minor radius", Number(geometry.minorRadiusMm), "mm"));
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "Rotation", Degrees(geometry.rotationRad), "deg"));
+            } else {
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "Points", std::to_string(geometry.points.size())));
+                rows.push_back(ReadOnlyRow("Geometry", "Closed", geometry.closed ? "yes" : "no"));
+                rows.push_back(
+                    ReadOnlyRow("Geometry", "Handles", std::to_string(geometry.handles.size())));
+            }
+        },
+        entity->geometry);
+
+    // WHERE THE PICKED POINT ACTUALLY IS, when a sub-element was picked. The
+    // rows above describe the whole entity; this one answers the click.
+    if (ref.subElement != SketchSubElement::Whole) {
+        const std::optional<Vec2> at =
+            PointOfSubElement(entity->geometry, ref.subElement, ref.index);
+        if (at) point("Picked point", *at);
+    }
+
+    // WHAT IS HOLDING IT. This is the row a user actually needs when geometry
+    // will not move: an entity that refuses to drag is over-constrained, and
+    // counting what holds it is the first thing anyone asks.
+    int holding = 0;
+    for (const SketchConstraint& constraint : sketch->constraints())
+        for (const SketchEntityId named : ReferencedEntities(constraint.data))
+            if (named == entity->id) {
+                ++holding;
+                break;
+            }
+    rows.push_back(ReadOnlyRow("Constraints", "On this", std::to_string(holding)));
+    return rows;
 }
 
 std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
@@ -726,57 +895,50 @@ std::vector<PropertyRow> DocumentOutline::propertiesOf(ObjectId id) const {
             rows.push_back(PropertyRow{"General", "Type", std::string(feature->typeName()), "",
                                        false, kInvalidObjectId, 0.0});
 
-            // A Pad's editable length is its Parameter, so the row points at the
-            // PARAMETER's id: the panel writes through PartDocument's facade,
-            // never into the feature (UI spec 20).
-            if (const auto* pad = dynamic_cast<const PadFeature*>(feature.get())) {
-                for (const auto& parameter : document.parameters().items()) {
-                    if (parameter->id() != pad->lengthParameterId()) continue;
-                    rows.push_back(EditableValueRow("Geometry", "Length", *parameter));
-                    // Which way it grows. A pad from a sketch made ON A FACE
-                    // grows away from the part, because that sketch's normal
-                    // points out of it (ADR-M17-028) -- so "the other way" is
-                    // an ordinary thing to want, not an edge case.
-                    rows.push_back(ReversedRow("Geometry", *parameter));
+            // EVERY editable number the feature exposes, ASKED OF THE FEATURE
+            // (M26.9).
+            //
+            // This was four hand-written dynamic_casts -- Pad, Pocket,
+            // Fillet/Chamfer, Revolve -- and every feature added after them
+            // arrived without one. By M26 that was Hole, Shell, Draft and all
+            // three patterns: their numbers were stored, solved, saved and
+            // reloaded correctly, and there was nowhere in the shell to read or
+            // change them. Nothing failed; the rows simply were not there.
+            //
+            // The row points at the PARAMETER's id, because the panel writes
+            // through PartDocument's facade and never into the feature (UI
+            // spec 20).
+            if (const auto* parameterised =
+                    dynamic_cast<const IParameterisedFeature*>(feature.get())) {
+                for (const FeatureParameter& exposed : parameterised->featureParameters()) {
+                    const Parameter* parameter =
+                        document.parameters().findById(exposed.parameterId);
+                    if (parameter == nullptr) continue;
+                    rows.push_back(EditableValueRow("Geometry", exposed.label, *parameter));
+                    // Which way it grows, for the numbers that HAVE another way.
+                    // A pad from a sketch made ON A FACE grows away from the
+                    // part, because that sketch's normal points out of it
+                    // (ADR-M17-028), and a pocket from a face sketch MUST be
+                    // reversed to cut into the material at all (ADR-M17-031) --
+                    // so "the other way" is ordinary, not an edge case. A
+                    // diameter and a count have no other way, and the box would
+                    // mean nothing on them.
+                    if (exposed.reversible) rows.push_back(ReversedRow("Geometry", *parameter));
                 }
             }
 
-            // Pocket (M8): the editable Depth, exactly as Pad's Length, plus
-            // the base it consumes -- read-only, because the chain reference is
-            // structure, not a value to type over.
+            // The consumed base, for the features that chain off another --
+            // read-only, because a chain reference is structure, not a value to
+            // type over.
             if (const auto* pocket = dynamic_cast<const PocketFeature*>(feature.get())) {
-                for (const auto& parameter : document.parameters().items()) {
-                    if (parameter->id() != pocket->depthParameterId()) continue;
-                    rows.push_back(EditableValueRow("Geometry", "Depth", *parameter));
-                    // A pocket from a face sketch MUST be reversed to cut into
-                    // the material: the default direction builds its tool
-                    // outside the solid and removes nothing (ADR-M17-031).
-                    rows.push_back(ReversedRow("Geometry", *parameter));
-                }
                 rows.push_back(PropertyRow{"Chain", "Base feature",
                                            std::to_string(pocket->baseFeatureId()), "", false,
                                            kInvalidObjectId, 0.0});
             }
-
-            // Fillet/Chamfer (M8.3): the editable size, plus the consumed base.
             if (const auto* dress = dynamic_cast<const EdgeDressFeature*>(feature.get())) {
-                const bool isFillet = dress->typeName() == "Fillet";
-                for (const auto& parameter : document.parameters().items()) {
-                    if (parameter->id() != dress->sizeParameterId()) continue;
-                    rows.push_back(
-                        EditableValueRow("Geometry", isFillet ? "Radius" : "Distance", *parameter));
-                }
                 rows.push_back(PropertyRow{"Chain", "Base feature",
                                            std::to_string(dress->baseFeatureId()), "", false,
                                            kInvalidObjectId, 0.0});
-            }
-
-            // Revolve (M8.2): the editable Angle, in the parameter's own unit.
-            if (const auto* revolve = dynamic_cast<const RevolveFeature*>(feature.get())) {
-                for (const auto& parameter : document.parameters().items()) {
-                    if (parameter->id() != revolve->angleParameterId()) continue;
-                    rows.push_back(EditableValueRow("Geometry", "Angle", *parameter));
-                }
             }
 
             if (const auto* referencing =

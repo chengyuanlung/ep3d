@@ -61,16 +61,52 @@ SUITES = [
     'ParametricCADImportTests',
 ]
 
+# THE SHELL, which is not a gtest suite and was therefore invisible here.
+#
+# The fourth time this project's mutation oracle has been wrong (see the header
+# above for the first three). Every check the viewer's `--selftest` makes -- and
+# it is the ONLY place that starts the program, paints a toolbar, opens a
+# sketch or runs a script through the window -- was outside what this harness
+# looked at. Mutating viewer code therefore scored SURVIVED no matter how
+# thoroughly the self test caught it, which is confidence the harness had not
+# earned, about precisely the code unit tests cannot reach.
+#
+# Its oracle is its own: it prints SELFTEST OK, not a gtest summary.
+SHELL_CHECKS = [
+    ('ParametricCADViewer', ['--selftest'], 'SELFTEST OK'),
+    ('ParametricCADViewer', ['--selftest', '--sample=m12-sketch'], 'SELFTEST OK'),
+]
+
 # Long enough for the OCCT suite on a cold cache; short enough that a mutation
 # which hangs is reported this decade. A timeout is a KILL, not an inconclusive
 # result: a change that makes the tests stop finishing has been noticed.
 SUITE_TIMEOUT_SECONDS = 900
 
 
+def unlock(target):
+    """Renames a RUNNING executable aside so the linker can write a new one.
+
+    The owner usually has a viewer window open while this runs, and Windows
+    refuses to overwrite a loaded image (LNK1168) -- which would score every
+    mutation as 'did not compile', i.e. as a kill, for a reason that has
+    nothing to do with the mutation. Renaming is allowed while it runs.
+    """
+    path = 'build/Debug/%s.exe' % target
+    if not os.path.exists(path):
+        return
+    try:
+        os.replace(path, path + '.busy')
+    except OSError:
+        pass
+
+
 def build():
     """Returns None on success, or the reason it failed."""
+    targets = SUITES + sorted({name for name, _, _ in SHELL_CHECKS})
+    for name, _, _ in SHELL_CHECKS:
+        unlock(name)
     result = subprocess.run(
-        ['cmake', '--build', 'build', '--config', 'Debug', '--target'] + SUITES,
+        ['cmake', '--build', 'build', '--config', 'Debug', '--target'] + targets,
         capture_output=True)
     return None if result.returncode == 0 else 'did not compile'
 
@@ -100,6 +136,28 @@ def run_suites():
                            % (suite, result.returncode))
         elif result.returncode != 0:
             reasons.append('%s exited %d' % (suite, result.returncode))
+
+    # ...and the shell, with the oracle IT answers to.
+    for target, arguments, wanted in SHELL_CHECKS:
+        label = target + ' ' + ' '.join(arguments)
+        try:
+            result = subprocess.run(['./build/Debug/%s.exe' % target] + arguments,
+                                    capture_output=True, text=True, errors='replace',
+                                    timeout=SUITE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            reasons.append('%s HUNG' % label)
+            continue
+        except OSError as problem:
+            reasons.append('%s could not be run (%s)' % (label, problem))
+            continue
+        if wanted not in result.stdout and wanted not in result.stderr:
+            first = ''
+            for line in (result.stderr or result.stdout).splitlines():
+                if 'FAIL' in line:
+                    first = ' -- ' + line.strip()
+                    break
+            reasons.append('%s did not say %s (exit %d)%s'
+                           % (label, wanted, result.returncode, first))
     return reasons
 
 

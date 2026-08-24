@@ -7,6 +7,7 @@
 #include "Core/Feature/SweepFeature.h"
 #include <set>
 
+#include "Cli/SketchScript.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Physics/MassProperties.h"
 #include "Viewer/DesignTokens.h"
@@ -35,6 +36,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QDockWidget>
+#include <QFile>
 #include <QFileDialog>
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include <QFileInfo>
@@ -119,8 +121,7 @@ MainWindow::MainWindow(PartDocument& document, DocumentPresenter& presenter, QWi
     // Docks get a deliberate share of the width rather than whatever their
     // contents ask for: the viewer must stay the dominant area (UI spec 5),
     // and the tree needs enough room that names elide only when genuinely long.
-    resizeDocks({findChild<QDockWidget*>()}, {ui::size::kModelTreeMinWidth + 100},
-                Qt::Horizontal);
+    resizeDocks({treeDock_}, {ui::size::kModelTreeMinWidth + 100}, Qt::Horizontal);
 
     refreshAll();
 }
@@ -143,6 +144,16 @@ void MainWindow::buildMenus() {
     QAction* importDxf = file->addAction(QStringLiteral("&Import DXF..."));
     importDxf->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
     connect(importDxf, &QAction::triggered, this, &MainWindow::onImportDxfRequested);
+    // RUN A SCRIPT (M26.6). The same vocabulary the CLI and the socket take,
+    // reachable from the window -- so an .ep3ds is something a user can open
+    // rather than something they need a terminal for.
+    QAction* runScript = file->addAction(QStringLiteral("&Run Script..."));
+    runScript->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+R")));
+    runScript->setToolTip(
+        QStringLiteral("Run an .ep3ds script against THIS document.\n"
+                       "It adds to what is already open -- File > New first to start empty.\n"
+                       "Each command is its own undo step, as it is over the script socket."));
+    connect(runScript, &QAction::triggered, this, &MainWindow::onRunScriptRequested);
     file->addSeparator();
     QAction* quit = file->addAction(QStringLiteral("E&xit"));
     connect(quit, &QAction::triggered, this, &QWidget::close);
@@ -486,10 +497,10 @@ void MainWindow::buildDocks() {
     connect(tree_, &QTreeWidget::itemSelectionChanged, this,
             &MainWindow::onTreeSelectionChanged);
 
-    auto* treeDock = new QDockWidget(QStringLiteral("Model Tree"), this);
-    treeDock->setWidget(tree_);
-    treeDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-    addDockWidget(Qt::LeftDockWidgetArea, treeDock);
+    treeDock_ = new QDockWidget(QStringLiteral("Model Tree"), this);
+    treeDock_->setWidget(tree_);
+    treeDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    addDockWidget(Qt::LeftDockWidgetArea, treeDock_);
 
     // --- Right: Property Panel -------------------------------------------
     properties_ = new QTableWidget(this);
@@ -586,6 +597,27 @@ void MainWindow::rebuildTree() {
 
 void MainWindow::rebuildProperties() {
     const DocumentOutline outline(*document_);
+
+    // WHAT THE CANVAS HAS PICKED WINS while a sketch is open (M26.7).
+    //
+    // In sketch mode the model tree is hidden, so `selectedId_` is whatever was
+    // last chosen in 3D -- a solid, or nothing. Describing that while the user
+    // is clicking lines is answering a question nobody asked, and it left the
+    // panel blank for every click inside a sketch.
+    //
+    // ONE thing only. Two picked elements are a selection for a CONSTRAINT, and
+    // a panel that showed the first of them would be quietly describing half of
+    // what is highlighted.
+    if (inSketchMode() && sketchCanvas_ != nullptr &&
+        sketchCanvas_->selection().size() == 1) {
+        const std::vector<PropertyRow> picked =
+            outline.propertiesOfSketchElement(editingSketch_, sketchCanvas_->selection().front());
+        if (!picked.empty()) {
+            showPropertyRows(picked);
+            return;
+        }
+    }
+
     std::vector<PropertyRow> rows = outline.propertiesOf(selectedId_);
 
     // Reconstruction provenance, appended HERE rather than in DocumentOutline.
@@ -632,6 +664,13 @@ void MainWindow::rebuildProperties() {
         }
     }
 
+    showPropertyRows(rows);
+}
+
+// The RENDERING half of the panel, shared by both things that fill it: the
+// tree's selection and the sketch canvas's. Two copies of this loop would be
+// two places for "how a property row looks" to drift apart.
+void MainWindow::showPropertyRows(const std::vector<PropertyRow>& rows) {
     properties_->setRowCount(static_cast<int>(rows.size()));
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         const PropertyRow& row = rows[static_cast<std::size_t>(i)];
@@ -1076,6 +1115,19 @@ bool MainWindow::hasPropertyRow(const std::string& label) const {
         if (bare == QString::fromStdString(label)) return true;
     }
     return false;
+}
+
+std::string MainWindow::propertyRowValue(const std::string& label) const {
+    for (int row = 0; row < properties_->rowCount(); ++row) {
+        const QTableWidgetItem* name = properties_->item(row, 0);
+        const QTableWidgetItem* value = properties_->item(row, 1);
+        if (name == nullptr || value == nullptr) continue;
+        const QString text = name->text();
+        const int slash = text.lastIndexOf(QStringLiteral(" / "));
+        const QString bare = slash < 0 ? text : text.mid(slash + 3);
+        if (bare == QString::fromStdString(label)) return value->text().toStdString();
+    }
+    return std::string();
 }
 
 QString MainWindow::editPropertyByLabel(const std::string& label, const QString& text) {
@@ -2266,6 +2318,62 @@ QString MainWindow::openDocumentFile(const QString& path) {
     return QStringLiteral("Opened %1").arg(path);
 }
 
+void MainWindow::onRunScriptRequested() {
+    // The dialog is the only part a test cannot drive, so it is the only part
+    // in the slot -- the split onImportDxfRequested established.
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Run Script"), QString(),
+        QStringLiteral("EP3D scripts (*.ep3ds);;All files (*)"));
+    if (path.isEmpty()) return; // cancelled; nothing said, nothing changed
+    runScriptFile(path);
+}
+
+QString MainWindow::runScriptFile(const QString& path) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    if (document_ == nullptr) return say(QStringLiteral("There is no document to run against."));
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        // THE CAUSE, not "could not run" -- the same rule the DXF reader
+        // follows. A missing file and an unreadable one are different problems
+        // with different fixes.
+        return say(QStringLiteral("Could not read %1: %2").arg(path, file.errorString()));
+    }
+    const QByteArray text = file.readAll();
+    file.close();
+
+    // THE SAME INTERPRETER the CLI and the socket use. A second one that
+    // understood "nearly the same" vocabulary would be this project's
+    // best-known defect shape, reached through the File menu.
+    const ScriptOutcome outcome = RunSketchScript(*document_, text.toStdString());
+
+    // THE VIEW, whatever happened. A script that fails at line 90 has already
+    // built 89 lines' worth of geometry, and leaving the window showing the
+    // state before it would be a lie about what the document now holds.
+    refreshAll();
+
+    if (!outcome.ok) {
+        // WHICH LINE. Finding out where a script goes wrong is most of what
+        // running one is for, and a message without the number sends the user
+        // back to read the whole file.
+        return say(QStringLiteral("%1 stopped at line %2: %3")
+                       .arg(QFileInfo(path).fileName())
+                       .arg(outcome.failedLine)
+                       .arg(QString::fromStdString(outcome.message)));
+    }
+    // HOW MANY UNDO STEPS IT LEFT, because it is not one. A user who runs a
+    // script and then reaches for Ctrl+Z should be told what that will do
+    // before they press it, not after.
+    return say(QStringLiteral("%1: ran %2 command%3. Each is its own undo step.")
+                   .arg(QFileInfo(path).fileName())
+                   .arg(outcome.log.size())
+                   .arg(outcome.log.size() == 1 ? QString() : QStringLiteral("s")));
+}
+
 void MainWindow::onImportDxfRequested() {
     // The dialog is the ONLY part of this workflow a test cannot drive, so it
     // is the only part that lives in the slot. Everything after it is in
@@ -2587,14 +2695,25 @@ void MainWindow::buildSketchUi() {
     QMenu* tools = sketch->addMenu(QStringLiteral("&Tools"));
     for (const ToolEntry& entry : kTools) {
         const SketchTool tool = entry.tool;
-        QAction* action =
-            sketchToolBar_->addAction(sketchIcon(entry.icon), QString::fromLatin1(entry.label));
-        // The tooltip carries the NAME as well, because an icon-only bar has
-        // nowhere else to say it.
-        action->setToolTip(QStringLiteral("%1 (%2)\n%3")
-                               .arg(QString::fromLatin1(entry.label))
-                               .arg(QString::fromLatin1(entry.shortcut))
-                               .arg(QString::fromLatin1(entry.tip)));
+        // THE LABEL IS TEXT, AND `&` IS A MNEMONIC MARKER. "H&V Distance"
+        // would put an underline under the V and show nothing where the
+        // ampersand belongs, so the action text doubles it -- and the TOOLTIP
+        // must not, because tooltips do not process mnemonics and would print
+        // the doubled one literally. Escaping every label is a no-op for the
+        // rest: none of them uses `&`, they carry their accelerator in
+        // `shortcut`.
+        const QString label = QString::fromLatin1(entry.label);
+        QString actionText = label;
+        actionText.replace(QLatin1Char('&'), QLatin1String("&&"));
+        QAction* action = sketchToolBar_->addAction(sketchIcon(entry.icon), actionText);
+        action->setToolTip(entry.shortcut[0] != 0
+                               ? QStringLiteral("%1 (%2)\n%3")
+                                     .arg(label)
+                                     .arg(QString::fromLatin1(entry.shortcut))
+                                     .arg(QString::fromLatin1(entry.tip))
+                               : QStringLiteral("%1\n%2")
+                                     .arg(label)
+                                     .arg(QString::fromLatin1(entry.tip)));
         action->setShortcut(QKeySequence(QString::fromLatin1(entry.shortcut)));
         // SCOPED TO THE CANVAS. These are single letters, and a window-scoped
         // single-letter shortcut steals the keystroke from every line editor in
@@ -2688,6 +2807,10 @@ void MainWindow::buildSketchUi() {
         {SketchEditKind::AddVerticalDistance, "Vertical Distance", "",
          "Dimension the VERTICAL gap between the 2 selected points", true,
          ui::SketchIcon::VerticalDistance},
+        {SketchEditKind::AddHVDistance, "H&V Distance", "",
+         "Dimension BOTH gaps between the 2 selected points at once: one "
+         "horizontal and one vertical, as two dimensions in one undo step",
+         true, ui::SketchIcon::HVDistance},
         {SketchEditKind::AddPointLineDistance, "Distance to Line", "",
          "Dimension the PERPENDICULAR gap between the selected point and line", true,
          ui::SketchIcon::PointLineDistance},
@@ -3069,12 +3192,38 @@ void MainWindow::buildSketchUi() {
 
 bool MainWindow::inSketchMode() const noexcept { return editingSketch_ != kInvalidObjectId; }
 
+bool MainWindow::modelToolBarVisible() const {
+    return modelToolBar_ != nullptr && modelToolBar_->isVisible();
+}
+bool MainWindow::modelTreeVisible() const {
+    return treeDock_ != nullptr && treeDock_->isVisible();
+}
+bool MainWindow::constraintPanelOnLeft() const {
+    return constraintDock_ != nullptr && dockWidgetArea(constraintDock_) == Qt::LeftDockWidgetArea;
+}
+
 void MainWindow::enterSketchMode(ObjectId sketchId) {
     editingSketch_ = sketchId;
     sketchCanvas_->setSketch(document_, sketchId);
     centralStack_->setCurrentWidget(sketchCanvas_);
     sketchToolBar_->setVisible(true);
     if (sketchToolBarSecond_ != nullptr) sketchToolBarSecond_->setVisible(true);
+    // M26.2: the model toolbar and the tree act on FEATURES -- Pad, Revolve,
+    // a solid's place in the tree -- and none of that exists to act on while
+    // a sketch is open. Leaving them on screen was clutter around the one
+    // panel a sketch actually needs, so both go away for as long as the
+    // sketch is open, the same way the sketch toolbar itself appears only
+    // then.
+    modelToolBar_->setVisible(false);
+    treeDock_->setVisible(false);
+    // The constraint panel moves INTO the column the tree just vacated,
+    // rather than piling a second dock onto the properties column on the
+    // right. addDockWidget on a dock that is already placed MOVES it -- this
+    // is not a second widget, it is the same one changing address -- and the
+    // width is reasserted because Qt does not carry a hidden dock's old
+    // width over to a widget arriving from a different area.
+    addDockWidget(Qt::LeftDockWidgetArea, constraintDock_);
+    resizeDocks({constraintDock_}, {ui::size::kModelTreeMinWidth + 100}, Qt::Horizontal);
     constraintDock_->setVisible(true);
     sketchCanvas_->setFocus(Qt::OtherFocusReason);
     rebuildConstraintPanel();
@@ -3209,6 +3358,14 @@ QString MainWindow::finishSketchCommand() {
     sketchToolBar_->setVisible(false);
     if (sketchToolBarSecond_ != nullptr) sketchToolBarSecond_->setVisible(false);
     constraintDock_->setVisible(false);
+    // Reverses enterSketchMode's swap: the tree comes back, the model
+    // toolbar comes back, and the constraint panel returns to the properties
+    // column rather than staying parked in the tree's old spot while hidden
+    // -- so the NEXT sketch opened starts from the same layout this one did,
+    // instead of drifting one dock further left each time a sketch closes.
+    modelToolBar_->setVisible(true);
+    treeDock_->setVisible(true);
+    addDockWidget(Qt::RightDockWidgetArea, constraintDock_);
     // Selecting the finished sketch is what makes "Insert > Pad" the obvious
     // next step: the command it needs is already armed.
     selectObject(finished);
@@ -3902,6 +4059,11 @@ void MainWindow::onSketchPresentationChanged() {
     // the one defect class this shell is built to keep catching.
     syncSketchToolButtons();
     updateSketchStatus();
+    // WHAT WAS PICKED ON THE CANVAS, in the property panel (M26.7).
+    // Selection is presentation, so this is the signal that carries it --
+    // and without this line the panel only ever answered the model tree,
+    // which in sketch mode is not even on screen.
+    rebuildProperties();
     // Shown once -- UNLESS it is a refusal.
     //
     // An ordinary report ("added 1 entity") should give way to the prompt on

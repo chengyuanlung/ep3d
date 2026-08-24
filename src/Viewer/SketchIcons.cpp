@@ -301,6 +301,23 @@ void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
         Dot(p, 19.0, 19.5, ink.stroke, 2.0);
         break;
 
+    case SketchIcon::HVDistance:
+        // BOTH legs at once: the two points, the horizontal run and the
+        // vertical rise, drawn as the right-angled pair they are. It has to
+        // read as "the two of them together" rather than as either one, so
+        // neither leg is centred the way the single-leg icons are -- they meet
+        // at the corner the ordinate pair actually makes.
+        Stroke(p, ink.accent, 1.6);
+        p.drawLine(QPointF(5.0, 18.0), QPointF(19.0, 18.0));   // the u leg
+        p.drawLine(QPointF(19.0, 18.0), QPointF(19.0, 5.0));   // the v leg
+        p.drawLine(QPointF(5.0, 15.5), QPointF(5.0, 20.5));    // tick on the u leg
+        p.drawLine(QPointF(16.5, 5.0), QPointF(21.5, 5.0));    // tick on the v leg
+        Stroke(p, ink.subdue, 1.2);
+        p.drawLine(QPointF(5.0, 18.0), QPointF(19.0, 5.0));    // the pair itself
+        Dot(p, 5.0, 18.0, ink.stroke, 2.2);
+        Dot(p, 19.0, 5.0, ink.stroke, 2.2);
+        break;
+
     case SketchIcon::PointLineDistance:
         // A point with a PERPENDICULAR dropped to a line, and the little square
         // that says the angle is a right angle -- which is the whole meaning of
@@ -1005,6 +1022,7 @@ const char* SketchIconName(SketchIcon icon) noexcept {
     case SketchIcon::AutoPlaceDimensions: return "AutoPlaceDimensions";
     case SketchIcon::HorizontalDistance: return "HorizontalDistance";
     case SketchIcon::VerticalDistance: return "VerticalDistance";
+    case SketchIcon::HVDistance: return "HVDistance";
     case SketchIcon::PointLineDistance: return "PointLineDistance";
     case SketchIcon::Offset: return "Offset";
     case SketchIcon::Trim: return "Trim";

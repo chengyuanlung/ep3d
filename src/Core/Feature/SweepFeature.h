@@ -52,15 +52,18 @@ public:
     ObjectId profileSketchId() const noexcept { return profileSketchId_; }
     ObjectId pathSketchId() const noexcept { return pathSketchId_; }
 
-    // ISketchConsuming answers with the PROFILE's sketch.
+    // BOTH SKETCHES (M26.8). The PROFILE is swept and must close; the PATH is
+    // a curve and must never be expected to.
     //
-    // The interface asks for one and a sweep consumes two, so this reports the
-    // one that decides the shape's cross-section -- the answer every caller of
-    // it wants ("which sketch became this solid's outline"). The path is
-    // reachable through pathSketchId(), and the recompute graph depends on
-    // BOTH regardless of what this returns: the dependency edges are wired
-    // explicitly, not derived from this method.
-    ObjectId consumedSketchId() const noexcept override { return profileSketchId_; }
+    // The interface used to ask for ONE, so this reported the profile -- and
+    // the path was left deletable out from under the sweep that follows it,
+    // while the tree called it Failed for being the open curve a path is.
+    // The PRIMARY one stays first: `consumedSketchId()` is the front of this
+    // list, and "which sketch became this solid's outline" is the profile.
+    std::vector<ConsumedSketch> consumedSketches() const override {
+        return {ConsumedSketch{profileSketchId_, true},
+                ConsumedSketch{pathSketchId_, false}};
+    }
 
     ObjectId materialId() const noexcept override { return materialId_; }
     void clearMaterialReference() noexcept override { materialId_ = kInvalidObjectId; }

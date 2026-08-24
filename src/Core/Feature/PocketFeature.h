@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
+#include "Core/Feature/IParameterisedFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISketchConsuming.h"
 #include "Core/Feature/ISolidFeature.h"
@@ -39,8 +40,11 @@ class PocketFeature final : public Feature,
                             public IRecomputable,
                             public ISolidFeature,
                             public ISketchConsuming,
-                            public IMaterialReferencing {
+                            public IMaterialReferencing, public IParameterisedFeature {
 public:
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{"Depth", depthParameterId_, true}};
+    }
     PocketFeature(std::string name, ObjectId baseFeatureId, ObjectId sketchId,
                   ObjectId depthParameterId, ObjectId materialId);
     // Restore constructor (deserialization): keeps the persisted id/state.
@@ -54,7 +58,9 @@ public:
     ObjectId sketchId() const noexcept { return sketchId_; }
     // ISketchConsuming: the same answer, asked the way code that does not know
     // this type has to ask it.
-    ObjectId consumedSketchId() const noexcept override { return sketchId_; }
+    std::vector<ConsumedSketch> consumedSketches() const override {
+        return {ConsumedSketch{sketchId_, true}};
+    }
     ObjectId depthParameterId() const noexcept { return depthParameterId_; }
     ObjectId materialId() const noexcept override { return materialId_; }
     void clearMaterialReference() noexcept override { materialId_ = kInvalidObjectId; }

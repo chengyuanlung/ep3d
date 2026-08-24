@@ -12,6 +12,10 @@ const char* ConstraintKindName(const SketchConstraintData& data) noexcept {
             if constexpr (std::is_same_v<T, CoincidentConstraint>) return "Coincident";
             else if constexpr (std::is_same_v<T, HorizontalConstraint>) return "Horizontal";
             else if constexpr (std::is_same_v<T, VerticalConstraint>) return "Vertical";
+            else if constexpr (std::is_same_v<T, PointsHorizontalConstraint>)
+                return "PointsHorizontal";
+            else if constexpr (std::is_same_v<T, PointsVerticalConstraint>)
+                return "PointsVertical";
             else if constexpr (std::is_same_v<T, FixConstraint>) return "Fix";
             else if constexpr (std::is_same_v<T, DistanceConstraint>) return "Distance";
             else if constexpr (std::is_same_v<T, HorizontalDistanceConstraint>)

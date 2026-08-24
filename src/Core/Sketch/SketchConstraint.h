@@ -57,6 +57,34 @@ struct VerticalConstraint {
     SketchEntityId line{kInvalidSketchEntityId};
 };
 
+// THE SAME TWO EQUATIONS, said about two POINTS that no line joins (M26.3).
+//
+// `a.v == b.v` is horizontal alignment and `a.u == b.u` is vertical alignment,
+// which is exactly what the two above mean about a line's own endpoints -- so
+// the solver reuses PointsEqualV/PointsEqualU rather than growing a residual,
+// and there is only ever one formula for "these two share an axis".
+//
+// A SEPARATE TYPE rather than an optional second reference bolted onto
+// HorizontalConstraint, for the reason stated at the top of this section: a
+// struct with slots that are meaningless half the time is the property bag
+// this file refuses, and "line is set XOR a and b are set" would be an
+// invariant nothing enforces.
+//
+// The two forms are NOT interchangeable spellings. Selecting a line's two
+// endpoints and asking for Horizontal produces the LINE form, normalised once
+// where the command is built -- see requestConstraint. Storing that as a point
+// pair would be a second way to say one thing, and this project has paid for
+// that shape before.
+struct PointsHorizontalConstraint {
+    SketchElementRef a{};
+    SketchElementRef b{};
+};
+
+struct PointsVerticalConstraint {
+    SketchElementRef a{};
+    SketchElementRef b{};
+};
+
 // A point is pinned where it currently is. This is what removes the global
 // translation freedom that would otherwise leave every sketch under-constrained
 // (ADR-M5-005).
@@ -338,7 +366,9 @@ using SketchConstraintData =
                  HorizontalDistanceConstraint, VerticalDistanceConstraint,
                  PointLineDistanceConstraint, SymmetricConstraint,
                  // M17.25 -- an ellipse's semi-axes and its orientation.
-                 EllipseAxisConstraint, EllipseRotationConstraint>;
+                 EllipseAxisConstraint, EllipseRotationConstraint,
+                 // M26.3 -- horizontal/vertical alignment of two POINTS.
+                 PointsHorizontalConstraint, PointsVerticalConstraint>;
 
 struct SketchConstraint {
     SketchConstraintId id{kInvalidSketchConstraintId};
@@ -397,7 +427,9 @@ void VisitConstraintElements(Data& data, Visit&& visit) {
             if constexpr (std::is_same_v<T, CoincidentConstraint> ||
                           std::is_same_v<T, DistanceConstraint> ||
                           std::is_same_v<T, HorizontalDistanceConstraint> ||
-                          std::is_same_v<T, VerticalDistanceConstraint>) {
+                          std::is_same_v<T, VerticalDistanceConstraint> ||
+                          std::is_same_v<T, PointsHorizontalConstraint> ||
+                          std::is_same_v<T, PointsVerticalConstraint>) {
                 visit(c.a.entityId, c.a.subElement);
                 visit(c.b.entityId, c.b.subElement);
             } else if constexpr (std::is_same_v<T, FixConstraint>) {

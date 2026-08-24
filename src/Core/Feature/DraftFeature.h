@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
+#include "Core/Feature/IParameterisedFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Kernel/FaceQuery.h"
@@ -33,8 +34,11 @@ namespace paramcad {
 class DraftFeature final : public Feature,
                            public IRecomputable,
                            public ISolidFeature,
-                           public IMaterialReferencing {
+                           public IMaterialReferencing, public IParameterisedFeature {
 public:
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{"Angle", angleParameterId_, false}};
+    }
     DraftFeature(std::string name, ObjectId baseFeatureId, FaceSelection faces,
                  FaceQuery neutral, ObjectId angleParameterId, ObjectId materialId);
     // Restore constructor (deserialization): keeps the persisted id/state.

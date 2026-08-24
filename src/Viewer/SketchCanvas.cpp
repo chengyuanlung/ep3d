@@ -723,6 +723,11 @@ bool IsLineRef(const Sketch& sketch, const SketchElementRef& ref) noexcept {
     return entity != nullptr && std::holds_alternative<SketchLine>(entity->geometry);
 }
 
+bool IsPointPairAlignment(const Sketch& sketch,
+                          const std::vector<SketchElementRef>& refs) noexcept {
+    return refs.size() == 2 && IsPointRef(sketch, refs[0]) && IsPointRef(sketch, refs[1]);
+}
+
 bool IsCurveRef(const Sketch& sketch, const SketchElementRef& ref) noexcept {
     const SketchEntity* entity = EntityOf(sketch, ref);
     if (entity == nullptr) return false;
@@ -888,6 +893,7 @@ const char* SketchEditKindName(SketchEditKind kind) noexcept {
     case SketchEditKind::AddDistance: return "Distance";
     case SketchEditKind::AddHorizontalDistance: return "HorizontalDistance";
     case SketchEditKind::AddVerticalDistance: return "VerticalDistance";
+    case SketchEditKind::AddHVDistance: return "H&V Distance";
     case SketchEditKind::AddPointLineDistance: return "PointLineDistance";
     case SketchEditKind::AddLength: return "Length";
     case SketchEditKind::AddRadius: return "Radius";
@@ -914,6 +920,7 @@ bool IsDimensionEdit(SketchEditKind kind) noexcept {
     return kind == SketchEditKind::AddDistance ||
            kind == SketchEditKind::AddHorizontalDistance ||
            kind == SketchEditKind::AddVerticalDistance ||
+           kind == SketchEditKind::AddHVDistance ||
            kind == SketchEditKind::AddPointLineDistance || kind == SketchEditKind::AddLength ||
            kind == SketchEditKind::AddRadius || kind == SketchEditKind::AddDiameter ||
            kind == SketchEditKind::AddMajorAxis || kind == SketchEditKind::AddMinorAxis ||
@@ -1067,8 +1074,39 @@ bool SketchCanvasModel::clearSelection() {
 }
 
 bool SketchCanvasModel::selectAt(const Sketch& sketch, Vec2 pickMm, double toleranceMm) {
-    const SketchElementRef hit = PickElement(sketch, pickMm, toleranceMm);
-    if (hit.entityId == kInvalidSketchEntityId) return clearSelection();
+    const std::vector<SketchElementRef> hits = HitTest(sketch, pickMm, toleranceMm);
+    if (hits.empty() || hits.front().entityId == kInvalidSketchEntityId) return clearSelection();
+
+    // SEVERAL THINGS SHARE ONE SPOT, and a click has to be able to reach each
+    // of them. Every rectangle corner holds TWO line endpoints at exactly the
+    // same place.
+    //
+    // Taking hits.front() every time meant the second click on a corner landed
+    // on the ref that was already selected and toggled it back OFF -- so the
+    // selection went 1, 0, 1, 0 and the two points could never be held at
+    // once. Coincident, Distance and the point-pair Horizontal/Vertical all
+    // need two points, so at a corner not one of them could ever be offered a
+    // pair: the geometry was reachable and the commands were not.
+    //
+    // The alternatives are the hits on the SAME side of the point/curve divide
+    // as the nearest one. HitTest puts points first because a click on an
+    // endpoint means the endpoint, and cycling from a point onto the line
+    // underneath it would quietly undo that rule.
+    //
+    // When everything here is already selected, `hit` stays the nearest one and
+    // the toggle below removes it -- so clicking a lone entity twice still
+    // deselects it, exactly as it did.
+    const bool wantPoint = IsPointRef(sketch, hits.front());
+    SketchElementRef hit = hits.front();
+    for (const SketchElementRef& candidate : hits) {
+        if (IsPointRef(sketch, candidate) != wantPoint) continue;
+        const bool alreadySelected =
+            std::any_of(selection_.begin(), selection_.end(),
+                        [&](const SketchElementRef& ref) { return SameRef(ref, candidate); });
+        if (alreadySelected) continue;
+        hit = candidate;
+        break;
+    }
 
     // Clicking a HANDLE of something already selected NARROWS the selection to
     // that handle instead of adding to it.
@@ -1736,17 +1774,52 @@ SketchEdit SketchCanvasModel::requestConstraint(const Sketch& sketch, SketchEdit
     }
     case SketchEditKind::AddHorizontal:
     case SketchEditKind::AddVertical: {
+        // TWO SHAPES, one command (M26.3). A line is held horizontal by its own
+        // two endpoints sharing a v; two points are held horizontal by exactly
+        // the same equation. Refusing the second was never a rule anybody
+        // chose -- it was simply the only one M5 built.
+        //
+        // IT IS A POINT PAIR when the selection is exactly two POINTS, and a
+        // line otherwise. That ordering is what keeps every older meaning
+        // intact: one endpoint still means the line it belongs to (a whole line
+        // is not a point, and neither is a lone endpoint once it is the only
+        // thing selected), and N whole lines still means N lines.
+        edit.kind = kind;
+        edit.label = std::string("Add ") + SketchEditKindName(kind);
+
+        if (IsPointPairAlignment(sketch, selection_)) {
+            if (SameRef(selection_[0], selection_[1]))
+                return refuse("Both selections are the same point.");
+
+            // A LINE'S OWN TWO ENDS ARE THAT LINE. Picking them and asking for
+            // Horizontal means what picking the line means, so it is
+            // normalised to the line form HERE, at the one place that builds
+            // this command. Storing it as a point pair would be a second
+            // spelling of one fact, and the badge would hang off a point
+            // instead of the line it is about.
+            //
+            // This also closes a duplicate the old rule produced: both ends
+            // were "line refs", so selecting them made TWO identical
+            // Horizontal constraints on one line.
+            if (selection_[0].entityId == selection_[1].entityId) {
+                edit.refs.push_back(
+                    SketchElementRef{selection_[0].entityId, SketchSubElement::Whole});
+                return edit;
+            }
+            edit.refs = selection_;
+            return edit;
+        }
+
         for (const SketchElementRef& ref : selection_)
             if (!IsLineRef(sketch, ref))
                 return refuse(DescribeElementRef(sketch, ref) + " is not a line. " +
-                              SketchEditKindName(kind) + " applies to lines.");
-        edit.kind = kind;
+                              SketchEditKindName(kind) +
+                              " applies to lines, or to two points.");
         // Normalised to Whole: the constraint takes an ENTITY, so selecting a
         // line by one of its endpoints must not produce two different
         // constraints for what the user sees as one line.
         for (const SketchElementRef& ref : selection_)
             edit.refs.push_back(SketchElementRef{ref.entityId, SketchSubElement::Whole});
-        edit.label = std::string("Add ") + SketchEditKindName(kind);
         return edit;
     }
     case SketchEditKind::AddFix: {
@@ -2113,6 +2186,7 @@ SketchEdit SketchCanvasModel::requestDimension(const Sketch& sketch, SketchEditK
     case SketchEditKind::AddDistance:
     case SketchEditKind::AddHorizontalDistance:
     case SketchEditKind::AddVerticalDistance:
+    case SketchEditKind::AddHVDistance:
         if (!(selection_.size() == 2 && points == 2))
             return refuse(std::string(SketchEditKindName(kind)) + " needs exactly 2 points.");
         break;
@@ -2146,7 +2220,8 @@ SketchEdit SketchCanvasModel::requestDimension(const Sketch& sketch, SketchEditK
                      SketchElementRef{selection_[pointFirst ? 1 : 0].entityId,
                                       SketchSubElement::Whole}};
     } else if (kind == SketchEditKind::AddHorizontalDistance ||
-               kind == SketchEditKind::AddVerticalDistance) {
+               kind == SketchEditKind::AddVerticalDistance ||
+               kind == SketchEditKind::AddHVDistance) {
         // ORDERED so the value comes out positive.
         //
         // These two are signed (see HorizontalDistanceConstraint), so which
@@ -2160,8 +2235,14 @@ SketchEdit SketchCanvasModel::requestDimension(const Sketch& sketch, SketchEditK
         const Vec2 a = ResolveElementPoint(sketch, edit.refs[0], &okA);
         const Vec2 b = ResolveElementPoint(sketch, edit.refs[1], &okB);
         if (okA && okB) {
-            const double delta = kind == SketchEditKind::AddHorizontalDistance ? b.x - a.x
-                                                                              : b.y - a.y;
+            // H&V HAS TWO LEGS AND ONE ORDER, so it cannot make both positive
+            // whenever the pair runs up-left or down-right. It orders on u and
+            // lets the v leg carry the sign -- the alternative is swapping the
+            // pair per leg, which would store the two dimensions about the
+            // points in OPPOSITE orders and make the pair read as two
+            // unrelated measurements.
+            const double delta = kind == SketchEditKind::AddVerticalDistance ? b.y - a.y
+                                                                            : b.x - a.x;
             if (delta < 0.0) std::swap(edit.refs[0], edit.refs[1]);
         }
     } else {

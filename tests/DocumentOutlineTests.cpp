@@ -8,12 +8,22 @@
 
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/PadFeature.h"
+#include "Core/Feature/SweepFeature.h"
+#include "Core/Reference/ReferenceFrame.h"
+#include "Core/Feature/LoftFeature.h"
+#include "Core/Feature/TransformFeatures.h"
+#include "Core/Feature/ShellFeature.h"
+#include "Core/Feature/HoleFeature.h"
 #include "Core/Sketch/Sketch.h"
 #include "Core/Body/Body.h"
 #include "Core/Parameter/Parameter.h"
 #include <vector>
 #include "Fakes/FakeGeometryKernel.h"
 #include "Viewer/DocumentOutline.h"
+#include "Core/Feature/ISketchConsuming.h"
+#include "Core/Sketch/Profile.h"
+#include <functional>
+#include <cstdio>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <set>
@@ -463,4 +473,494 @@ TEST(DocumentOutlineTest, M17_TREE_024_ARowWithAStateOfItsOwnKeepsItWhenItsChild
     // The ROOT still summarises: rolling up must still travel, it just stops
     // overwriting rows that had something of their own to say.
     EXPECT_NE(root.state, OutlineState::Valid);
+}
+
+
+// =============================================================================
+// M26.7 -- what a click on sketch geometry puts in the property panel
+//
+// The rows themselves, tested here where no widget is needed. The WIRING (a
+// click reaching the panel at all) is checked in the viewer's --selftest,
+// because that is the half no unit test can see.
+// =============================================================================
+
+namespace {
+
+std::string ValueOf(const std::vector<PropertyRow>& rows, const std::string& label) {
+    for (const PropertyRow& row : rows)
+        if (row.label == label) return row.value;
+    return std::string();
+}
+
+bool HasRow(const std::vector<PropertyRow>& rows, const std::string& label) {
+    for (const PropertyRow& row : rows)
+        if (row.label == label) return true;
+    return false;
+}
+
+} // namespace
+
+TEST(DocumentOutlineTest, M26_PROP_001_ALineReportsItsEndsItsLengthAndItsAngle) {
+    PartDocument document{"Part"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId line = sketch.addLine(Vec2{10.0, 20.0}, Vec2{40.0, 60.0});
+
+    const DocumentOutline outline(document);
+    const std::vector<PropertyRow> rows =
+        outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{line});
+
+    EXPECT_EQ(ValueOf(rows, "Type"), "Line");
+    EXPECT_EQ(ValueOf(rows, "Start u"), "10.000");
+    EXPECT_EQ(ValueOf(rows, "Start v"), "20.000");
+    EXPECT_EQ(ValueOf(rows, "End u"), "40.000");
+    EXPECT_EQ(ValueOf(rows, "End v"), "60.000");
+    // 3-4-5: the length is 50, and the angle is atan2(40, 30).
+    EXPECT_EQ(ValueOf(rows, "Length"), "50.000");
+    EXPECT_EQ(ValueOf(rows, "Angle"), "53.13");
+
+    // EVERY ROW IS READ-ONLY. Sketch geometry is what the solver writes, and a
+    // cell that took a typed coordinate would be overwritten by the next solve
+    // that disagreed with it.
+    for (const PropertyRow& row : rows)
+        EXPECT_FALSE(row.editable) << row.label << " offers to be typed into";
+}
+
+TEST(DocumentOutlineTest, M26_PROP_002_ACircleGivesBOTHRadiusAndDiameter) {
+    // A drawing quotes one or the other, and a user should not have to double
+    // a number in their head to check it against one.
+    PartDocument document{"Part"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId circle = sketch.addCircle(Vec2{5.0, -5.0}, 12.5);
+
+    const DocumentOutline outline(document);
+    const std::vector<PropertyRow> rows =
+        outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{circle});
+
+    EXPECT_EQ(ValueOf(rows, "Type"), "Circle");
+    EXPECT_EQ(ValueOf(rows, "Centre u"), "5.000");
+    EXPECT_EQ(ValueOf(rows, "Radius"), "12.500");
+    EXPECT_EQ(ValueOf(rows, "Diameter"), "25.000");
+}
+
+TEST(DocumentOutlineTest, M26_PROP_003_AnArcSaysWHICHOfTheTwoArcsItIs) {
+    // Its two angles describe two different shapes equally well. The direction
+    // is the flag SketchArc stores to resolve that, so leaving it out of the
+    // panel would show a user three rows that do not pin down what they picked.
+    PartDocument document{"Part"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId arc = sketch.addArc(Vec2{0.0, 0.0}, 20.0, 0.0, 1.5707963267948966, false);
+
+    const DocumentOutline outline(document);
+    const std::vector<PropertyRow> rows =
+        outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{arc});
+
+    EXPECT_EQ(ValueOf(rows, "Type"), "Arc");
+    EXPECT_EQ(ValueOf(rows, "Radius"), "20.000");
+    EXPECT_EQ(ValueOf(rows, "Start angle"), "0.00");
+    EXPECT_EQ(ValueOf(rows, "End angle"), "90.00");
+    EXPECT_EQ(ValueOf(rows, "Direction"), "clockwise");
+}
+
+TEST(DocumentOutlineTest, M26_PROP_004_PickingAnENDPOINTSaysSoAndGivesThatPoint) {
+    // "Line1" and "Line1's end" are different answers to "what did I click",
+    // and the sub-element is the half an id-only lookup would throw away.
+    PartDocument document{"Part"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId line = sketch.addLine(Vec2{0.0, 0.0}, Vec2{30.0, 40.0});
+
+    const DocumentOutline outline(document);
+    const std::vector<PropertyRow> whole =
+        outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{line});
+    EXPECT_FALSE(HasRow(whole, "Picked")) << "the whole line claimed a sub-element was picked";
+
+    const std::vector<PropertyRow> end = outline.propertiesOfSketchElement(
+        sketch.id(), SketchElementRef{line, SketchSubElement::EndPoint});
+    EXPECT_NE(ValueOf(end, "Picked").find("end point"), std::string::npos)
+        << ValueOf(end, "Picked");
+    EXPECT_EQ(ValueOf(end, "Picked point u"), "30.000");
+    EXPECT_EQ(ValueOf(end, "Picked point v"), "40.000");
+}
+
+TEST(DocumentOutlineTest, M26_PROP_005_ItCountsWhatHoldsTheEntity) {
+    // The row a user wants when geometry will not drag: an entity that refuses
+    // to move is over-constrained, and counting what holds it is the first
+    // question anyone asks.
+    PartDocument document{"Part"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId held = sketch.addLine(Vec2{0.0, 0.0}, Vec2{50.0, 0.0});
+    const SketchEntityId loose = sketch.addLine(Vec2{0.0, 30.0}, Vec2{50.0, 35.0});
+    document.addSketchConstraint(sketch.id(), HorizontalConstraint{held});
+    document.addSketchConstraint(
+        sketch.id(), FixConstraint{SketchElementRef{held, SketchSubElement::StartPoint}});
+
+    const DocumentOutline outline(document);
+    EXPECT_EQ(ValueOf(outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{held}),
+                      "On this"),
+              "2");
+    EXPECT_EQ(ValueOf(outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{loose}),
+                      "On this"),
+              "0");
+}
+
+TEST(DocumentOutlineTest, M26_PROP_006_ItSaysWhetherTheGeometryIsCONSTRUCTION) {
+    // The flag that decides whether a pad will sweep it. A user staring at a
+    // profile that refuses to extrude needs to be able to read this somewhere.
+    PartDocument document{"Part"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId line = sketch.addLine(Vec2{0.0, 0.0}, Vec2{50.0, 0.0});
+
+    const DocumentOutline outline(document);
+    EXPECT_EQ(
+        ValueOf(outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{line}),
+                "Construction"),
+        "no");
+
+    ASSERT_EQ(document.setSketchEntitiesConstruction(sketch.id(), {line}, true), 1u);
+    EXPECT_EQ(
+        ValueOf(outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{line}),
+                "Construction"),
+        "yes");
+}
+
+TEST(DocumentOutlineTest, M26_PROP_007_AnUnknownRefDescribesNothing) {
+    // Empty, not a row of blanks. A panel full of empty cells looks like a
+    // described object whose values failed to load.
+    PartDocument document{"Part"};
+    Sketch& sketch = document.addSketch("Sketch001");
+
+    const DocumentOutline outline(document);
+    EXPECT_TRUE(outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{}).empty());
+    EXPECT_TRUE(
+        outline.propertiesOfSketchElement(kInvalidObjectId, SketchElementRef{}).empty());
+}
+
+
+TEST(DocumentOutlineTest, M26_PROP_008_ACoordinateOfMinusNothingIsNotShownAsMinusZero) {
+    // A solver returns -1e-17 for "on the axis" about half the time, and
+    // "%.3f" prints that as "-0.000". A panel showing "-0.000 mm" beside
+    // "0.000 mm" is showing two numbers where the model has one.
+    //
+    // Found by LOOKING at the panel, not by any assertion -- so this is the
+    // assertion.
+    PartDocument document{"Part"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId line = sketch.addLine(Vec2{0.0, -1e-17}, Vec2{80.0, -1e-17});
+
+    const DocumentOutline outline(document);
+    const std::vector<PropertyRow> rows =
+        outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{line});
+    EXPECT_EQ(ValueOf(rows, "Start v"), "0.000");
+    EXPECT_EQ(ValueOf(rows, "End v"), "0.000");
+
+    // ...and a real negative still keeps its sign.
+    const SketchEntityId below = sketch.addLine(Vec2{0.0, -4.25}, Vec2{10.0, -4.25});
+    EXPECT_EQ(ValueOf(outline.propertiesOfSketchElement(sketch.id(), SketchElementRef{below}),
+                      "Start v"),
+              "-4.250");
+}
+
+
+// =============================================================================
+// M26.8 -- a sketch of POINTS feeding a Hole is not a failed sketch
+// =============================================================================
+
+namespace {
+
+const OutlineNode* FindNode(const OutlineNode& node, const std::string& name) {
+    if (node.name == name) return &node;
+    for (const OutlineNode& child : node.children)
+        if (const OutlineNode* found = FindNode(child, name)) return found;
+    return nullptr;
+}
+
+} // namespace
+
+TEST(DocumentOutlineTest, M26_TREE_001_APointSketchFeedingAHoleIsNotMarkedFailed) {
+    // What examples/stepper-motor.ep3ds showed in the tree: `[Skt] ! Mounts
+    // Failed`, beside a hole feature that had drilled four correct bores.
+    //
+    // The sketch is four POINTS. It has no closed loop and is not supposed to
+    // have one -- that is the drawing a hole wants. The old rule asked only
+    // whether ANYTHING depended on the sketch, which is a different question
+    // from whether anything wanted a profile out of it.
+    PartDocument document{"Part"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+
+    Sketch& profile = document.addSketch("Profile");
+    profile.addLine(Vec2{0, 0}, Vec2{50, 0});
+    profile.addLine(Vec2{50, 0}, Vec2{50, 50});
+    profile.addLine(Vec2{50, 50}, Vec2{0, 50});
+    profile.addLine(Vec2{0, 50}, Vec2{0, 0});
+    Parameter& thickness = document.addParameter("T", 10.0, UnitType::Millimeter);
+    Body& body = document.addBody("Block");
+    const Feature& pad = document.addPadFeature(body, "Pad", profile.id(), thickness.id());
+
+    Sketch& mounts = document.addSketch("Mounts");
+    mounts.addPoint(Vec2{10, 10});
+    mounts.addPoint(Vec2{40, 40});
+    Parameter& bore = document.addParameter("Bore", 5.0, UnitType::Millimeter);
+    Parameter& deep = document.addParameter("Deep", 0.0, UnitType::Millimeter);
+    document.addHoleFeature(body, "Holes", pad.id(), mounts.id(), bore.id(), deep.id());
+    (void)document.recompute();
+
+    const DocumentOutline outline(document);
+    const OutlineNode root = outline.build();
+
+    const OutlineNode* mountsNode = FindNode(root, "Mounts");
+    ASSERT_NE(mountsNode, nullptr);
+    EXPECT_NE(mountsNode->state, OutlineState::Failed)
+        << "a sketch of points feeding a hole was marked Failed: " << mountsNode->diagnostic;
+    // THE REASON IS STILL THERE. Only the failure MARKER is withheld -- a user
+    // who wonders why it will not pad can still read why.
+    EXPECT_FALSE(mountsNode->diagnostic.empty())
+        << "the profile's complaint stopped being reported at all";
+}
+
+TEST(DocumentOutlineTest, M26_TREE_002_AnOpenSketchFeedingAPadIsStillMarkedFailed) {
+    // The other half, and the reason the rule exists at all. A pad sweeps an
+    // AREA, so a sketch that does not close really is a failure for it -- and
+    // relaxing the hole case must not relax this one.
+    PartDocument document{"Part"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+
+    Sketch& open = document.addSketch("OpenProfile");
+    open.addLine(Vec2{0, 0}, Vec2{50, 0}); // one line: no loop
+    Parameter& thickness = document.addParameter("T", 10.0, UnitType::Millimeter);
+    Body& body = document.addBody("Block");
+    document.addPadFeature(body, "Pad", open.id(), thickness.id());
+    (void)document.recompute();
+
+    const DocumentOutline outline(document);
+    // The root is HELD. FindNode returns a pointer INTO the tree, so reading it
+    // out of a temporary is a use-after-free -- which is what the first draft of
+    // this test did, and it reported the production code as broken.
+    const OutlineNode root = outline.build();
+    const OutlineNode* node = FindNode(root, "OpenProfile");
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->state, OutlineState::Failed)
+        << "an open sketch a pad is waiting for stopped being a failure";
+}
+
+TEST(DocumentOutlineTest, M26_TREE_003_AnOpenSketchNOTHINGDependsOnIsNotAFailure) {
+    // The M6 case this rule was written for in the first place: one imported
+    // line, drawn correctly, with nothing waiting for it. Kept as a test so
+    // the M26.8 change cannot quietly undo it.
+    PartDocument document{"Part"};
+    Sketch& lonely = document.addSketch("JustALine");
+    lonely.addLine(Vec2{0, 0}, Vec2{50, 0});
+
+    const DocumentOutline outline(document);
+    const OutlineNode root = outline.build();
+    const OutlineNode* node = FindNode(root, "JustALine");
+    ASSERT_NE(node, nullptr);
+    EXPECT_NE(node->state, OutlineState::Failed);
+}
+
+
+// =============================================================================
+// M26.9 -- every feature's numbers reach the property panel
+// =============================================================================
+
+TEST(DocumentOutlineTest, M26_PROP_010_AHoleShowsItsDiameterAndItsDepth) {
+    // Reported from the stepper-motor example: selecting [Sld] MotorHole showed
+    // no diameter and no depth. Both were stored, solved, saved and reloaded
+    // correctly -- the panel had a hand-written branch per feature type and
+    // Hole never got one.
+    PartDocument document{"Part"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+
+    Sketch& profile = document.addSketch("Profile");
+    profile.addLine(Vec2{0, 0}, Vec2{50, 0});
+    profile.addLine(Vec2{50, 0}, Vec2{50, 50});
+    profile.addLine(Vec2{50, 50}, Vec2{0, 50});
+    profile.addLine(Vec2{0, 50}, Vec2{0, 0});
+    Parameter& thickness = document.addParameter("T", 10.0, UnitType::Millimeter);
+    Body& body = document.addBody("Block");
+    const Feature& pad = document.addPadFeature(body, "Pad", profile.id(), thickness.id());
+
+    Sketch& mounts = document.addSketch("Mounts");
+    mounts.addPoint(Vec2{10, 10});
+    Parameter& bore = document.addParameter("Bore", 5.5, UnitType::Millimeter);
+    Parameter& deep = document.addParameter("Deep", 12.0, UnitType::Millimeter);
+    const Feature& hole =
+        document.addHoleFeature(body, "Holes", pad.id(), mounts.id(), bore.id(), deep.id());
+    (void)document.recompute();
+
+    const DocumentOutline outline(document);
+    const std::vector<PropertyRow> rows = outline.propertiesOf(hole.id());
+
+    EXPECT_EQ(ValueOf(rows, "Diameter"), "5.500");
+    EXPECT_EQ(ValueOf(rows, "Depth"), "12.000");
+
+    // EDITABLE, and pointing at the PARAMETER -- a row that pointed at the
+    // feature would accept typing and change nothing.
+    for (const PropertyRow& row : rows) {
+        if (row.label != "Diameter" && row.label != "Depth") continue;
+        EXPECT_TRUE(row.editable) << row.label << " is not editable";
+        EXPECT_NE(row.parameterId, kInvalidObjectId) << row.label << " writes to nothing";
+        EXPECT_EQ(row.field, PropertyField::Value);
+    }
+
+    // ...AND NO "Reversed" BOX. A diameter has no other way to go, and a
+    // checkbox that means nothing is worse than no checkbox.
+    EXPECT_FALSE(HasRow(rows, "Reversed"))
+        << "a hole was offered a direction it does not have";
+}
+
+TEST(DocumentOutlineTest, M26_PROP_011_APadStillShowsItsLengthAndItsDirection) {
+    // The four kinds that DID work must keep working: the capability replaced
+    // their branches, it did not merely get added alongside them.
+    PartDocument document{"Part"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+    Sketch& profile = document.addSketch("Profile");
+    profile.addLine(Vec2{0, 0}, Vec2{50, 0});
+    Parameter& thickness = document.addParameter("T", 10.0, UnitType::Millimeter);
+    Body& body = document.addBody("Block");
+    const Feature& pad = document.addPadFeature(body, "Pad", profile.id(), thickness.id());
+
+    const DocumentOutline outline(document);
+    const std::vector<PropertyRow> rows = outline.propertiesOf(pad.id());
+    EXPECT_EQ(ValueOf(rows, "Length"), "10.000");
+    // A pad's direction lives in the SIGN of its length, so the box belongs.
+    EXPECT_TRUE(HasRow(rows, "Reversed"));
+}
+
+TEST(DocumentOutlineTest, M26_PROP_012_EveryFeatureWithANumberExposesIt) {
+    // THE GUARD AGAINST THE NEXT ONE. The defect was never "Hole was
+    // forgotten" -- it was that forgetting is silent. A feature that stores a
+    // Parameter and exposes none is the shape to catch, whoever adds it.
+    PartDocument document{"Part"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+
+    Sketch& profile = document.addSketch("Profile");
+    profile.addLine(Vec2{0, 0}, Vec2{50, 0});
+    profile.addLine(Vec2{50, 0}, Vec2{50, 50});
+    profile.addLine(Vec2{50, 50}, Vec2{0, 50});
+    profile.addLine(Vec2{0, 50}, Vec2{0, 0});
+    Parameter& thickness = document.addParameter("T", 10.0, UnitType::Millimeter);
+    Body& body = document.addBody("Block");
+    const Feature& pad = document.addPadFeature(body, "Pad", profile.id(), thickness.id());
+    Parameter& wall = document.addParameter("Wall", 2.0, UnitType::Millimeter);
+    const Feature& shell =
+        document.addShellFeature(body, "Shell", pad.id(), FaceSelection{}, wall.id());
+    Parameter& count = document.addParameter("N", 3.0, UnitType::Unitless);
+    Parameter& gap = document.addParameter("Gap", 20.0, UnitType::Millimeter);
+    ReferenceFrame& along = document.addFrame("Along");
+    const Feature& row = document.addPatternFeature(body, "Row", shell.id(), along.id(),
+                                                    count.id(), gap.id());
+    (void)document.recompute();
+
+    const DocumentOutline outline(document);
+    // Shell's thickness and the pattern's count and spacing: none of these had
+    // a branch in the panel before M26.9.
+    EXPECT_EQ(ValueOf(outline.propertiesOf(shell.id()), "Thickness"), "2.000");
+    EXPECT_EQ(ValueOf(outline.propertiesOf(row.id()), "Count"), "3.000");
+    EXPECT_EQ(ValueOf(outline.propertiesOf(row.id()), "Spacing"), "20.000");
+}
+
+// =============================================================================
+// M26.8 -- a feature names EVERY sketch it reads
+// =============================================================================
+
+TEST(DocumentOutlineTest, M26_TREE_004_ACurvePatternsPathIsProtectedAndNotCalledFailed) {
+    // CurvePatternFeature held a path sketch and did not implement
+    // ISketchConsuming at all. So the path was DELETABLE while the pattern
+    // still walked it, and the tree marked it Failed for not closing into a
+    // loop a path is never meant to close into.
+    PartDocument document{"Part"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+
+    Sketch& profile = document.addSketch("Profile");
+    profile.addLine(Vec2{0, 0}, Vec2{10, 0});
+    profile.addLine(Vec2{10, 0}, Vec2{10, 10});
+    profile.addLine(Vec2{10, 10}, Vec2{0, 10});
+    profile.addLine(Vec2{0, 10}, Vec2{0, 0});
+    Parameter& thickness = document.addParameter("T", 5.0, UnitType::Millimeter);
+    Body& body = document.addBody("Block");
+    const Feature& pad = document.addPadFeature(body, "Pad", profile.id(), thickness.id());
+
+    Sketch& path = document.addSketch("Path");
+    path.addLine(Vec2{0, 0}, Vec2{100, 0}); // an open curve, as a path is
+    Parameter& count = document.addParameter("N", 4.0, UnitType::Unitless);
+    document.addCurvePatternFeature(body, "Along", pad.id(), path.id(), count.id());
+    (void)document.recompute();
+
+    // THE DELETION GATE now sees it. Empty here is exactly the condition under
+    // which the sketch may be deleted, and it was empty for this path.
+    EXPECT_FALSE(document.featuresReferencingSketch(path.id()).empty())
+        << "a curve pattern's path could be deleted out from under it";
+
+    const DocumentOutline outline(document);
+    const OutlineNode root = outline.build();
+    const OutlineNode* node = FindNode(root, "Path");
+    ASSERT_NE(node, nullptr);
+    EXPECT_NE(node->state, OutlineState::Failed)
+        << "a curve pattern's path was marked Failed for being an open curve";
+}
+
+TEST(DocumentOutlineTest, M26_TREE_005_ALoftsLATERSectionsAreProtectedToo) {
+    // consumedSketchId() named the FIRST section and nothing else, so the
+    // deletion gate protected section one and let the others be deleted out
+    // from under the loft that runs through them.
+    PartDocument document{"Part"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+
+    Body& body = document.addBody("Block");
+    std::vector<ObjectId> sections;
+    for (int i = 0; i < 3; ++i) {
+        Sketch& section = document.addSketch("Section" + std::to_string(i));
+        section.addLine(Vec2{0, 0}, Vec2{10, 0});
+        section.addLine(Vec2{10, 0}, Vec2{10, 10});
+        section.addLine(Vec2{10, 10}, Vec2{0, 10});
+        section.addLine(Vec2{0, 10}, Vec2{0, 0});
+        sections.push_back(section.id());
+    }
+    document.addLoftFeature(body, "Loft", sections);
+
+    for (std::size_t i = 0; i < sections.size(); ++i)
+        EXPECT_FALSE(document.featuresReferencingSketch(sections[i]).empty())
+            << "section " << i << " could be deleted out from under the loft";
+}
+
+
+TEST(DocumentOutlineTest, M26_TREE_006_ASweepsPATHIsProtectedAndNotCalledFailed) {
+    // A sweep reads TWO sketches and the capability let it name one. The path
+    // was therefore deletable out from under it, and the tree marked the path
+    // Failed for not closing into a loop a path is never meant to close into.
+    PartDocument document{"Part"};
+    FakeGeometryKernel kernel;
+    document.setGeometryKernel(&kernel);
+
+    Sketch& profile = document.addSketch("Profile");
+    profile.addLine(Vec2{0, 0}, Vec2{10, 0});
+    profile.addLine(Vec2{10, 0}, Vec2{10, 10});
+    profile.addLine(Vec2{10, 10}, Vec2{0, 10});
+    profile.addLine(Vec2{0, 10}, Vec2{0, 0});
+    Sketch& path = document.addSketch("Spine");
+    path.addLine(Vec2{0, 0}, Vec2{80, 0}); // an open curve, as a path is
+
+    Body& body = document.addBody("Block");
+    document.addSweepFeature(body, "Sweep", profile.id(), path.id());
+    (void)document.recompute();
+
+    EXPECT_FALSE(document.featuresReferencingSketch(path.id()).empty())
+        << "a sweep's path could be deleted out from under it";
+
+    const DocumentOutline outline(document);
+    const OutlineNode root = outline.build();
+    const OutlineNode* node = FindNode(root, "Spine");
+    ASSERT_NE(node, nullptr);
+    EXPECT_NE(node->state, OutlineState::Failed)
+        << "a sweep's path was marked Failed for being an open curve";
+
+    // ...and the PROFILE is still the primary: it is what became the outline.
+    const OutlineNode* profileNode = FindNode(root, "Profile");
+    ASSERT_NE(profileNode, nullptr);
 }

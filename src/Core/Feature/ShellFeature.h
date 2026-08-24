@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
+#include "Core/Feature/IParameterisedFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Kernel/FaceQuery.h"
@@ -30,8 +31,11 @@ namespace paramcad {
 class ShellFeature final : public Feature,
                            public IRecomputable,
                            public ISolidFeature,
-                           public IMaterialReferencing {
+                           public IMaterialReferencing, public IParameterisedFeature {
 public:
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{"Thickness", thicknessParameterId_, false}};
+    }
     ShellFeature(std::string name, ObjectId baseFeatureId, FaceSelection openFaces,
                  ObjectId thicknessParameterId, ObjectId materialId);
     // Restore constructor (deserialization): keeps the persisted id/state.

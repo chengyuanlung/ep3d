@@ -114,6 +114,21 @@ public:
 
     QString saveDocumentFile(const QString& path);
     QString openDocumentFile(const QString& path);
+    // Runs an .ep3ds SCRIPT against the document this window is looking at
+    // (M26.6). Returns what the user is told; never empty.
+    //
+    // It ADDS to the open document rather than replacing it -- the same thing
+    // `--connect` does, and for the same reason: a script is a sequence of the
+    // commands a user could have typed, so running one has to mean what typing
+    // them would have meant. `File > New` first is how to get the other
+    // behaviour, and it is one click.
+    //
+    // NOT ONE UNDO STEP, and the message says so. Each command records its own
+    // delta, exactly as it does over the socket. Wrapping the whole run in one
+    // transaction was the alternative and it is worse: a script that fails at
+    // line 90 would throw away the 89 lines that worked, and finding out WHERE
+    // a script goes wrong is most of what running one is for.
+    QString runScriptFile(const QString& path);
     // Where this document was last saved or opened from, or empty.
     QString documentPath() const { return documentPath_; }
     // Counted off the document the WINDOW is looking at, which after an Open is
@@ -202,6 +217,19 @@ public:
     // edit through: the shell still writes to a sketch through PartDocument's
     // facade (UI spec 20).
     ObjectId editingSketch() const noexcept { return editingSketch_; }
+
+    // M26.2: what a sketch does to the shell around it, readable without a
+    // screenshot. The model toolbar (Pad, Revolve, Union, ...) and the tree
+    // act on FEATURES and on what is already built -- neither means anything
+    // while a sketch is open, and leaving them on screen only crowds the one
+    // panel a sketch does need.
+    bool modelToolBarVisible() const;
+    bool modelTreeVisible() const;
+    // The constraint panel moves INTO the column the tree just vacated,
+    // rather than sharing the properties column on the right -- a sketch
+    // with many constraints needs its own width, not a fight with whatever
+    // the property panel is already showing.
+    bool constraintPanelOnLeft() const;
 
     // Switches how SOLIDS are drawn (M17.9). Returns what the user is told;
     // never empty, because a view command that changes nothing visible on an
@@ -361,6 +389,9 @@ public:
     // Whether the panel is showing a property row with this label at all.
     // An editable row that is absent is not a row a user can discover.
     bool hasPropertyRow(const std::string& label) const;
+    // The VALUE shown against a label, or empty. Asked of the WIDGET, so a
+    // panel that built the right rows and painted none of them fails here.
+    std::string propertyRowValue(const std::string& label) const;
 
     // Commit a value into the property row with this label, exactly as typing
     // it and pressing Enter does, and return the resulting status line.
@@ -418,6 +449,7 @@ private slots:
     void onFitAllRequested();
     void onToggleHiddenRequested();
     void onImportDxfRequested();
+    void onRunScriptRequested();
     void onSaveRequested();
     void onSaveAsRequested();
     void onOpenRequested();
@@ -479,6 +511,8 @@ private:
     void reportSketchOrPlainStatus(const QString& message);
     void rebuildTree();
     void rebuildProperties();
+    // The rendering half, shared by the tree's selection and the canvas's.
+    void showPropertyRows(const std::vector<PropertyRow>& rows);
     void clampLabelColumn();
     void updateStatus();
     void reportHealth();
@@ -594,6 +628,7 @@ private:
     QAction* extendAction_ = nullptr;
     QToolBar* mainToolBar_ = nullptr;
     QToolBar* modelToolBar_ = nullptr;
+    QDockWidget* treeDock_ = nullptr;
     QDockWidget* constraintDock_ = nullptr;
     QPushButton* deleteConstraintButton_ = nullptr;
     QTableWidget* constraints_ = nullptr;

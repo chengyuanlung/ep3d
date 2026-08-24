@@ -38,9 +38,16 @@ struct SolvingFixture {
     ObjectId sketchId{kInvalidObjectId};
     SketchCanvasModel model;
 
+    // The one sketch, mutable, for tests that need raw geometry rather than
+    // geometry drawn by clicking. Only ever one sketch is added here, so it
+    // cannot be invalidated by a later addSketch.
+    Sketch* editable = nullptr;
+
     SolvingFixture() {
         document.setSketchSolver(&solver);
-        sketchId = document.addSketch("Sketch1").id();
+        Sketch& created = document.addSketch("Sketch1");
+        sketchId = created.id();
+        editable = &created;
     }
 
     const Sketch& sketch() const { return *document.findSketch(sketchId); }
@@ -3123,3 +3130,429 @@ TEST(SketchMirrorTest, M18_MIR_003_TheSymmetryHOLDSWhenTheOriginalMoves) {
 }
 
 } // namespace
+
+// =============================================================================
+// M26.3 -- Horizontal and Vertical, asked for through the UI, on POINTS
+//
+// The solver tests prove the constraints hold. These prove the COMMAND offers
+// them: which selections are accepted, which are refused and why, and -- the
+// part a solver test cannot see -- that a line's own two ends still produce
+// the line form rather than a second spelling of it.
+// =============================================================================
+
+TEST(SketchCanvasSolveTest, M26_UIPHV_001_TwoPointsAreAcceptedAndHeldHorizontal) {
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addPoint(Vec2{10, 5});
+    const SketchEntityId b = sketch.addPoint(Vec2{80, 60});
+
+    const SketchEditOutcome outcome =
+        fixture.constrain(SketchEditKind::AddHorizontal,
+                          {SketchElementRef{a}, SketchElementRef{b}});
+    ASSERT_TRUE(outcome.applied) << outcome.status;
+
+    const Sketch& after = fixture.sketch();
+    const Vec2 pa = std::get_if<SketchPoint>(&after.findEntity(a)->geometry)->position;
+    const Vec2 pb = std::get_if<SketchPoint>(&after.findEntity(b)->geometry)->position;
+    EXPECT_NEAR(pa.y, pb.y, 1e-6);
+}
+
+TEST(SketchCanvasSolveTest, M26_UIPHV_002_ALinesOwnTwoEndsBecomeTheLINEForm) {
+    // Picking a line's start and end IS picking the line. Storing that as a
+    // point pair would be a second way to say one thing -- so the command
+    // normalises it, and this is the assertion that says so.
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId line = sketch.addLine(Vec2{0, 0}, Vec2{60, 40});
+
+    const SketchEditOutcome outcome = fixture.constrain(
+        SketchEditKind::AddHorizontal,
+        {SketchElementRef{line, SketchSubElement::StartPoint},
+         SketchElementRef{line, SketchSubElement::EndPoint}});
+    ASSERT_TRUE(outcome.applied) << outcome.status;
+
+    const Sketch& after = fixture.sketch();
+    ASSERT_EQ(after.constraints().size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<HorizontalConstraint>(after.constraints().front().data))
+        << "a line's own two ends should be stored as the line form, not a point pair";
+    const SketchLine& solved = LineOf(after, line);
+    EXPECT_NEAR(solved.start.y, solved.end.y, 1e-6);
+}
+
+TEST(SketchCanvasSolveTest, M26_UIPHV_003_ALineAndAPointTogetherAreRefusedWithBothWordsInIt) {
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId line = sketch.addLine(Vec2{0, 0}, Vec2{60, 40});
+    const SketchEntityId point = sketch.addPoint(Vec2{10, 90});
+
+    fixture.model.setSelection(
+        {SketchElementRef{line, SketchSubElement::Whole}, SketchElementRef{point}});
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestConstraint(fixture.sketch(), SketchEditKind::AddHorizontal, &whyNot);
+    EXPECT_FALSE(edit.valid());
+    // The refusal has to say what IS accepted, not merely that this was not.
+    EXPECT_NE(whyNot.find("line"), std::string::npos) << whyNot;
+    EXPECT_NE(whyNot.find("two points"), std::string::npos) << whyNot;
+}
+
+TEST(SketchCanvasSolveTest, M26_UIPHV_004_ThreePointsAreRefusedAndSayHowMany) {
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addPoint(Vec2{0, 0});
+    const SketchEntityId b = sketch.addPoint(Vec2{10, 10});
+    const SketchEntityId c = sketch.addPoint(Vec2{20, 20});
+
+    fixture.model.setSelection(
+        {SketchElementRef{a}, SketchElementRef{b}, SketchElementRef{c}});
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestConstraint(fixture.sketch(), SketchEditKind::AddVertical, &whyNot);
+    EXPECT_FALSE(edit.valid());
+    // The refusal names BOTH shapes the command takes, so a user holding three
+    // points is told what to do rather than only what not to.
+    EXPECT_NE(whyNot.find("two points"), std::string::npos) << whyNot;
+}
+
+TEST(SketchCanvasSolveTest, M26_UIPHV_005_OnePointTwiceIsRefused) {
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addPoint(Vec2{0, 0});
+
+    fixture.model.setSelection({SketchElementRef{a}, SketchElementRef{a}});
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestConstraint(fixture.sketch(), SketchEditKind::AddHorizontal, &whyNot);
+    EXPECT_FALSE(edit.valid());
+    EXPECT_NE(whyNot.find("same point"), std::string::npos) << whyNot;
+}
+
+TEST(SketchCanvasSolveTest, M26_UIPHV_006_SeveralLinesStillWorkTheWayTheyDid) {
+    // The line form is what every sketch drawn before this existed uses, and
+    // it takes N of them. Nothing above may have narrowed that.
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addLine(Vec2{0, 0}, Vec2{60, 12});
+    const SketchEntityId b = sketch.addLine(Vec2{0, 40}, Vec2{60, 55});
+
+    const SketchEditOutcome outcome =
+        fixture.constrain(SketchEditKind::AddHorizontal,
+                          {SketchElementRef{a, SketchSubElement::Whole},
+                           SketchElementRef{b, SketchSubElement::Whole}});
+    ASSERT_TRUE(outcome.applied) << outcome.status;
+
+    const Sketch& after = fixture.sketch();
+    EXPECT_EQ(after.constraints().size(), 2u);
+    EXPECT_NEAR(LineOf(after, a).start.y, LineOf(after, a).end.y, 1e-6);
+    EXPECT_NEAR(LineOf(after, b).start.y, LineOf(after, b).end.y, 1e-6);
+}
+
+TEST(SketchCanvasSolveTest, M26_UIPHV_007_TwoENDPOINTSOfDifferentLinesAlignThePointsNotTheLines) {
+    // THE CASE THE FEATURE EXISTS FOR, and the one the old rule got wrong: both
+    // refs named line entities, so it made each LINE horizontal instead of
+    // levelling the two corners the user picked. The lines must keep their
+    // slopes.
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addLine(Vec2{0, 0}, Vec2{60, 12});
+    const SketchEntityId b = sketch.addLine(Vec2{100, 40}, Vec2{160, 80});
+
+    const SketchEditOutcome outcome = fixture.constrain(
+        SketchEditKind::AddHorizontal,
+        {SketchElementRef{a, SketchSubElement::EndPoint},
+         SketchElementRef{b, SketchSubElement::StartPoint}});
+    ASSERT_TRUE(outcome.applied) << outcome.status;
+
+    const Sketch& after = fixture.sketch();
+    ASSERT_EQ(after.constraints().size(), 1u) << "one alignment, not one constraint per line";
+    EXPECT_NEAR(LineOf(after, a).end.y, LineOf(after, b).start.y, 1e-6);
+    // NEITHER LINE became horizontal. This is the assertion the old behaviour
+    // fails, and it is the whole difference between the two readings.
+    EXPECT_GT(std::fabs(LineOf(after, a).start.y - LineOf(after, a).end.y), 1.0);
+    EXPECT_GT(std::fabs(LineOf(after, b).start.y - LineOf(after, b).end.y), 1.0);
+}
+
+TEST(SketchCanvasSolveTest, M26_UIPHV_008_TwoLineEndsGoVerticalOntoOneVirtualLine) {
+    // Two lines, pick one END of each, press Vertical: the two ends must come
+    // to share a u -- they end up on the same vertical line -- and the lines
+    // themselves must keep their own slopes.
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addLine(Vec2{0, 0}, Vec2{40, 30});
+    const SketchEntityId b = sketch.addLine(Vec2{90, 5}, Vec2{130, 55});
+
+    const SketchEditOutcome outcome = fixture.constrain(
+        SketchEditKind::AddVertical,
+        {SketchElementRef{a, SketchSubElement::EndPoint},
+         SketchElementRef{b, SketchSubElement::StartPoint}});
+    ASSERT_TRUE(outcome.applied) << outcome.status;
+
+    const Sketch& after = fixture.sketch();
+    ASSERT_EQ(after.constraints().size(), 1u);
+    EXPECT_NEAR(LineOf(after, a).end.x, LineOf(after, b).start.x, 1e-6);
+    // The v separation is untouched -- they are ON one vertical line, not on
+    // top of each other. A Coincident would have collapsed this to zero.
+    EXPECT_GT(std::fabs(LineOf(after, a).end.y - LineOf(after, b).start.y), 1.0);
+    EXPECT_GT(std::fabs(LineOf(after, a).start.x - LineOf(after, a).end.x), 1.0);
+    EXPECT_GT(std::fabs(LineOf(after, b).start.x - LineOf(after, b).end.x), 1.0);
+}
+
+// =============================================================================
+// M26.4 -- what a rectangle's CORNERS can be asked to do
+// =============================================================================
+
+TEST(SketchCanvasSolveTest, M26_RECT_001_DraggingASideKeepsTheCornersJoined) {
+    SolvingFixture fixture;
+    const SketchEditOutcome made = fixture.drawRectangle(Vec2{0, 0}, Vec2{60, 40});
+    ASSERT_TRUE(made.applied) << made.status;
+    ASSERT_EQ(made.createdEntities.size(), 4u);
+    const SketchEntityId side0 = made.createdEntities[0];
+    const SketchEntityId side1 = made.createdEntities[1];
+
+    // Drag side 0's END -- which is the corner side 1's START is joined to.
+    ASSERT_TRUE(DragMoved(fixture.document.previewSketchDrag(
+        fixture.sketchId, SketchElementRef{side0, SketchSubElement::EndPoint},
+        Vec2{95.0, 15.0})));
+
+    const Sketch& after = fixture.sketch();
+    const SketchLine& a = LineOf(after, side0);
+    const SketchLine& b = LineOf(after, side1);
+    EXPECT_NEAR(a.end.x, b.start.x, 1e-6) << "the corner came apart in u";
+    EXPECT_NEAR(a.end.y, b.start.y, 1e-6) << "the corner came apart in v";
+}
+
+TEST(SketchCanvasSolveTest, M26_RECT_002_BothPointsAtACornerCanBeSelected) {
+    // THE REPORTED PROBLEM, as the smallest case. Two endpoints sit at exactly
+    // the same place at every rectangle corner. PickElement returns hits.front()
+    // -- always the same one -- so the second click toggles that same ref back
+    // off instead of adding its twin, and Coincident can never be offered a
+    // pair.
+    SolvingFixture fixture;
+    const SketchEditOutcome made = fixture.drawRectangle(Vec2{0, 0}, Vec2{60, 40});
+    ASSERT_TRUE(made.applied) << made.status;
+
+    fixture.model.setTool(SketchTool::Select);
+    fixture.model.clearSelection();
+    const Sketch& sketch = fixture.sketch();
+    // The corner shared by side 0's end and side 1's start.
+    const Vec2 corner = LineOf(sketch, made.createdEntities[0]).end;
+
+    fixture.model.selectAt(sketch, corner, 1.0);
+    const std::size_t afterFirst = fixture.model.selection().size();
+    fixture.model.selectAt(sketch, corner, 1.0);
+    const std::size_t afterSecond = fixture.model.selection().size();
+
+    EXPECT_EQ(afterFirst, 1u);
+    EXPECT_EQ(afterSecond, 2u) << "the two points at a corner cannot both be selected";
+
+    // ...and they are DIFFERENT points, which is the whole claim.
+    ASSERT_EQ(fixture.model.selection().size(), 2u);
+    const SketchElementRef& first = fixture.model.selection()[0];
+    const SketchElementRef& second = fixture.model.selection()[1];
+    EXPECT_FALSE(first.entityId == second.entityId &&
+                 first.subElement == second.subElement);
+
+    // ...and Coincident is now something the command layer will build out of
+    // them, which is what the user could not reach.
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestConstraint(sketch, SketchEditKind::AddCoincident, &whyNot);
+    EXPECT_TRUE(edit.valid()) << whyNot;
+}
+
+TEST(SketchCanvasSolveTest, M26_RECT_003_ClickingALoneEntityTwiceStillDeselectsIt) {
+    // The cycling rule must not cost the plain toggle: where there is only one
+    // thing under the cursor, the second click still turns it off.
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    sketch.addLine(Vec2{0, 0}, Vec2{100, 0});
+
+    fixture.model.setTool(SketchTool::Select);
+    fixture.model.clearSelection();
+    // The MIDDLE of the line, away from either endpoint.
+    fixture.model.selectAt(fixture.sketch(), Vec2{50, 0}, 1.0);
+    EXPECT_EQ(fixture.model.selection().size(), 1u);
+    fixture.model.selectAt(fixture.sketch(), Vec2{50, 0}, 1.0);
+    EXPECT_EQ(fixture.model.selection().size(), 0u) << "a second click no longer deselects";
+}
+
+TEST(SketchCanvasSolveTest, M26_RECT_004_TwoLooseEndsCanBeMadeCoincidentForREAL) {
+    // Two lines whose ends merely LOOK joined -- drawn to the same place with
+    // nothing holding them there. This is what a user gets drawing an outline
+    // by hand instead of with the rectangle tool, and it is the case
+    // Coincident exists for.
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addLine(Vec2{0, 0}, Vec2{60, 40});
+    const SketchEntityId b = sketch.addLine(Vec2{60, 40}, Vec2{120, 0});
+
+    fixture.model.setTool(SketchTool::Select);
+    fixture.model.clearSelection();
+    fixture.model.selectAt(fixture.sketch(), Vec2{60, 40}, 1.0);
+    fixture.model.selectAt(fixture.sketch(), Vec2{60, 40}, 1.0);
+    ASSERT_EQ(fixture.model.selection().size(), 2u);
+
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestConstraint(fixture.sketch(), SketchEditKind::AddCoincident, &whyNot);
+    ASSERT_TRUE(edit.valid()) << whyNot;
+    ASSERT_TRUE(fixture.apply(edit).applied);
+
+    // NOW it holds: drag one line's end and the other's follows.
+    ASSERT_TRUE(DragMoved(fixture.document.previewSketchDrag(
+        fixture.sketchId, SketchElementRef{a, SketchSubElement::EndPoint}, Vec2{75.0, 90.0})));
+    const Sketch& after = fixture.sketch();
+    EXPECT_NEAR(LineOf(after, a).end.x, LineOf(after, b).start.x, 1e-6);
+    EXPECT_NEAR(LineOf(after, a).end.y, LineOf(after, b).start.y, 1e-6);
+}
+
+// =============================================================================
+// M26.5 -- "H&V Distance": both legs of a point pair, in one command
+// =============================================================================
+
+TEST(SketchCanvasSolveTest, M26_HV_001_ItMakesBOTHLegsWithTheirMeasuredValues) {
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addPoint(Vec2{10, 20});
+    const SketchEntityId b = sketch.addPoint(Vec2{70, 95}); // 60 across, 75 up
+
+    fixture.model.setSelection({SketchElementRef{a}, SketchElementRef{b}});
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestDimension(fixture.sketch(), SketchEditKind::AddHVDistance, &whyNot);
+    ASSERT_TRUE(edit.valid()) << whyNot;
+    const SketchEditOutcome outcome = fixture.apply(edit);
+    ASSERT_TRUE(outcome.applied) << outcome.status;
+
+    const Sketch& after = fixture.sketch();
+    ASSERT_EQ(after.constraints().size(), 2u) << "H&V must make two dimensions, not one";
+
+    // ONE OF EACH, and each reading the gap it is about.
+    const auto* h = std::get_if<HorizontalDistanceConstraint>(&after.constraints()[0].data);
+    const auto* v = std::get_if<VerticalDistanceConstraint>(&after.constraints()[1].data);
+    ASSERT_NE(h, nullptr) << "the first leg is not a horizontal distance";
+    ASSERT_NE(v, nullptr) << "the second leg is not a vertical distance";
+
+    const Parameter* hp = fixture.document.parameters().findById(h->parameterId);
+    const Parameter* vp = fixture.document.parameters().findById(v->parameterId);
+    ASSERT_NE(hp, nullptr);
+    ASSERT_NE(vp, nullptr);
+    EXPECT_NE(hp->id(), vp->id()) << "both legs share one Parameter";
+    EXPECT_NEAR(hp->value(), 60.0, 1e-6);
+    EXPECT_NEAR(vp->value(), 75.0, 1e-6);
+
+    // ...AND NOTHING MOVED. A dimension seeded from anything other than the
+    // measurement drags the geometry the moment it is added.
+    const Vec2 pa = std::get_if<SketchPoint>(&after.findEntity(a)->geometry)->position;
+    const Vec2 pb = std::get_if<SketchPoint>(&after.findEntity(b)->geometry)->position;
+    EXPECT_NEAR(pa.x, 10.0, 1e-6);
+    EXPECT_NEAR(pa.y, 20.0, 1e-6);
+    EXPECT_NEAR(pb.x, 70.0, 1e-6);
+    EXPECT_NEAR(pb.y, 95.0, 1e-6);
+}
+
+TEST(SketchCanvasSolveTest, M26_HV_002_ItIsONEUndoStep) {
+    // Two Parameters and two constraints, and Ctrl+Z has to take the lot. A
+    // user who undoes this expects the pair gone, not to be left holding half
+    // of what they asked for.
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addPoint(Vec2{10, 20});
+    const SketchEntityId b = sketch.addPoint(Vec2{70, 95});
+
+    const std::size_t depthBefore = fixture.document.undoDepth();
+    fixture.model.setSelection({SketchElementRef{a}, SketchElementRef{b}});
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestDimension(fixture.sketch(), SketchEditKind::AddHVDistance, &whyNot);
+    ASSERT_TRUE(edit.valid()) << whyNot;
+    ASSERT_TRUE(fixture.apply(edit).applied);
+    ASSERT_EQ(fixture.sketch().constraints().size(), 2u);
+
+    EXPECT_EQ(fixture.document.undoDepth(), depthBefore + 1) << "H&V recorded more than one step";
+    ASSERT_TRUE(fixture.document.undo());
+    EXPECT_EQ(fixture.sketch().constraints().size(), 0u)
+        << "one undo left half the pair behind";
+}
+
+TEST(SketchCanvasSolveTest, M26_HV_003_BothLegsDriveTheGeometry) {
+    // The pair is not decoration: changing either number has to move the point.
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addPoint(Vec2{0, 0});
+    const SketchEntityId b = sketch.addPoint(Vec2{60, 75});
+    ASSERT_TRUE(fixture.constrain(SketchEditKind::AddFix, {SketchElementRef{a}}).applied);
+
+    fixture.model.setSelection({SketchElementRef{a}, SketchElementRef{b}});
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestDimension(fixture.sketch(), SketchEditKind::AddHVDistance, &whyNot);
+    ASSERT_TRUE(edit.valid()) << whyNot;
+    ASSERT_TRUE(fixture.apply(edit).applied);
+
+    // With one point fixed and both legs pinned, the pair is fully determined.
+    EXPECT_EQ(fixture.sketch().degreesOfFreedom(), 0) << fixture.sketch().solveMessage();
+
+    const auto* h =
+        std::get_if<HorizontalDistanceConstraint>(&fixture.sketch().constraints()[1].data);
+    ASSERT_NE(h, nullptr);
+    ASSERT_TRUE(fixture.document.setParameterValue(h->parameterId, 100.0));
+    (void)fixture.document.recompute();
+    const Vec2 moved =
+        std::get_if<SketchPoint>(&fixture.sketch().findEntity(b)->geometry)->position;
+    EXPECT_NEAR(moved.x, 100.0, 1e-6) << "the horizontal leg does not drive";
+    EXPECT_NEAR(moved.y, 75.0, 1e-6) << "the vertical leg let go when the other changed";
+}
+
+TEST(SketchCanvasSolveTest, M26_HV_004_ItNeedsExactlyTwoPoints) {
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId line = sketch.addLine(Vec2{0, 0}, Vec2{50, 0});
+    const SketchEntityId point = sketch.addPoint(Vec2{10, 40});
+
+    fixture.model.setSelection(
+        {SketchElementRef{line, SketchSubElement::Whole}, SketchElementRef{point}});
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestDimension(fixture.sketch(), SketchEditKind::AddHVDistance, &whyNot);
+    EXPECT_FALSE(edit.valid());
+    EXPECT_NE(whyNot.find("2 points"), std::string::npos) << whyNot;
+}
+
+TEST(SketchCanvasSolveTest, M26_HV_005_BothLegsAreAboutTheSameORDEREDPair) {
+    // The legs must agree about which point is `a`. Ordering them separately
+    // -- one swapped so its own value came out positive -- would store two
+    // dimensions about the pair in OPPOSITE directions, and editing one would
+    // then move the geometry the other way from the other.
+    SolvingFixture fixture;
+    Sketch& sketch = *fixture.editable;
+    const SketchEntityId a = sketch.addPoint(Vec2{80, 10});
+    const SketchEntityId b = sketch.addPoint(Vec2{20, 90}); // left and up: u and v disagree
+
+    fixture.model.setSelection({SketchElementRef{a}, SketchElementRef{b}});
+    std::string whyNot;
+    const SketchEdit edit =
+        fixture.model.requestDimension(fixture.sketch(), SketchEditKind::AddHVDistance, &whyNot);
+    ASSERT_TRUE(edit.valid()) << whyNot;
+    ASSERT_TRUE(fixture.apply(edit).applied);
+
+    const Sketch& after = fixture.sketch();
+    ASSERT_EQ(after.constraints().size(), 2u);
+    const auto* h = std::get_if<HorizontalDistanceConstraint>(&after.constraints()[0].data);
+    const auto* v = std::get_if<VerticalDistanceConstraint>(&after.constraints()[1].data);
+    ASSERT_NE(h, nullptr);
+    ASSERT_NE(v, nullptr);
+    EXPECT_EQ(h->a.entityId, v->a.entityId) << "the two legs disagree about which point is first";
+    EXPECT_EQ(h->b.entityId, v->b.entityId);
+
+    // ORDERED ON u, so the horizontal leg reads positive and the vertical one
+    // carries the sign. One order cannot make both positive when the pair runs
+    // up-and-left, and swapping per leg is the thing that would break the
+    // agreement asserted just above.
+    const Parameter* hp = fixture.document.parameters().findById(h->parameterId);
+    const Parameter* vp = fixture.document.parameters().findById(v->parameterId);
+    ASSERT_NE(hp, nullptr);
+    ASSERT_NE(vp, nullptr);
+    EXPECT_NEAR(hp->value(), 60.0, 1e-6) << "the horizontal leg was not ordered positive";
+    EXPECT_NEAR(vp->value(), -80.0, 1e-6) << "the vertical leg lost its sign";
+}

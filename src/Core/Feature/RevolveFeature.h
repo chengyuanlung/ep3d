@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/Feature.h"
+#include "Core/Feature/IParameterisedFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISketchConsuming.h"
 #include "Core/Feature/ISolidFeature.h"
@@ -43,8 +44,11 @@ class RevolveFeature final : public Feature,
                              public IRecomputable,
                              public ISolidFeature,
                              public ISketchConsuming,
-                             public IMaterialReferencing {
+                             public IMaterialReferencing, public IParameterisedFeature {
 public:
+    std::vector<FeatureParameter> featureParameters() const override {
+        return {FeatureParameter{"Angle", angleParameterId_, false}};
+    }
     RevolveFeature(std::string name, ObjectId sketchId, SketchEntityId axisEntityId,
                    ObjectId angleParameterId, ObjectId materialId);
     // Restore constructor (deserialization): keeps the persisted id/state.
@@ -57,7 +61,9 @@ public:
     ObjectId sketchId() const noexcept { return sketchId_; }
     // ISketchConsuming: the same answer, asked the way code that does not know
     // this type has to ask it.
-    ObjectId consumedSketchId() const noexcept override { return sketchId_; }
+    std::vector<ConsumedSketch> consumedSketches() const override {
+        return {ConsumedSketch{sketchId_, true}};
+    }
     SketchEntityId axisEntityId() const noexcept { return axisEntityId_; }
     ObjectId angleParameterId() const noexcept { return angleParameterId_; }
     ObjectId materialId() const noexcept override { return materialId_; }

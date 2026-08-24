@@ -211,3 +211,67 @@ TEST(SerializationV11Test, M13_SER_007_ADocumentWithNoGeometricConstraintsStillR
     ASSERT_EQ(reloaded.constraints().size(), 1u);
     EXPECT_TRUE(std::holds_alternative<HorizontalConstraint>(reloaded.constraints().front().data));
 }
+
+// =============================================================================
+// M26.3 -- point-pair Horizontal and Vertical (schema v33)
+// =============================================================================
+
+TEST(SerializationV11Test, M26_SER_010_PointPairHorizontalAndVerticalRoundTrip) {
+    PartDocument document{"PointPairs"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId lineA = sketch.addLine(Vec2{0, 0}, Vec2{40, 30});
+    const SketchEntityId lineB = sketch.addLine(Vec2{90, 5}, Vec2{130, 55});
+    const SketchEntityId loose = sketch.addPoint(Vec2{200, 200});
+    const SketchEntityId circle = sketch.addCircle(Vec2{300, 40}, 9.0);
+
+    document.addSketchConstraint(
+        sketch.id(),
+        PointsHorizontalConstraint{SketchElementRef{lineA, SketchSubElement::EndPoint},
+                                   SketchElementRef{lineB, SketchSubElement::StartPoint}});
+    document.addSketchConstraint(
+        sketch.id(),
+        PointsVerticalConstraint{SketchElementRef{loose},
+                                 SketchElementRef{circle, SketchSubElement::CenterPoint}});
+
+    const LoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const Sketch& reloaded = OnlySketch(*loaded.document);
+    ASSERT_EQ(reloaded.constraints().size(), 2u);
+
+    // THE SUB-ELEMENTS ARE THE POINT. A round trip that kept the entity ids and
+    // dropped which END was named would reload as a constraint about the
+    // lines' start points -- a different model that still loads cleanly.
+    const auto* h = std::get_if<PointsHorizontalConstraint>(&reloaded.constraints()[0].data);
+    ASSERT_NE(h, nullptr);
+    EXPECT_EQ(h->a.entityId, lineA);
+    EXPECT_EQ(h->a.subElement, SketchSubElement::EndPoint);
+    EXPECT_EQ(h->b.entityId, lineB);
+    EXPECT_EQ(h->b.subElement, SketchSubElement::StartPoint);
+
+    const auto* v = std::get_if<PointsVerticalConstraint>(&reloaded.constraints()[1].data);
+    ASSERT_NE(v, nullptr);
+    EXPECT_EQ(v->a.entityId, loose);
+    EXPECT_EQ(v->b.entityId, circle);
+    EXPECT_EQ(v->b.subElement, SketchSubElement::CenterPoint);
+}
+
+TEST(SerializationV11Test, M26_SER_011_APointPairNamingAMissingEntityIsRefused) {
+    // The same door every other constraint reference goes through. A file that
+    // saved cleanly and reloads pointing at nothing is ADR-M3-008's worst case.
+    PartDocument document{"PointPairs"};
+    Sketch& sketch = document.addSketch("Sketch001");
+    const SketchEntityId a = sketch.addPoint(Vec2{0, 0});
+    const SketchEntityId b = sketch.addPoint(Vec2{50, 50});
+    document.addSketchConstraint(
+        sketch.id(), PointsHorizontalConstraint{SketchElementRef{a}, SketchElementRef{b}});
+
+    std::string text = SaveToString(document);
+    const std::string wanted = std::to_string(static_cast<unsigned long long>(ToObjectId(b)));
+    const std::size_t at = text.rfind(wanted);
+    ASSERT_NE(at, std::string::npos);
+    text.replace(at, wanted.size(), "999999");
+
+    const LoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_NE(loaded.message.find("not in this sketch"), std::string::npos) << loaded.message;
+}
