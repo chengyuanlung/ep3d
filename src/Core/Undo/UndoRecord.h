@@ -263,6 +263,44 @@ struct InstanceExistenceEdit {
     bool addedByTheEdit = false;
 };
 
+// M24: a mate came into existence or left it.
+//
+// Carries the SENTENCE -- which two instances, which connector on each, what
+// kind, what value -- because that is all a mate is. The connector names are
+// strings for the same reason the mate holds strings: the connector lives in
+// the PART file and is reused by every instance of it (roadmap §21), so there
+// is no id in this document to record.
+struct MateExistenceEdit {
+    ObjectId mateId = kInvalidObjectId;
+    std::string name;
+    int type = 0; // MateType, as its underlying value, to keep this header light
+    ObjectId leadingInstanceId = kInvalidObjectId;
+    std::string leadingConnector;
+    ObjectId followingInstanceId = kInvalidObjectId;
+    std::string followingConnector;
+    double value = 0.0;
+    bool addedByTheEdit = false;
+};
+
+// M24: a mate's one remaining freedom was driven -- the hinge was turned.
+//
+// Its own delta rather than a ParameterValueEdit, because an assembly has no
+// Parameters yet: a mate value is a number on the mate. When assembly
+// variables arrive this becomes an expression like any other dimension, and
+// the delta will be the parameter's, not this.
+struct MateValueEdit {
+    ObjectId mateId = kInvalidObjectId;
+    double before = 0.0;
+    double after = 0.0;
+};
+
+// M24: an instance was grounded, or let go.
+struct InstanceGroundEdit {
+    ObjectId instanceId = kInvalidObjectId;
+    bool before = false;
+    bool after = false;
+};
+
 using UndoDelta =
     std::variant<ParameterValueEdit, FeatureExistenceEdit, SuppressionEdit, RollbackEdit,
                  ParameterExistenceEdit, FrameExistenceEdit, FrameTransformEdit,
@@ -270,7 +308,8 @@ using UndoDelta =
                  SketchEntityExistenceEdit, SketchConstraintExistenceEdit,
                  SketchDimensionPlacementEdit, SketchDimensionFormatEdit,
                  SketchEntityConstructionEdit, SketchEntityGeometryEdit, ObjectNameEdit,
-                 SketchConstraintDrivenEdit, InstanceExistenceEdit>;
+                 SketchConstraintDrivenEdit, InstanceExistenceEdit, MateExistenceEdit,
+                 MateValueEdit, InstanceGroundEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

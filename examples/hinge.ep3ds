@@ -1,0 +1,120 @@
+# A HINGE THAT TURNS (M24).
+#
+# The M24 gate, and read the second half of it carefully:
+#
+#     a hinge turns, AND IT DOES NOT FALL APART WHILE TURNING.
+#
+# Turning needs one number. Not falling apart needs the solver to actually put
+# the arm where the mate says it goes -- every angle, not just zero.
+#
+# Run it:
+#   ep3d --script examples/hinge.ep3ds
+
+# --- part 1: the bracket ------------------------------------------------------
+#
+# A plate with a pin standing up at one end.
+
+sketch Plate
+tool rect
+click -50 -20
+click 10 20
+pad Bracket 8
+
+sketch Pin
+tool circle
+click 0 0
+click 6 0
+pad Bracket 40
+
+# ONE SOLID, not two. Two pads into one body that nothing consumes are two
+# disjoint solids (ADR-M21-002), and an instance brings in the CHAIN TIP -- so
+# without this the assembly below would get the pin on its own.
+union Bracket
+
+# THE MATE CONNECTOR, on the PART. This is where a connector belongs: define it
+# once here and every instance of this bracket in every assembly has it
+# (roadmap §21). It is not an assembly concept that happens to sit on a part.
+#
+# The three numbers after the position are where the connector's +Z POINTS, and
+# that is the whole act of saying where the hinge is: a revolute turns about
+# +Z. The pin stands up in +Z, so +Z is what this points along -- and saying it
+# explicitly is the difference between a hinge on the pin and a hinge on
+# whatever axis the default happened to be.
+connector Pivot 0 0 40 0 0 1
+
+echo --- the bracket ---
+solve
+measure
+save build/hinge-bracket.ep3d
+
+# --- part 2: the arm ----------------------------------------------------------
+#
+# A second body in the same document, so the file holds both and each insert
+# below names which one it wants.
+
+sketch Blade
+tool rect
+click -8 -8
+click 90 8
+pad Arm 10
+
+# The arm's own connector, at the end that goes on the pin. Same axis: two
+# connectors meeting in a revolute share their +Z, which is why both parts
+# point theirs along the pin rather than along anything else.
+connector Eye 0 0 0 0 0 1
+
+echo --- the arm ---
+solve
+measure
+save build/hinge-parts.ep3d
+
+# --- the assembly -------------------------------------------------------------
+
+assembly Hinge
+
+insert Base build/hinge-bracket.ep3d Bracket
+insert Swing build/hinge-parts.ep3d Arm
+
+# SOMEWHERE HAS TO BE FIXED. A mate says where something is RELATIVE to
+# something else, so a chain of them has to start from something that is not
+# relative to anything. An assembly whose mates reach no ground is REFUSED --
+# grounding the first instance in the list instead would make the answer depend
+# on the order things were typed.
+ground Base
+
+# THE HINGE. Base's Pivot and Swing's Eye become the same place, free to turn
+# about their shared +Z. The angle is given in DEGREES, like every other angle
+# a script types, and stored in radians -- the same conversion `draft` makes.
+mate revolute Elbow Base/Pivot Swing/Eye 0
+
+echo --- closed, at 0 degrees ---
+solve
+measure
+
+# --- and now turn it ----------------------------------------------------------
+#
+# One number changes. Everything downstream of it is worked out again, and the
+# arm goes where the mate says -- which is the half of the gate that a picture
+# cannot check and a centroid can.
+#
+# The arm is 98 x 16 x 10 with its Eye at the near end, so its centre of mass
+# sits 41 mm out along the arm. At 0 degrees that is +41 in x; at 90 degrees it
+# is +41 in y; at 180 it is -41 in x. The z never moves, because the hinge axis
+# is z.
+
+drive Elbow 90
+echo --- turned a quarter ---
+solve
+measure
+
+drive Elbow 180
+echo --- turned a half ---
+solve
+measure
+
+# The connectors stay together at every angle. If they did not, the arm would
+# fly off in a way that the volume would never notice and the centre of mass
+# would report as a wrong number rather than as an error -- which is why the
+# measurement above is the test and the picture is not.
+
+save build/hinge.ep3da

@@ -28,6 +28,16 @@ Transform3D Compose(const Transform3D& parent, const Transform3D& child) noexcep
     return result;
 }
 
+Transform3D Inverse(const Transform3D& transform) noexcept {
+    Transform3D result;
+    // The conjugate, which for a unit quaternion IS the inverse rotation.
+    result.rotation = Quaternion{transform.rotation.w, -transform.rotation.x,
+                                 -transform.rotation.y, -transform.rotation.z};
+    const Vec3 back = RotateByQuaternion(result.rotation, transform.translation);
+    result.translation = Vec3{-back.x, -back.y, -back.z};
+    return result;
+}
+
 Vec3 ApplyTransform(const Transform3D& transform, Vec3 local) noexcept {
     const Vec3 rotated = RotateByQuaternion(transform.rotation, local);
     return Vec3{rotated.x + transform.translation.x, rotated.y + transform.translation.y,

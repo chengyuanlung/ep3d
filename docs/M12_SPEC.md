@@ -580,6 +580,10 @@ Hatch、Block、Layer、Array（屬 §24 Drawing 的範疇，不是 sketch 幾�
 60. 組合件文件型別                ✅ ADR-M23-001..003
 61. 零件實例與擺放                ✅ ADR-M23-002
 62. 剛體放置（kernel）            ✅ ADR-M23-004
+63. Mate Connector（零件上）      ✅ ADR-M24-001
+64. Fastened / Revolute / Slider  ✅ ADR-M24-002..003
+65. 接地與樹狀 mate 求解          ✅ ADR-M24-004
+66. 逐 instance 自由度回報        ✅ ADR-M24-005
 ```
 
 **Chamfer 與 Trim / Extend 共同缺少同一個基礎設施**：
@@ -3718,3 +3722,296 @@ P3 列了五樣。M23 把其中三樣做成通用的，兩樣沒有：
   組合件能覆寫就是**第二個密度住的地方**。
 - **檔案監看**：編輯零件檔不會弄髒實例（跟 ADR-M22-003 第四節同一筆帳）。
 - **同一個零件檔載入 N 次**：三個實例是三次載入。真的成本，記在 ADR-M23-002。
+
+---
+
+# M24 — Mate Connector 與基本 mate
+
+M23 讓零件**放得進**組合件。這一個讓它們**接得起來**。
+
+Gate 是「一個鉸鏈轉得動，而且轉的時候不會散開」——
+第二句才是真正的考題。轉得動只需要一個數字會變；
+不散開需要求解器**每一個角度**都真的把手臂放到 mate 說的位置。
+
+## ADR-M24-001 — Connector 長在**零件**上，不是長在組合件上
+
+### 一、§21 說得很清楚
+
+```text
+MotorPart
+├─ ShaftAxisConnector
+└─ MountConnector
+
+MotorInstance.ShaftAxisConnector ↕ Revolute ↕ ArmInstance.JointConnector
+```
+
+Connector 定義在**零件**上，**每一個 instance 重複使用**。
+這正是 connector-based mating 比參照拓樸好的全部理由：
+在馬達上定義一次「軸線」，之後每一個組合件裡的每一顆馬達都有它。
+
+### 二、EP3D 幾乎不用做什麼
+
+`PartDocument` 早就有 `addConnector`，而且早就會存檔 ——
+M10 就做好了，只是當時沒有第二個使用者。
+M23 又把 connector 搬進 `DocumentBase`，所以兩種文件都有。
+
+所以 M24 這一塊的全部工作是：`PartInstance` 每次重建時，
+把零件的 connector 連同實體一起讀出來，
+存成 `{名字, 零件座標系裡的變換}`。
+
+它在組合件裡的位置是 `instanceWorld ∘ connectorLocal`，
+**當場算，不儲存**（ADR-M10-002）。
+`mateConnectorWorldTransform()` 就是那一行，而它不只是給 UI 用的 ——
+**它是鉸鏈 gate 的量尺**：「兩個 connector 在同一個地方」
+是一件可以**量**的事，而「不會散開」就是那個距離保持為零。
+
+### 三、Mate 用**名字**指 connector，不是 id
+
+一個 mate 的兩端各是「一個 instance，加上那個零件上的一個 connector **名字**」。
+
+不能用 ObjectId：那個 connector 活在**零件檔**裡，
+這份文件裡沒有 id 可以指 —— 而且**不該有**，
+因為同一個零件的兩個 instance 那樣就需要兩份同一個 connector 的複本。
+
+名字跟這個專案裡其他每一個參照一樣：**每次重建都重新解析一次**。
+零件裡被改名或刪掉的 connector 會在這裡**大聲失敗**，
+而不是解析到別的東西上（ADR-M4-004 那條「序號不是身分」的規則，
+第一次跨過文件邊界）。
+
+## ADR-M24-002 — 一個 mate 是一句話，而**哪一邊會動**不存在裡面
+
+```cpp
+class Mate {
+    ObjectId id_;
+    std::string name_;
+    MateType type_;                       // Fastened / Revolute / Slider
+    ObjectId leadingInstanceId_;   std::string leadingConnector_;
+    ObjectId followingInstanceId_; std::string followingConnector_;
+    double value_;                        // 弧度（revolute）或公釐（slider）
+};
+```
+
+### 一、方向由**接地**決定，不由 mate 決定
+
+`leading` / `following` 只是打字的順序。
+真正決定誰動的是**求解**：哪一端已經被放好了，哪一端就是主動的。
+
+如果把方向存進 mate 裡，那就是**第二個答案** ——
+而接地已經回答過同一個問題了。
+所以 `setMateValue` 會把**兩端都**標髒：猜哪一端會動，
+就是在猜一個沒有存在任何地方的方向。
+
+### 二、`value` 是那個 mate**還剩下**的那個自由度
+
+Revolute 是弧度，Slider 是公釐。
+**Fastened 沒有自由度可以花**，所以給它一個值會被**拒絕**，
+不是被忽略 —— 忽略會讓寫的人相信自己偏移了什麼東西。
+
+拒絕發生在**三個門**：`addMate`、`restoreMate`、以及載入器。
+三個門都擋，因為兩個門對「什麼是合法的」有不同意見，
+正是「存得起來、開不起來」的產生方式（ADR-M3-008）。
+
+### 三、檔案裡存**弧度**
+
+不是度。度是**第二個單位**，而這個格式一個單位都沒有。
+腳本層做一次轉換（`mate revolute ... 90`），
+跟 `draft` 完全一樣的位置、完全一樣的理由。
+
+## ADR-M24-003 — 一條公式，而不是每種 mate 一條
+
+```cpp
+Transform3D MateTransform(MateType type, double value);
+//   Fastened -> identity
+//   Revolute -> 繞 +Z 轉 value
+//   Slider   -> 沿 +Z 移 value
+```
+
+然後**擺放規則只寫一次**：
+
+```cpp
+followerPlacement = leaderConnectorWorld
+                  ∘ MateTransform(type, value)
+                  ∘ Inverse(followerConnectorLocal)
+```
+
+讀出來就是一句話：「主動端的 connector 在世界的哪裡，
+再加上這個 mate 還允許的動作，再從從動端的 connector **倒推回**它自己。」
+
+這麼寫的理由是 P4：**新增一種 mate 型別不能帶著它自己對「接在一起」的理解**。
+M25 要加的圓柱、球、平面，全部是 `MateTransform` 多一個 case，
+擺放規則一個字都不用改。
+
+**所有型別共用 +Z**，這不是省事，是**讓連接器的 Z 軸變成一件有意義的事**：
+使用者把 Z 指向鉸鏈銷，就是在說鉸鏈在哪裡。
+腳本的 `connector NAME X Y Z AX AY AZ` 裡那三個數字就是它。
+
+`Inverse` 是 M24 為此加進 `Transform.h` 的 ——
+剛體的逆是精確的（共軛旋轉，加上反轉過的負位移），
+所以這裡沒有除法，也沒有容差要調。
+
+## ADR-M24-004 — 樹狀求解，而閉環**指名拒絕**
+
+### 一、接地
+
+Mate 說的是「相對於某個東西在哪裡」，
+所以一串 mate 必須從一個**不相對於任何東西**的地方開始。那就是接地。
+
+**預設什麼都沒有接地**，而 mate 走不到任何接地的組合件會被**拒絕**：
+
+```
+these mates start from nowhere: nothing in this assembly is grounded, so there
+is no answer to where any of it goes. Ground one instance.
+```
+
+不預設「清單裡的第一個」——那會讓所有東西的最終位置
+取決於**打字的順序**，那是「位置即意義」換一個名字。
+
+### 二、樹狀求解是**精確**的
+
+從每個接地的 instance 往外走，每一步用一個已經放好的鄰居放一個新的。
+**沒有迭代，沒有容差。** 這是一棵樹上唯一正確的做法，
+而且它剛好就是絕大多數組合件的形狀。
+
+一個細節花了時間才對：**每個 mate 只能用一次**。
+沒有這條，走到 mate 的另一端之後會馬上沿著同一個 mate 走回來，
+發現起點已經被放好了，然後**報告一個自己剛剛製造出來的閉環**。
+（這正是第一次跑 `hinge.ep3ds` 的症狀。）
+
+用過的 mate 是「來時路」；**沒用過**而另一端已經放好的 mate，才是真的閉環。
+
+### 三、閉環：拒絕，並指名
+
+```
+'CA' closes a loop: 'A' is already placed by another chain of mates, and
+solving a closed loop needs an iterative solver this does not have yet
+```
+
+四連桿機構就是閉環，而它是 **M25 的 gate**。
+近似一個閉環會安靜地產生一個**合不起來**的組合件，
+所以這裡的做法跟 OCCT 那一系列決定一樣：**量它，然後拒絕**。
+
+### 四、求解的結果**不記進 undo**
+
+被解出來的位置是**推導出來的**。
+使用者轉了鉸鏈之後按 Undo，意思是「把角度轉回去」，
+不是「把手臂移回去、角度留著」。
+
+## ADR-M24-005 — 自由度**逐 instance** 回報
+
+§20.3 講得很直白：
+
+> 「這個組立還沒定位完」是無法行動的訊息，
+> 「Arm 這個 instance 還有 1 個繞 Z 的旋轉自由度」才是。
+
+所以 `MateSolveReport` 每個 instance 一筆，
+帶著剩下幾個旋轉、幾個平移，以及**是誰決定的**：
+
+| instance | 旋轉 | 平移 | 由誰 |
+|---|---|---|---|
+| Base | 0 | 0 | ground |
+| Swing | 1 | 0 | Elbow |
+| Bolted | 0 | 0 | Bolt |
+| Loose | 3 | 3 | placed by hand |
+
+最後一行值得注意：**沒有任何 mate 碰過的 instance 不是「未求解」**，
+它就是被手放在那裡，六個自由度都在，
+而那是一個**完整而正確**的答案，不是一個失敗。
+
+## ADR-M24-006 — 重算跑兩趟，以及為什麼
+
+求解需要每個 instance 的 mate connector，而那些活在**零件檔**裡 ——
+所以在 instance 被建過一次之前，它們是未知的。
+
+於是 `AssemblyDocument::recompute()`：
+
+1. 第一趟：建每個 instance（讀零件檔，connector 隨之而來）；
+2. 求解：mate 說要動的東西被移動，而移動**只弄髒真的動了的那些**；
+3. 第二趟：只重建那些。
+
+**已經解好的組合件上，求解什麼都不會動，第二趟是空的。**
+成本只在組合件真的改變時付出，而那正是該付的時候。
+
+Mate **不是依賴圖的節點**，這也是刻意的：
+mate 不「建造」任何東西，它決定東西在哪裡。
+給它一個節點的話，instance 要依賴它（對），
+而讀 instance 的 connector 的 mate 又要反過來依賴 instance（也對）——
+在一個專門用來拒絕環的圖裡開一個環。
+
+所以求解是一趟走 mate 圖的過程，夾在兩趟圖重算之間，而圖從頭到尾看不到 mate。
+圖**看得到**的是求解寫下去的那些座標系，而它們剛好弄髒該弄髒的 instance。
+
+## ADR-M24-007 — 突變測試
+
+**28 個突變，全部被殺** —— 其中兩個是第一輪存活、之後補測試的。
+
+| # | 突變 | 被誰殺 |
+|---|---|---|
+| 1 | revolute 繞 +X 轉，不是共用的 +Z | M24_MATE_007、M24_HINGE_001／002、M24_CLI_001（5 紅） |
+| 2 | slider 沿 +X 滑 | M24_MATE_007、M24_HINGE_003 |
+| 3 | fastened 偷偷把 value 帶進世界 | M24_MATE_003 |
+| 4 | 四元數用整角而不是半角 | M24_MATE_007、M24_HINGE_002（4 紅） |
+| 5 | 擺放公式忘記從動端的 connector | 5 紅 |
+| 6 | 擺放公式忘記 mate 本身 | 5 紅 |
+| 7 | 擺放公式用 connector 而不是它的逆 | 5 紅 |
+| 8 | 主動端的 connector 讀成區域而不是世界 | M24_HINGE_010 |
+| 9 | 沒有接地也照樣求解 | M24_HINGE_005、M24_CLI_007 |
+| 10 | 閉環被當成已經解好 | M24_HINGE_007 |
+| 11 | 走不到接地的 instance 不提 | M24_HINGE_006 |
+| 12 | connector 名字找不到也照樣放 | M24_HINGE_008 |
+| 13 | 求解沿著來時路走回去 | 9 紅 |
+| 14 | 走到接地的直接鄰居就停 | M24_HINGE_010（3 紅） |
+| 15 | revolute 被報成沒有剩餘自由度 | M24_HINGE_009 |
+| 16 | 沒被 mate 碰過的 instance 被報成完全約束 | M24_HINGE_009 |
+| 17 | 允許 mate 到自己 | M24_MATE_002 |
+| 18 | fastened 接受 value | M24_MATE_003 |
+| 19 | 刪 instance 留下 mate | M24_MATE_005 |
+| 20 | 求解把自己做的事記成 undo | **M24_HINGE_011（存活，後補）** |
+| 21 | 驅動 mate 兩端都不標髒 | **M24_HINGE_012（存活，後補）** |
+| 22 | 重算永遠不跑第二趟 | 6 紅 |
+| 23 | `Inverse` 忘記反轉位移 | M24_MATE_008 |
+| 24 | 檔案裡的 mate value 掉了 | M24_SER_010 |
+| 25 | 接地沒有寫進檔案 | M24_SER_010 |
+| 26 | 載入器接受不是 instance 的 mate 端點 | M24_SER_011 |
+| 27 | 腳本把角度當弧度讀 | M24_CLI_002 |
+| 28 | connector 的零長度軸退回 +Z | M24_CLI_005 |
+
+### 第 13 個：9 紅，而那正是它該有的樣子
+
+「求解沿著來時路走回去」是我第一次跑 `hinge.ep3ds` 時**真的犯的錯**：
+走到 mate 的另一端之後，同一個 mate 又把你帶回起點，
+起點已經放好了，於是程式**報告一個它自己剛剛製造出來的閉環**。
+
+它現在會弄紅 9 個測試。那不是過度測試 ——
+那是「每個 mate 只能用一次」這條規則被**九個不同的角度**看著。
+
+### 第 20、21 個：兩個「幾何看不見」的存活者
+
+**第 20 個**：求解把自己做的事記成 undo 步驟。
+形狀完全一樣，所以每一個看幾何的測試都通過。
+補的 M24_HINGE_011 數 `undoDepth()`，而且**先確認求解真的動了東西** ——
+否則那會是一個因為什麼都沒發生而通過的測試。
+
+**第 21 個**：`setMateValue` 兩端都不標髒。
+幾何仍然是對的，因為求解寫座標系的時候會弄髒 ——
+所以這個突變**在幾何上是等價的**。它不是等價的地方在於
+**重算之前**：一棵能顯示什麼東西過期了的樹，是一棵讀得懂的樹。
+
+它在 Core 測試裡殺不掉，因為那裡沒有 kernel，instance 一出生就是 Dirty，
+斷言**沒有辦法失敗**。補的 M24_HINGE_012 先重算到 Valid，
+再驅動，然後**不重算**就檢查 —— 那才是那個性質的形狀。
+
+## 還沒有的
+
+- **閉環**（四連桿）—— M25 的 gate，需要迭代求解器
+- **其他 mate 型別**：圓柱、球、平面、Pin-slot、平行、相切、Width、Group（§20.1）
+- **Relation**（齒輪、齒條、螺紋、線性）—— §20.5 說得對：
+  relation 的輸入是 **mate 不是 instance**，而且 screw 只吃**一個** mate，
+  所以 relation 的模型要能表達兩種 arity，不能硬寫成二元關係
+- **運動極限**與 **mate 的 offset**（§20.2）—— Fastened 的 offset 也在這裡
+- **拖曳求解**（kinematic drag）與 **snap mode**（§20.6）—— 純 UI，不影響架構
+- **干涉檢查**（M25）
+- **次組合件**（M26）—— 地基在了：次組合件是座標系掛在座標系底下
+- **組合件層級的變數**：mate 的值目前是一個 `double`，不是 `Parameter`，
+  所以它不能寫運算式。組合件變數到位時，那個值會變成一個普通的具名參數，
+  而 `MateValueEdit` 這個 delta 會被 `ParameterValueEdit` 取代
+- UI：一樣只有腳本和 API

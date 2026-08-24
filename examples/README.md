@@ -245,3 +245,30 @@ assembly rather than the part, and the log says so at the moment it changes.
 ```
 ep3d --script examples/assembly-three-parts.ep3ds
 ```
+
+## `hinge.ep3ds` (M24)
+
+A hinge that turns. Read the gate carefully: **it turns, and it does not fall
+apart while turning.** Turning needs one number. Not falling apart needs the
+solver to put the arm where the mate actually says it goes, at every angle.
+
+One script draws a bracket with a pin, draws an arm, puts a **mate connector**
+on each, assembles them, and drives the joint. The connector lives on the
+**part** -- define "the pivot" once and every instance of that bracket in every
+assembly has it -- and the three numbers after its position are where its **+Z
+points**, which is the whole act of saying where the hinge is: a revolute turns
+about +Z and a slider slides along it.
+
+Something has to be **grounded**. A mate says where something is relative to
+something else, so a chain of them has to start from something that is not
+relative to anything; an assembly whose mates reach no ground is refused rather
+than started from whichever instance was typed first.
+
+The arm's centre of mass is what the script measures at each angle. Its z never
+changes, because the hinge axis is z -- an arm that had come off the pin would
+report a plausible number rather than an error, which is why the measurement is
+the test and the picture is not.
+
+```
+ep3d --script examples/hinge.ep3ds
+```

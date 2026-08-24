@@ -5,8 +5,11 @@
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
 
+#include "Core/Geometry/MathTypes.h"
+
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace paramcad {
 
@@ -59,6 +62,26 @@ public:
     const KernelShape& currentShape() const noexcept { return currentShape_; }
     ComputeState currentState() const noexcept { return state_; }
 
+    // THE MATE CONNECTORS THIS INSTANCE BRINGS IN (M24, roadmap §21).
+    //
+    // Defined in the PART and reused by every instance of it, which is the
+    // whole reason connector-based mating beats referencing topology: define
+    // "the shaft axis" once on the motor, and every motor in every assembly
+    // has it.
+    //
+    // Read out of the part file on each rebuild, alongside the solid, and held
+    // as a transform in the PART's own coordinates -- where it lands in the
+    // assembly is that composed with wherever this instance ended up, computed
+    // on demand and never stored (ADR-M10-002).
+    struct MateConnector {
+        std::string name;
+        Transform3D localTransform;
+    };
+    const std::vector<MateConnector>& connectors() const noexcept { return connectors_; }
+    // The named one, or nullptr. A name that no longer resolves is a loud
+    // failure at the mate rather than a quiet fallback here.
+    const MateConnector* findConnector(const std::string& name) const noexcept;
+
     RecomputeResult recompute(const RecomputeContext& context) override;
 
 private:
@@ -73,6 +96,7 @@ private:
     ObjectId frameId_;
     ComputeState state_ = ComputeState::Dirty;
     KernelShape currentShape_;
+    std::vector<MateConnector> connectors_;
 };
 
 } // namespace paramcad

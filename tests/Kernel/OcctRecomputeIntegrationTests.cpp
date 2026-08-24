@@ -1793,3 +1793,447 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_010_AnInstanceTakesTheCHAINTIPNotThe
         << "the instance brought in the block, not the part carved out of it";
     EXPECT_LT(measured, 0.6 * solidBlock);
 }
+
+// --- M24: mates, against real parts on disk ----------------------------------
+
+namespace {
+
+constexpr double kPiM24 = 3.14159265358979323846;
+
+// A part with a connector on it. `side` is the block, `at` where the connector
+// sits in the part's own coordinates, `axis` where its +Z points -- which is
+// the axis a revolute turns about and a slider slides along.
+void WriteConnectedPart(const std::string& path, double side, const std::string& bodyName,
+                        const std::string& connectorName, Vec3 at, Vec3 axis = Vec3{0, 0, 1}) {
+    PartDocument part{"Source"};
+    Sketch& sketch = part.addSketch("Base");
+    AddSquare(part, sketch.id(), side);
+    Parameter& tall = part.addParameter("H", side, UnitType::Millimeter);
+    Body& body = part.addBody(bodyName);
+    part.addPadFeature(body, "Pad1", sketch.id(), tall.id());
+
+    ReferenceFrame& frame = part.addFrame(connectorName + " frame");
+    Transform3D placement;
+    placement.translation = at;
+    // The shortest rotation taking +Z onto `axis`, built here rather than
+    // borrowed from the script layer -- a test that used the production
+    // helper would be checking that helper against itself.
+    const double length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+    EXPECT_GT(length, 1e-9);
+    const Vec3 to{axis.x / length, axis.y / length, axis.z / length};
+    if (to.z > 1.0 - 1e-12) {
+        placement.rotation = Quaternion{1, 0, 0, 0};
+    } else if (to.z < -1.0 + 1e-12) {
+        placement.rotation = Quaternion{0, 1, 0, 0};
+    } else {
+        const double s = std::sqrt((1.0 + to.z) * 2.0);
+        placement.rotation = Quaternion{s / 2.0, -to.y / s, to.x / s, 0.0};
+    }
+    part.setFrameTransform(frame.id(), placement);
+    part.addConnector(connectorName, ConnectorRole::Generic, frame.id());
+    ASSERT_TRUE(savePartDocumentToFile(part, path));
+}
+
+// How far apart two mate connectors ended up. THE measurement the hinge gate
+// turns on: "does not fall apart" is exactly "this stays zero".
+double ConnectorGap(const AssemblyDocument& assembly, ObjectId a, const std::string& aName,
+                    ObjectId b, const std::string& bName) {
+    bool foundA = false;
+    bool foundB = false;
+    const Transform3D at = assembly.mateConnectorWorldTransform(a, aName, &foundA);
+    const Transform3D bt = assembly.mateConnectorWorldTransform(b, bName, &foundB);
+    EXPECT_TRUE(foundA) << aName << " did not resolve";
+    EXPECT_TRUE(foundB) << bName << " did not resolve";
+    const double dx = at.translation.x - bt.translation.x;
+    const double dy = at.translation.y - bt.translation.y;
+    const double dz = at.translation.z - bt.translation.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+std::string SolveMessage(const AssemblyDocument& assembly) {
+    return assembly.mateSolveReport().message;
+}
+
+} // namespace
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_001_AHingeTURNSAndDoesNotFALLAPART) {
+    // THE M24 GATE, and the second half is the hard one.
+    //
+    // Turning needs one number to change. Not falling apart needs the solve to
+    // put the arm where the mate actually says it goes, at EVERY angle -- and
+    // that is checked by measuring the distance between the two mate
+    // connectors, which is zero if and only if they are still joined.
+    //
+    // A centroid test alone would not do it: an arm that drifted along the
+    // hinge axis would have a plausible-looking centroid and a joint that had
+    // come apart.
+    OcctGeometryKernel kernel;
+    ScratchPart bracket{"hinge-bracket.ep3d"};
+    ScratchPart arm{"hinge-arm.ep3d"};
+    WriteConnectedPart(bracket.path, 40.0, "Bracket", "Pivot", Vec3{0, 0, 40});
+    WriteConnectedPart(arm.path, 20.0, "Arm", "Eye", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Hinge"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& base = assembly.addInstance("Base", bracket.path);
+    PartInstance& swing = assembly.addInstance("Swing", arm.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
+    Mate& elbow = assembly.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", swing.id(),
+                                   "Eye", 0.0);
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    EXPECT_NEAR(ConnectorGap(assembly, base.id(), "Pivot", swing.id(), "Eye"), 0.0, 1e-9);
+
+    // The arm's own centroid is 10 mm up its axis from the Eye, and the Eye
+    // lands on the Pivot at (0, 0, 40) -- so at every angle the arm's centre
+    // is at z = 50 and the joint is at z = 40.
+    const KernelMassProperties closed = MassOf(kernel, swing.currentShape());
+    EXPECT_NEAR(closed.centerOfMassMm.z, 50.0, 1e-6);
+
+    // TURN IT. Every quarter, all the way round, and the joint has to hold at
+    // each one -- a solve that were right only at zero would pass a test that
+    // only ever looked at zero.
+    for (int step = 1; step <= 4; ++step) {
+        const double angle = step * kPiM24 / 2.0;
+        ASSERT_TRUE(assembly.setMateValue(elbow.id(), angle));
+        ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+        EXPECT_NEAR(ConnectorGap(assembly, base.id(), "Pivot", swing.id(), "Eye"), 0.0, 1e-9)
+            << "the hinge came apart at step " << step;
+        const KernelMassProperties turned = MassOf(kernel, swing.currentShape());
+        EXPECT_NEAR(turned.centerOfMassMm.z, 50.0, 1e-6)
+            << "the arm drifted along the hinge axis at step " << step;
+        EXPECT_NEAR(turned.volumeMm3, closed.volumeMm3, 1e-6 * closed.volumeMm3)
+            << "turning changed the arm";
+    }
+
+    // ...and the base never moved, because it is the ground.
+    EXPECT_NEAR(assembly.instanceWorldTransform(base.id()).translation.x, 0.0, 1e-12);
+    EXPECT_NEAR(assembly.instanceWorldTransform(base.id()).translation.z, 0.0, 1e-12);
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_002_ARevoluteReallyROTATESRatherThanJustMeeting) {
+    // A solve that ignored the angle entirely would still hold the joint
+    // together -- the connectors would coincide at every "angle" because the
+    // angle was never applied. So the claim here is about a point that is NOT
+    // on the hinge axis: the arm's far end has to swing.
+    OcctGeometryKernel kernel;
+    ScratchPart bracket{"swing-bracket.ep3d"};
+    ScratchPart arm{"swing-arm.ep3d"};
+    WriteConnectedPart(bracket.path, 40.0, "Bracket", "Pivot", Vec3{0, 0, 0});
+    // The arm's connector is OFF its own centre, so the arm's centroid is not
+    // on the hinge axis and has somewhere to swing to.
+    WriteConnectedPart(arm.path, 20.0, "Arm", "Eye", Vec3{-30, 0, 0});
+
+    AssemblyDocument assembly{"Swing"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& base = assembly.addInstance("Base", bracket.path);
+    PartInstance& swing = assembly.addInstance("Swing", arm.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
+    Mate& elbow = assembly.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", swing.id(),
+                                   "Eye", 0.0);
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties at0 = MassOf(kernel, swing.currentShape());
+    EXPECT_NEAR(at0.centerOfMassMm.x, 30.0, 1e-6);
+    EXPECT_NEAR(at0.centerOfMassMm.y, 0.0, 1e-6);
+
+    ASSERT_TRUE(assembly.setMateValue(elbow.id(), kPiM24 / 2.0));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties at90 = MassOf(kernel, swing.currentShape());
+    EXPECT_NEAR(at90.centerOfMassMm.x, 0.0, 1e-6) << "a quarter turn did not move the arm";
+    EXPECT_NEAR(at90.centerOfMassMm.y, 30.0, 1e-6);
+    EXPECT_NEAR(at90.centerOfMassMm.z, at0.centerOfMassMm.z, 1e-6);
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_003_ASliderSlidesAlongTheSHAREDAxis) {
+    // The connector's +Z is the axis for every mate kind, which is what makes
+    // one formula enough. Here the axis is +X on both parts, so a slider has
+    // to move the follower in X and in nothing else.
+    OcctGeometryKernel kernel;
+    ScratchPart railPart{"rail.ep3d"};
+    ScratchPart shoePart{"shoe.ep3d"};
+    WriteConnectedPart(railPart.path, 40.0, "Rail", "Track", Vec3{0, 0, 0}, Vec3{1, 0, 0});
+    WriteConnectedPart(shoePart.path, 20.0, "Shoe", "Foot", Vec3{0, 0, 0}, Vec3{1, 0, 0});
+
+    AssemblyDocument assembly{"Slide"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& rail = assembly.addInstance("Rail", railPart.path);
+    PartInstance& shoe = assembly.addInstance("Shoe", shoePart.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(rail.id(), true));
+    Mate& slide =
+        assembly.addMate("Slide", MateType::Slider, rail.id(), "Track", shoe.id(), "Foot", 0.0);
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties home = MassOf(kernel, shoe.currentShape());
+
+    ASSERT_TRUE(assembly.setMateValue(slide.id(), 55.0));
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    const KernelMassProperties out = MassOf(kernel, shoe.currentShape());
+
+    EXPECT_NEAR(out.centerOfMassMm.x - home.centerOfMassMm.x, 55.0, 1e-6)
+        << "the slider did not slide along the connectors' shared axis";
+    EXPECT_NEAR(out.centerOfMassMm.y, home.centerOfMassMm.y, 1e-6);
+    EXPECT_NEAR(out.centerOfMassMm.z, home.centerOfMassMm.z, 1e-6);
+    // A slider must not turn anything.
+    EXPECT_NEAR(assembly.instanceWorldTransform(shoe.id()).rotation.w, 1.0, 1e-9);
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_004_AFastenedMatePutsTheConnectorsExactlyTogether) {
+    OcctGeometryKernel kernel;
+    ScratchPart a{"fast-a.ep3d"};
+    ScratchPart b{"fast-b.ep3d"};
+    WriteConnectedPart(a.path, 40.0, "A", "Face", Vec3{20, 5, 0});
+    WriteConnectedPart(b.path, 20.0, "B", "Back", Vec3{-10, 0, 3});
+
+    AssemblyDocument assembly{"Stack"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& first = assembly.addInstance("First", a.path);
+    PartInstance& second = assembly.addInstance("Second", b.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(first.id(), true));
+    assembly.addMate("Bolt", MateType::Fastened, first.id(), "Face", second.id(), "Back");
+
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    EXPECT_NEAR(ConnectorGap(assembly, first.id(), "Face", second.id(), "Back"), 0.0, 1e-9);
+    // The follower moved to make that true rather than staying at the origin.
+    const Transform3D placement = assembly.instanceWorldTransform(second.id());
+    EXPECT_NEAR(placement.translation.x, 30.0, 1e-9);
+    EXPECT_NEAR(placement.translation.y, 5.0, 1e-9);
+    EXPECT_NEAR(placement.translation.z, -3.0, 1e-9);
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_005_MatesThatReachNoGroundAreREFUSED) {
+    // "Somewhere" is not an answer. Grounding the first instance in the list
+    // instead would make where everything ends up depend on the order things
+    // were typed.
+    OcctGeometryKernel kernel;
+    ScratchPart a{"ungrounded-a.ep3d"};
+    ScratchPart b{"ungrounded-b.ep3d"};
+    WriteConnectedPart(a.path, 40.0, "A", "P", Vec3{0, 0, 0});
+    WriteConnectedPart(b.path, 20.0, "B", "Q", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Floating"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& first = assembly.addInstance("First", a.path);
+    PartInstance& second = assembly.addInstance("Second", b.path);
+    assembly.addMate("Join", MateType::Fastened, first.id(), "P", second.id(), "Q");
+
+    EXPECT_FALSE(assembly.recompute().success);
+    EXPECT_NE(SolveMessage(assembly).find("nothing in this assembly is grounded"),
+              std::string::npos)
+        << SolveMessage(assembly);
+
+    // ...and grounding one fixes it, which is the evidence that the refusal
+    // was about the ground and not about something else.
+    ASSERT_TRUE(assembly.setInstanceGrounded(first.id(), true));
+    EXPECT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_006_AnInstanceStrandedFromEveryGroundIsREFUSED) {
+    // A grounded island and a floating pair. The floating pair has no answer,
+    // and saying nothing about it would leave two parts sitting wherever they
+    // were last dragged while the tree claimed the assembly was solved.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"island.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Islands"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& anchored = assembly.addInstance("Anchored", part.path);
+    PartInstance& lost = assembly.addInstance("Lost", part.path);
+    PartInstance& alsoLost = assembly.addInstance("AlsoLost", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(anchored.id(), true));
+    assembly.addMate("Floating", MateType::Fastened, lost.id(), "P", alsoLost.id(), "P");
+
+    EXPECT_FALSE(assembly.recompute().success);
+    const std::string why = SolveMessage(assembly);
+    EXPECT_NE(why.find("Lost"), std::string::npos) << why;
+    EXPECT_NE(why.find("not connected to any ground"), std::string::npos) << why;
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_007_AClosedLoopIsREFUSEDByName) {
+    // A tree solve is exact and needs no iteration; a closed loop cannot be
+    // solved that way at all. Refused by name rather than approximated,
+    // because an approximation would silently produce an assembly that does
+    // not close. That is M25's work, and this is what not having done it
+    // looks like.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"loop.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Loop"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& a = assembly.addInstance("A", part.path);
+    PartInstance& b = assembly.addInstance("B", part.path);
+    PartInstance& c = assembly.addInstance("C", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
+    assembly.addMate("AB", MateType::Fastened, a.id(), "P", b.id(), "P");
+    assembly.addMate("BC", MateType::Fastened, b.id(), "P", c.id(), "P");
+    assembly.addMate("CA", MateType::Fastened, c.id(), "P", a.id(), "P");
+
+    EXPECT_FALSE(assembly.recompute().success);
+    const std::string why = SolveMessage(assembly);
+    EXPECT_NE(why.find("closes a loop"), std::string::npos) << why;
+    EXPECT_NE(why.find("iterative solver"), std::string::npos) << why;
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_008_AConnectorNameThatDoesNotResolveIsNAMED) {
+    // The connector lives in the PART file, so a part that was edited can take
+    // one away. The reader's next move is to open that part, and which name
+    // went missing is the difference between doing that and guessing.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"named.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "Pivot", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& base = assembly.addInstance("Base", part.path);
+    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
+    assembly.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "NoSuchThing");
+
+    EXPECT_FALSE(assembly.recompute().success);
+    const std::string why = SolveMessage(assembly);
+    EXPECT_NE(why.find("NoSuchThing"), std::string::npos) << why;
+    EXPECT_NE(why.find("Arm"), std::string::npos) << why;
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_009_DOFIsReportedPERINSTANCE) {
+    // Roadmap §20.3: "this assembly is under-constrained" is not something a
+    // user can act on. "Swing has one rotation left, because of Elbow" is.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"dof.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& base = assembly.addInstance("Base", part.path);
+    PartInstance& swing = assembly.addInstance("Swing", part.path);
+    PartInstance& bolted = assembly.addInstance("Bolted", part.path);
+    PartInstance& loose = assembly.addInstance("Loose", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
+    assembly.addMate("Elbow", MateType::Revolute, base.id(), "P", swing.id(), "P");
+    assembly.addMate("Bolt", MateType::Fastened, swing.id(), "P", bolted.id(), "P");
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+
+    const auto freedomOf = [&](ObjectId id) {
+        for (const auto& one : assembly.mateSolveReport().freedoms)
+            if (one.instanceId == id) return one;
+        ADD_FAILURE() << "no freedom reported for an instance";
+        return AssemblyDocument::MateSolveReport::InstanceFreedom{};
+    };
+
+    EXPECT_EQ(freedomOf(base.id()).rotational, 0);
+    EXPECT_EQ(freedomOf(base.id()).translational, 0);
+    EXPECT_EQ(freedomOf(base.id()).describedBy, "ground");
+
+    EXPECT_EQ(freedomOf(swing.id()).rotational, 1) << "a revolute left no rotation";
+    EXPECT_EQ(freedomOf(swing.id()).translational, 0);
+    EXPECT_EQ(freedomOf(swing.id()).describedBy, "Elbow");
+
+    EXPECT_EQ(freedomOf(bolted.id()).rotational, 0) << "a fastened mate left a freedom";
+    EXPECT_EQ(freedomOf(bolted.id()).translational, 0);
+
+    // Nothing mates it, so it is still exactly where it was put, with all six.
+    EXPECT_EQ(freedomOf(loose.id()).rotational, 3);
+    EXPECT_EQ(freedomOf(loose.id()).translational, 3);
+    EXPECT_EQ(freedomOf(loose.id()).describedBy, "placed by hand");
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_010_AChainOfThreeIsPlacedAllTheWayDown) {
+    // The solve walks outwards from the ground, so an instance two mates away
+    // is placed from one that was itself placed by a mate. A solve that only
+    // handled direct neighbours of the ground would pass every test above.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"chain.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 20});
+
+    AssemblyDocument assembly{"Tower"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& a = assembly.addInstance("A", part.path);
+    PartInstance& b = assembly.addInstance("B", part.path);
+    PartInstance& c = assembly.addInstance("C", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
+    // Each block's connector is 20 mm up its own body, so fastening the next
+    // one's connector to it raises each by exactly nothing -- the connectors
+    // coincide -- while a SLIDER of 20 stacks them.
+    assembly.addMate("AB", MateType::Slider, a.id(), "P", b.id(), "P", 20.0);
+    assembly.addMate("BC", MateType::Slider, b.id(), "P", c.id(), "P", 20.0);
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+
+    const double zA = MassOf(kernel, a.currentShape()).centerOfMassMm.z;
+    const double zB = MassOf(kernel, b.currentShape()).centerOfMassMm.z;
+    const double zC = MassOf(kernel, c.currentShape()).centerOfMassMm.z;
+    EXPECT_NEAR(zB - zA, 20.0, 1e-6) << "the first link did not place B";
+    EXPECT_NEAR(zC - zB, 20.0, 1e-6) << "the chain stopped at the ground's neighbours";
+    EXPECT_NEAR(ConnectorGap(assembly, b.id(), "P", c.id(), "P"), 20.0, 1e-9);
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_011_SolvingIsNotSomethingTheUserDID) {
+    // A solved position is DERIVED. Pressing Undo after turning a hinge means
+    // "put the angle back", not "put the arm back and leave the angle" -- so
+    // the solve must move things without recording a single step.
+    //
+    // Every earlier test recomputed and then looked at geometry, which cannot
+    // see this: an assembly whose solve pushed a Move onto the undo stack
+    // produces exactly the same shapes.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"undo-solve.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 20});
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& base = assembly.addInstance("Base", part.path);
+    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
+    Mate& elbow = assembly.addMate("Elbow", MateType::Revolute, base.id(), "P", arm.id(), "P");
+
+    // A rebuild that really does move the arm -- confirmed below, so this is
+    // not a test that passes because nothing happened.
+    const std::size_t before = assembly.undoDepth();
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    EXPECT_EQ(assembly.undoDepth(), before) << "the solve recorded its own work";
+
+    ASSERT_TRUE(assembly.setMateValue(elbow.id(), kPiM24 / 2.0));
+    const std::size_t afterDrive = assembly.undoDepth();
+    EXPECT_EQ(afterDrive, before + 1) << "driving a mate is one step, not more";
+    const Transform3D wasAt = assembly.instanceWorldTransform(arm.id());
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+    EXPECT_EQ(assembly.undoDepth(), afterDrive) << "the solve recorded its own work";
+
+    // The rebuild DID move it, so the counts above mean something.
+    const Transform3D nowAt = assembly.instanceWorldTransform(arm.id());
+    EXPECT_GT(std::fabs(nowAt.rotation.z - wasAt.rotation.z), 1e-6)
+        << "the solve moved nothing, so this test proved nothing";
+
+    // ...and ONE undo puts the angle back, which is what the user meant.
+    ASSERT_TRUE(assembly.undo());
+    EXPECT_NEAR(elbow.value(), 0.0, 1e-12);
+}
+
+TEST(OcctRecomputeIntegrationTest, M24_HINGE_012_DrivingAMateMarksWhatItAffectsDIRTY) {
+    // Observable BEFORE any rebuild: a tree that shows what is stale is a tree
+    // a user can read. Checked here rather than in the Core suite because it
+    // needs the instances to have been Valid first -- and in a Core test with
+    // no kernel they are Dirty from birth, so the assertion cannot fail.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"dirty-drive.ep3d"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 20});
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& base = assembly.addInstance("Base", part.path);
+    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
+    Mate& elbow = assembly.addMate("Elbow", MateType::Revolute, base.id(), "P", arm.id(), "P");
+    ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
+
+    ASSERT_EQ(assembly.dependencyGraph().state(arm.id()), ComputeState::Valid);
+    ASSERT_EQ(assembly.dependencyGraph().state(base.id()), ComputeState::Valid);
+
+    ASSERT_TRUE(assembly.setMateValue(elbow.id(), 0.4));
+    // BOTH ends, because which one moves depends on the ground and the ground
+    // is not consulted by an edit. Dirtying one would be a guess about a
+    // direction that is not stored anywhere (ADR-M24-002).
+    EXPECT_EQ(assembly.dependencyGraph().state(arm.id()), ComputeState::Dirty);
+    EXPECT_EQ(assembly.dependencyGraph().state(base.id()), ComputeState::Dirty);
+}

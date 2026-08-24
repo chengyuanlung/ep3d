@@ -1265,3 +1265,137 @@ TEST(CliScriptTest, M23_CLI_007_MeasuringBeforeSolvingSaysWhichStepIsMissing) {
     EXPECT_NE(outcome.message.find("`solve` before measuring"), std::string::npos)
         << outcome.message;
 }
+
+// --- M24: a hinge from a script ----------------------------------------------
+
+TEST(CliScriptTest, M24_CLI_001_TheWorkedHingeTurnsAndStaysTogether) {
+    // The regression test for examples/hinge.ep3ds, and the M24 gate seen from
+    // where a user stands: one script draws two parts, puts a mate connector
+    // on each, assembles them, and turns the joint.
+    //
+    // The arm's centre of mass is what carries the claim. Its z never moves,
+    // because the hinge axis is z -- an arm that had come off the pin would
+    // report a plausible number rather than an error, which is exactly why the
+    // measurement is the test and the picture is not.
+    ScratchIo bracket{"cli-bracket.ep3d"};
+    ScratchIo arm{"cli-arm.ep3d"};
+    ScratchIo rig{"cli-hinge.ep3da"};
+
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string(
+                "sketch Plate\ntool rect\nclick -50 -20\nclick 10 20\npad Bracket 8\n"
+                "sketch Pin\ntool circle\nclick 0 0\nclick 6 0\npad Bracket 40\n"
+                "union Bracket\n"
+                "connector Pivot 0 0 40 0 0 1\n"
+                "solve\nsave ") + bracket.path + "\n"
+            "sketch Blade\ntool rect\nclick -8 -8\nclick 90 8\npad Arm 10\n"
+            "connector Eye 0 0 0 0 0 1\n"
+            "solve\nsave " + arm.path + "\n"
+            "assembly Hinge\n"
+            "insert Base " + bracket.path + " Bracket\n"
+            "insert Swing " + arm.path + " Arm\n"
+            "ground Base\n"
+            "mate revolute Elbow Base/Pivot Swing/Eye 0\n"
+            "solve\nmeasure\n"
+            "drive Elbow 90\nsolve\nmeasure\n"
+            "drive Elbow 180\nsolve\nmeasure\n"
+            "save " + rig.path + "\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(rig.exists());
+
+    // The arm is 98 x 16 x 10 with its Eye at the near end, so its centre sits
+    // 41 mm out along the arm, and the Pivot is 40 mm up the pin.
+    EXPECT_TRUE(LogMentions(outcome, "Swing: volume = 15680 mm^3, centre = 41, 0, 45 mm"))
+        << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "Swing: volume = 15680 mm^3, centre = 0, 41, 45 mm"))
+        << "a quarter turn did not swing the arm: " << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "Swing: volume = 15680 mm^3, centre = -41, 0, 45 mm"))
+        << "a half turn did not swing the arm: " << outcome.message;
+}
+
+TEST(CliScriptTest, M24_CLI_002_AnAngleIsTypedInDEGREESAndStoredInRADIANS) {
+    // The same conversion `draft` makes, in the same place, for the same
+    // reason: a drawing says degrees and the model stores radians, and a
+    // script should not have to know that.
+    //
+    // Checked by WHERE THE PART ENDS UP, not by reading the log back. A log
+    // line prints what was typed, so a test that read one would pass on a
+    // script that passed 90 straight through as radians -- which is 5.157
+    // radians once wrapped, and puts the arm somewhere else entirely.
+    ScratchIo part{"deg-part.ep3d"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch Base\ntool rect\nclick -10 -10\nclick 10 10\npad Block 20\n"
+                        "connector P -40 0 0\nsolve\nsave ") + part.path + "\n"
+            "assembly Rig\n"
+            "insert A " + part.path + " Block\n"
+            "insert B " + part.path + " Block\n"
+            "ground A\n"
+            "mate revolute Turn A/P B/P 90\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+
+    // B's connector is 40 mm to the -x side of its own centre, so at 0 degrees
+    // B's centre would sit 40 mm along +x from the joint, and a quarter turn
+    // puts it 40 mm along +y instead. Ninety RADIANS would put it at neither.
+    EXPECT_TRUE(LogMentions(outcome, "B: volume = 8000 mm^3, centre = -40, 40, 10 mm"))
+        << "90 was not read as degrees: " << outcome.message;
+}
+
+TEST(CliScriptTest, M24_CLI_003_AnUnknownMateKindListsTheOnesThatExist) {
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("assembly Rig\nmate hinge Elbow A/P B/Q\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("fastened, revolute or slider"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M24_CLI_004_AnEndThatIsNotAnInstanceSlashConnectorIsREFUSED) {
+    // "Base" alone names an instance and no connector, and guessing one --
+    // the first, say -- would silently mate a different place than the writer
+    // meant every time a part gained a connector.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("assembly Rig\ninsert Base parts/base.ep3d\nmate fastened Bolt Base Base/P\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("is not an INSTANCE/CONNECTOR pair"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M24_CLI_005_AConnectorAxisOfNOTHINGIsREFUSED) {
+    // A zero-length axis is a point, not a direction. Quietly falling back to
+    // +Z would put a hinge on an axis nobody chose.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("sketch Base\ntool rect\nclick -10 -10\nclick 10 10\npad Block 5\n"
+            "connector P 0 0 0 0 0 0\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("needs a direction"), std::string::npos) << outcome.message;
+}
+
+TEST(CliScriptTest, M24_CLI_006_AFastenedMateRefusesAValueFromTheScriptToo) {
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("assembly Rig\ninsert A parts/a.ep3d\ninsert B parts/b.ep3d\n"
+            "mate fastened Bolt A/P B/Q 12\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("no freedom"), std::string::npos) << outcome.message;
+}
+
+TEST(CliScriptTest, M24_CLI_007_AnUngroundedAssemblySaysWhatToDoAboutIt) {
+    // "The solve failed" is true and useless. "Ground one instance" is the
+    // reader's next action, in the message.
+    ScratchIo part{"ungrounded.ep3d"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch Base\ntool rect\nclick -10 -10\nclick 10 10\npad Block 5\n"
+                        "connector P 0 0 0\nsolve\nsave ") + part.path + "\n"
+            "assembly Rig\n"
+            "insert A " + part.path + " Block\n"
+            "insert B " + part.path + " Block\n"
+            "mate fastened Bolt A/P B/P\nsolve\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("Ground one instance"), std::string::npos)
+        << outcome.message;
+}

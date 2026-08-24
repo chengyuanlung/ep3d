@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <sstream>
+#include <optional>
 #include <unordered_set>
 #include <utility>
 
@@ -67,6 +68,28 @@ SaveResult validateSaveable(const AssemblyDocument& document) {
                               "instance '" + instance->name() +
                                   "' is placed by a frame that is not in this document"};
     }
+    for (const Mate* mate : document.mates()) {
+        if (const SaveResult bad = claim(mate->id(), "mate"); !bad) return bad;
+        // BOTH ENDS HAVE TO BE HERE. The loader checks it, so this checks it
+        // first -- otherwise a document could save and then refuse to open,
+        // which is the named worst case (ADR-M3-008).
+        for (const ObjectId end : {mate->leadingInstanceId(), mate->followingInstanceId()})
+            if (document.findInstance(end) == nullptr)
+                return SaveResult{SerializationError::UnknownDependencyId,
+                                  "mate '" + mate->name() +
+                                      "' names an instance that is not in this document"};
+        if (mate->leadingInstanceId() == mate->followingInstanceId())
+            return SaveResult{SerializationError::InvalidDependency,
+                              "mate '" + mate->name() + "' has the same instance at both ends"};
+        // A connector NAME is not checked here and cannot be: it lives in the
+        // part file, which may not even be present at save time. A name that
+        // no longer resolves is a recompute failure that says so, not a
+        // reason to refuse to write the document down.
+        if (mate->type() == MateType::Fastened && mate->value() != 0.0)
+            return SaveResult{SerializationError::InvalidFieldType,
+                              "mate '" + mate->name() +
+                                  "' is fastened and has no freedom to give a value to"};
+    }
     return SaveResult{};
 }
 
@@ -92,9 +115,37 @@ JsonValue toJson(const AssemblyDocument& document) {
         entry.set("sourcePath", JsonValue::makeString(instance->sourcePath()));
         entry.set("bodyName", JsonValue::makeString(instance->bodyName()));
         entry.set("frameId", JsonValue::makeString(idToString(instance->frameId())));
+        // v30. GROUNDED lives on the instance rather than in a list of its own:
+        // a parallel array naming ids is a second place the set of instances
+        // is written down, and the two would disagree the first time one was
+        // deleted.
+        entry.set("grounded", JsonValue::makeBool(document.isInstanceGrounded(instance->id())));
         instances.add(std::move(entry));
     }
     root.set("instances", std::move(instances));
+
+    // v30 (M24). Each end is an instance id and a connector NAME -- the
+    // connector itself lives in the part file and is reused by every instance
+    // of it (roadmap §21), so there is no id here to point at.
+    JsonValue mates = JsonValue::makeArray();
+    for (const Mate* mate : document.mates()) {
+        JsonValue entry = JsonValue::makeObject();
+        entry.set("id", JsonValue::makeString(idToString(mate->id())));
+        entry.set("name", JsonValue::makeString(mate->name()));
+        entry.set("type", JsonValue::makeString(std::string(toString(mate->type()))));
+        entry.set("leadingInstanceId",
+                  JsonValue::makeString(idToString(mate->leadingInstanceId())));
+        entry.set("leadingConnector", JsonValue::makeString(mate->leadingConnector()));
+        entry.set("followingInstanceId",
+                  JsonValue::makeString(idToString(mate->followingInstanceId())));
+        entry.set("followingConnector", JsonValue::makeString(mate->followingConnector()));
+        // RADIANS for a revolute, millimetres for a slider -- the unit the
+        // freedom has, written as the number it is. Degrees would be a second
+        // unit in a file that has none.
+        entry.set("value", JsonValue::makeNumber(mate->value()));
+        mates.add(std::move(entry));
+    }
+    root.set("mates", std::move(mates));
     return root;
 }
 
@@ -104,7 +155,26 @@ struct InstanceData {
     std::string sourcePath;
     std::string bodyName;
     ObjectId frameId = kInvalidObjectId;
+    bool grounded = false;
 };
+
+struct MateData {
+    ObjectId id = kInvalidObjectId;
+    std::string name;
+    MateType type = MateType::Fastened;
+    ObjectId leadingInstanceId = kInvalidObjectId;
+    std::string leadingConnector;
+    ObjectId followingInstanceId = kInvalidObjectId;
+    std::string followingConnector;
+    double value = 0.0;
+};
+
+std::optional<MateType> mateTypeFromString(std::string_view text) {
+    if (text == "Fastened") return MateType::Fastened;
+    if (text == "Revolute") return MateType::Revolute;
+    if (text == "Slider") return MateType::Slider;
+    return std::nullopt;
+}
 
 } // namespace
 
@@ -215,8 +285,111 @@ AssemblyLoadResult loadAssemblyDocument(std::istream& in) {
                                context + ": frameId " + idToString(*frame) +
                                    " is not a frame in this document");
 
+        // v30. Absent in a v29 file, where nothing was grounded because nothing
+        // could be -- so the default is false and those files load exactly as
+        // they did.
+        bool grounded = false;
+        if (const JsonValue* groundedField = entry.find("grounded")) {
+            if (groundedField->type() != JsonType::Bool)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'grounded' is not a boolean");
+            grounded = groundedField->asBool();
+        }
+
         instanceData.push_back(InstanceData{*id, name->asString(), source->asString(),
-                                            bodyName->asString(), *frame});
+                                            bodyName->asString(), *frame, grounded});
+    }
+
+    // v30 mates. Absent in a v29 file, which is why this is not required.
+    std::vector<MateData> mateData;
+    if (const JsonValue* matesField = root.find("mates")) {
+        if (matesField->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'mates' is not an array");
+        for (std::size_t i = 0; i < matesField->items().size(); ++i) {
+            const JsonValue& entry = matesField->items()[i];
+            const std::string context = "mates[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            MateData mate;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(
+                    SerializationError::InvalidFieldType,
+                    context + ": field 'id' is not a valid decimal ObjectId string");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            mate.id = *id;
+
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            mate.name = name->asString();
+
+            const JsonValue* type = requireField(entry, "type", JsonType::String, context, err);
+            if (type == nullptr) return loadFailure(err.error, err.message);
+            const auto parsedType = mateTypeFromString(type->asString());
+            if (!parsedType.has_value())
+                return loadFailure(SerializationError::InvalidEnumValue,
+                                   context + ": unknown mate type '" + type->asString() + "'");
+            mate.type = *parsedType;
+
+            // BOTH ENDS, and both have to be instances IN THIS FILE. Checked
+            // here rather than left to restoreMate's throw, because a loader
+            // that throws is a loader a caller cannot use.
+            struct End {
+                const char* idKey;
+                const char* connectorKey;
+                ObjectId* into;
+                std::string* connectorInto;
+            };
+            const End ends[2] = {{"leadingInstanceId", "leadingConnector",
+                                  &mate.leadingInstanceId, &mate.leadingConnector},
+                                 {"followingInstanceId", "followingConnector",
+                                  &mate.followingInstanceId, &mate.followingConnector}};
+            for (const End& end : ends) {
+                const JsonValue* endId =
+                    requireField(entry, end.idKey, JsonType::String, context, err);
+                if (endId == nullptr) return loadFailure(err.error, err.message);
+                const auto parsed = idFromString(endId->asString());
+                if (!parsed.has_value())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field '" + end.idKey +
+                                           "' is not a valid ObjectId");
+                bool isHere = false;
+                for (const InstanceData& candidate : instanceData)
+                    if (candidate.id == *parsed) isHere = true;
+                if (!isHere)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       context + ": " + end.idKey + " " + idToString(*parsed) +
+                                           " is not an instance in this document");
+                *end.into = *parsed;
+
+                const JsonValue* connector =
+                    requireField(entry, end.connectorKey, JsonType::String, context, err);
+                if (connector == nullptr) return loadFailure(err.error, err.message);
+                // A mate that names no connector can never resolve. Refused at
+                // the door, like an import with no path.
+                if (connector->asString().empty())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field '" + end.connectorKey +
+                                           "' names no connector");
+                *end.connectorInto = connector->asString();
+            }
+            if (mate.leadingInstanceId == mate.followingInstanceId)
+                return loadFailure(SerializationError::InvalidDependency,
+                                   context + ": both ends are the same instance");
+
+            const JsonValue* value = requireField(entry, "value", JsonType::Number, context, err);
+            if (value == nullptr) return loadFailure(err.error, err.message);
+            if (mate.type == MateType::Fastened && value->asNumber() != 0.0)
+                return loadFailure(
+                    SerializationError::InvalidFieldType,
+                    context + ": a fastened mate has no freedom to give a value to");
+            mate.value = value->asNumber();
+            mateData.push_back(std::move(mate));
+        }
     }
 
     auto document = std::make_unique<AssemblyDocument>(documentId, documentName);
@@ -229,10 +402,19 @@ AssemblyLoadResult loadAssemblyDocument(std::istream& in) {
             document->restoreRemoveObject(existing->id());
     docjson::restoreFramesAndConnectors(*document, frameData, connectorData);
 
-    for (auto& instance : instanceData)
+    for (auto& instance : instanceData) {
         document->restoreInstance(instance.id, std::move(instance.name), ComputeState::Dirty,
                                   std::move(instance.sourcePath), std::move(instance.bodyName),
                                   instance.frameId);
+        // Through the restore path so the ground does not arrive as an undo
+        // step (ADR-M9-001): a freshly opened document has nothing to undo.
+        if (instance.grounded) document->restoreInstanceGrounded(instance.id);
+    }
+    // MATES AFTER INSTANCES, because a mate names two of them.
+    for (auto& mate : mateData)
+        document->restoreMate(mate.id, std::move(mate.name), mate.type, mate.leadingInstanceId,
+                              std::move(mate.leadingConnector), mate.followingInstanceId,
+                              std::move(mate.followingConnector), mate.value);
 
     // A loaded document starts with an EMPTY history: the load is not
     // something the user did, and "Undo" on a freshly opened file must not

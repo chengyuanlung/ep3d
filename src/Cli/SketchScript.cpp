@@ -1,5 +1,7 @@
 #include "Cli/SketchScript.h"
 
+#include "Core/Assembly/Mate.h"
+#include "Core/Geometry/Transform.h"
 #include "Core/Assembly/AssemblyDocument.h"
 #include "Core/Serialization/AssemblyDocumentSerializer.h"
 #include "Core/Feature/BooleanFeature.h"
@@ -383,7 +385,11 @@ private:
         if (verb == "along") return doAlong(tokens);
         if (verb == "export") return doExport(tokens);
         if (verb == "import") return doImport(tokens);
+        if (verb == "connector") return doConnector(tokens);
         if (verb == "assembly") return doAssembly(tokens);
+        if (verb == "ground") return doGround(tokens);
+        if (verb == "mate") return doMate(tokens);
+        if (verb == "drive") return doDrive(tokens);
         if (verb == "insert") return doInsert(tokens);
         if (verb == "place") return doPlace(tokens);
         if (verb == "solve") return doSolve();
@@ -397,7 +403,8 @@ private:
             note("dimensions: " + Join(ScriptDimensionNames()));
             note("commands: sketch, tool, click, finish, constrain, dimension, pad, sweep, "
                  "loft, shell, draft, hole, union, subtract, intersect, ring, along, "
-                 "export, import, assembly, insert, place, solve, save, measure, "
+                 "export, import, connector, assembly, insert, place, ground, mate, "
+                 "drive, solve, save, measure, "
                  "handle, echo, help");
             return true;
         }
@@ -1180,6 +1187,155 @@ private:
             }
         }
         note("solve");
+        return true;
+    }
+
+    // The rotation that takes +Z onto `axis`. Used by `connector`, which is the
+    // one place a script says which way a mate's freedom points.
+    //
+    // The degenerate case is REFUSED rather than defaulted: a zero-length axis
+    // is a point, not a direction, and quietly using +Z would put a hinge on
+    // an axis nobody chose.
+    static bool RotationTakingZTo(const Vec3& axis, Quaternion* out) {
+        const double length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+        if (!(length > 1e-9)) return false;
+        const Vec3 to{axis.x / length, axis.y / length, axis.z / length};
+        // The shortest rotation from +Z to `to`: axis = z x to, angle from the
+        // dot product. The antiparallel case has no shortest rotation -- every
+        // axis in the XY plane works -- so +X is chosen and said so here.
+        const double dot = to.z;
+        if (dot > 1.0 - 1e-12) {
+            *out = Quaternion{1.0, 0.0, 0.0, 0.0};
+            return true;
+        }
+        if (dot < -1.0 + 1e-12) {
+            *out = Quaternion{0.0, 1.0, 0.0, 0.0}; // half turn about +X
+            return true;
+        }
+        const Vec3 cross{-to.y, to.x, 0.0}; // z_hat x to
+        const double s = std::sqrt((1.0 + dot) * 2.0);
+        *out = Quaternion{s / 2.0, cross.x / s, cross.y / s, cross.z / s};
+        return true;
+    }
+
+    bool doConnector(const std::vector<std::string>& tokens) {
+        // connector NAME X Y Z [AX AY AZ]
+        //
+        // A MATE CONNECTOR ON THE PART, which is where one belongs: define
+        // "the shaft axis" once on the motor and every motor in every assembly
+        // has it (roadmap §21). This is a PART verb, not an assembly verb.
+        //
+        // The three optional numbers are where the connector's +Z POINTS, and
+        // that is not decoration: a revolute turns about +Z and a slider
+        // slides along it, so pointing Z down the hinge pin is the whole act
+        // of saying where the hinge is. Default is +Z, which is what a part
+        // drawn with its axis up already wants.
+        if (tokens.size() != 5 && tokens.size() != 8)
+            return fail("connector needs a name and x y z, and optionally an axis");
+        Vec3 at{};
+        if (!ParseNumber(tokens[2], &at.x) || !ParseNumber(tokens[3], &at.y) ||
+            !ParseNumber(tokens[4], &at.z))
+            return fail("a connector needs three numbers in mm");
+        Vec3 axis{0.0, 0.0, 1.0};
+        if (tokens.size() == 8) {
+            if (!ParseNumber(tokens[5], &axis.x) || !ParseNumber(tokens[6], &axis.y) ||
+                !ParseNumber(tokens[7], &axis.z))
+                return fail("a connector axis needs three numbers");
+        }
+        Transform3D placement;
+        placement.translation = at;
+        if (!RotationTakingZTo(axis, &placement.rotation))
+            return fail("a connector axis needs a direction, not a point");
+
+        // A connector IS a frame plus meaning (ADR-M10-004), so this makes
+        // both -- and the frame is named after the connector so a tree reads
+        // as one thing rather than two.
+        ReferenceFrame& frame = document_.addFrame(tokens[1] + " frame");
+        document_.setFrameTransform(frame.id(), placement);
+        document_.addConnector(tokens[1], ConnectorRole::Generic, frame.id());
+        note("connector " + tokens[1] + " at " + FormatNumber(at.x) + ", " +
+             FormatNumber(at.y) + ", " + FormatNumber(at.z) + " along " +
+             FormatNumber(axis.x) + ", " + FormatNumber(axis.y) + ", " + FormatNumber(axis.z));
+        return true;
+    }
+
+    bool doGround(const std::vector<std::string>& tokens) {
+        // ground INSTANCE
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 2) return fail("ground needs an instance");
+        const PartInstance* instance = assembly_->findInstanceNamed(tokens[1]);
+        if (instance == nullptr)
+            return fail("there is no instance called '" + tokens[1] + "'");
+        if (!assembly_->setInstanceGrounded(instance->id(), true))
+            return fail("could not ground '" + tokens[1] + "'");
+        note("ground " + tokens[1]);
+        return true;
+    }
+
+    bool doMate(const std::vector<std::string>& tokens) {
+        // mate KIND NAME A/connector B/connector [VALUE]
+        //
+        // The value is in the unit that mate's remaining freedom has, said the
+        // way a drawing says it: DEGREES for a revolute, millimetres for a
+        // slider. The conversion to radians happens here, once, exactly as
+        // `draft` does it -- the model stores radians and a script should not
+        // have to know that.
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 5 && tokens.size() != 6)
+            return fail("mate needs a kind, a name, and two INSTANCE/CONNECTOR ends");
+        MateType type = MateType::Fastened;
+        if (tokens[1] == "fastened") type = MateType::Fastened;
+        else if (tokens[1] == "revolute") type = MateType::Revolute;
+        else if (tokens[1] == "slider") type = MateType::Slider;
+        else return fail("'" + tokens[1] + "' is not a mate kind; use fastened, revolute or "
+                         "slider");
+
+        ObjectId ends[2] = {kInvalidObjectId, kInvalidObjectId};
+        std::string connectors[2];
+        for (int i = 0; i < 2; ++i) {
+            const std::string& text = tokens[3 + i];
+            const std::size_t slash = text.find('/');
+            if (slash == std::string::npos || slash == 0 || slash + 1 >= text.size())
+                return fail("'" + text + "' is not an INSTANCE/CONNECTOR pair");
+            const PartInstance* instance =
+                assembly_->findInstanceNamed(text.substr(0, slash));
+            if (instance == nullptr)
+                return fail("there is no instance called '" + text.substr(0, slash) + "'");
+            ends[i] = instance->id();
+            connectors[i] = text.substr(slash + 1);
+        }
+
+        double value = 0.0;
+        if (tokens.size() == 6) {
+            if (!ParseNumber(tokens[5], &value)) return fail("a mate value is a number");
+            if (type == MateType::Fastened)
+                return fail("a fastened mate has no freedom to give a value to");
+            if (type == MateType::Revolute) value = value * 3.14159265358979323846 / 180.0;
+        }
+        if (assembly_->findMateNamed(tokens[2]) != nullptr)
+            return fail("there is already a mate called '" + tokens[2] + "'");
+        assembly_->addMate(tokens[2], type, ends[0], connectors[0], ends[1], connectors[1],
+                           value);
+        note("mate " + tokens[1] + " " + tokens[2] + ": " + tokens[3] + " <-> " + tokens[4] +
+             (tokens.size() == 6 ? " at " + tokens[5] : ""));
+        return true;
+    }
+
+    bool doDrive(const std::vector<std::string>& tokens) {
+        // drive MATE VALUE  -- turn the hinge
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 3) return fail("drive needs a mate and a value");
+        const Mate* mate = assembly_->findMateNamed(tokens[1]);
+        if (mate == nullptr) return fail("there is no mate called '" + tokens[1] + "'");
+        double value = 0.0;
+        if (!ParseNumber(tokens[2], &value)) return fail("a mate value is a number");
+        if (mate->type() == MateType::Revolute) value = value * 3.14159265358979323846 / 180.0;
+        if (!assembly_->setMateValue(mate->id(), value))
+            return fail("'" + tokens[1] + "' has no freedom to drive");
+        note("drive " + tokens[1] + " to " + tokens[2]);
         return true;
     }
 

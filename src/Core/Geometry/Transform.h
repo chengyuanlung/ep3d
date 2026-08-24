@@ -38,6 +38,22 @@ Quaternion MultiplyQuaternions(const Quaternion& a, const Quaternion& b) noexcep
 // is exactly why M10's gate F composes two levels by hand.
 Transform3D Compose(const Transform3D& parent, const Transform3D& child) noexcept;
 
+// The transform that undoes `transform`: Compose(t, Inverse(t)) is identity.
+//
+// Added in M24, because that is what a mate is made of. "Put the follower so
+// that ITS connector lands on the leader's" is
+//
+//     followerPlacement = leaderConnectorWorld o mate o Inverse(followerConnectorLocal)
+//
+// and the inverse is the half that says "work backwards from where the
+// connector has to end up to where the instance has to be".
+//
+// A rigid transform's inverse is exact -- the conjugate rotation and the
+// counter-rotated negative offset -- so nothing here divides by anything and
+// there is no tolerance to get wrong. It assumes a UNIT quaternion, which is
+// the only kind this project stores (placeShape refuses the others).
+Transform3D Inverse(const Transform3D& transform) noexcept;
+
 // A point in `transform`'s local space, expressed in its parent's space.
 Vec3 ApplyTransform(const Transform3D& transform, Vec3 local) noexcept;
 

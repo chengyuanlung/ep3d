@@ -12,6 +12,7 @@ add_library(ParametricCADCore
     src/Core/Document/CadDocument.cpp
     src/Core/Document/ObjectRegistry.cpp
     src/Core/Assembly/AssemblyDocument.cpp
+    src/Core/Assembly/Mate.cpp
     src/Core/Assembly/PartInstance.cpp
     src/Core/Document/DocumentBase.cpp
     src/Core/Document/PartDocument.cpp

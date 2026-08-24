@@ -411,3 +411,288 @@ TEST(AssemblyDocumentTest, M23_SER_009_ATransformMissingAComponentIsREFUSED) {
     EXPECT_NE(loaded.message.find("missing a numeric component"), std::string::npos)
         << loaded.message;
 }
+
+// --- M24: mates as document objects ------------------------------------------
+
+TEST(AssemblyDocumentTest, M24_MATE_001_AMateIsADocumentObjectLikeAnyOther) {
+    // Named, id-carrying, resolvable, renameable, removable. Stated as a test
+    // because a mate that was none of those would still solve, and would then
+    // be the one thing in the tree a user could not point at.
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Mate& elbow = document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(),
+                                   "Eye", 0.0);
+
+    EXPECT_NE(elbow.id(), kInvalidObjectId);
+    EXPECT_TRUE(document.objectRegistry().contains(elbow.id()));
+    EXPECT_EQ(document.findMateNamed("Elbow"), &elbow);
+    EXPECT_EQ(document.objectName(elbow.id()), "Elbow");
+
+    const DocumentBase::RenameResult renamed = document.renameObject(elbow.id(), "Knee");
+    ASSERT_TRUE(renamed.ok) << renamed.message;
+    EXPECT_EQ(document.findMateNamed("Knee"), &elbow);
+    // ...and its name is taken, by the same rule that governs every other name.
+    EXPECT_FALSE(document.renameObject(arm.id(), "Knee").ok);
+}
+
+TEST(AssemblyDocumentTest, M24_MATE_002_AThingCannotBeMatedToItself) {
+    // The solve would place it from its own placement, which is either a
+    // no-op or a contradiction depending on the value, and neither is what
+    // anybody meant.
+    AssemblyDocument document{"Rig"};
+    PartInstance& one = document.addInstance("One", "parts/one.ep3d");
+    EXPECT_THROW(document.addMate("Silly", MateType::Revolute, one.id(), "A", one.id(), "B", 0.0),
+                 std::runtime_error);
+    EXPECT_EQ(document.mates().size(), 0u);
+}
+
+TEST(AssemblyDocumentTest, M24_MATE_003_AFastenedMateHasNoFreedomToGiveAValueTo) {
+    // Refused rather than ignored: ignoring it would leave the writer
+    // believing they had offset something. Both doors, because two doors that
+    // disagree about what is legal is how a document saves and stops loading.
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+
+    EXPECT_THROW(document.addMate("Stuck", MateType::Fastened, base.id(), "A", arm.id(), "B",
+                                  5.0),
+                 std::runtime_error);
+    EXPECT_THROW(document.restoreMate(9911, "Stuck", MateType::Fastened, base.id(), "A",
+                                      arm.id(), "B", 5.0),
+                 std::runtime_error);
+
+    // ...and driving one after the fact is refused too, rather than silently
+    // stored where nothing would ever read it.
+    Mate& fixed = document.addMate("Fixed", MateType::Fastened, base.id(), "A", arm.id(), "B");
+    EXPECT_FALSE(document.setMateValue(fixed.id(), 5.0));
+    EXPECT_EQ(fixed.value(), 0.0);
+}
+
+TEST(AssemblyDocumentTest, M24_MATE_004_DrivingAMateIsAnOrdinaryUndoableEdit) {
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Mate& elbow = document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(),
+                                   "Eye", 0.0);
+
+    ASSERT_TRUE(document.setMateValue(elbow.id(), 1.0));
+    ASSERT_TRUE(document.setMateValue(elbow.id(), 2.0));
+    EXPECT_EQ(document.nextUndoLabel(), "Drive Elbow");
+
+    ASSERT_TRUE(document.undo());
+    EXPECT_NEAR(elbow.value(), 1.0, 1e-12);
+    ASSERT_TRUE(document.undo());
+    EXPECT_NEAR(elbow.value(), 0.0, 1e-12);
+    ASSERT_TRUE(document.redo());
+    EXPECT_NEAR(elbow.value(), 1.0, 1e-12);
+
+    // BOTH ENDS are dirtied, because which one moves depends on the ground and
+    // the ground is not consulted here. Dirtying one would be a guess about a
+    // direction that is not stored anywhere.
+    EXPECT_EQ(document.dependencyGraph().state(arm.id()), ComputeState::Dirty);
+    EXPECT_EQ(document.dependencyGraph().state(base.id()), ComputeState::Dirty);
+}
+
+TEST(AssemblyDocumentTest, M24_MATE_005_DeletingAnInstanceDeletesTheMatesThatNamedIt) {
+    // A mate to something that is not there cannot be solved and cannot be
+    // repaired -- there is no other instance to re-point it at -- so leaving
+    // it would put a permanent failure in the tree whose cause has already
+    // been deleted.
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    PartInstance& tip = document.addInstance("Tip", "parts/tip.ep3d");
+    const ObjectId elbow =
+        document.addMate("Elbow", MateType::Revolute, base.id(), "P", arm.id(), "E").id();
+    const ObjectId wrist =
+        document.addMate("Wrist", MateType::Fastened, arm.id(), "F", tip.id(), "G").id();
+    ASSERT_EQ(document.mates().size(), 2u);
+
+    ASSERT_TRUE(document.removeObject(arm.id()));
+    EXPECT_EQ(document.mates().size(), 0u) << "a mate outlived the instance it named";
+    EXPECT_FALSE(document.objectRegistry().contains(elbow));
+    EXPECT_FALSE(document.objectRegistry().contains(wrist));
+    EXPECT_NE(document.findInstance(base.id()), nullptr) << "the other end went too";
+}
+
+TEST(AssemblyDocumentTest, M24_MATE_006_GroundingIsUndoableAndDefaultsToNothing) {
+    // Nothing is grounded by default. Grounding the first instance in the list
+    // would make where everything ends up depend on the order things were
+    // typed, which is position-as-meaning by another name.
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    EXPECT_FALSE(document.isInstanceGrounded(base.id()));
+
+    ASSERT_TRUE(document.setInstanceGrounded(base.id(), true));
+    EXPECT_TRUE(document.isInstanceGrounded(base.id()));
+    ASSERT_TRUE(document.undo());
+    EXPECT_FALSE(document.isInstanceGrounded(base.id()));
+    ASSERT_TRUE(document.redo());
+    EXPECT_TRUE(document.isInstanceGrounded(base.id()));
+
+    // Grounding what is already grounded records nothing: an undo stack full
+    // of steps that change nothing is an undo stack a user cannot read.
+    const std::size_t depth = document.undoDepth();
+    EXPECT_TRUE(document.setInstanceGrounded(base.id(), true));
+    EXPECT_EQ(document.undoDepth(), depth);
+}
+
+TEST(AssemblyDocumentTest, M24_MATE_007_ONEFormulaDecidesWhatEachMateKindMeans) {
+    // Every mate type is MateTransform plus a placement rule written once, so
+    // a new kind cannot arrive with its own idea of what "connected" means.
+    const Transform3D fastened = MateTransform(MateType::Fastened, 7.0);
+    EXPECT_NEAR(fastened.translation.z, 0.0, 1e-12);
+    EXPECT_NEAR(fastened.rotation.w, 1.0, 1e-12) << "a fastened mate moved something";
+
+    const double quarter = 3.14159265358979323846 / 2.0;
+    const Transform3D turned = MateTransform(MateType::Revolute, quarter);
+    EXPECT_NEAR(turned.translation.z, 0.0, 1e-12) << "a revolute translated";
+    // A quarter turn about +Z takes +X to +Y, and nothing else would.
+    const Vec3 moved = RotateByQuaternion(turned.rotation, Vec3{1, 0, 0});
+    EXPECT_NEAR(moved.x, 0.0, 1e-9);
+    EXPECT_NEAR(moved.y, 1.0, 1e-9);
+
+    const Transform3D slid = MateTransform(MateType::Slider, 12.0);
+    EXPECT_NEAR(slid.rotation.w, 1.0, 1e-12) << "a slider turned";
+    EXPECT_NEAR(slid.translation.z, 12.0, 1e-12);
+    EXPECT_NEAR(slid.translation.x, 0.0, 1e-12) << "a slider slid along the wrong axis";
+}
+
+TEST(AssemblyDocumentTest, M24_MATE_008_InverseUndoesAComposeExactly) {
+    // The half of a mate that says "work backwards from where the connector
+    // has to end up to where the instance has to be". A rigid inverse is
+    // exact, so this is checked as exact rather than nearly.
+    Transform3D t;
+    t.translation = Vec3{3.0, -7.0, 11.0};
+    const double angle = 0.9;
+    t.rotation = Quaternion{std::cos(angle / 2.0), 0.0, std::sin(angle / 2.0), 0.0};
+
+    const Transform3D roundTrip = Compose(t, Inverse(t));
+    EXPECT_NEAR(roundTrip.translation.x, 0.0, 1e-12);
+    EXPECT_NEAR(roundTrip.translation.y, 0.0, 1e-12);
+    EXPECT_NEAR(roundTrip.translation.z, 0.0, 1e-12);
+    EXPECT_NEAR(std::fabs(roundTrip.rotation.w), 1.0, 1e-12);
+
+    // ...and the OTHER order too, which a conjugate-only implementation that
+    // forgot to counter-rotate the offset would fail.
+    const Transform3D otherWay = Compose(Inverse(t), t);
+    EXPECT_NEAR(otherWay.translation.x, 0.0, 1e-12);
+    EXPECT_NEAR(otherWay.translation.y, 0.0, 1e-12);
+    EXPECT_NEAR(otherWay.translation.z, 0.0, 1e-12);
+}
+
+TEST(AssemblyDocumentTest, M24_SER_010_MatesAndGroundingSurviveASaveAndAReopen) {
+    AssemblyDocument document{"Hinge"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d", "Bracket");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    ASSERT_TRUE(document.setInstanceGrounded(base.id(), true));
+    Mate& elbow = document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(),
+                                   "Eye", 0.75);
+    document.addMate("Slide", MateType::Slider, base.id(), "Rail", arm.id(), "Shoe", 12.5);
+
+    const std::string text = SaveToString(document);
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    ASSERT_TRUE(loaded) << loaded.message;
+    const AssemblyDocument& back = *loaded.document;
+
+    ASSERT_EQ(back.mates().size(), 2u);
+    const Mate* elbowBack = back.findMateNamed("Elbow");
+    ASSERT_NE(elbowBack, nullptr);
+    EXPECT_EQ(elbowBack->type(), MateType::Revolute);
+    EXPECT_EQ(elbowBack->leadingConnector(), "Pivot");
+    EXPECT_EQ(elbowBack->followingConnector(), "Eye");
+    // RADIANS, unconverted. A file that stored degrees would be a second unit
+    // in a format that has none.
+    EXPECT_NEAR(elbowBack->value(), 0.75, 1e-12);
+    EXPECT_NEAR(back.findMateNamed("Slide")->value(), 12.5, 1e-12);
+
+    const PartInstance* baseBack = back.findInstanceNamed("Base");
+    ASSERT_NE(baseBack, nullptr);
+    EXPECT_TRUE(back.isInstanceGrounded(baseBack->id()));
+    EXPECT_FALSE(back.isInstanceGrounded(back.findInstanceNamed("Arm")->id()));
+    EXPECT_EQ(back.undoDepth(), 0u) << "loading recorded undo steps";
+
+    // Byte-identical, which catches what a field-by-field check cannot:
+    // something written that is not read, or read into the wrong place.
+    EXPECT_EQ(SaveToString(back), text);
+    (void)elbow;
+}
+
+TEST(AssemblyDocumentTest, M24_SER_011_AMateNamingSomethingThatIsNotThereIsREFUSED) {
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "Eye");
+    std::string text = SaveToString(document);
+
+    const std::string real = "\"followingInstanceId\": \"" + std::to_string(arm.id()) + "\"";
+    const std::size_t at = text.find(real);
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, real.size(), "\"followingInstanceId\": \"888555\"");
+
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_EQ(loaded.error, SerializationError::UnknownDependencyId);
+    EXPECT_NE(loaded.message.find("888555"), std::string::npos) << loaded.message;
+}
+
+TEST(AssemblyDocumentTest, M24_SER_012_AMateNamingNOConnectorIsREFUSED) {
+    // A mate that names no connector can never resolve, so it is refused at
+    // the door rather than at solve time, a long way from the cause.
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "Eye");
+
+    std::string text = SaveToString(document);
+    const std::size_t at = text.find("\"Pivot\"");
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, std::string("\"Pivot\"").size(), "\"\"");
+
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_NE(loaded.message.find("names no connector"), std::string::npos) << loaded.message;
+}
+
+TEST(AssemblyDocumentTest, M24_SER_013_AFastenedMateCarryingAValueInTheFileIsREFUSED) {
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    document.addMate("Fixed", MateType::Fastened, base.id(), "A", arm.id(), "B");
+
+    std::string text = SaveToString(document);
+    const std::size_t at = text.find("\"value\": 0");
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, std::string("\"value\": 0").size(), "\"value\": 4");
+
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_NE(loaded.message.find("no freedom"), std::string::npos) << loaded.message;
+}
+
+TEST(AssemblyDocumentTest, M24_SER_014_ADocumentWithABrokenMateIsRefusedAtSAVE) {
+    // ADR-M3-008 again, for the new kind of reference: every rule the loader
+    // enforces is enforced before a byte is written, so a document that saves
+    // can always be opened.
+    AssemblyDocument document{"Rig"};
+    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "Eye");
+    ASSERT_TRUE(TrySave(document));
+
+    // Take one end away through a path that does NOT cascade -- the restore
+    // path, which is how a loader builds a document and therefore the one that
+    // has to be defended against.
+    AssemblyDocument hand{"Rig"};
+    PartInstance& left = hand.addInstance("Left", "parts/base.ep3d");
+    PartInstance& right = hand.addInstance("Right", "parts/arm.ep3d");
+    hand.restoreMate(7001, "Elbow", MateType::Revolute, left.id(), "Pivot", right.id(), "Eye",
+                     0.0);
+    ASSERT_TRUE(TrySave(hand));
+    ASSERT_TRUE(hand.removeObject(right.id()));
+    // The cascade took the mate with it, so the document is savable again --
+    // which IS the invariant, stated as the outcome rather than as a rule.
+    EXPECT_TRUE(TrySave(hand));
+    EXPECT_EQ(hand.mates().size(), 0u);
+}

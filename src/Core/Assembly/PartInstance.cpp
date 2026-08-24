@@ -1,6 +1,7 @@
 #include "Core/Assembly/PartInstance.h"
 
 #include "Core/Body/Body.h"
+#include "Core/Connector/Connector.h"
 #include "Core/Document/DocumentBase.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/ISolidFeature.h"
@@ -21,6 +22,13 @@ PartInstance::PartInstance(ObjectId id, std::string name, ComputeState state,
                            std::string sourcePath, std::string bodyName, ObjectId frameId)
     : id_(RestoreObjectId(id)), name_(std::move(name)), sourcePath_(std::move(sourcePath)),
       bodyName_(std::move(bodyName)), frameId_(frameId), state_(state) {}
+
+const PartInstance::MateConnector* PartInstance::findConnector(
+    const std::string& name) const noexcept {
+    for (const MateConnector& one : connectors_)
+        if (one.name == name) return &one;
+    return nullptr;
+}
 
 RecomputeResult PartInstance::recompute(const RecomputeContext& context) {
     const auto fail = [this](std::string message) {
@@ -87,6 +95,16 @@ RecomputeResult PartInstance::recompute(const RecomputeContext& context) {
             tip = solid;
     if (tip == nullptr || !tip->currentShape().isValid())
         return fail("'" + chosen->name() + "' in '" + sourcePath_ + "' has no solid");
+
+    // WHAT IT OFFERS TO BE MATED BY. The part's own connectors, in the
+    // part's own coordinates. Rebuilt from the file every time alongside the
+    // solid, for the same reason: the part file is the truth, so a connector
+    // the part no longer has must stop existing here too rather than linger
+    // as a stale place a mate could still land on.
+    connectors_.clear();
+    for (const Connector* connector : part.connectors())
+        connectors_.push_back(MateConnector{connector->name(),
+                                            part.worldTransform(connector->frameId())});
 
     // WHERE. The frame's world transform, composed by the document -- this
     // holds no transform of its own, so there is no second answer to keep in

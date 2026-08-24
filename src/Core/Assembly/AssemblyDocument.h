@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/Assembly/Mate.h"
 #include "Core/Assembly/PartInstance.h"
 #include "Core/Document/DocumentBase.h"
 #include "Core/Geometry/MathTypes.h"
@@ -71,6 +72,85 @@ public:
     Transform3D instanceTransform(ObjectId instanceId) const noexcept;
     Transform3D instanceWorldTransform(ObjectId instanceId) const noexcept;
 
+    // --- Grounding (M24) -----------------------------------------------------
+    //
+    // A mate says where something is RELATIVE to something else, so a chain of
+    // them has to start somewhere that is not relative to anything. That is
+    // what grounding is: this instance stays where it was put, and everything
+    // mated to it follows.
+    //
+    // Nothing is grounded by default, and an assembly whose mates reach no
+    // ground is REFUSED with the names -- because "somewhere" is not an answer
+    // and putting the first instance in the list there would make the answer
+    // depend on the order things were typed.
+    bool setInstanceGrounded(ObjectId instanceId, bool grounded);
+    bool isInstanceGrounded(ObjectId instanceId) const noexcept;
+    // The restore-path twin: grounds without recording an undo step.
+    bool restoreInstanceGrounded(ObjectId instanceId);
+
+    // --- Mates (M24, ADR-M24-002) --------------------------------------------
+    //
+    // Each side is an instance and a connector NAME on the part it brings in.
+    // `value` is the mate's one remaining freedom -- radians for a revolute,
+    // millimetres for a slider -- and must be zero for a Fastened mate, which
+    // has no freedom to spend it on.
+    //
+    // Throws when an id is not an instance, when both sides are the SAME
+    // instance (a thing cannot be mated to itself), or when a Fastened mate is
+    // handed a value.
+    Mate& addMate(std::string name, MateType type, ObjectId leadingInstanceId,
+                  std::string leadingConnector, ObjectId followingInstanceId,
+                  std::string followingConnector, double value = 0.0);
+    Mate& restoreMate(ObjectId id, std::string name, MateType type, ObjectId leadingInstanceId,
+                      std::string leadingConnector, ObjectId followingInstanceId,
+                      std::string followingConnector, double value);
+
+    std::vector<const Mate*> mates() const;
+    const Mate* findMate(ObjectId id) const noexcept;
+    const Mate* findMateNamed(const std::string& name) const noexcept;
+
+    // Drives the mate's one freedom. This is what "turn the hinge" means: it
+    // is an ordinary undoable edit, and the next rebuild moves everything
+    // downstream of it. False if the id is not a mate; refused for Fastened.
+    bool setMateValue(ObjectId mateId, double value);
+
+    // WHERE A MATE CONNECTOR ACTUALLY IS, in the assembly (M24).
+    //
+    // The instance's placement composed with the connector's place on the
+    // part. Composed on demand, never stored -- which is what makes "the two
+    // connectors are the same place" a thing that can be MEASURED rather than
+    // assumed, and that measurement is the half of the hinge gate a picture
+    // cannot check.
+    //
+    // `found` is set false when the instance or the connector name does not
+    // resolve, because identity is not a place and returning one would be a
+    // lie a caller cannot distinguish from an answer.
+    Transform3D mateConnectorWorldTransform(ObjectId instanceId, const std::string& connectorName,
+                                            bool* found = nullptr) const noexcept;
+
+    // --- What the solve concluded (M24, ADR-M24-004) --------------------------
+    //
+    // Filled by the last recompute. Empty message and true means the mates were
+    // satisfiable and every instance was placed; false names what stopped it.
+    struct MateSolveReport {
+        bool ok = true;
+        std::string message;
+        // Per instance, the degrees of freedom the mates LEFT it (roadmap
+        // §20.3 requires this be readable per instance, not as one number for
+        // the assembly: "this assembly is under-constrained" is not something
+        // a user can act on).
+        struct InstanceFreedom {
+            ObjectId instanceId = kInvalidObjectId;
+            int rotational = 0;
+            int translational = 0;
+            std::string describedBy; // the mate that decided it, or "ground"
+        };
+        std::vector<InstanceFreedom> freedoms;
+    };
+    const MateSolveReport& mateSolveReport() const noexcept { return solveReport_; }
+
+    DocumentRecomputeReport recompute() override;
+
     bool removeObject(ObjectId id) override;
 
 protected:
@@ -86,7 +166,20 @@ private:
     // add and restore cannot disagree about what an instance's frame is.
     void wireInstance(PartInstance& instance);
 
+    Mate* findMateForEdit(ObjectId id) noexcept;
+    // The rules a mate has to pass before it exists at all. Shared by add and
+    // restore so the two doors cannot come to disagree about what a legal mate
+    // is -- which is how a document that saves cleanly stops loading.
+    void requireMatable(ObjectId leadingInstanceId, ObjectId followingInstanceId, MateType type,
+                        double value, const char* who) const;
+    // Places every instance the mates reach, starting from the grounded ones.
+    // Returns false and fills `solveReport_` when it cannot.
+    bool solveMates();
+
     std::vector<std::unique_ptr<PartInstance>> instances_;
+    std::vector<std::unique_ptr<Mate>> mates_;
+    std::vector<ObjectId> groundedInstances_;
+    MateSolveReport solveReport_;
 };
 
 } // namespace paramcad
