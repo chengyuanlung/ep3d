@@ -301,6 +301,123 @@ void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
         Dot(p, 19.0, 19.5, ink.stroke, 2.0);
         break;
 
+    // --- Assembly (M30.2) ---------------------------------------------------
+    //
+    // A PART IS A FILLED BLOCK in this group, where sketch geometry is a line.
+    // That is the one visual rule the set follows, and it is what lets a user
+    // glancing at the toolbar tell that these commands are about whole parts
+    // without reading a single label.
+    case SketchIcon::InsertInstance: {
+        // A block dropping INTO a place waiting for it: the dashed outline is
+        // where it goes, the solid one is what is arriving.
+        Stroke(p, ink.subdue, 1.4, Qt::DashLine);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(3.5, 12.5, 10.0, 8.0));
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        p.drawRect(QRectF(11.0, 4.0, 9.5, 8.0));
+        Arrow(p, QPointF(10.0, 13.5), QPointF(-1.0, 1.0), ink.stroke, 4.2, 1.8);
+        break;
+    }
+    case SketchIcon::GroundInstance: {
+        // A block sitting ON hatched ground -- the drawing convention for
+        // "this does not move", which is what grounding means.
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        p.drawRect(QRectF(6.0, 4.5, 12.0, 9.0));
+        Stroke(p, ink.stroke, 1.7);
+        p.drawLine(QPointF(3.0, 14.5), QPointF(21.0, 14.5));
+        Stroke(p, ink.stroke, 1.2);
+        for (int i = 0; i < 5; ++i) {
+            const double x = 4.5 + i * 3.6;
+            p.drawLine(QPointF(x, 20.0), QPointF(x + 2.6, 14.8));
+        }
+        break;
+    }
+    case SketchIcon::AddMate: {
+        // TWO blocks meeting at ONE point -- the connector they share. The dot
+        // is the whole idea: a mate is two things meeting somewhere.
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.subdue);
+        p.drawRect(QRectF(2.5, 8.0, 8.0, 8.0));
+        p.setBrush(ink.accent);
+        p.drawRect(QRectF(13.5, 8.0, 8.0, 8.0));
+        Dot(p, 12.0, 12.0, ink.stroke, 2.6);
+        break;
+    }
+    case SketchIcon::DriveMate: {
+        // A block turned about a pinned centre: driving is a value you set, and
+        // the arc is the value moving.
+        Stroke(p, ink.accent, 1.7);
+        p.setBrush(Qt::NoBrush);
+        p.drawArc(QRectF(4.0, 4.0, 16.0, 16.0), 20 * 16, 200 * 16);
+        Arrow(p, QPointF(19.4, 9.0), QPointF(0.8, -1.0), ink.accent, 4.2, 1.8);
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.stroke);
+        p.drawRect(QRectF(9.5, 9.5, 5.0, 5.0));
+        break;
+    }
+    case SketchIcon::LimitMate: {
+        // The same turn, STOPPED at both ends. The stops are the point, so they
+        // are the heaviest strokes in it.
+        Stroke(p, ink.subdue, 1.5);
+        p.setBrush(Qt::NoBrush);
+        p.drawArc(QRectF(4.0, 4.0, 16.0, 16.0), 30 * 16, 120 * 16);
+        Stroke(p, ink.accent, 2.4);
+        p.drawLine(QPointF(4.6, 10.0), QPointF(8.4, 12.2));
+        p.drawLine(QPointF(19.4, 10.0), QPointF(15.6, 12.2));
+        Dot(p, 12.0, 15.5, ink.stroke, 2.2);
+        break;
+    }
+    case SketchIcon::AssemblyPattern: {
+        // One solid block plus ghosts: a pattern is an original and copies, and
+        // ADR-M26-003 says the copies hang off the original.
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        p.drawRect(QRectF(2.5, 9.0, 6.0, 6.0));
+        Stroke(p, ink.subdue, 1.4);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(9.5, 9.0, 6.0, 6.0));
+        p.drawRect(QRectF(16.5, 9.0, 6.0, 6.0));
+        break;
+    }
+    case SketchIcon::NamedPosition: {
+        // A bookmark over a block: a place you can come back to, and nothing
+        // about the part changes when you do.
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.subdue);
+        p.drawRect(QRectF(2.5, 7.0, 11.0, 12.0));
+        p.setBrush(ink.accent);
+        const QPointF flag[5] = {QPointF(13.5, 3.5), QPointF(21.0, 3.5), QPointF(21.0, 16.0),
+                                 QPointF(17.25, 12.0), QPointF(13.5, 16.0)};
+        p.drawPolygon(flag, 5);
+        break;
+    }
+    case SketchIcon::ExplodeView: {
+        // Blocks flying APART along one line, with the line drawn: §49's
+        // explosion is an ORDERED set of moves, and the trail is the order.
+        Stroke(p, ink.subdue, 1.2, Qt::DashLine);
+        p.drawLine(QPointF(3.5, 20.0), QPointF(20.5, 4.0));
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        p.drawRect(QRectF(2.0, 16.0, 6.0, 6.0));
+        p.drawRect(QRectF(9.0, 9.5, 6.0, 6.0));
+        p.drawRect(QRectF(16.0, 3.0, 6.0, 6.0));
+        break;
+    }
+    case SketchIcon::Interference: {
+        // Two blocks OVERLAPPING, with the overlap itself filled -- which is
+        // the number the check reports.
+        Stroke(p, ink.stroke, 1.5);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(3.0, 5.5, 11.0, 11.0));
+        p.drawRect(QRectF(10.0, 8.5, 11.0, 11.0));
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        p.drawRect(QRectF(10.0, 8.5, 4.0, 8.0));
+        break;
+    }
+
     case SketchIcon::HVDistance:
         // BOTH legs at once: the two points, the horizontal run and the
         // vertical rise, drawn as the right-angled pair they are. It has to
@@ -1022,6 +1139,15 @@ const char* SketchIconName(SketchIcon icon) noexcept {
     case SketchIcon::AutoPlaceDimensions: return "AutoPlaceDimensions";
     case SketchIcon::HorizontalDistance: return "HorizontalDistance";
     case SketchIcon::VerticalDistance: return "VerticalDistance";
+    case SketchIcon::InsertInstance: return "InsertInstance";
+    case SketchIcon::GroundInstance: return "GroundInstance";
+    case SketchIcon::AddMate: return "AddMate";
+    case SketchIcon::DriveMate: return "DriveMate";
+    case SketchIcon::LimitMate: return "LimitMate";
+    case SketchIcon::AssemblyPattern: return "AssemblyPattern";
+    case SketchIcon::NamedPosition: return "NamedPosition";
+    case SketchIcon::ExplodeView: return "ExplodeView";
+    case SketchIcon::Interference: return "Interference";
     case SketchIcon::HVDistance: return "HVDistance";
     case SketchIcon::PointLineDistance: return "PointLineDistance";
     case SketchIcon::Offset: return "Offset";

@@ -433,6 +433,13 @@ public:
     // The MODEL toolbar: the solid commands, which lived only in the Insert
     // menu. Asked of the widgets for the same reason the others are.
     int modelToolbarButtonCount() const;
+    // The assembly toolbar, asked the same questions as the others.
+    int assemblyToolbarButtonCount() const;
+    unsigned long long assemblyToolbarIconFingerprint(int index) const;
+    std::string assemblyToolbarLabel(int index) const;
+    bool assemblyToolbarButtonEnabled(int index) const;
+    bool assemblyToolbarVisible() const;
+    bool modelToolbarVisible() const;
     int modelToolbarButtonsWithIcons() const;
     unsigned long long modelToolbarIconFingerprint(int index) const;
     std::string modelToolbarLabel(int index) const;
@@ -820,6 +827,9 @@ private:
     QAction* extendAction_ = nullptr;
     QToolBar* mainToolBar_ = nullptr;
     QToolBar* modelToolBar_ = nullptr;
+    // The ASSEMBLY toolbar (M30.2). Shown only for an assembly, with the part
+    // toolbar hidden then -- see refreshCommandStates.
+    QToolBar* assemblyToolBar_ = nullptr;
     // The Assembly menu's actions, enabled only when the document is one.
     QAction* insertInstanceAction_ = nullptr;
     QAction* groundInstanceAction_ = nullptr;

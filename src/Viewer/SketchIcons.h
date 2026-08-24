@@ -116,6 +116,22 @@ enum class SketchIcon {
     // used it.
     //
     // Keep it LAST. Anything after it would be invisible to every sweep.
+    // --- Assembly (M30.2) ---------------------------------------------------
+    //
+    // Their own group, drawn to read as being ABOUT PARTS rather than about
+    // geometry: a part is a filled block here, where every sketch icon is a
+    // line. That is the one visual rule this set follows, and it is what makes
+    // an assembly toolbar tell you at a glance that you are not in a part.
+    InsertInstance,
+    GroundInstance,
+    AddMate,
+    DriveMate,
+    LimitMate,
+    AssemblyPattern,
+    NamedPosition,
+    ExplodeView,
+    Interference,
+
     Count
 };
 

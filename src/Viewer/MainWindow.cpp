@@ -600,6 +600,55 @@ void MainWindow::buildToolbar() {
         QStringLiteral("Chamfer\nCut every edge of the current solid"));
     model->addAction(insertChamferAction_);
     modelToolBar_ = model;
+
+    // --- The ASSEMBLY toolbar (M30.2) ---------------------------------------
+    //
+    // ITS OWN BAR, shown only for an assembly while the part bar is hidden.
+    //
+    // The menus could afford to leave part items visible-and-disabled: a menu
+    // is opened deliberately, and a greyed row still says the command exists.
+    // A TOOLBAR is always in view, and an open assembly showing seventeen
+    // greyed part buttons and no assembly buttons is what a screenshot of M30
+    // actually looked like.
+    //
+    // KNOWN COSMETIC ISSUE, measured and named rather than left to be noticed:
+    // the break gives this bar its own row, so the hidden bar's row stays as a
+    // blank strip and the visible bar sits about 49 px lower than a part's
+    // does. Two ways round it were tried and are both worse -- sharing a row
+    // leaves Qt collapsing it, so the bar reports visible and paints nothing,
+    // and one bar with swapped contents did not restore the part actions after
+    // the swap back. A blank strip is the cheapest of the three wrongs, and it
+    // is the only one a user can still work through.
+    addToolBarBreak();
+    QToolBar* assembly = addToolBar(QStringLiteral("Assembly"));
+    assembly->setIconSize(QSize(ui::size::kToolbarIcon, ui::size::kToolbarIcon));
+    assembly->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    assembly->setMovable(false);
+
+    const auto addAssembly = [&](QAction* action, ui::SketchIcon which,
+                                 const char* shortLabel) {
+        if (action == nullptr) return;
+        action->setIcon(icon(which));
+        action->setIconText(QString::fromLatin1(shortLabel));
+        assembly->addAction(action);
+    };
+    addAssembly(insertInstanceAction_, ui::SketchIcon::InsertInstance, "Insert");
+    addAssembly(groundInstanceAction_, ui::SketchIcon::GroundInstance, "Ground");
+    assembly->addSeparator();
+    addAssembly(addMateAction_, ui::SketchIcon::AddMate, "Mate");
+    addAssembly(driveMateAction_, ui::SketchIcon::DriveMate, "Drive");
+    addAssembly(limitMateAction_, ui::SketchIcon::LimitMate, "Limit");
+    assembly->addSeparator();
+    addAssembly(patternInstanceAction_, ui::SketchIcon::AssemblyPattern, "Pattern");
+    assembly->addSeparator();
+    addAssembly(capturePositionAction_, ui::SketchIcon::NamedPosition, "Position");
+    addAssembly(showExplodeAction_, ui::SketchIcon::ExplodeView, "Explode");
+    assembly->addSeparator();
+    addAssembly(interferenceAction_, ui::SketchIcon::Interference, "Interference");
+    assemblyToolBar_ = assembly;
+    // Hidden until an assembly is open, as the sketch bar is hidden until a
+    // sketch is.
+    assemblyToolBar_->setVisible(false);
 }
 
 void MainWindow::buildDocks() {
@@ -2370,6 +2419,9 @@ void MainWindow::refreshCommandStates() {
     // command that refuses after the click.
     {
         const bool isAssembly = partOrNull() == nullptr && document_ != nullptr;
+        // ONE BAR OR THE OTHER, never both and never neither.
+        if (assemblyToolBar_ != nullptr) assemblyToolBar_->setVisible(isAssembly);
+        if (modelToolBar_ != nullptr) modelToolBar_->setVisible(!isAssembly);
         const bool haveInstance = selectedInstance() != kInvalidObjectId;
         if (assemblyMenu_ != nullptr) assemblyMenu_->setEnabled(isAssembly);
         if (insertInstanceAction_ != nullptr) insertInstanceAction_->setEnabled(isAssembly);
@@ -4791,6 +4843,43 @@ std::vector<QAction*> MainWindow::sketchToolbarButtons() const {
     const std::vector<QAction*> second = ToolbarButtons(sketchToolBarSecond_);
     buttons.insert(buttons.end(), second.begin(), second.end());
     return buttons;
+}
+
+int MainWindow::assemblyToolbarButtonCount() const {
+    return static_cast<int>(ToolbarButtons(assemblyToolBar_).size());
+}
+std::string MainWindow::assemblyToolbarLabel(int index) const {
+    const std::vector<QAction*> buttons = ToolbarButtons(assemblyToolBar_);
+    if (index < 0 || index >= static_cast<int>(buttons.size())) return std::string();
+    return buttons[static_cast<std::size_t>(index)]->iconText().toStdString();
+}
+bool MainWindow::assemblyToolbarButtonEnabled(int index) const {
+    const std::vector<QAction*> buttons = ToolbarButtons(assemblyToolBar_);
+    if (index < 0 || index >= static_cast<int>(buttons.size())) return false;
+    return buttons[static_cast<std::size_t>(index)]->isEnabled();
+}
+unsigned long long MainWindow::assemblyToolbarIconFingerprint(int index) const {
+    const std::vector<QAction*> buttons = ToolbarButtons(assemblyToolBar_);
+    if (index < 0 || index >= static_cast<int>(buttons.size())) return 0;
+    const QIcon shown = buttons[static_cast<std::size_t>(index)]->icon();
+    if (shown.isNull()) return 0;
+    const QImage image = shown.pixmap(QSize(ui::size::kToolbarIcon, ui::size::kToolbarIcon))
+                             .toImage()
+                             .convertToFormat(QImage::Format_RGBA8888);
+    unsigned long long hash = 1469598103934665603ULL; // FNV-1a
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            const QRgb pixel = image.pixel(x, y);
+            hash = (hash ^ static_cast<unsigned long long>(pixel)) * 1099511628211ULL;
+        }
+    }
+    return hash;
+}
+bool MainWindow::assemblyToolbarVisible() const {
+    return assemblyToolBar_ != nullptr && assemblyToolBar_->isVisible();
+}
+bool MainWindow::modelToolbarVisible() const {
+    return modelToolBar_ != nullptr && modelToolBar_->isVisible();
 }
 
 int MainWindow::modelToolbarButtonCount() const {

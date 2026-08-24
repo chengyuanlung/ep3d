@@ -4144,6 +4144,52 @@ int main(int argc, char** argv) {
                     if (shape.id == arm) fail("a hidden instance is still being drawn");
                 window.showHideSelectedInstance();
 
+                // --- THE ASSEMBLY TOOLBAR (M30.2) -------------------------------
+                //
+                // Before this, an open assembly showed the MODEL toolbar --
+                // seventeen greyed part buttons and no assembly buttons at all.
+                // A menu can afford to be visible-and-disabled because it is
+                // opened deliberately; a toolbar is always in view.
+                {
+                    const int buttons = window.assemblyToolbarButtonCount();
+                    if (buttons < 9)
+                        fail("the assembly toolbar is missing commands");
+                    if (!window.assemblyToolbarVisible())
+                        fail("an assembly does not show the assembly toolbar");
+                    if (window.modelToolbarVisible())
+                        fail("an assembly is still showing the part toolbar");
+
+                    // DISTINCT icons, and none of them blank. "Every button has
+                    // an icon" is satisfied by giving them all the same one,
+                    // which is exactly what a copy-paste slip produces.
+                    std::vector<unsigned long long> prints;
+                    for (int i = 0; i < buttons; ++i) {
+                        const unsigned long long print =
+                            window.assemblyToolbarIconFingerprint(i);
+                        if (print == 0) fail("an assembly toolbar icon rendered as nothing");
+                        for (std::size_t j = 0; j < prints.size(); ++j)
+                            if (prints[j] == print)
+                                fail("two assembly toolbar buttons carry the SAME icon");
+                        prints.push_back(print);
+                    }
+
+                    // NAMED, so a renamed or dropped button says which one.
+                    for (const char* wanted : {"Insert", "Ground", "Mate", "Drive", "Limit",
+                                               "Pattern", "Position", "Explode",
+                                               "Interference"}) {
+                        bool found = false;
+                        for (int i = 0; i < buttons; ++i)
+                            if (window.assemblyToolbarLabel(i).find(wanted) != std::string::npos)
+                                found = true;
+                        if (!found) {
+                            std::string message = "the assembly toolbar has no ";
+                            message += wanted;
+                            message += " button";
+                            fail(message.c_str());
+                        }
+                    }
+                }
+
                 // --- INTERFERENCE ----------------------------------------------
                 const QString interference = window.checkInterferenceCommand();
                 if (interference.isEmpty())
@@ -4153,6 +4199,12 @@ int main(int argc, char** argv) {
             window.newDocumentCommand();
             if (window.openedDocumentType() != DocumentType::Part)
                 fail("the self test did not get back to a part document");
+            // ...AND THE BARS SWAP BACK. A one-way switch would be a
+            // different defect wearing the same clothes.
+            if (!window.modelToolbarVisible())
+                fail("a part does not show the part toolbar");
+            if (window.assemblyToolbarVisible())
+                fail("a part is still showing the assembly toolbar");
 
             // ...and going back to a PART turns them on again, because a
             // one-way switch would be a different defect.
