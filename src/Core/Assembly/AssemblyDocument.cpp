@@ -1520,56 +1520,44 @@ void AssemblyDocument::requireUnusedIdHook(ObjectId id, const char* who) const {
     (void)who;
 }
 
-std::string AssemblyDocument::ownObjectName(ObjectId id) const {
-    if (const Instance* instance = findInstance(id)) return instance->name();
-    if (const Mate* mate = findMate(id)) return mate->name();
-    if (const Relation* relation = findRelation(id)) return relation->name();
-    if (const NamedPosition* pose = findNamedPosition(id)) return pose->name();
-    if (const ExplodeView* view = findExplodeView(id)) return view->name();
-    return {};
-}
-
-void AssemblyDocument::applyOwnName(ObjectId id, const std::string& name) {
-    if (Mate* mate = findMateForEdit(id)) {
-        mate->setName(name);
-        return;
+void AssemblyDocument::forEachOwnNamed(const std::function<void(const NamedSlot&)>& visit) {
+    // IN DOCUMENT ORDER, and every kind exactly once. This replaced three
+    // hand-kept walks -- name, rename, uniqueness -- and M31 had already
+    // proved they drift: a relation was in none of them, so it could take a
+    // mate's name and then could not be renamed at all.
+    for (const std::unique_ptr<Instance>& one : instances_) {
+        Instance* instance = one.get();
+        visit(NamedSlot{instance->id(), instance->name(), [this, instance](const std::string& n) {
+                            instance->setName(n);
+                            // THE PLACEMENT FRAME FOLLOWS. An instance's frame
+                            // exists only to place it, so a tree showing "Gear
+                            // origin" under an instance called "Pinion" would
+                            // be describing a document that does not exist.
+                            // Through the base's own writer, so there is still
+                            // one thing that can set a frame's name.
+                            applyName(instance->frameId(), FrameNameFor(n));
+                        }});
     }
-    for (const std::unique_ptr<Relation>& one : relations_)
-        if (one->id() == id) {
-            one->setName(name);
-            return;
-        }
-    if (NamedPosition* pose = findNamedPositionForEdit(id)) {
-        pose->setName(name);
-        return;
+    for (const std::unique_ptr<Mate>& one : mates_) {
+        Mate* mate = one.get();
+        visit(NamedSlot{mate->id(), mate->name(),
+                        [mate](const std::string& n) { mate->setName(n); }});
     }
-    if (ExplodeView* view = findExplodeViewForEdit(id)) {
-        view->setName(name);
-        return;
+    for (const std::unique_ptr<Relation>& one : relations_) {
+        Relation* relation = one.get();
+        visit(NamedSlot{relation->id(), relation->name(),
+                        [relation](const std::string& n) { relation->setName(n); }});
     }
-    Instance* instance = findInstanceForEdit(id);
-    if (instance == nullptr) return;
-    instance->setName(name);
-    // The placement frame is named after the instance, so it follows. Written
-    // here rather than left alone because a tree that showed "Gear origin"
-    // under an instance called "Pinion" would be describing a document that
-    // does not exist. Through the base's own writer, so there is still only
-    // one thing that can set a frame's name.
-    applyName(instance->frameId(), FrameNameFor(name));
-}
-
-bool AssemblyDocument::ownNameIsTaken(const std::string& name, ObjectId except) const {
-    for (const std::unique_ptr<Instance>& one : instances_)
-        if (one->id() != except && one->name() == name) return true;
-    for (const std::unique_ptr<Mate>& one : mates_)
-        if (one->id() != except && one->name() == name) return true;
-    for (const std::unique_ptr<Relation>& one : relations_)
-        if (one->id() != except && one->name() == name) return true;
-    for (const std::unique_ptr<NamedPosition>& one : namedPositions_)
-        if (one->id() != except && one->name() == name) return true;
-    for (const std::unique_ptr<ExplodeView>& one : explodeViews_)
-        if (one->id() != except && one->name() == name) return true;
-    return false;
+    for (const std::unique_ptr<NamedPosition>& one : namedPositions_) {
+        NamedPosition* pose = one.get();
+        visit(NamedSlot{pose->id(), pose->name(),
+                        [pose](const std::string& n) { pose->setName(n); }});
+    }
+    for (const std::unique_ptr<ExplodeView>& one : explodeViews_) {
+        ExplodeView* view = one.get();
+        visit(NamedSlot{view->id(), view->name(),
+                        [view](const std::string& n) { view->setName(n); }});
+    }
 }
 
 void AssemblyDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {

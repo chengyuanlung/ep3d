@@ -426,7 +426,19 @@ std::string DocumentBase::objectName(ObjectId id) const {
         if (frame->id() == id) return frame->name();
     for (const std::unique_ptr<Connector>& connector : connectors_)
         if (connector->id() == id) return connector->name();
-    return ownObjectName(id);
+
+    std::string found;
+    forEachOwnNamedConst([&](const NamedSlot& slot) {
+        if (slot.id == id) found = slot.name;
+    });
+    return found;
+}
+
+void DocumentBase::forEachOwnNamedConst(
+    const std::function<void(const NamedSlot&)>& visit) const {
+    // THE ONE const_cast, and it is honest: the walk itself writes nothing.
+    // What the slot carries is a writer the const readers never call.
+    const_cast<DocumentBase*>(this)->forEachOwnNamed(visit);
 }
 
 void DocumentBase::applyName(ObjectId id, const std::string& name) {
@@ -440,7 +452,9 @@ void DocumentBase::applyName(ObjectId id, const std::string& name) {
             connector->setName(name);
             return;
         }
-    applyOwnName(id, name);
+    forEachOwnNamed([&](const NamedSlot& slot) {
+        if (slot.id == id && slot.rename) slot.rename(name);
+    });
 }
 
 std::string DocumentBase::unusedNameLike(const std::string& wanted) const {
@@ -457,7 +471,12 @@ bool DocumentBase::nameIsTaken(const std::string& name, ObjectId except) const {
         if (frame->id() != except && frame->name() == name) return true;
     for (const std::unique_ptr<Connector>& connector : connectors_)
         if (connector->id() != except && connector->name() == name) return true;
-    return ownNameIsTaken(name, except);
+
+    bool taken = false;
+    forEachOwnNamedConst([&](const NamedSlot& slot) {
+        if (slot.id != except && slot.name == name) taken = true;
+    });
+    return taken;
 }
 
 DocumentBase::RenameResult DocumentBase::renameObject(ObjectId id, std::string name) {

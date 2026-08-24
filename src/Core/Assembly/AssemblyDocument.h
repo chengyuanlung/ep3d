@@ -348,9 +348,7 @@ public:
 
 protected:
     void requireUnusedIdHook(ObjectId id, const char* who) const override;
-    std::string ownObjectName(ObjectId id) const override;
-    void applyOwnName(ObjectId id, const std::string& name) override;
-    bool ownNameIsTaken(const std::string& name, ObjectId except) const override;
+    void forEachOwnNamed(const std::function<void(const NamedSlot&)>& visit) override;
     void applyOwnDelta(const UndoDelta& delta, bool forward) override;
     const std::vector<std::string>* sourceChain() const override { return &sourceChain_; }
     IAssemblySolver* assemblySolverForNodes() const override { return assemblySolver_; }

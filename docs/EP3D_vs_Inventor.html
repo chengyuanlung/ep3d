@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EP3D 對照 Inventor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+
+<style>
+/* ---------------------------------------------------------------- tokens --
+   Light is the bare :root. Dark is redefined twice -- once for the OS
+   preference (guarded so an explicit light choice wins) and once for the
+   explicit dark stamp. Nothing below this block declares a raw colour. */
+:root {
+  --paper:      #EEF1F3;
+  --card:       #FFFFFF;
+  --card-2:     #F6F8F9;
+  --ink:        #14202A;
+  --ink-2:      #5B6B78;
+  --ink-3:      #8798A4;
+  --rule:       #D0D8DE;
+  --rule-soft:  #E2E8EC;
+  --accent:     #0B6E7F;
+  --accent-ink: #FFFFFF;
+
+  --have:       #1E7A5B;
+  --have-bg:    #E4F2EC;
+  --partial:    #9A6B0C;
+  --partial-bg: #F7EEDC;
+  --none:       #A63D33;
+  --none-bg:    #F7E7E4;
+
+  --shadow: 0 1px 2px rgba(20, 32, 42, .06), 0 8px 24px -12px rgba(20, 32, 42, .18);
+
+  --step--1: .8125rem;
+  --step-0:  1rem;
+  --step-1:  1.1875rem;
+  --step-2:  1.5rem;
+  --step-3:  2rem;
+  --step-4:  2.75rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:      #0F151A;
+    --card:       #161E25;
+    --card-2:     #1B242C;
+    --ink:        #E2E9EE;
+    --ink-2:      #9AAAB6;
+    --ink-3:      #6F808C;
+    --rule:       #28333B;
+    --rule-soft:  #202A32;
+    --accent:     #56C4D6;
+    --accent-ink: #06222A;
+
+    --have:       #58C89C;
+    --have-bg:    #16302A;
+    --partial:    #DCA83E;
+    --partial-bg: #322817;
+    --none:       #E08579;
+    --none-bg:    #33201D;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 30px -14px rgba(0, 0, 0, .8);
+  }
+}
+:root[data-theme="dark"] {
+  --paper:      #0F151A;
+  --card:       #161E25;
+  --card-2:     #1B242C;
+  --ink:        #E2E9EE;
+  --ink-2:      #9AAAB6;
+  --ink-3:      #6F808C;
+  --rule:       #28333B;
+  --rule-soft:  #202A32;
+  --accent:     #56C4D6;
+  --accent-ink: #06222A;
+
+  --have:       #58C89C;
+  --have-bg:    #16302A;
+  --partial:    #DCA83E;
+  --partial-bg: #322817;
+  --none:       #E08579;
+  --none-bg:    #33201D;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 30px -14px rgba(0, 0, 0, .8);
+}
+
+/* ----------------------------------------------------------------- base -- */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Noto Sans TC", "Archivo", system-ui, sans-serif;
+  font-size: var(--step-0);
+  line-height: 1.75;
+  font-feature-settings: "kern";
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 clamp(1rem, 4vw, 2.5rem); }
+h1, h2, h3 { font-family: "Archivo", "Noto Sans TC", system-ui, sans-serif; text-wrap: balance; margin: 0; }
+p { margin: 0; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+.mono {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: var(--step--1);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* -------------------------------------------------------------- masthead -- */
+.masthead {
+  border-bottom: 1px solid var(--rule);
+  background: var(--card);
+  padding: clamp(2rem, 6vw, 3.5rem) 0 0;
+}
+.masthead h1 {
+  font-size: var(--step-4);
+  font-weight: 700;
+  letter-spacing: -.02em;
+  line-height: 1.1;
+  margin: .5rem 0 0;
+}
+.masthead .sub {
+  color: var(--ink-2);
+  max-width: 62ch;
+  margin-top: 1rem;
+  font-size: var(--step-1);
+}
+.stamp {
+  display: flex; flex-wrap: wrap; gap: 1.75rem;
+  margin: 2rem 0 0; padding: 1.25rem 0;
+  border-top: 1px solid var(--rule-soft);
+}
+.stamp div { display: flex; flex-direction: column; gap: .1rem; }
+.stamp .n {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: var(--step-2); font-weight: 600; line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.stamp .l { font-size: var(--step--1); color: var(--ink-2); }
+
+/* --------------------------------------------------------------- legend -- */
+.legend {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1.25rem;
+  padding: .6rem 0;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--rule);
+  font-size: var(--step--1);
+}
+.key { display: inline-flex; align-items: center; gap: .45rem; }
+.swatch { width: .7rem; height: .7rem; border-radius: 2px; flex: none; }
+.sw-have    { background: var(--have); }
+.sw-partial { background: var(--partial); }
+.sw-none    { background: var(--none); }
+
+/* -------------------------------------------------------------- sections -- */
+section { padding: clamp(2.5rem, 6vw, 4rem) 0; border-bottom: 1px solid var(--rule); }
+section > .wrap > header { margin-bottom: 1.75rem; max-width: 68ch; }
+section h2 {
+  font-size: var(--step-3); font-weight: 700; letter-spacing: -.015em;
+  margin: .35rem 0 .6rem;
+}
+section h2 + p, header > p { color: var(--ink-2); }
+h3 {
+  font-size: var(--step-1); font-weight: 600;
+  margin: 2.25rem 0 .75rem;
+}
+
+/* ----------------------------------------------------------- ribbon map -- */
+.ribbon {
+  background: var(--card); border: 1px solid var(--rule); border-radius: 6px;
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.ribbon-tabs {
+  display: flex; gap: .25rem; overflow-x: auto;
+  padding: .4rem .6rem 0; background: var(--card-2);
+  border-bottom: 1px solid var(--rule);
+}
+.ribbon-tabs span {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: var(--step--1); color: var(--ink-3);
+  padding: .3rem .7rem; border-radius: 4px 4px 0 0; white-space: nowrap;
+}
+.ribbon-tabs span[aria-current] {
+  background: var(--card); color: var(--ink); font-weight: 600;
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.panels { display: flex; overflow-x: auto; }
+.panel {
+  flex: none; min-width: 0; padding: .85rem .9rem 1rem;
+  border-right: 1px solid var(--rule-soft);
+}
+.panel:last-child { border-right: 0; }
+.panel-name {
+  display: flex; align-items: baseline; gap: .5rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: var(--step--1); color: var(--ink-2);
+  margin-bottom: .55rem; white-space: nowrap;
+}
+.panel-name b { color: var(--ink); font-weight: 600; }
+.frac { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.chips { display: flex; flex-wrap: wrap; gap: .3rem; max-width: 22rem; }
+.chip {
+  font-size: var(--step--1); line-height: 1.35;
+  padding: .2rem .5rem; border-radius: 3px; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.chip small {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .78em; opacity: .72; margin-left: .3rem;
+}
+.c-have    { background: var(--have-bg);    color: var(--have);    border-color: color-mix(in srgb, var(--have) 28%, transparent); }
+.c-partial { background: var(--partial-bg); color: var(--partial); border-color: color-mix(in srgb, var(--partial) 28%, transparent); }
+.c-none    { background: var(--none-bg);    color: var(--none);    border-color: color-mix(in srgb, var(--none) 26%, transparent); }
+
+.caption {
+  font-size: var(--step--1); color: var(--ink-3);
+  margin-top: .7rem; max-width: 72ch;
+}
+
+/* ------------------------------------------------------------ ep3d bars -- */
+.bar-shot {
+  margin-top: 1rem; background: var(--card);
+  border: 1px solid var(--rule); border-radius: 6px; overflow: hidden;
+}
+.bar-shot .bar-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
+  padding: .5rem .8rem; border-bottom: 1px solid var(--rule-soft);
+  background: var(--card-2);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: var(--step--1); color: var(--ink-2);
+}
+.bar-scroll { overflow-x: auto; }
+.bar-shot img { display: block; height: auto; min-width: 100%; }
+/* The captures are of a light shell; on a dark ground they need a seat rather
+   than a filter, so the pixels stay honest. */
+.bar-scroll { background: #FFFFFF; }
+
+/* ---------------------------------------------------------------- table -- */
+.table-wrap {
+  overflow-x: auto; background: var(--card);
+  border: 1px solid var(--rule); border-radius: 6px; box-shadow: var(--shadow);
+}
+table { border-collapse: collapse; width: 100%; min-width: 44rem; }
+caption { text-align: left; padding: .9rem 1rem; color: var(--ink-2); font-size: var(--step--1); border-bottom: 1px solid var(--rule-soft); }
+th, td { text-align: left; padding: .7rem 1rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+thead th {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: var(--step--1); font-weight: 600; letter-spacing: .04em;
+  color: var(--ink-2); background: var(--card-2);
+  border-bottom: 1px solid var(--rule); position: sticky; top: 0;
+}
+tbody tr:last-child td { border-bottom: 0; }
+td.who { white-space: nowrap; font-weight: 500; }
+td.note { color: var(--ink-2); font-size: var(--step--1); }
+.pill {
+  display: inline-block; font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .78rem; padding: .12rem .45rem; border-radius: 3px;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.p-have    { background: var(--have-bg);    color: var(--have);    border-color: color-mix(in srgb, var(--have) 28%, transparent); }
+.p-partial { background: var(--partial-bg); color: var(--partial); border-color: color-mix(in srgb, var(--partial) 28%, transparent); }
+.p-none    { background: var(--none-bg);    color: var(--none);    border-color: color-mix(in srgb, var(--none) 26%, transparent); }
+
+/* --------------------------------------------------------------- callout -- */
+.callout {
+  border-left: 3px solid var(--accent);
+  background: var(--card); padding: 1.1rem 1.25rem;
+  border-radius: 0 6px 6px 0; margin-top: 1.5rem;
+  max-width: 74ch;
+}
+.callout h3 { margin: 0 0 .4rem; font-size: var(--step-1); }
+.callout p { color: var(--ink-2); }
+
+.grid-2 { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); }
+.note-card {
+  background: var(--card); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 1.1rem 1.25rem;
+}
+.note-card h3 { margin: 0 0 .4rem; font-size: var(--step-0); }
+.note-card p { font-size: var(--step--1); color: var(--ink-2); }
+
+ul { margin: .5rem 0 0; padding-left: 1.15rem; color: var(--ink-2); }
+li { margin: .25rem 0; }
+li b { color: var(--ink); font-weight: 600; }
+
+footer { padding: 2.5rem 0 4rem; color: var(--ink-3); font-size: var(--step--1); }
+footer p { max-width: 74ch; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+
+</head>
+<body>
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">能力對照 · EP3D M31 · 2026-08-25</div>
+    <h1>EP3D 對照 Inventor</h1>
+    <p class="sub">
+      一份工具列層級的落差清單：EP3D 走到第 31 個里程碑，能畫零件、組得出機構、
+      配得了 mate、齒輪帶得動另一支手臂 —— 但送不出一張圖。
+    </p>
+    <div class="stamp">
+      <div><span class="n">31</span><span class="l">里程碑</span></div>
+      <div><span class="n">1830</span><span class="l">測試</span></div>
+      <div><span class="n">2</span><span class="l">文件型別 / Inventor 為 5</span></div>
+      <div><span class="n">7</span><span class="l">mate 型別 / Inventor 約 12</span></div>
+      <div><span class="n">0</span><span class="l">工程圖功能</span></div>
+    </div>
+  </div>
+</header>
+
+<div class="legend">
+  <div class="wrap" style="display:flex;flex-wrap:wrap;gap:.5rem 1.25rem;align-items:center;">
+    <span class="eyebrow">EP3D 覆蓋率</span>
+    <span class="key"><span class="swatch sw-have"></span>有，可用</span>
+    <span class="key"><span class="swatch sw-partial"></span>有，但範圍窄</span>
+    <span class="key"><span class="swatch sw-none"></span>沒有</span>
+  </div>
+</div>
+
+<!-- ================================================================ 零件 -->
+<section>
+  <div class="wrap">
+    <header>
+      <div class="eyebrow">工具列對照 · 零件</div>
+      <h2>Inventor 的「3D 模型」頁籤</h2>
+      <p>
+        下面是 Inventor 3D 模型頁籤的面板結構（示意重繪，非截圖），每一個指令依 EP3D 目前的狀態上色。
+        再下面是 EP3D 對應的那一條工具列 —— 那是真的截圖，從 <span class="mono">--selftest --screenshot</span> 抓下來的。
+      </p>
+    </header>
+
+    <div class="ribbon">
+      <div class="ribbon-tabs" role="presentation">
+        <span>檔案</span><span aria-current="true">3D 模型</span><span>草圖</span><span>檢驗</span>
+        <span>工具</span><span>管理</span><span>檢視</span><span>環境</span><span>開始上手</span>
+      </div>
+      <div class="panels">
+        <div class="panel">
+          <div class="panel-name"><b>草圖</b><span class="frac">1 / 2</span></div>
+          <div class="chips" style="max-width:11rem">
+            <span class="chip c-have">2D 草圖<small>Sketch</small></span>
+            <span class="chip c-none">3D 草圖<small>3D Sketch</small></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>建立</b><span class="frac">4 / 10</span></div>
+          <div class="chips">
+            <span class="chip c-have">擠出<small>Extrude</small></span>
+            <span class="chip c-have">旋轉<small>Revolve</small></span>
+            <span class="chip c-have">掃掠<small>Sweep</small></span>
+            <span class="chip c-have">斷面混成<small>Loft</small></span>
+            <span class="chip c-none">線圈<small>Coil</small></span>
+            <span class="chip c-none">肋<small>Rib</small></span>
+            <span class="chip c-none">浮雕<small>Emboss</small></span>
+            <span class="chip c-none">加厚 / 偏移<small>Thicken</small></span>
+            <span class="chip c-none">衍生<small>Derive</small></span>
+            <span class="chip c-none">貼圖<small>Decal</small></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>修改</b><span class="frac">5 / 11</span></div>
+          <div class="chips">
+            <span class="chip c-partial">孔<small>Hole</small></span>
+            <span class="chip c-partial">圓角<small>Fillet</small></span>
+            <span class="chip c-have">倒角<small>Chamfer</small></span>
+            <span class="chip c-have">薄殼<small>Shell</small></span>
+            <span class="chip c-have">拔模<small>Draft</small></span>
+            <span class="chip c-have">結合<small>Combine</small></span>
+            <span class="chip c-none">螺紋<small>Thread</small></span>
+            <span class="chip c-none">分割<small>Split</small></span>
+            <span class="chip c-none">移動面<small>Move Face</small></span>
+            <span class="chip c-none">刪除面<small>Delete Face</small></span>
+            <span class="chip c-none">直接編輯<small>Direct Edit</small></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>陣列</b><span class="frac">3 / 3</span></div>
+          <div class="chips" style="max-width:11rem">
+            <span class="chip c-have">矩形陣列<small>Rect.</small></span>
+            <span class="chip c-have">環形陣列<small>Circular</small></span>
+            <span class="chip c-have">鏡射<small>Mirror</small></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>工作特徵</b><span class="frac">1 / 4</span></div>
+          <div class="chips" style="max-width:11rem">
+            <span class="chip c-partial">平面<small>Plane</small></span>
+            <span class="chip c-none">軸<small>Axis</small></span>
+            <span class="chip c-none">點<small>Point</small></span>
+            <span class="chip c-none">UCS</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>曲面</b><span class="frac">0 / 6</span></div>
+          <div class="chips" style="max-width:12rem">
+            <span class="chip c-none">縫織<small>Stitch</small></span>
+            <span class="chip c-none">雕塑<small>Sculpt</small></span>
+            <span class="chip c-none">修剪<small>Trim</small></span>
+            <span class="chip c-none">延伸<small>Extend</small></span>
+            <span class="chip c-none">補面<small>Patch</small></span>
+            <span class="chip c-none">取代面<small>Replace</small></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>塑膠零件</b><span class="frac">0 / 6</span></div>
+          <div class="chips" style="max-width:11rem">
+            <span class="chip c-none">卡榫<small>Snap Fit</small></span>
+            <span class="chip c-none">格柵<small>Grill</small></span>
+            <span class="chip c-none">靴形<small>Boss</small></span>
+            <span class="chip c-none">唇緣<small>Lip</small></span>
+            <span class="chip c-none">加強座<small>Rest</small></span>
+            <span class="chip c-none">排氣孔<small>Rule Fillet</small></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>轉換</b><span class="frac">0 / 1</span></div>
+          <div class="chips" style="max-width:9rem">
+            <span class="chip c-none">鈑金<small>Sheet Metal</small></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="caption">
+      面板組成依 Inventor 2023 前後的配置示意重繪，版本之間會有出入；重點在分組與比例，不在逐格對位。
+    </p>
+
+    <div class="bar-shot">
+      <div class="bar-head">
+        <span>EP3D · 零件工具列（實際截圖）</span>
+        <span class="mono">17 個按鈕</span>
+      </div>
+      <div class="bar-scroll"><img src="data:image/png;base64,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" alt="EP3D 零件工具列：On Face、Pad、Pocket、Revolve、Sweep、Loft、Shell、Hole、Union、Subtract、Intersect、Ring、Along、Export、Import、Fillet、Chamfer" width="1920" height="38"></div>
+    </div>
+    <p class="caption">
+      灰掉的按鈕不是壞的 —— EP3D 的啟用狀態跟指令真正會接受的輸入一致（截圖當下沒有選到可用的輸入）。
+      Inventor 的三個頁籤面板，EP3D 壓進了一條 17 格的工具列。
+    </p>
+
+    <div class="callout">
+      <h3>差最多的一格：孔</h3>
+      <p>
+        EP3D 的 Hole 只有直孔，通孔或盲孔。<b>沒有沉頭、埋頭、螺紋，也沒有 M6×1.0 那種標準規格</b>，
+        更沒有孔標註。Inventor 的孔特徵本身就是一個裝滿的對話框，它撐著整個緊固件工作流。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================== 組合件 -->
+<section>
+  <div class="wrap">
+    <header>
+      <div class="eyebrow">工具列對照 · 組合件</div>
+      <h2>Inventor 的「組合」頁籤</h2>
+      <p>
+        這是 EP3D 最接近 Inventor 的一塊 —— M23 到 M31 花了九個里程碑在這裡。
+        剩下的差距集中在<b>零件庫</b>和<b>互動</b>，不在模型本身。
+      </p>
+    </header>
+
+    <div class="ribbon">
+      <div class="ribbon-tabs" role="presentation">
+        <span>檔案</span><span aria-current="true">組合</span><span>設計</span><span>3D 模型</span>
+        <span>檢驗</span><span>工具</span><span>管理</span><span>檢視</span><span>環境</span>
+      </div>
+      <div class="panels">
+        <div class="panel">
+          <div class="panel-name"><b>組件</b><span class="frac">3 / 5</span></div>
+          <div class="chips" style="max-width:11rem">
+            <span class="chip c-have">放置<small>Place</small></span>
+            <span class="chip c-have">陣列<small>Pattern</small></span>
+            <span class="chip c-have">鏡射<small>Mirror</small></span>
+            <span class="chip c-none">建立<small>Create</small></span>
+            <span class="chip c-none">取代<small>Replace</small></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>位置</b><span class="frac">1 / 3</span></div>
+          <div class="chips" style="max-width:11rem">
+            <span class="chip c-partial">移動<small>Free Move</small></span>
+            <span class="chip c-none">旋轉<small>Free Rotate</small></span>
+            <span class="chip c-none">抓取<small>Grip Snap</small></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>關係</b><span class="frac">2 / 4</span></div>
+          <div class="chips" style="max-width:12rem">
+            <span class="chip c-partial">接合<small>Joint</small></span>
+            <span class="chip c-have">驅動 / 極限<small>Drive</small></span>
+            <span class="chip c-none">舊式約束<small>Constrain</small></span>
+            <span class="chip c-none">接觸求解<small>Contact</small></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>生產力 / 管理</b><span class="frac">1 / 4</span></div>
+          <div class="chips" style="max-width:12rem">
+            <span class="chip c-have">干涉檢查<small>Analyze</small></span>
+            <span class="chip c-none">零件表<small>BOM</small></span>
+            <span class="chip c-none">模型狀態<small>Model States</small></span>
+            <span class="chip c-none">iAssembly</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>設計加速器</b><span class="frac">0 / 8</span></div>
+          <div class="chips" style="max-width:13rem">
+            <span class="chip c-none">螺栓接合</span>
+            <span class="chip c-none">正齒輪</span>
+            <span class="chip c-none">軸</span>
+            <span class="chip c-none">軸承</span>
+            <span class="chip c-none">彈簧</span>
+            <span class="chip c-none">凸輪</span>
+            <span class="chip c-none">皮帶 / 鏈</span>
+            <span class="chip c-none">框架產生器</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-name"><b>標準件庫</b><span class="frac">0 / 1</span></div>
+          <div class="chips" style="max-width:9rem">
+            <span class="chip c-none">Content Center</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bar-shot">
+      <div class="bar-head">
+        <span>EP3D · 組合件工具列（實際截圖）</span>
+        <span class="mono">10 個按鈕</span>
+      </div>
+      <div class="bar-scroll"><img src="data:image/png;base64,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" alt="EP3D 組合件工具列：Insert、Ground、Mate、Drive、Limit、Relation、Pattern、Position、Explode、Interference" width="1250" height="47"></div>
+    </div>
+    <p class="caption">
+      Relation 是 M31 剛加的：齒輪、齒條、螺紋、線性四種耦合。Position 是具名姿態，Explode 是爆炸圖。
+    </p>
+
+    <div class="table-wrap" style="margin-top:1.5rem">
+      <table>
+        <caption>配合／接合：兩邊的模型不是同一種東西</caption>
+        <thead>
+          <tr><th style="width:30%">項目</th><th style="width:16%">EP3D</th><th>說明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="who">7 種 mate</td><td><span class="pill p-have">有</span></td>
+              <td class="note">Fastened、Revolute、Slider、Cylindrical、Ball、Planar、Parallel。語意接近 Inventor 的 <b>Joint</b>，不是舊式 Constraint。</td></tr>
+          <tr><td class="who">Tangent mate</td><td><span class="pill p-none">沒有</span></td>
+              <td class="note">ADR-M25-007 明文拒絕做一個假的：它不吃 mate connector，沒有共用軸可以量。</td></tr>
+          <tr><td class="who">Mate relation</td><td><span class="pill p-have">有</span></td>
+              <td class="note">齒輪／齒條／螺紋／線性。耦合的是兩個<b>自由度</b>而不是兩個零件，所以螺紋（同一個 mate 的旋轉帶自己的位移）不是特例。</td></tr>
+          <tr><td class="who">接觸求解</td><td><span class="pill p-none">沒有</span></td>
+              <td class="note">零件會互相穿過去。EP3D 只有事後的干涉「檢查」，不是即時阻擋。</td></tr>
+          <tr><td class="who">3D 拖曳零件</td><td><span class="pill p-none">沒有</span></td>
+              <td class="note">只能用 Drive 打數字。3D 視窗裡也還不能點選 mate connector 建立配合。</td></tr>
+          <tr><td class="who">動態模擬</td><td><span class="pill p-none">沒有</span></td>
+              <td class="note">機構會動，但沒有力、沒有質量慣性、沒有時間軸。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 草圖 -->
+<section>
+  <div class="wrap">
+    <header>
+      <div class="eyebrow">工具列對照 · 草圖</div>
+      <h2>草圖是差距最小的一塊</h2>
+      <p>
+        52 個按鈕，幾何、約束、尺寸、編輯四組都有。少的是<b>維度</b>不是數量：沒有 3D 草圖、沒有文字、沒有投影幾何。
+      </p>
+    </header>
+
+    <div class="bar-shot">
+      <div class="bar-head">
+        <span>EP3D · 草圖工具列（實際截圖，兩列）</span>
+        <span class="mono">52 個按鈕</span>
+      </div>
+      <div class="bar-scroll"><img src="data:image/png;base64,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" alt="EP3D 草圖工具列兩列：選取、線、矩形、圓、弧、點、橢圓、雲形線等幾何，重合、水平、垂直、固定、平行、垂直、相等、同心、中點、點在物件上、相切、對稱等約束，以及距離、半徑、直徑、角度等尺寸和偏移、修剪、延伸、倒角、圓角、鏡射等編輯" width="1700" height="94"></div>
+    </div>
+
+    <div class="grid-2" style="margin-top:1.5rem">
+      <div class="note-card">
+        <h3>有的</h3>
+        <p>點、線、圓、弧、橢圓、橢圓弧、雲形線（含控制把手）。11 種約束加對稱。距離／水平距離／垂直距離／點到線距離／長度／半徑／直徑／角度／橢圓長短軸與旋轉。偏移、修剪、延伸、倒角、圓角、鏡射、自動放尺寸。</p>
+      </div>
+      <div class="note-card">
+        <h3>沒有的</h3>
+        <p><b>3D 草圖</b>、<b>文字</b>、<b>Block</b>、<b>投影幾何</b>（Project Geometry）、參考影像、完整的建構線／中心線語意。前兩項在 Inventor 是每天都會用到的。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 整個模組 -->
+<section>
+  <div class="wrap">
+    <header>
+      <div class="eyebrow">模組層級</div>
+      <h2>整個沒有的東西</h2>
+      <p>這一節才是「差異」的主體。上面談的是同一個模組裡少幾個指令；這裡是模組本身不存在。</p>
+    </header>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th style="width:22%">模組</th><th style="width:12%">EP3D</th><th>影響</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="who">工程圖<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">.idw / .dwg</span></td>
+            <td><span class="pill p-none">完全沒有</span></td>
+            <td class="note"><b>目前最大的一個洞。</b>沒有視圖投影、剖視、局部放大、尺寸標註、公差、表面粗糙度、熔接符號、標題欄、零件表、PDF 輸出。一個畫得出零件但印不出圖的 CAD，在工廠裡是不能用的。</td>
+          </tr>
+          <tr><td class="who">鈑金</td><td><span class="pill p-none">完全沒有</span></td>
+              <td class="note">展開、折彎、K 因子、板金專用特徵樹。這是一整套獨立的建模語意，不是實體特徵加幾個按鈕。</td></tr>
+          <tr><td class="who">曲面建模</td><td><span class="pill p-none">完全沒有</span></td>
+              <td class="note">曲面是另一套幾何，不是實體的子集。做進去等於再蓋一次特徵樹。</td></tr>
+          <tr><td class="who">標準件庫</td><td><span class="pill p-none">完全沒有</span></td>
+              <td class="note">螺絲、螺帽、軸承、擋圈。Inventor 的 Content Center 是資料問題不是幾何問題 —— 需要自建資料來源。</td></tr>
+          <tr><td class="who">框架產生器</td><td><span class="pill p-none">完全沒有</span></td>
+              <td class="note">型鋼骨架、接頭處理、切割清單。</td></tr>
+          <tr><td class="who">設計加速器</td><td><span class="pill p-none">完全沒有</span></td>
+              <td class="note">齒輪、彈簧、軸承、皮帶的計算＋產生器。EP3D 有齒輪 <b>relation</b>（運動耦合），但不會替你算模數與齒數。</td></tr>
+          <tr><td class="who">模擬</td><td><span class="pill p-none">完全沒有</span></td>
+              <td class="note">應力分析、動態模擬、模具流動。</td></tr>
+          <tr><td class="who">iLogic / API</td><td><span class="pill p-partial">只有腳本</span></td>
+              <td class="note">EP3D 有一個腳本語言（<span class="mono">.ep3ds</span>），但那是給測試和範例用的，不是 iLogic 那種規則引擎，也沒有對外 API。</td></tr>
+          <tr><td class="who">簡報 / 組裝說明</td><td><span class="pill p-partial">只有爆炸圖</span></td>
+              <td class="note">有爆炸圖與具名姿態，沒有動畫、沒有輸出成說明書。</td></tr>
+          <tr><td class="who">算圖</td><td><span class="pill p-none">完全沒有</span></td>
+              <td class="note">沒有 Studio、沒有材質貼圖、沒有光源。</td></tr>
+          <tr><td class="who">變體 / 模型狀態</td><td><span class="pill p-none">完全沒有</span></td>
+              <td class="note">iPart、iAssembly、Model States。這在 roadmap 排在工程圖之後，理由是它<b>乘在別的東西上面</b> —— 零件、組合件、圖都還在變的時候做，同一件事要做三遍。</td></tr>
+          <tr><td class="who">版本管理</td><td><span class="pill p-none">刻意不做</span></td>
+              <td class="note">Vault、雲端文件、協作、分支。roadmap §52.3 已裁決不做。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================== 交換與核心 -->
+<section>
+  <div class="wrap">
+    <header>
+      <div class="eyebrow">檔案交換 · 幾何核心 · 操作層</div>
+      <h2>三件不在工具列上、但每天會撞到的事</h2>
+    </header>
+
+    <div class="grid-2">
+      <div class="note-card">
+        <h3>檔案交換</h3>
+        <p>
+          EP3D：<b>STEP 進出、STL 出、DXF 進</b>。<br>
+          沒有 IGES、SAT、Parasolid，也沒有 Inventor 的 <b>AnyCAD</b> —— 直接讀 SolidWorks / CATIA / NX / Creo 的原生檔並保持關聯更新。
+          在一條有外包的供應鏈上，這一項比看起來重要。
+        </p>
+      </div>
+      <div class="note-card">
+        <h3>幾何核心</h3>
+        <p>
+          EP3D 用 <b>OCCT</b>，Inventor 用 <b>ASM</b>（Autodesk Shape Manager）。
+          實務上會遇到的差別是複雜圓角、薄殼、布林的<b>穩健度與容差處理</b> ——
+          OCCT 在這些邊界情況上比商用核心脆弱，而<b>這不是加功能能補的</b>。
+        </p>
+      </div>
+      <div class="note-card">
+        <h3>操作層</h3>
+        <p>
+          沒有 Ribbon（是傳統功能表加工具列）、沒有右鍵情境選單、沒有 Mini-toolbar、
+          沒有 ViewCube、沒有量測工具、沒有即時剖視。
+          3D 視窗裡不能直接點 connector 建立配合（§14.1 記為欠帳），也不能拖放建立配合（§20.6 的 snap mode）。
+        </p>
+      </div>
+      <div class="note-card">
+        <h3>EP3D 有而 Inventor 沒有的</h3>
+        <p>
+          一個把整個模型從頭建起來的<b>純文字腳本語言</b>，跑得過 CI，也能連上正在開著的視窗一行一行畫。
+          Inventor 有 iLogic 和 API，但沒有這種「一個檔案就是一台機器」的東西。
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 建議 -->
+<section>
+  <div class="wrap">
+    <header>
+      <div class="eyebrow">建議</div>
+      <h2>如果只補一項</h2>
+    </header>
+    <div class="callout">
+      <h3>工程圖。</h3>
+      <p>
+        其他每一項都是「Inventor 多一個能力」，工程圖是「EP3D 做完的東西送不出去」。
+        而且地基已經付掉了：M23 做第二個文件型別時，序列化、undo、相依圖、選取、UI 樹全部抽成兩種文件共用的機制，
+        所以<b>第三個文件型別的成本會比第二個低得多</b>。
+      </p>
+    </div>
+    <ul style="margin-top:1.25rem;max-width:74ch">
+      <li><b>其次是孔。</b>沉頭、埋頭、螺紋、標準規格 —— 它撐著整個緊固件工作流，而且不需要新的幾何觀念。</li>
+      <li><b>再其次是 3D 草圖與投影幾何。</b>沒有它們，很多真實零件根本無法開始畫。</li>
+      <li><b>接觸求解</b>要不要做值得先想清楚：它會改變組合件求解器的性質，不是加一個按鈕。</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      EP3D 側的每一項都是在 M31 的程式碼裡查證過的，不是憑印象：特徵清單來自
+      <span class="mono">src/Core/Feature/</span>，約束清單來自 <span class="mono">SketchConstraint.h</span>，
+      mate 型別來自 <span class="mono">Mate.h</span>，三張工具列是 <span class="mono">--selftest --screenshot</span> 抓的實圖。
+      Inventor 側的 ribbon 是示意重繪、非截圖，版本之間會有出入。
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

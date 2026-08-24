@@ -1354,72 +1354,35 @@ bool PartDocument::setSketchTrackedFace(ObjectId sketchId, FaceQuery query) {
     return true;
 }
 
-namespace {
 
-// Is this name already taken by something the tree shows? Names are how a user
-// picks what to delete or edit, and for a PARAMETER a duplicate is worse than
-// confusing: expressions resolve by name and findByName answers with the first
-// match (ADR-M17-038).
-bool PartNameIsFree(const PartDocument& document, ObjectId self, const std::string& name) {
-    for (const auto& parameter : document.parameters().items())
-        if (parameter->id() != self && parameter->name() == name) return false;
-    for (const Sketch* sketch : document.sketches())
-        if (sketch->id() != self && sketch->name() == name) return false;
-    for (const auto& body : document.bodies()) {
-        if (body->id() != self && body->name() == name) return false;
-        for (const auto& feature : body->features())
-            if (feature->id() != self && feature->name() == name) return false;
+void PartDocument::forEachOwnNamed(const std::function<void(const NamedSlot&)>& visit) {
+    // ONE walk, in document order -- see DocumentBase::NamedSlot for why there
+    // used to be three of these per document type and what that cost.
+    for (const auto& one : parameters_.items()) {
+        Parameter* parameter = one.get();
+        visit(NamedSlot{parameter->id(), parameter->name(),
+                        [parameter](const std::string& n) { parameter->setName(n); }});
     }
-    if (document.material() != nullptr && document.material()->id() != self &&
-        document.material()->name() == name)
-        return false;
-    return true;
-}
-
-} // namespace
-
-bool PartDocument::ownNameIsTaken(const std::string& name, ObjectId except) const {
-    return !PartNameIsFree(*this, except, name);
-}
-
-void PartDocument::applyOwnName(ObjectId id, const std::string& name) {
-    for (const auto& parameter : parameters_.items())
-        if (parameter->id() == id) {
-            parameter->setName(name);
-            return;
-        }
-    for (const std::unique_ptr<Sketch>& sketch : sketches_)
-        if (sketch->id() == id) {
-            sketch->setName(name);
-            return;
-        }
-    for (const std::unique_ptr<Body>& body : bodies_) {
-        if (body->id() == id) {
-            body->setName(name);
-            return;
-        }
-        for (const std::unique_ptr<Feature>& feature : body->features())
-            if (feature->id() == id) {
-                feature->setName(name);
-                return;
-            }
+    for (const std::unique_ptr<Sketch>& one : sketches_) {
+        Sketch* sketch = one.get();
+        visit(NamedSlot{sketch->id(), sketch->name(),
+                        [sketch](const std::string& n) { sketch->setName(n); }});
     }
-    if (material_ && material_->id() == id) material_->setName(name);
-}
-
-
-std::string PartDocument::ownObjectName(ObjectId id) const {
-    for (const auto& parameter : parameters_.items())
-        if (parameter->id() == id) return parameter->name();
-    for (const Sketch* sketch : sketches()) 
-        if (sketch->id() == id) return sketch->name();
-    for (const auto& body : bodies_) {
-        if (body->id() == id) return body->name();
-        for (const auto& feature : body->features())
-            if (feature->id() == id) return feature->name();
+    for (const std::unique_ptr<Body>& one : bodies_) {
+        Body* body = one.get();
+        visit(NamedSlot{body->id(), body->name(),
+                        [body](const std::string& n) { body->setName(n); }});
+        for (const std::unique_ptr<Feature>& item : body->features()) {
+            Feature* feature = item.get();
+            visit(NamedSlot{feature->id(), feature->name(),
+                            [feature](const std::string& n) { feature->setName(n); }});
+        }
     }
-    if (material_ && material_->id() == id) return material_->name();
-    return {};
+    if (material_) {
+        Material* material = material_.get();
+        visit(NamedSlot{material->id(), material->name(),
+                        [material](const std::string& n) { material->setName(n); }});
+    }
 }
 
 bool PartDocument::setSketchConstraintDriven(ObjectId sketchId,

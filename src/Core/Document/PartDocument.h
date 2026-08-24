@@ -978,9 +978,7 @@ private:
     // private and the base is a friend of nothing: it reaches them through the
     // virtuals it declared, so there is no second way in.
     void requireUnusedIdHook(ObjectId id, const char* who) const override;
-    std::string ownObjectName(ObjectId id) const override;
-    void applyOwnName(ObjectId id, const std::string& name) override;
-    bool ownNameIsTaken(const std::string& name, ObjectId except) const override;
+    void forEachOwnNamed(const std::function<void(const NamedSlot&)>& visit) override;
     void applyOwnDelta(const UndoDelta& delta, bool forward) override;
     void onGraphDirtied() noexcept override { syncFeatureStatesFromGraph(); }
     void beforeRecomputePass() override { reconcileAllSketchParameterEdges(); }

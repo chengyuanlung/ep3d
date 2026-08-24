@@ -10,6 +10,7 @@
 #include "Core/Reference/ReferenceFrame.h"
 #include "Core/Undo/UndoRecord.h"
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -224,18 +225,37 @@ protected:
     // halves do.
     virtual void requireUnusedIdHook(ObjectId id, const char* who) const { (void)id; (void)who; }
 
-    // The name of an object the base does not own, or empty.
-    virtual std::string ownObjectName(ObjectId id) const { (void)id; return {}; }
-    // Write a name onto an object the base does not own. Called only after
-    // renameObject has validated it, and by undo -- so it must not validate
-    // again, or a replayed rename could take a path the original did not.
-    virtual void applyOwnName(ObjectId id, const std::string& name) { (void)id; (void)name; }
-    // Is `name` already taken by an object the base does not own, ignoring
-    // `except`?
-    virtual bool ownNameIsTaken(const std::string& name, ObjectId except) const {
-        (void)name;
-        (void)except;
-        return false;
+    // --- Named objects: ONE list, three questions ---------------------------
+    //
+    // "What is this called", "write this name onto it" and "is this name
+    // taken" are three readings of the same set. They used to be three
+    // hand-kept walks per document type, which is this project's signature
+    // defect wearing its plainest clothes: M31 shipped a relation that was in
+    // NONE of the assembly's three, so a relation could take a name a mate
+    // already had and then could not be renamed to anything.
+    //
+    // A subclass now says what it names ONCE. The three answers are derived
+    // here, so a kind that is visited is answerable in all three, and a kind
+    // that is not is answerable in none -- which is a visible hole rather than
+    // a silent disagreement.
+    struct NamedSlot {
+        ObjectId id{kInvalidObjectId};
+        std::string name;
+        // Writes the new name where it belongs. NOT always a plain setter: an
+        // assembly instance's placement frame is named after it and follows,
+        // and that rule belongs with the instance rather than in a second
+        // switch somewhere else.
+        std::function<void(const std::string&)> rename;
+    };
+
+    // Visits every object this subclass names, in document order.
+    //
+    // NON-CONST because a slot carries a writer. The const readers below walk
+    // through one documented const_cast rather than making the subclass keep a
+    // second, read-only copy of the list -- which is the very duplication this
+    // exists to remove.
+    virtual void forEachOwnNamed(const std::function<void(const NamedSlot&)>& visit) {
+        (void)visit;
     }
 
     // Apply an undo delta the base does not recognise. Reached only after the
@@ -301,6 +321,10 @@ protected:
     void applyName(ObjectId id, const std::string& name);
     // Is `name` taken by anything in this document other than `except`?
     bool nameIsTaken(const std::string& name, ObjectId except) const;
+
+    // The const half of the walk. One place, so the const_cast that makes a
+    // mutable visitor answer a const question is written down once.
+    void forEachOwnNamedConst(const std::function<void(const NamedSlot&)>& visit) const;
 
     void recordDelta(UndoDelta delta, std::string label);
     void clearHistory(const char* becauseOfWhat) noexcept;

@@ -524,6 +524,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/M4ReviewFindingTests.cpp
         tests/DocumentOutlineTests.cpp
         tests/AssemblyOutlineTests.cpp
+        tests/NamedObjectTests.cpp
         tests/RelationTests.cpp
         tests/SerializationV5Tests.cpp
         tests/ReconstructionTests.cpp
