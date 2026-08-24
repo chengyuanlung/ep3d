@@ -1156,6 +1156,12 @@ void MainWindow::refreshCommandStates() {
     const bool haveSketch = selectedSketch() != kInvalidObjectId;
     const bool haveTail = currentTail() != kInvalidObjectId;
     if (insertPadAction_ != nullptr) insertPadAction_->setEnabled(haveSketch);
+    // Revolve takes a SELECTED SKETCH -- its own menu text says so -- and it
+    // was never in this function at all, so it sat enabled with nothing
+    // selected and refused when pressed. Found by LOOKING at the toolbar,
+    // which is the one check a fingerprint of the icons cannot make: every
+    // test asked whether the button existed, none asked what it offered.
+    if (insertRevolveAction_ != nullptr) insertRevolveAction_->setEnabled(haveSketch);
     // The same rule the commands themselves enforce, so the toolbar cannot
     // offer something the command would refuse (M9's "availability cannot
     // differ between the two surfaces").

@@ -376,6 +376,13 @@ int main(int argc, char** argv) {
     // right way, and still not tell anyone whether the result reads as a
     // drawing.
     const char* screenshotPath = nullptr;
+    // Whether the picture was actually TAKEN. --screenshot was honoured inside
+    // exactly one sample's branch (`--sample=m12-sketch`) and silently ignored
+    // in every other, so asking for a picture of the model toolbar printed
+    // SELFTEST OK and wrote no file. Silently discarding a flag the program
+    // understands is the defect --sample was fixed for three separate times
+    // (ADR-M5-025, ADR-M6-025); this is the same defect, one flag along.
+    bool screenshotWritten = false;
     const char* importPath = nullptr;
     // THE SCRIPT SOCKET IS ON BY DEFAULT (M17.28).
     //
@@ -1287,8 +1294,13 @@ int main(int argc, char** argv) {
             //
             // Import is the one exception and is checked as such: it needs
             // nothing but a file, so it is always available.
+            //
+            // Revolve is in this list for a reason it earned: it was never in
+            // refreshCommandStates at all, so it sat enabled with nothing
+            // selected while Pad next to it was correctly greyed. Nothing
+            // caught it, because every check asked whether the button EXISTED.
             for (const char* off : {"Sweep", "Loft", "Hole", "Union", "Subtract", "Intersect",
-                                    "Along"}) {
+                                    "Along", "Revolve"}) {
                 for (int i = 0; i < buttons; ++i) {
                     if (window.modelToolbarLabel(i).find(off) == std::string::npos) continue;
                     if (window.modelToolbarButtonEnabled(i)) {
@@ -1353,6 +1365,28 @@ int main(int argc, char** argv) {
                 fail(("Sketch on Face's refusal does not mention a face: " + refusal).c_str());
             if (window.inSketchMode())
                 fail("a refused Sketch on Face opened a sketch anyway");
+
+            // --- AND THE MIRROR OF IT ---------------------------------------
+            //
+            // A button that is never enabled is a command that does not exist.
+            // Every check above asks what is REFUSED, so greying Revolve out
+            // could have switched it off for good and nothing here would have
+            // said a word -- the same one-sided test that let it sit enabled
+            // in the first place. Select a sketch and it has to come back.
+            if (!model->document.sketches().empty()) {
+                window.selectObject(model->document.sketches().front()->id());
+                for (const char* on : {"Pad", "Revolve"}) {
+                    for (int i = 0; i < buttons; ++i) {
+                        if (window.modelToolbarLabel(i).find(on) == std::string::npos) continue;
+                        if (!window.modelToolbarButtonEnabled(i)) {
+                            std::string message(on);
+                            message += " stays greyed out with a sketch selected";
+                            fail(message.c_str());
+                        }
+                    }
+                }
+                window.selectObject(kInvalidObjectId);
+            }
         }
 
         // --- The main toolbar: Undo and Redo are REACHABLE ------------------
@@ -2623,6 +2657,8 @@ int main(int argc, char** argv) {
                     // what a screenshot has to answer.
                     if (!window.grab().save(QString::fromUtf8(screenshotPath)))
                         fail("could not write the requested screenshot");
+                    else
+                        screenshotWritten = true;
                 }
 
                 // --- Projected reference geometry, through the shell --------
@@ -3405,6 +3441,20 @@ int main(int argc, char** argv) {
                 }
             }
         }
+
+        // Every OTHER sample gets its picture here, of the shell in whatever
+        // state the run left it. The model toolbar is on the window in all of
+        // them, which is the whole reason somebody asks for one.
+        if (screenshotPath != nullptr && !screenshotWritten
+            && window.grab().save(QString::fromUtf8(screenshotPath)))
+            screenshotWritten = true;
+        // ONE check for one fact, and it covers both ways of getting here: the
+        // save failed, or nothing ever tried. "Nobody said it failed" and "it
+        // worked" are different sentences, and only one of them is evidence --
+        // the rule the mutation harness's own oracle had to learn three times
+        // over (ADR-M26-008).
+        if (screenshotPath != nullptr && !screenshotWritten)
+            fail("--screenshot was given and no file was written");
 
         if (status == 0) std::printf("SELFTEST OK\n");
         app.quit();
