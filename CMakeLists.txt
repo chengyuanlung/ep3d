@@ -223,6 +223,7 @@ option(PARAMCAD_BUILD_VIEWER "Build the Qt viewer" ON)
 add_library(ParametricCADViewerCore
     src/Viewer/DocumentPresenter.cpp
     src/Viewer/DocumentOutline.cpp
+    src/Viewer/AssemblyOutline.cpp
     src/Viewer/PropertyEditing.cpp
     src/Viewer/SketchCanvas.cpp
     src/Viewer/SketchCommands.cpp
@@ -521,6 +522,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/ViewerPresenterTests.cpp
         tests/M4ReviewFindingTests.cpp
         tests/DocumentOutlineTests.cpp
+        tests/AssemblyOutlineTests.cpp
         tests/SerializationV5Tests.cpp
         tests/ReconstructionTests.cpp
         tests/ReconstructionGeneralTests.cpp

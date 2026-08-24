@@ -34,7 +34,12 @@ enum class OutlineState {
 // needs behaviour asks for a capability (ADR-M3-007).
 enum class OutlineKind {
     Document, Parameter, Sketch, Constraint, Solid, MassProperties, Material,
-    Frame, Connector, Other
+    Frame, Connector,
+    // M27: what an ASSEMBLY's tree is made of. In the shared vocabulary rather
+    // than a second enum, because the widget, the state markers and the
+    // selection are shared -- only the BUILDER differs (see AssemblyOutline).
+    Instance, Mate, NamedPosition, ExplodeView,
+    Other
 };
 
 struct OutlineNode {
