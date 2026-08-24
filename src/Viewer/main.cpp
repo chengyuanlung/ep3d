@@ -3692,6 +3692,165 @@ int main(int argc, char** argv) {
             if (window.insertPadEnabled())
                 fail("Pad is offered on an assembly, which has no sketches to pad");
 
+            // --- M28's GATE: build a three-part assembly with the COMMANDS ---
+            //
+            // Insert, move, ground, pattern, delete -- then save, reopen, and
+            // check the places survived. Driven through the command methods
+            // because the dialogs are the only part a self test cannot work,
+            // which is the split importDxfFile established.
+            {
+                const QString partFile = QDir::tempPath() +
+                                         QStringLiteral("/ep3d-selftest/m28-block.ep3d");
+                {
+                    // A part to instance, built by the script interpreter so
+                    // the fixture cannot drift from what the CLI produces.
+                    const QString buildScript = QDir::tempPath() +
+                                                QStringLiteral("/ep3d-selftest/m28-block.ep3ds");
+                    QFile out(buildScript);
+                    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                        fail("could not write the part script M28 instances");
+                    out.write(("sketch B\ntool rect\nclick -10 -10\nclick 10 10\n"
+                               "pad Block 20 as M28Thick\nsolve\nsave " +
+                               partFile.toStdString() + "\n").c_str());
+                    out.close();
+                    window.newDocumentCommand();
+                    const QString made = window.runScriptFile(buildScript);
+                    if (made.contains(QStringLiteral("stopped")))
+                        fail(("M28's part did not build: " + made.toStdString()).c_str());
+                }
+
+                // A FRESH ASSEMBLY, adopted the way File > Open adopts one.
+                window.adoptAssemblyForTesting("M28Rig");
+                if (window.openedDocumentType() != DocumentType::Assembly)
+                    fail("the window did not adopt an assembly");
+
+                // INSERT THREE. The name is derived from the file and made
+                // unique, because several of one part is the ordinary case.
+                for (int i = 0; i < 3; ++i) {
+                    const QString said = window.insertInstanceCommand(partFile);
+                    if (!said.contains(QStringLiteral("Inserted")))
+                        fail(("Insert Part did not insert: " + said.toStdString()).c_str());
+                }
+                if (window.instanceCountForTesting() != 3)
+                    fail("three inserts did not make three instances");
+
+                // ...WITH DIFFERENT NAMES. Three rows all called "m28-block"
+                // is a tree a user cannot navigate.
+                if (window.instanceNamesForTesting().size() != 3)
+                    fail("the three instances do not have three distinct names");
+
+                // MOVE the one that is selected -- insert leaves it selected,
+                // which is what makes "insert then place" two clicks.
+                // NOBODY WAS THERE BEFORE. Asserting the destination without
+                // this would pass for a command that moved nothing, if some
+                // instance happened to sit there already.
+                const auto anyInstanceAt = [&](double x) {
+                    for (const Vec3& place : window.instancePlacesForTesting())
+                        if (std::fabs(place.x - x) < 1e-6) return true;
+                    return false;
+                };
+                if (anyInstanceAt(60.0))
+                    fail("an instance was already at x=60 before anything was moved there");
+
+                const QString moved = window.placeSelectedInstance(Vec3{60.0, 0.0, 0.0});
+                if (!moved.contains(QStringLiteral("Moved")))
+                    fail(("an instance would not move: " + moved.toStdString()).c_str());
+                // ...AND IT ACTUALLY MOVED. The message saying "Moved" is the
+                // report; this is the fact. A mutation that dropped the
+                // translation passed every other check in this block.
+                if (!anyInstanceAt(60.0))
+                    fail("an instance reported a move and did not move");
+
+                // GROUND it, and say so both ways.
+                const QString grounded = window.toggleGroundSelectedInstance();
+                if (!grounded.contains(QStringLiteral("grounded")))
+                    fail(("Ground did not report grounding: " + grounded.toStdString()).c_str());
+                const QString ungrounded = window.toggleGroundSelectedInstance();
+                if (!ungrounded.contains(QStringLiteral("free")))
+                    fail(("Unground did not report it: " + ungrounded.toStdString()).c_str());
+                window.toggleGroundSelectedInstance(); // leave it grounded
+
+                // PATTERN it, and hear the cost of changing it later.
+                const QString patterned =
+                    window.patternSelectedInstance(3, Vec3{0.0, 40.0, 0.0});
+                if (!patterned.contains(QStringLiteral("delete them and pattern again")))
+                    fail(("Pattern did not say what changing the count costs: " +
+                          patterned.toStdString())
+                             .c_str());
+                if (window.instanceCountForTesting() != 5)
+                    fail("a pattern of 3 on top of 3 instances did not leave 5");
+
+                // SAVE, REOPEN, AND THE PLACES SURVIVED. This is the gate: an
+                // assembly built by hand that comes back different is an
+                // assembly nobody can build by hand.
+                const QString rigPath =
+                    QDir::tempPath() + QStringLiteral("/ep3d-selftest/m28-rig.ep3da");
+                const QString saved = window.saveDocumentFile(rigPath);
+                if (!saved.contains(QStringLiteral("Saved")))
+                    fail(("the assembly would not save: " + saved.toStdString()).c_str());
+
+                const std::vector<Vec3> before = window.instancePlacesForTesting();
+                window.newDocumentCommand();
+                const QString reopened = window.openDocumentFile(rigPath);
+                if (reopened.contains(QStringLiteral("Could not open")))
+                    fail(("the saved assembly would not reopen: " + reopened.toStdString())
+                             .c_str());
+                const std::vector<Vec3> after = window.instancePlacesForTesting();
+                if (before.size() != after.size())
+                    fail("the reopened assembly has a different number of instances");
+                for (std::size_t i = 0; i < before.size(); ++i) {
+                    if (std::fabs(before[i].x - after[i].x) > 1e-6 ||
+                        std::fabs(before[i].y - after[i].y) > 1e-6 ||
+                        std::fabs(before[i].z - after[i].z) > 1e-6)
+                        fail("an instance came back in a different place than it was saved in");
+                }
+
+                // DELETE, on an instance NOTHING names: it takes only itself.
+                window.selectFirstInstanceForTesting();
+                const QString deleted = window.deleteSelectedInstance();
+                if (!deleted.contains(QStringLiteral("Deleted")))
+                    fail(("Delete did not delete: " + deleted.toStdString()).c_str());
+                if (window.instanceCountForTesting() != after.size() - 1)
+                    fail("Delete removed the wrong number of instances");
+                if (deleted.contains(QStringLiteral("mate")))
+                    fail(("Delete claimed to take mates that do not exist: " +
+                          deleted.toStdString())
+                             .c_str());
+            }
+
+            // --- DELETE SAYS WHAT ELSE IT TOOK ------------------------------
+            //
+            // A mate names two instances and cannot outlive either of them.
+            // Finding that out afterwards -- from a tree with fewer rows than
+            // expected -- is how a user learns not to trust Delete.
+            //
+            // The hinge is reopened rather than mated here, because building a
+            // mate needs connectors and a mate dialog, and neither exists until
+            // M29. Using the assembly the CLI already builds keeps this honest
+            // about what the SHELL can currently do.
+            {
+                const QString hinge = QDir::tempPath() +
+                                      QStringLiteral("/ep3d-selftest/m27-hinge.ep3da");
+                const QString reopened = window.openDocumentFile(hinge);
+                if (reopened.contains(QStringLiteral("Could not open")))
+                    fail("the hinge would not reopen for the delete check");
+                if (window.mateCountForTesting() != 1)
+                    fail("the hinge came back without its mate");
+
+                window.selectFirstInstanceForTesting();
+                const QString deleted = window.deleteSelectedInstance();
+                if (!deleted.contains(QStringLiteral("mate")))
+                    fail(("Delete did not say it took the mate with it: " +
+                          deleted.toStdString())
+                             .c_str());
+                if (window.mateCountForTesting() != 0)
+                    fail("the mate outlived the instance it named");
+            }
+
+            window.newDocumentCommand();
+            if (window.openedDocumentType() != DocumentType::Part)
+                fail("the self test did not get back to a part document");
+
             // ...and going back to a PART turns them on again, because a
             // one-way switch would be a different defect.
             window.newDocumentCommand();

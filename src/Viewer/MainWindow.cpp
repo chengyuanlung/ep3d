@@ -10,6 +10,8 @@
 
 #include "Cli/SketchScript.h"
 #include "Core/Assembly/AssemblyDocument.h"
+#include "Core/Assembly/Instance.h"
+#include "Core/Assembly/Mate.h"
 #include "Core/Document/DocumentBase.h"
 #include "Core/Serialization/AssemblyDocumentSerializer.h"
 #include "Core/Serialization/DocumentJson.h"
@@ -163,6 +165,48 @@ void MainWindow::buildMenus() {
     file->addSeparator();
     QAction* quit = file->addAction(QStringLiteral("E&xit"));
     connect(quit, &QAction::triggered, this, &QWidget::close);
+
+    // --- Assembly (M28) -----------------------------------------------------
+    //
+    // ITS OWN MENU, not entries mixed into Insert. Insert builds features on a
+    // part and every one of its items is disabled on an assembly; putting
+    // "Insert Part" among them would put the one enabled item in a list of
+    // fourteen greyed ones, which reads as a mistake rather than as a menu.
+    //
+    // The whole menu is disabled on a part, so it is visible and inert rather
+    // than appearing and vanishing -- a menu that comes and goes teaches a user
+    // that the application is unpredictable.
+    assemblyMenu_ = menuBar()->addMenu(QStringLiteral("&Assembly"));
+    insertInstanceAction_ = assemblyMenu_->addAction(QStringLiteral("Insert &Part..."));
+    insertInstanceAction_->setToolTip(
+        QStringLiteral("Add a part or sub-assembly to this assembly.\n"
+                       "It is placed at the origin; move it, ground it, or mate it."));
+    connect(insertInstanceAction_, &QAction::triggered, this,
+            &MainWindow::onInsertInstanceRequested);
+
+    assemblyMenu_->addSeparator();
+    groundInstanceAction_ = assemblyMenu_->addAction(QStringLiteral("&Ground / Unground"));
+    groundInstanceAction_->setToolTip(
+        QStringLiteral("Pin the selected instance where it is.\n"
+                       "A mate solve needs something that does not move."));
+    connect(groundInstanceAction_, &QAction::triggered, this,
+            &MainWindow::onGroundInstanceRequested);
+
+    patternInstanceAction_ = assemblyMenu_->addAction(QStringLiteral("Pattern &Instance..."));
+    patternInstanceAction_->setToolTip(
+        QStringLiteral("Repeat the selected instance in a row.\n"
+                       "The copies are ordinary instances, not a stored feature: to change "
+                       "the count, delete them and pattern again."));
+    connect(patternInstanceAction_, &QAction::triggered, this,
+            &MainWindow::onPatternInstanceRequested);
+
+    assemblyMenu_->addSeparator();
+    deleteInstanceAction_ = assemblyMenu_->addAction(QStringLiteral("&Delete Instance"));
+    deleteInstanceAction_->setToolTip(
+        QStringLiteral("Delete the selected instance.\n"
+                       "Any mate that names it goes with it, and the message says how many."));
+    connect(deleteInstanceAction_, &QAction::triggered, this,
+            &MainWindow::onDeleteInstanceRequested);
 
     QMenu* view = menuBar()->addMenu(QStringLiteral("&View"));
     QAction* fit = view->addAction(QStringLiteral("&Fit All"));
@@ -561,6 +605,281 @@ OutlineNode MainWindow::buildOutline() const {
         return AssemblyOutline(*assembly).build(hiddenIds());
     return DocumentOutline(part()).build(hiddenIds());
 }
+
+// =============================================================================
+// Assembly commands (M28)
+// =============================================================================
+
+namespace {
+
+// The assembly, or null. Written once here for the same reason partOrNull()
+// exists: five commands asking the same question five different ways is five
+// chances to ask it wrongly.
+AssemblyDocument* AsAssembly(DocumentBase* document) noexcept {
+    return dynamic_cast<AssemblyDocument*>(document);
+}
+
+} // namespace
+
+ObjectId MainWindow::selectedInstance() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return kInvalidObjectId;
+    return assembly->findInstance(selectedId_) != nullptr ? selectedId_ : kInvalidObjectId;
+}
+
+void MainWindow::adoptAssemblyForTesting(const QString& name) {
+    // The same adoption File > Open performs, without a file: the window owns
+    // the document, points everything at it, and the kernel and solver are
+    // carried across because they are the APPLICATION'S (ADR-M3-003).
+    auto fresh = std::make_unique<AssemblyDocument>(name.toStdString());
+    if (document_ != nullptr) {
+        fresh->setGeometryKernel(document_->geometryKernel());
+        fresh->setSketchSolver(document_->sketchSolver());
+    }
+    if (inSketchMode()) finishSketchCommand();
+    ownedDocument_ = std::move(fresh);
+    document_ = ownedDocument_.get();
+    presenter_->setDocument(*document_);
+    if (sketchCanvas_ != nullptr) sketchCanvas_->setSketch(partOrNull(), kInvalidObjectId);
+    selectedId_ = kInvalidObjectId;
+    documentPath_.clear();
+    refreshAll();
+}
+
+std::size_t MainWindow::instanceCountForTesting() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    return assembly == nullptr ? 0 : assembly->instances().size();
+}
+
+std::size_t MainWindow::mateCountForTesting() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    return assembly == nullptr ? 0 : assembly->mates().size();
+}
+
+std::vector<std::string> MainWindow::instanceNamesForTesting() const {
+    std::set<std::string> unique;
+    if (const AssemblyDocument* assembly = AsAssembly(document_))
+        for (const Instance* instance : assembly->instances()) unique.insert(instance->name());
+    return {unique.begin(), unique.end()};
+}
+
+std::vector<Vec3> MainWindow::instancePlacesForTesting() const {
+    std::vector<Vec3> places;
+    if (const AssemblyDocument* assembly = AsAssembly(document_))
+        for (const Instance* instance : assembly->instances())
+            places.push_back(assembly->instanceWorldTransform(instance->id()).translation);
+    return places;
+}
+
+void MainWindow::selectFirstInstanceForTesting() {
+    if (const AssemblyDocument* assembly = AsAssembly(document_))
+        if (!assembly->instances().empty()) selectObject(assembly->instances().front()->id());
+}
+
+QString MainWindow::insertInstanceCommand(const QString& sourcePath, const QString& bodyName) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return say(QStringLiteral("Only an assembly can hold instances."));
+    if (sourcePath.isEmpty()) return say(QStringLiteral("Insert needs a part file."));
+
+    // A NAME THE TREE CAN SHOW, derived from the file rather than asked for.
+    // Onshape does the same: the instance is named after what it is, and
+    // renaming it is one edit in the property panel afterwards. Asking first
+    // would put a dialog in front of the commonest action in an assembly.
+    const QString base = QFileInfo(sourcePath).completeBaseName();
+    std::string name = base.isEmpty() ? std::string("Part") : base.toStdString();
+    if (assembly->findInstanceNamed(name) != nullptr) {
+        // ...AND MADE UNIQUE, because five of the same part is the ordinary
+        // case in an assembly, not an error.
+        for (int suffix = 2;; ++suffix) {
+            const std::string candidate = name + " " + std::to_string(suffix);
+            if (assembly->findInstanceNamed(candidate) == nullptr) {
+                name = candidate;
+                break;
+            }
+        }
+    }
+
+    document_->beginTransaction("Insert " + name);
+    const Instance& made =
+        assembly->addInstance(name, sourcePath.toStdString(), bodyName.toStdString());
+    const ObjectId madeId = made.id();
+    if (!document_->commitTransaction())
+        return say(QStringLiteral("The document refused that instance."));
+
+    // RECOMPUTED, then reported -- an instance whose source will not load is a
+    // failure the user has to hear about now rather than discover later.
+    const DocumentRecomputeReport report = document_->recompute();
+    refreshAll();
+    selectObject(madeId);
+    if (!report.success) {
+        const Instance* placed = assembly->findInstance(madeId);
+        return say(QStringLiteral("%1 was inserted but did not build: %2")
+                       .arg(QString::fromStdString(name))
+                       .arg(placed != nullptr && placed->currentState() == ComputeState::Failed
+                                ? QStringLiteral("its source could not be read")
+                                : QStringLiteral("see the model tree")));
+    }
+    return say(QStringLiteral("Inserted %1 from %2")
+                   .arg(QString::fromStdString(name), QFileInfo(sourcePath).fileName()));
+}
+
+QString MainWindow::placeSelectedInstance(const Vec3& whereMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId instanceId = selectedInstance();
+    if (assembly == nullptr || instanceId == kInvalidObjectId)
+        return say(QStringLiteral("Select an instance to move."));
+
+    // §19: this moves the INSTANCE, never the part. The transform lives on the
+    // instance's own frame, so the part file it came from is untouched and
+    // every other instance of it stays where it is.
+    Transform3D placement = assembly->instanceTransform(instanceId);
+    placement.translation = whereMm;
+    document_->beginTransaction("Move instance");
+    const bool moved = assembly->setInstanceTransform(instanceId, placement);
+    if (!moved || !document_->commitTransaction())
+        return say(QStringLiteral("That instance could not be moved."));
+    (void)document_->recompute();
+    refreshAll();
+    return say(QStringLiteral("Moved to (%1, %2, %3) mm")
+                   .arg(whereMm.x, 0, 'f', 2)
+                   .arg(whereMm.y, 0, 'f', 2)
+                   .arg(whereMm.z, 0, 'f', 2));
+}
+
+QString MainWindow::toggleGroundSelectedInstance() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId instanceId = selectedInstance();
+    if (assembly == nullptr || instanceId == kInvalidObjectId)
+        return say(QStringLiteral("Select an instance to ground."));
+
+    const bool wasGrounded = assembly->isInstanceGrounded(instanceId);
+    document_->beginTransaction(wasGrounded ? "Unground instance" : "Ground instance");
+    const bool changed = assembly->setInstanceGrounded(instanceId, !wasGrounded);
+    if (!changed || !document_->commitTransaction())
+        return say(QStringLiteral("That instance could not be grounded."));
+    (void)document_->recompute();
+    refreshAll();
+    const Instance* instance = assembly->findInstance(instanceId);
+    const QString name =
+        instance != nullptr ? QString::fromStdString(instance->name()) : QStringLiteral("it");
+    return say(wasGrounded ? QStringLiteral("%1 is free to move again").arg(name)
+                           : QStringLiteral("%1 is grounded").arg(name));
+}
+
+QString MainWindow::patternSelectedInstance(int count, const Vec3& stepMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId instanceId = selectedInstance();
+    if (assembly == nullptr || instanceId == kInvalidObjectId)
+        return say(QStringLiteral("Select an instance to pattern."));
+    if (count < 2)
+        return say(QStringLiteral("A pattern needs at least 2, counting the original."));
+
+    document_->beginTransaction("Pattern instance");
+    std::vector<ObjectId> copies;
+    try {
+        copies = assembly->addInstancePattern(instanceId, count, stepMm);
+    } catch (const std::exception& problem) {
+        document_->commitTransaction();
+        return say(QStringLiteral("That pattern was refused: %1")
+                       .arg(QString::fromUtf8(problem.what())));
+    }
+    if (!document_->commitTransaction())
+        return say(QStringLiteral("The document refused that pattern."));
+    (void)document_->recompute();
+    refreshAll();
+    // WHAT IT COSTS TO CHANGE, said now. The copies are ordinary instances and
+    // not a stored feature (ADR-M26-003), so editing the count afterwards means
+    // deleting them and doing it again -- and a user should hear that before
+    // they build a row of forty.
+    return say(QStringLiteral("Made %1 cop%2. They are ordinary instances: to change the "
+                              "count, delete them and pattern again.")
+                   .arg(copies.size())
+                   .arg(copies.size() == 1 ? "y" : "ies"));
+}
+
+QString MainWindow::deleteSelectedInstance() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    const ObjectId instanceId = selectedInstance();
+    if (assembly == nullptr || instanceId == kInvalidObjectId)
+        return say(QStringLiteral("Select an instance to delete."));
+
+    const Instance* instance = assembly->findInstance(instanceId);
+    const QString name =
+        instance != nullptr ? QString::fromStdString(instance->name()) : QStringLiteral("it");
+    // WHAT ELSE GOES, counted BEFORE the delete. A mate names two instances and
+    // cannot outlive either of them, and finding that out afterwards -- from a
+    // tree with fewer rows than expected -- is how a user learns not to trust
+    // Delete.
+    std::size_t matesLost = 0;
+    for (const Mate* mate : assembly->mates())
+        if (mate->leadingInstanceId() == instanceId || mate->followingInstanceId() == instanceId)
+            ++matesLost;
+
+    document_->beginTransaction("Delete instance");
+    const bool removed = document_->removeObject(instanceId);
+    if (!removed || !document_->commitTransaction())
+        return say(QStringLiteral("%1 could not be deleted.").arg(name));
+    (void)document_->recompute();
+    selectedId_ = kInvalidObjectId;
+    refreshAll();
+    if (matesLost == 0) return say(QStringLiteral("Deleted %1").arg(name));
+    return say(QStringLiteral("Deleted %1 and %2 mate%3 that named it")
+                   .arg(name)
+                   .arg(matesLost)
+                   .arg(matesLost == 1 ? "" : "s"));
+}
+
+// --- The slots: the dialogs, and nothing else --------------------------------
+
+void MainWindow::onInsertInstanceRequested() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Insert Part"), QString(),
+        QStringLiteral("EP3D documents (*.ep3d *.ep3da);;All files (*)"));
+    if (path.isEmpty()) return; // cancelled; nothing said, nothing changed
+    insertInstanceCommand(path);
+}
+
+void MainWindow::onGroundInstanceRequested() { toggleGroundSelectedInstance(); }
+
+void MainWindow::onPatternInstanceRequested() {
+    bool ok = false;
+    const int count = QInputDialog::getInt(this, QStringLiteral("Pattern Instance"),
+                                           QStringLiteral("How many, including the original?"),
+                                           3, 2, 999, 1, &ok);
+    if (!ok) return;
+    const double step = QInputDialog::getDouble(this, QStringLiteral("Pattern Instance"),
+                                                QStringLiteral("Step along X, in mm"), 50.0,
+                                                -1e6, 1e6, 3, &ok);
+    if (!ok) return;
+    patternSelectedInstance(count, Vec3{step, 0.0, 0.0});
+}
+
+void MainWindow::onDeleteInstanceRequested() { deleteSelectedInstance(); }
 
 void MainWindow::rebuildTree() {
     // WHICH BUILDER, by what the document IS (M27). The node type is shared, so
@@ -1286,6 +1605,23 @@ void MainWindow::refreshCommandStates() {
     // form of the refusal -- a command that is offered and then explains
     // itself is worse than one that was never offered, because the refusal
     // arrives after the click.
+    // THE ASSEMBLY MENU, enabled from the model exactly as everything else is.
+    // Insert Part needs only an assembly; the other three need something
+    // selected in it, and offering them with nothing selected would be a
+    // command that refuses after the click.
+    {
+        const bool isAssembly = partOrNull() == nullptr && document_ != nullptr;
+        const bool haveInstance = selectedInstance() != kInvalidObjectId;
+        if (assemblyMenu_ != nullptr) assemblyMenu_->setEnabled(isAssembly);
+        if (insertInstanceAction_ != nullptr) insertInstanceAction_->setEnabled(isAssembly);
+        if (groundInstanceAction_ != nullptr)
+            groundInstanceAction_->setEnabled(isAssembly && haveInstance);
+        if (patternInstanceAction_ != nullptr)
+            patternInstanceAction_->setEnabled(isAssembly && haveInstance);
+        if (deleteInstanceAction_ != nullptr)
+            deleteInstanceAction_->setEnabled(isAssembly && haveInstance);
+    }
+
     if (partOrNull() == nullptr) {
         for (QAction* action : partOnlyActions())
             if (action != nullptr) action->setEnabled(false);

@@ -20,6 +20,7 @@
 #include <set>
 
 class QAction;
+class QMenu;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QTableWidget;
@@ -132,6 +133,41 @@ public:
     // line 90 would throw away the 89 lines that worked, and finding out WHERE
     // a script goes wrong is most of what running one is for.
     QString runScriptFile(const QString& path);
+
+    // --- Assembly commands (M28) --------------------------------------------
+    //
+    // Each takes its inputs as arguments and returns what the user was told, so
+    // the whole workflow is reachable without a dialog -- the split
+    // importDxfFile established, and the only reason any of this is testable.
+    //
+    // The document AS AN ASSEMBLY is checked inside each, the same way part()
+    // checks the other direction: these are reached from menu items that are
+    // disabled on a part, and the check is what makes "disabled" a guarantee
+    // rather than a hope.
+    QString insertInstanceCommand(const QString& sourcePath, const QString& bodyName = {});
+    // Moves the SELECTED instance to an absolute place in the assembly.
+    QString placeSelectedInstance(const Vec3& whereMm);
+    QString toggleGroundSelectedInstance();
+    // `count` INCLUDING the original, matching addInstancePattern.
+    QString patternSelectedInstance(int count, const Vec3& stepMm);
+    // Deletes the selected instance -- and says what went with it, because a
+    // mate that named it cannot survive it.
+    QString deleteSelectedInstance();
+
+    // Which instance the tree has selected, or kInvalidObjectId.
+    ObjectId selectedInstance() const;
+
+    // --- Readbacks, so a self test can drive the whole workflow -------------
+    //
+    // Asked of the document the WINDOW is looking at, which after an Open is
+    // not the one its owner still holds -- the same reason openedSketches()
+    // exists rather than the test asking the owner.
+    void adoptAssemblyForTesting(const QString& name);
+    std::size_t instanceCountForTesting() const;
+    std::size_t mateCountForTesting() const;
+    std::vector<std::string> instanceNamesForTesting() const;
+    std::vector<Vec3> instancePlacesForTesting() const;
+    void selectFirstInstanceForTesting();
     // WHAT KIND of document this window is looking at (M27). A readback,
     // so a self test can assert that File > Open read the file right.
     DocumentType openedDocumentType() const;
@@ -460,6 +496,10 @@ private slots:
     void onToggleHiddenRequested();
     void onImportDxfRequested();
     void onRunScriptRequested();
+    void onInsertInstanceRequested();
+    void onGroundInstanceRequested();
+    void onPatternInstanceRequested();
+    void onDeleteInstanceRequested();
     void onSaveRequested();
     void onSaveAsRequested();
     void onOpenRequested();
@@ -676,6 +716,13 @@ private:
     QAction* extendAction_ = nullptr;
     QToolBar* mainToolBar_ = nullptr;
     QToolBar* modelToolBar_ = nullptr;
+    // The Assembly menu's actions, enabled only when the document is one.
+    QAction* insertInstanceAction_ = nullptr;
+    QAction* groundInstanceAction_ = nullptr;
+    QAction* patternInstanceAction_ = nullptr;
+    QAction* deleteInstanceAction_ = nullptr;
+    QMenu* assemblyMenu_ = nullptr;
+
     QDockWidget* treeDock_ = nullptr;
     QDockWidget* constraintDock_ = nullptr;
     QPushButton* deleteConstraintButton_ = nullptr;
