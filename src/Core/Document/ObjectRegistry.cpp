@@ -7,6 +7,7 @@
 #include "Core/Reference/ReferenceFrame.h"
 #include "Core/Assembly/AssemblyStates.h"
 #include "Core/Assembly/Mate.h"
+#include "Core/Assembly/Relation.h"
 #include "Core/Connector/Connector.h"
 #include "Core/Sketch/Sketch.h"
 #include <type_traits>

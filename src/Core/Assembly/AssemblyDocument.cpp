@@ -1,4 +1,5 @@
 #include "Core/Assembly/AssemblyDocument.h"
+#include "Core/Assembly/Relation.h"
 
 #include "Core/Assembly/IAssemblySolver.h"
 #include "Core/Geometry/Transform.h"
@@ -926,6 +927,172 @@ bool AssemblyDocument::loopResiduals(const MateForest& forest,
     return true;
 }
 
+// =============================================================================
+// Relations (M31, roadmap §20.5)
+// =============================================================================
+
+std::string AssemblyDocument::whyRelationIsRefused(RelationType type,
+                                                   const CoupledFreedom& driver,
+                                                   const CoupledFreedom& driven) const {
+    // THE TYPE'S OWN RULE FIRST -- gear needs two rotations, screw needs one
+    // mate -- because it needs no document to answer and gives the clearer
+    // message when it is the thing that is wrong.
+    const std::string byType = WhyRelationIsRefused(type, driver, driven);
+    if (!byType.empty()) return byType;
+
+    const auto check = [this](const CoupledFreedom& end, const char* which) -> std::string {
+        const Mate* mate = findMate(end.mateId);
+        if (mate == nullptr)
+            return std::string("the ") + which + " mate is not in this assembly";
+        // TANGENT SUPPORTS NO RELATION (§20.5). It is not that its freedoms are
+        // wrong -- it does not use mate connectors at all (§20.1), so there is
+        // no shared axis for a coupled number to be measured against.
+        //
+        // EP3D has no Tangent mate yet (ADR-M25-007 refused to fake one), so
+        // this cannot fire today. It is written now because the rule belongs
+        // with the relation, and the day Tangent arrives is the day somebody
+        // would otherwise have to remember it.
+        if (!mate->freedom().free[static_cast<std::size_t>(end.component)])
+            return std::string("a ") + std::string(toString(mate->type())) + " mate leaves its " +
+                   std::string(toString(end.component)) + " pinned, so nothing can drive it";
+        return {};
+    };
+    if (const std::string why = check(driver, "driving"); !why.empty()) return why;
+    if (const std::string why = check(driven, "driven"); !why.empty()) return why;
+
+    // ONE DRIVER PER FREEDOM. Two relations writing the same number is two
+    // answers to one question, and the solve would take whichever ran last.
+    for (const std::unique_ptr<Relation>& existing : relations_) {
+        if (existing->driven().mateId != driven.mateId) continue;
+        if (existing->driven().component != driven.component) continue;
+        return "that freedom is already driven by " + existing->name();
+    }
+    return {};
+}
+
+Relation& AssemblyDocument::addRelation(std::string name, RelationType type,
+                                        CoupledFreedom driver, CoupledFreedom driven,
+                                        double ratio, bool reversed) {
+    for (const std::unique_ptr<Relation>& existing : relations_)
+        if (existing->name() == name)
+            throw std::invalid_argument("addRelation: there is already a relation "
+                                        "called '" + name + "'");
+    const std::string why = whyRelationIsRefused(type, driver, driven);
+    if (!why.empty()) throw std::invalid_argument("addRelation: " + why);
+
+    auto item = std::make_unique<Relation>(ObjectIdGenerator::Next(), std::move(name), type,
+                                           driver, driven, ratio, reversed);
+    auto& ref = *item;
+    relations_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    // The DRIVEN mate's follower has to be rebuilt: its freedom is no longer
+    // its own.
+    if (const Mate* mate = findMate(driven.mateId))
+        graph_.markDirty(mate->followingInstanceId());
+    return ref;
+}
+
+Relation& AssemblyDocument::restoreRelation(ObjectId id, std::string name, RelationType type,
+                                            CoupledFreedom driver, CoupledFreedom driven,
+                                            double ratio, bool reversed) {
+    auto item = std::make_unique<Relation>(RestoreObjectId(id), std::move(name), type, driver,
+                                           driven, ratio, reversed);
+    auto& ref = *item;
+    relations_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const Relation*> AssemblyDocument::relations() const {
+    std::vector<const Relation*> all;
+    all.reserve(relations_.size());
+    for (const std::unique_ptr<Relation>& one : relations_) all.push_back(one.get());
+    return all;
+}
+
+const Relation* AssemblyDocument::findRelation(ObjectId id) const noexcept {
+    for (const std::unique_ptr<Relation>& one : relations_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+const Relation* AssemblyDocument::findRelationNamed(const std::string& name) const noexcept {
+    for (const std::unique_ptr<Relation>& one : relations_)
+        if (one->name() == name) return one.get();
+    return nullptr;
+}
+
+bool AssemblyDocument::setRelationRatio(ObjectId relationId, double ratio) {
+    for (const std::unique_ptr<Relation>& one : relations_) {
+        if (one->id() != relationId) continue;
+        one->setRatio(ratio);
+        if (const Mate* mate = findMate(one->driven().mateId))
+            graph_.markDirty(mate->followingInstanceId());
+        return true;
+    }
+    return false;
+}
+
+bool AssemblyDocument::setRelationReversed(ObjectId relationId, bool reversed) {
+    for (const std::unique_ptr<Relation>& one : relations_) {
+        if (one->id() != relationId) continue;
+        one->setReversed(reversed);
+        if (const Mate* mate = findMate(one->driven().mateId))
+            graph_.markDirty(mate->followingInstanceId());
+        return true;
+    }
+    return false;
+}
+
+bool AssemblyDocument::isDrivenByRelation(ObjectId mateId, std::size_t component) const noexcept {
+    for (const std::unique_ptr<Relation>& one : relations_)
+        if (one->driven().mateId == mateId &&
+            static_cast<std::size_t>(one->driven().component) == component)
+            return true;
+    return false;
+}
+
+MateValues AssemblyDocument::valuesAfterRelations(ObjectId mateId) const {
+    const std::size_t index = mateIndex(mateId);
+    if (index >= mates_.size()) return MateValues{};
+    std::vector<MateValues> values;
+    values.reserve(mates_.size());
+    for (const std::unique_ptr<Mate>& mate : mates_) values.push_back(mate->values());
+    applyRelations(values);
+    return values[index];
+}
+
+void AssemblyDocument::applyRelations(std::vector<MateValues>& values) const {
+    if (relations_.empty()) return;
+
+    // CHAINS RESOLVE, and they resolve in a bounded number of passes.
+    //
+    // A gear train is relations end to end: A drives B, B drives C. One pass
+    // in storage order would leave C reading a stale B whenever C's relation
+    // was stored first. Repeating until nothing changes settles any acyclic
+    // chain, and the pass limit is what stops a cycle spinning -- a cycle is
+    // refused at creation, so reaching the limit means one was made another
+    // way and stopping is better than hanging.
+    const std::size_t limit = relations_.size() + 1;
+    for (std::size_t pass = 0; pass < limit; ++pass) {
+        bool changed = false;
+        for (const std::unique_ptr<Relation>& relation : relations_) {
+            const std::size_t driverMate = mateIndex(relation->driver().mateId);
+            const std::size_t drivenMate = mateIndex(relation->driven().mateId);
+            if (driverMate >= values.size() || drivenMate >= values.size()) continue;
+            const double from =
+                values[driverMate][static_cast<std::size_t>(relation->driver().component)];
+            const double to = relation->valueFor(from);
+            double& slot = values[drivenMate][static_cast<std::size_t>(relation->driven().component)];
+            if (slot != to) {
+                slot = to;
+                changed = true;
+            }
+        }
+        if (!changed) return;
+    }
+}
+
 bool AssemblyDocument::solveMates() {
     solveReport_ = MateSolveReport{};
     if (mates_.empty()) {
@@ -952,6 +1119,10 @@ bool AssemblyDocument::solveMates() {
     std::vector<MateValues> mateValues;
     mateValues.reserve(mates_.size());
     for (const std::unique_ptr<Mate>& mate : mates_) mateValues.push_back(mate->values());
+    // A RELATION-DRIVEN FREEDOM IS NOT ITS MATE'S OWN NUMBER any more (M31).
+    // Whatever the last solve or the last edit left in it, the relation is
+    // what decides it now -- so it is rewritten before anything is placed.
+    applyRelations(mateValues);
 
     // WHICH NUMBERS THE SOLVE MAY CHOOSE.
     //
@@ -969,8 +1140,15 @@ bool AssemblyDocument::solveMates() {
             const Mate* mate = findMate(step.mateId);
             if (mate == nullptr || mate->isDriven()) continue;
             const MateFreedom freedom = mate->freedom();
-            for (std::size_t c = 0; c < kMateComponentCount; ++c)
-                if (freedom.free[c]) unknowns.push_back(Unknown{mateIndex(step.mateId), c});
+            for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+                if (!freedom.free[c]) continue;
+                // A FREEDOM A RELATION WRITES IS NOT AN UNKNOWN. This is
+                // §20.5's third reading in code: the MATE still leaves that
+                // freedom, so its own DOF is unchanged -- but the solve may no
+                // longer choose it, because the relation already has.
+                if (isDrivenByRelation(step.mateId, c)) continue;
+                unknowns.push_back(Unknown{mateIndex(step.mateId), c});
+            }
         }
     }
 

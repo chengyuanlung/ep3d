@@ -3,6 +3,7 @@
 #include "Core/Assembly/AssemblyStates.h"
 #include "Core/Assembly/IAssemblySolver.h"
 #include "Core/Assembly/Mate.h"
+#include "Core/Assembly/Relation.h"
 #include "Core/Assembly/Instance.h"
 #include "Core/Document/DocumentBase.h"
 #include "Core/Geometry/MathTypes.h"
@@ -138,6 +139,49 @@ public:
     // (kInvalidObjectId) gives instanceWorldTransform unchanged, which is the
     // evidence that an explosion is a picture and not a move.
     Transform3D explodedWorldTransform(ObjectId viewId, ObjectId instanceId) const noexcept;
+
+    // --- Relations (M31, roadmap §20.5) --------------------------------------
+    //
+    // A relation couples two freedoms a mate solve would otherwise be free to
+    // choose independently: two gears turn together, a rack advances as its
+    // pinion turns, a screw travels as it turns.
+    //
+    // AFTER MATES, ALWAYS. A relation's input is a MATE (§20.5), so one cannot
+    // exist before the mates it couples -- which is also why it holds MateIds
+    // rather than instances.
+    //
+    // Refused, by name, when the freedoms do not suit the type: a gear needs
+    // two rotations, a screw needs one mate's rotation and its own travel. The
+    // rule lives in WhyRelationIsRefused so the document, the loader and the
+    // UI cannot disagree about it.
+    //
+    // THROWS on a refusal, matching addInstancePattern: these are programming
+    // errors from a UI that should have disabled the command, not user input
+    // arriving at the model.
+    Relation& addRelation(std::string name, RelationType type, CoupledFreedom driver,
+                          CoupledFreedom driven, double ratio, bool reversed = false);
+    Relation& restoreRelation(ObjectId id, std::string name, RelationType type,
+                              CoupledFreedom driver, CoupledFreedom driven, double ratio,
+                              bool reversed);
+    std::vector<const Relation*> relations() const;
+    const Relation* findRelation(ObjectId id) const noexcept;
+    const Relation* findRelationNamed(const std::string& name) const noexcept;
+    bool setRelationRatio(ObjectId relationId, double ratio);
+    bool setRelationReversed(ObjectId relationId, bool reversed);
+
+    // Why this pair of freedoms cannot be coupled by this type, or empty when
+    // it can. Checks the mates EXIST and actually leave those freedoms free,
+    // which the type-only rule cannot know.
+    std::string whyRelationIsRefused(RelationType type, const CoupledFreedom& driver,
+                                     const CoupledFreedom& driven) const;
+
+    // WHAT A MATE'S VALUES ACTUALLY ARE once relations have had their say.
+    //
+    // A relation-driven freedom is no longer the mate's own number: whatever
+    // the last solve or the last edit left in it, the relation decides it.
+    // The solve uses this same code path, so the panel and the geometry
+    // cannot disagree about what a coupled freedom currently is.
+    MateValues valuesAfterRelations(ObjectId mateId) const;
 
     // --- Grounding (M24) -----------------------------------------------------
     //
@@ -349,6 +393,18 @@ private:
 
     std::vector<std::unique_ptr<Instance>> instances_;
     std::vector<std::unique_ptr<Mate>> mates_;
+    std::vector<std::unique_ptr<Relation>> relations_;
+
+    // Rewrites every RELATION-DRIVEN component of `values` from its driver.
+    //
+    // Called wherever mate values are about to place something, so a driven
+    // freedom is never read from the mate's own stored number -- that number
+    // is whatever the last solve or the last user edit left there, and the
+    // relation is what decides it now.
+    void applyRelations(std::vector<MateValues>& values) const;
+    // Whether (mateId, component) is written by some relation, and therefore
+    // is NOT an unknown the loop solver may choose.
+    bool isDrivenByRelation(ObjectId mateId, std::size_t component) const noexcept;
     std::vector<std::unique_ptr<NamedPosition>> namedPositions_;
     std::vector<std::unique_ptr<ExplodeView>> explodeViews_;
     std::vector<ObjectId> groundedInstances_;

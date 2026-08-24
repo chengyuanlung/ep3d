@@ -13,6 +13,7 @@ add_library(ParametricCADCore
     src/Core/Document/ObjectRegistry.cpp
     src/Core/Assembly/AssemblyDocument.cpp
     src/Core/Assembly/Mate.cpp
+    src/Core/Assembly/Relation.cpp
     src/Core/Assembly/MateFreedom.cpp
     src/Core/Assembly/AssemblyStates.cpp
     src/Core/Assembly/Instance.cpp
@@ -523,6 +524,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/M4ReviewFindingTests.cpp
         tests/DocumentOutlineTests.cpp
         tests/AssemblyOutlineTests.cpp
+        tests/RelationTests.cpp
         tests/SerializationV5Tests.cpp
         tests/ReconstructionTests.cpp
         tests/ReconstructionGeneralTests.cpp
