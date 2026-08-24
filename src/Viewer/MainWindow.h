@@ -1,7 +1,9 @@
 #pragma once
 
 #include "Core/Document/ObjectId.h"
+#include "Core/Feature/BooleanFeature.h"
 #include "Core/Kernel/EdgeQuery.h"
+#include "Core/Kernel/FaceQuery.h"
 #include "Core/Recompute/RecomputeTypes.h"
 #include "Viewer/DocumentOutline.h"
 #include "Core/Reconstruction/SketchReconstructor.h"
@@ -140,6 +142,27 @@ public:
     // construction line, or an invalid id when the choice is not obvious.
     SketchEntityId obviousRevolveAxis(ObjectId sketchId) const;
     QString insertPocketFromSelection();
+
+    // --- M19-M22 features, on the Model toolbar (M26.1) ---------------------
+    //
+    // Everything from Sweep to Import shipped with "UI: script and API only"
+    // recorded against it. These are the same commands the script verbs are,
+    // with the same rules -- restating a rule differently here would be two
+    // answers to one question, which is the defect class this project spends
+    // its milestones removing.
+    //
+    // Each one is PUBLIC for the same reason the others are (ADR-M9-005): the
+    // selftest drives them and reads the message back, so a command that
+    // reported success over a solid that did not change is caught.
+    QString insertSweepFromSelection();
+    QString insertLoftFromSelection();
+    QString insertShellOnTail();
+    QString insertHoleFromSelection();
+    QString insertBooleanOnTail(BooleanOperation operation, const char* what);
+    QString insertCircularPatternOnTail();
+    QString insertCurvePatternFromSelection();
+    QString exportCurrentSolid();
+    QString importSolidAsFeature();
     QString insertFilletOnTail();
     QString insertChamferOnTail();
 
@@ -408,6 +431,17 @@ private slots:
     void onInsertPadRequested();
     void onInsertPocketRequested();
     void onInsertRevolveRequested();
+    void onInsertSweepRequested();
+    void onInsertLoftRequested();
+    void onInsertShellRequested();
+    void onInsertHoleRequested();
+    void onInsertUnionRequested();
+    void onInsertSubtractRequested();
+    void onInsertIntersectRequested();
+    void onInsertCircularPatternRequested();
+    void onInsertCurvePatternRequested();
+    void onExportRequested();
+    void onImportRequested();
     void onInsertFilletRequested();
     void onInsertChamferRequested();
     void onNewSketchRequested();
@@ -465,6 +499,17 @@ private:
     QAction* insertPadAction_ = nullptr;
     QAction* insertPocketAction_ = nullptr;
     QAction* insertRevolveAction_ = nullptr;
+    QAction* insertSweepAction_ = nullptr;
+    QAction* insertLoftAction_ = nullptr;
+    QAction* insertShellAction_ = nullptr;
+    QAction* insertHoleAction_ = nullptr;
+    QAction* insertUnionAction_ = nullptr;
+    QAction* insertSubtractAction_ = nullptr;
+    QAction* insertIntersectAction_ = nullptr;
+    QAction* insertCircularPatternAction_ = nullptr;
+    QAction* insertCurvePatternAction_ = nullptr;
+    QAction* exportAction_ = nullptr;
+    QAction* importAction_ = nullptr;
     QAction* deleteObjectAction_ = nullptr;
     QAction* insertFilletAction_ = nullptr;
     QAction* insertChamferAction_ = nullptr;
@@ -506,6 +551,22 @@ private:
         QString refusal;     // non-empty when the pick could not be expressed
     };
     DressSelection selectionForDress(ObjectId baseFeatureId) const;
+
+    // The picked face, said as a QUERY -- which is what a Shell needs and what
+    // a face sketch already does with the same pick (ADR-M17-036).
+    struct PickedFaceQuery {
+        FaceQuery query;
+        std::string words;  // for the status line
+        QString refusal;    // non-empty when nothing was picked
+    };
+    PickedFaceQuery selectionForFace() const;
+
+    // Every sketch the tree has selected, IN DOCUMENT ORDER. A loft's order is
+    // its shape, so the order has to be one the user can see and control --
+    // Qt does not keep the order things were clicked in.
+    std::vector<ObjectId> selectedSketches() const;
+    // The body's solids that nothing has consumed: what a boolean needs two of.
+    std::vector<ObjectId> unconsumedSolids() const;
 
     // A tree name no other sketch or feature already has.
     std::string uniqueObjectName(const std::string& base) const;

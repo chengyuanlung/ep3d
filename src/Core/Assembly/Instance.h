@@ -13,7 +13,19 @@
 
 namespace paramcad {
 
-// ONE APPEARANCE OF A PART INSIDE AN ASSEMBLY (M23, ADR-M23-002).
+// ONE APPEARANCE OF SOMETHING INSIDE AN ASSEMBLY (M23, ADR-M23-002;
+// generalised in M26).
+//
+// It was called PartInstance until M26, when it learned to hold a
+// SUB-ASSEMBLY as well as a part -- and a name that says "part" would then
+// have been a name that lies. There is deliberately ONE type rather than two:
+// a mate names an instance by id, and two instance kinds would mean every mate
+// lookup, every rename, every deletion and every save had to ask which -- four
+// pairs of things that must agree about what an instance is.
+//
+// What it holds is the same sentence either way: "that thing, in that file,
+// over there". The file's own documentType decides whether the thing is a body
+// or a whole assembly, and nothing here has to be told which.
 //
 // An instance is three things and no more:
 //
@@ -39,12 +51,12 @@ namespace paramcad {
 //
 // NOT here, deliberately: a material. The part brings its own, and an assembly
 // that could override it would be a second place a density lives.
-class PartInstance final : public IRecomputable {
+class Instance final : public IRecomputable {
 public:
-    PartInstance(std::string name, std::string sourcePath, std::string bodyName,
+    Instance(std::string name, std::string sourcePath, std::string bodyName,
                  ObjectId frameId);
     // Restore constructor (deserialization): keeps the persisted id and state.
-    PartInstance(ObjectId id, std::string name, ComputeState state, std::string sourcePath,
+    Instance(ObjectId id, std::string name, ComputeState state, std::string sourcePath,
                  std::string bodyName, ObjectId frameId);
 
     ObjectId id() const noexcept override { return id_; }
@@ -78,6 +90,11 @@ public:
         Transform3D localTransform;
     };
     const std::vector<MateConnector>& connectors() const noexcept { return connectors_; }
+    // True when the source turned out to be an ASSEMBLY rather than a part.
+    // Not stored in the file: it is a property of what is on disk, re-read on
+    // every rebuild like everything else about the source (ADR-M22-003), so a
+    // part that became an assembly is not a document that needs migrating.
+    bool isSubAssembly() const noexcept { return subAssembly_; }
     // The named one, or nullptr. A name that no longer resolves is a loud
     // failure at the mate rather than a quiet fallback here.
     const MateConnector* findConnector(const std::string& name) const noexcept;
@@ -86,6 +103,12 @@ public:
 
 private:
     friend class AssemblyDocument;
+
+    // The other half of recompute, for when the source turns out to be an
+    // assembly. Separate because it is a different sentence -- "everything in
+    // that assembly, where it put them" rather than "that body" -- and not a
+    // different TYPE, because a mate does not care which it got.
+    RecomputeResult recomputeSubAssembly(const RecomputeContext& context);
 
     void setName(std::string name) { name_ = std::move(name); }
 
@@ -97,6 +120,7 @@ private:
     ComputeState state_ = ComputeState::Dirty;
     KernelShape currentShape_;
     std::vector<MateConnector> connectors_;
+    bool subAssembly_ = false;
 };
 
 } // namespace paramcad

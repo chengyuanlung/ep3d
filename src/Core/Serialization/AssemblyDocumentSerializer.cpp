@@ -56,7 +56,7 @@ SaveResult validateSaveable(const AssemblyDocument& document) {
                               "connector '" + connector->name() +
                                   "' names a frame that is not in this document"};
     }
-    for (const PartInstance* instance : document.instances()) {
+    for (const Instance* instance : document.instances()) {
         if (const SaveResult bad = claim(instance->id(), "instance"); !bad) return bad;
         // An instance with no file can never build, so it can never be
         // anything but a Failed node in the tree. Refused where the reason is
@@ -113,6 +113,30 @@ SaveResult validateSaveable(const AssemblyDocument& document) {
                                                             "above its maximum"};
         }
     }
+    // v32. A pose and an exploded view are references like any other, and the
+    // loader checks them -- so this checks them first (ADR-M3-008).
+    for (const NamedPosition* pose : document.namedPositions()) {
+        if (const SaveResult bad = claim(pose->id(), "named position"); !bad) return bad;
+        for (const NamedPosition::MateSetting& setting : pose->mates())
+            if (document.findMate(setting.mateId) == nullptr)
+                return SaveResult{SerializationError::UnknownDependencyId,
+                                  "named position '" + pose->name() +
+                                      "' names a mate that is not in this document"};
+        for (const NamedPosition::LooseSetting& setting : pose->loose())
+            if (document.findInstance(setting.instanceId) == nullptr)
+                return SaveResult{SerializationError::UnknownDependencyId,
+                                  "named position '" + pose->name() +
+                                      "' names an instance that is not in this document"};
+    }
+    for (const ExplodeView* view : document.explodeViews()) {
+        if (const SaveResult bad = claim(view->id(), "exploded view"); !bad) return bad;
+        for (const ExplodeStep& step : view->steps())
+            if (document.findInstance(step.instanceId) == nullptr)
+                return SaveResult{SerializationError::UnknownDependencyId,
+                                  "exploded view '" + view->name() +
+                                      "' has a step on an instance that is not in this "
+                                      "document"};
+    }
     return SaveResult{};
 }
 
@@ -131,7 +155,7 @@ JsonValue toJson(const AssemblyDocument& document) {
     // transform, in the frames array, once -- so a file cannot carry two
     // answers about where an instance is.
     JsonValue instances = JsonValue::makeArray();
-    for (const PartInstance* instance : document.instances()) {
+    for (const Instance* instance : document.instances()) {
         JsonValue entry = JsonValue::makeObject();
         entry.set("id", JsonValue::makeString(idToString(instance->id())));
         entry.set("name", JsonValue::makeString(instance->name()));
@@ -196,6 +220,60 @@ JsonValue toJson(const AssemblyDocument& document) {
         mates.add(std::move(entry));
     }
     root.set("mates", std::move(mates));
+
+    // v32 (M26). Three separate arrays because roadmap §49 says three separate
+    // mechanisms -- and a file that merged them would be the first place they
+    // stopped being separate. `displayStates` is deliberately absent: that one
+    // is presentation (A02), and EP3D has no assembly UI to hide anything in.
+    JsonValue positions = JsonValue::makeArray();
+    for (const NamedPosition* pose : document.namedPositions()) {
+        JsonValue entry = JsonValue::makeObject();
+        entry.set("id", JsonValue::makeString(idToString(pose->id())));
+        entry.set("name", JsonValue::makeString(pose->name()));
+        JsonValue mateSettings = JsonValue::makeArray();
+        for (const NamedPosition::MateSetting& setting : pose->mates()) {
+            JsonValue one = JsonValue::makeObject();
+            one.set("mateId", JsonValue::makeString(idToString(setting.mateId)));
+            JsonValue values = JsonValue::makeArray();
+            for (std::size_t c = 0; c < kMateComponentCount; ++c)
+                values.add(JsonValue::makeNumber(setting.values[c]));
+            one.set("values", std::move(values));
+            mateSettings.add(std::move(one));
+        }
+        entry.set("mates", std::move(mateSettings));
+        JsonValue looseSettings = JsonValue::makeArray();
+        for (const NamedPosition::LooseSetting& setting : pose->loose()) {
+            JsonValue one = JsonValue::makeObject();
+            one.set("instanceId", JsonValue::makeString(idToString(setting.instanceId)));
+            one.set("transform", docjson::transformToJson(setting.transform));
+            looseSettings.add(std::move(one));
+        }
+        entry.set("loose", std::move(looseSettings));
+        positions.add(std::move(entry));
+    }
+    root.set("namedPositions", std::move(positions));
+
+    JsonValue views = JsonValue::makeArray();
+    for (const ExplodeView* view : document.explodeViews()) {
+        JsonValue entry = JsonValue::makeObject();
+        entry.set("id", JsonValue::makeString(idToString(view->id())));
+        entry.set("name", JsonValue::makeString(view->name()));
+        // THE STORED CUT, not the effective one: kAll has to come back as kAll
+        // rather than as however many steps there happened to be, or adding a
+        // step to a saved-and-reopened view would leave it hidden.
+        entry.set("previewCut", JsonValue::makeString(std::to_string(view->previewCut())));
+        JsonValue steps = JsonValue::makeArray();
+        for (const ExplodeStep& step : view->steps()) {
+            JsonValue one = JsonValue::makeObject();
+            one.set("name", JsonValue::makeString(step.name));
+            one.set("instanceId", JsonValue::makeString(idToString(step.instanceId)));
+            one.set("displacement", docjson::transformToJson(step.displacement));
+            steps.add(std::move(one));
+        }
+        entry.set("steps", std::move(steps));
+        views.add(std::move(entry));
+    }
+    root.set("explodeViews", std::move(views));
     return root;
 }
 
@@ -219,6 +297,20 @@ struct MateData {
     MateValues values{};
     bool driven = false;
     std::array<Mate::Limit, kMateComponentCount> limits{};
+};
+
+struct NamedPositionData {
+    ObjectId id = kInvalidObjectId;
+    std::string name;
+    std::vector<NamedPosition::MateSetting> mates;
+    std::vector<NamedPosition::LooseSetting> loose;
+};
+
+struct ExplodeViewData {
+    ObjectId id = kInvalidObjectId;
+    std::string name;
+    std::vector<ExplodeStep> steps;
+    std::size_t previewCut = EvaluationCut::kAll;
 };
 
 std::optional<MateType> mateTypeFromString(std::string_view text) {
@@ -525,6 +617,178 @@ AssemblyLoadResult loadAssemblyDocument(std::istream& in) {
         }
     }
 
+    // v32 named positions and exploded views. Absent in a v31 file, which is
+    // why neither is required.
+    std::vector<NamedPositionData> positionData;
+    if (const JsonValue* field = root.find("namedPositions")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'namedPositions' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "namedPositions[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            NamedPositionData pose;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context +
+                                       ": field 'id' is not a valid decimal ObjectId string");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            pose.id = *id;
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            pose.name = name->asString();
+
+            const JsonValue* mateSettings =
+                requireField(entry, "mates", JsonType::Array, context, err);
+            if (mateSettings == nullptr) return loadFailure(err.error, err.message);
+            for (const JsonValue& one : mateSettings->items()) {
+                if (one.type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a mate setting is not an object");
+                const JsonValue* mateId =
+                    requireField(one, "mateId", JsonType::String, context, err);
+                if (mateId == nullptr) return loadFailure(err.error, err.message);
+                const auto parsed = idFromString(mateId->asString());
+                if (!parsed.has_value())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a mate setting names no mate");
+                bool isHere = false;
+                for (const MateData& candidate : mateData)
+                    if (candidate.id == *parsed) isHere = true;
+                if (!isHere)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       context + ": mateId " + idToString(*parsed) +
+                                           " is not a mate in this document");
+                const JsonValue* values =
+                    requireField(one, "values", JsonType::Array, context, err);
+                if (values == nullptr) return loadFailure(err.error, err.message);
+                if (values->items().size() != kMateComponentCount)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a mate setting is not six numbers");
+                NamedPosition::MateSetting setting;
+                setting.mateId = *parsed;
+                for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+                    if (values->items()[c].type() != JsonType::Number)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": a mate setting is not six numbers");
+                    setting.values[c] = values->items()[c].asNumber();
+                }
+                pose.mates.push_back(setting);
+            }
+
+            const JsonValue* looseSettings =
+                requireField(entry, "loose", JsonType::Array, context, err);
+            if (looseSettings == nullptr) return loadFailure(err.error, err.message);
+            for (const JsonValue& one : looseSettings->items()) {
+                if (one.type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a loose setting is not an object");
+                const JsonValue* instanceId =
+                    requireField(one, "instanceId", JsonType::String, context, err);
+                if (instanceId == nullptr) return loadFailure(err.error, err.message);
+                const auto parsed = idFromString(instanceId->asString());
+                if (!parsed.has_value())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a loose setting names no instance");
+                bool isHere = false;
+                for (const InstanceData& candidate : instanceData)
+                    if (candidate.id == *parsed) isHere = true;
+                if (!isHere)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       context + ": instanceId " + idToString(*parsed) +
+                                           " is not an instance in this document");
+                const JsonValue* transform =
+                    requireField(one, "transform", JsonType::Object, context, err);
+                if (transform == nullptr) return loadFailure(err.error, err.message);
+                NamedPosition::LooseSetting setting;
+                setting.instanceId = *parsed;
+                if (!docjson::transformFromJson(*transform, context, err, setting.transform))
+                    return loadFailure(err.error, err.message);
+                pose.loose.push_back(setting);
+            }
+            positionData.push_back(std::move(pose));
+        }
+    }
+
+    std::vector<ExplodeViewData> viewData;
+    if (const JsonValue* field = root.find("explodeViews")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'explodeViews' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "explodeViews[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            ExplodeViewData view;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context +
+                                       ": field 'id' is not a valid decimal ObjectId string");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            view.id = *id;
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            view.name = name->asString();
+
+            // A DECIMAL STRING, like every other count that can be kAll: kAll
+            // is 2^64-1, which a JSON number cannot carry exactly.
+            const JsonValue* cut =
+                requireField(entry, "previewCut", JsonType::String, context, err);
+            if (cut == nullptr) return loadFailure(err.error, err.message);
+            const auto parsedCut = idFromString(cut->asString());
+            if (!parsedCut.has_value())
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'previewCut' is not a count");
+            view.previewCut = static_cast<std::size_t>(*parsedCut);
+
+            const JsonValue* steps = requireField(entry, "steps", JsonType::Array, context, err);
+            if (steps == nullptr) return loadFailure(err.error, err.message);
+            for (const JsonValue& one : steps->items()) {
+                if (one.type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a step is not an object");
+                const JsonValue* stepName =
+                    requireField(one, "name", JsonType::String, context, err);
+                if (stepName == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* instanceId =
+                    requireField(one, "instanceId", JsonType::String, context, err);
+                if (instanceId == nullptr) return loadFailure(err.error, err.message);
+                const auto parsed = idFromString(instanceId->asString());
+                if (!parsed.has_value())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a step names no instance");
+                bool isHere = false;
+                for (const InstanceData& candidate : instanceData)
+                    if (candidate.id == *parsed) isHere = true;
+                if (!isHere)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       context + ": instanceId " + idToString(*parsed) +
+                                           " is not an instance in this document");
+                const JsonValue* displacement =
+                    requireField(one, "displacement", JsonType::Object, context, err);
+                if (displacement == nullptr) return loadFailure(err.error, err.message);
+                ExplodeStep step;
+                step.name = stepName->asString();
+                step.instanceId = *parsed;
+                if (!docjson::transformFromJson(*displacement, context, err, step.displacement))
+                    return loadFailure(err.error, err.message);
+                view.steps.push_back(std::move(step));
+            }
+            viewData.push_back(std::move(view));
+        }
+    }
+
     auto document = std::make_unique<AssemblyDocument>(documentId, documentName);
     // WHO OWNS THE ORIGIN ON LOAD. The constructor always makes one and the
     // file carries its own, so restoring naively would give the document two
@@ -550,6 +814,14 @@ AssemblyLoadResult loadAssemblyDocument(std::istream& in) {
                                         mate.followingInstanceId,
                                         std::move(mate.followingConnector), mate.values,
                                         mate.driven, mate.limits);
+
+    // POSES AND VIEWS LAST, because both name mates and instances.
+    for (auto& pose : positionData)
+        document->restoreNamedPosition(pose.id, std::move(pose.name), std::move(pose.mates),
+                                       std::move(pose.loose));
+    for (auto& view : viewData)
+        document->restoreExplodeView(view.id, std::move(view.name), std::move(view.steps),
+                                     view.previewCut);
 
     // A loaded document starts with an EMPTY history: the load is not
     // something the user did, and "Undo" on a freshly opened file must not

@@ -545,6 +545,15 @@ public:
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "FakeGeometryKernel does not model transforms; use the OCCT kernel"};
     }
+    int countSolids(const KernelShape& shape) override {
+        (void)shape;
+        return 0;
+    }
+    ShapeResult compoundOf(const std::vector<KernelShape>& shapes) override {
+        (void)shapes;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "this kernel does not build compounds"};
+    }
     ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) override {
         ++fuseShapesCallCount;
         (void)a;

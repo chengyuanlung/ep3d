@@ -49,6 +49,8 @@ public:
                             const Vec3& planeNormal) override;
     ShapeResult translateShape(const KernelShape& shape, const Vec3& offsetMm) override;
     ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) override;
+    ShapeResult compoundOf(const std::vector<KernelShape>& shapes) override;
+    int countSolids(const KernelShape& shape) override;
 };
 
 } // namespace paramcad

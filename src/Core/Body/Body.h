@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/Document/EvaluationCut.h"
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/Feature.h"
 #include <cstddef>
@@ -31,14 +32,20 @@ public:
     // stored as a count rather than as a feature id on purpose: a position
     // BEFORE the first feature and a position AFTER the last one both have to
     // be expressible, and neither names a feature.
-    static constexpr std::size_t kNoRollback = static_cast<std::size_t>(-1);
+    //
+    // The rule itself is EvaluationCut (M26): "an ordered list plus a position
+    // in it" turned up a third time -- feature chain, feature editing, and an
+    // exploded view's step preview -- and roadmap §49 point 2 says to extract
+    // it at that point rather than write it again. What stays here is the LIST;
+    // what moved is the arithmetic that is easy to get subtly different twice.
+    static constexpr std::size_t kNoRollback = EvaluationCut::kAll;
     // The effective cut: kNoRollback and any out-of-range value clamp to
     // features().size(), so a position can never silently hide a feature that
     // a later edit appended.
-    std::size_t rollbackCut() const noexcept {
-        return rollback_ > features_.size() ? features_.size() : rollback_;
+    std::size_t rollbackCut() const noexcept { return rollback_.effective(features_.size()); }
+    bool isRolledBack(std::size_t index) const noexcept {
+        return rollback_.isPast(index, features_.size());
     }
-    bool isRolledBack(std::size_t index) const noexcept { return index >= rollbackCut(); }
 
 private:
     // BOTH mutators are private with PartDocument as the only caller (M8
@@ -95,7 +102,7 @@ private:
 
     // Set only through PartDocument::setRollbackPosition, so the mass source
     // and the dirty set are updated in the same step.
-    void setRollback(std::size_t cut) noexcept { rollback_ = cut; }
+    void setRollback(std::size_t cut) noexcept { rollback_.set(cut); }
 
     ObjectId id_;
     // PRIVATE with PartDocument as the only caller (M17.16, ADR-M17-039).
@@ -109,7 +116,7 @@ private:
 
     std::string name_;
     std::vector<std::unique_ptr<Feature>> features_;
-    std::size_t rollback_ = kNoRollback;
+    EvaluationCut rollback_;
 };
 
 } // namespace paramcad

@@ -304,3 +304,40 @@ which made every mate in the linkage resolve to the first link's pin.
 ```
 ep3d --script examples/four-bar.ep3ds
 ```
+
+## `sub-assembly.ep3ds` (M26)
+
+An assembly inside an assembly, and three ways to show one.
+
+`insert` does not care whether the file holds a part or an assembly — it reads
+the file's own `documentType` and asks the right question. There is **one**
+instance type either way, because a mate names an instance by id and two kinds
+would mean every mate lookup, rename, deletion and save had to ask which.
+
+Moving a sub-assembly moves everything inside it, and nothing was told about
+the parts: that is what M23 bought by making a placement a **frame** rather than
+a transform of its own.
+
+The three state mechanisms stay three, because roadmap §49 says they capture
+three different kinds of thing:
+
+- a **named pose** is geometry evaluation input — the mates' freedoms plus where
+  the loose parts were put. Apply it and the model rebuilds. Not a
+  configuration: a configuration changes what the model *is*.
+- an **exploded view** is a derived picture. It never changes the model, it has
+  its own preview position, and its steps can be named, reordered and deleted.
+- a **display state** is pure presentation, and is deliberately absent: A02
+  keeps presentation out of Core and there is no assembly UI to hide anything
+  in yet.
+
+The script also shows a **row** of instances — each copy's placement frame hangs
+off the original's, so moving the original moves the row.
+
+Two things this example forced: `part`, to switch back to the part document
+after starting an assembly (without it a rig built from sub-assemblies could not
+be written by one script at all), and lifting a deleted frame's children onto
+its parent so a patterned copy does not silently jump when its original goes.
+
+```
+ep3d --script examples/sub-assembly.ep3ds
+```

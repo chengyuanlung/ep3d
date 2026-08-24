@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cmath>
+#include <vector>
 
 namespace paramcad::ui {
 namespace {
@@ -755,6 +756,171 @@ void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
     }
 
     // --- Document-level commands -----------------------------------------
+    // --- M19-M22 solid modelling -----------------------------------------
+    //
+    // The visual rule for this group: the PROFILE or the material that goes in
+    // is subdued, and what the command DOES to it is accent -- or danger when
+    // it removes material. That is the same grammar Pad and Pocket already
+    // use, so a user who has learned those two can read these eleven.
+    //
+    // Every one has to be visually distinct from every other, and that is not
+    // a preference: --selftest fingerprints each toolbar icon and fails the
+    // build if two match. An icon that "reads like Pad but for sweeps" would
+    // be caught there rather than by somebody clicking the wrong button.
+    case SketchIcon::Sweep: {
+        // A profile, dragged along a path. The path is the point, so the path
+        // is the accent and the profile is where it starts.
+        Stroke(p, ink.subdue, 1.4);
+        p.drawEllipse(QRectF(3.2, 13.6, 5.2, 5.2));
+        QPainterPath path;
+        path.moveTo(5.8, 13.2);
+        path.cubicTo(6.6, 6.0, 13.0, 4.4, 19.0, 6.6);
+        Stroke(p, ink.accent, 1.9);
+        p.drawPath(path);
+        Arrow(p, QPointF(19.4, 6.8), QPointF(2.6, 1.0), ink.accent);
+        break;
+    }
+    case SketchIcon::Loft: {
+        // TWO profiles of different sizes, and the skin between them. Sweep
+        // has one profile and a path; loft has two profiles and no path, and
+        // the icons say exactly that difference.
+        Stroke(p, ink.subdue, 1.4);
+        p.drawLine(QPointF(3.6, 4.4), QPointF(11.4, 4.4));
+        p.drawLine(QPointF(6.2, 19.6), QPointF(19.4, 19.6));
+        Stroke(p, ink.accent, 1.8);
+        p.drawLine(QPointF(3.6, 4.4), QPointF(6.2, 19.6));
+        p.drawLine(QPointF(11.4, 4.4), QPointF(19.4, 19.6));
+        Stroke(p, ink.accent, 1.2, Qt::DashLine);
+        p.drawLine(QPointF(7.5, 4.4), QPointF(12.8, 19.6));
+        break;
+    }
+    case SketchIcon::Shell: {
+        // A solid with its inside taken out and its top open. The WALL is what
+        // the command is about, so the wall is the accent and the opening is
+        // the gap in it.
+        Stroke(p, ink.subdue, 1.4);
+        p.drawRect(QRectF(4.0, 5.0, 16.0, 14.5));
+        Stroke(p, ink.accent, 1.8);
+        p.drawLine(QPointF(7.0, 5.0), QPointF(7.0, 16.5));
+        p.drawLine(QPointF(7.0, 16.5), QPointF(17.0, 16.5));
+        p.drawLine(QPointF(17.0, 16.5), QPointF(17.0, 5.0));
+        break;
+    }
+    case SketchIcon::Hole: {
+        // The bore seen from ABOVE -- a circle on a face, with the wall going
+        // down behind it. Pocket is the same operation from the side; a hole
+        // knows its diameter and its depth, and the round mouth is what tells
+        // them apart at 16 px.
+        Stroke(p, ink.subdue, 1.4);
+        p.drawRect(QRectF(3.4, 7.0, 17.2, 12.0));
+        Stroke(p, ink.danger, 1.8);
+        p.drawEllipse(QRectF(8.4, 8.0, 7.2, 3.6));
+        Stroke(p, ink.danger, 1.4, Qt::DashLine);
+        p.drawLine(QPointF(8.4, 9.8), QPointF(8.4, 16.0));
+        p.drawLine(QPointF(15.6, 9.8), QPointF(15.6, 16.0));
+        Stroke(p, ink.danger, 1.4);
+        QPainterPath bottom;
+        bottom.moveTo(8.4, 16.0);
+        bottom.cubicTo(9.6, 18.0, 14.4, 18.0, 15.6, 16.0);
+        p.drawPath(bottom);
+        break;
+    }
+    case SketchIcon::Union: {
+        // Two circles, and the OUTLINE of the pair. The three booleans differ
+        // only in which part is emphasised, which is the honest way to draw
+        // them: they are the same two inputs with three answers.
+        Stroke(p, ink.subdue, 1.3);
+        p.drawEllipse(QRectF(3.4, 6.6, 11.0, 11.0));
+        p.drawEllipse(QRectF(9.6, 6.6, 11.0, 11.0));
+        Stroke(p, ink.accent, 2.0);
+        QPainterPath outline;
+        outline.arcMoveTo(QRectF(3.4, 6.6, 11.0, 11.0), 60.0);
+        outline.arcTo(QRectF(3.4, 6.6, 11.0, 11.0), 60.0, 240.0);
+        outline.arcTo(QRectF(9.6, 6.6, 11.0, 11.0), 240.0, 240.0);
+        p.drawPath(outline);
+        break;
+    }
+    case SketchIcon::Subtract: {
+        // The FIRST solid, with the second taken out of it. The removed part is
+        // danger, as Pocket's arrow is.
+        Stroke(p, ink.subdue, 1.3);
+        p.drawEllipse(QRectF(9.6, 6.6, 11.0, 11.0));
+        Stroke(p, ink.accent, 2.0);
+        QPainterPath keep;
+        keep.arcMoveTo(QRectF(3.4, 6.6, 11.0, 11.0), 60.0);
+        keep.arcTo(QRectF(3.4, 6.6, 11.0, 11.0), 60.0, 240.0);
+        p.drawPath(keep);
+        Stroke(p, ink.danger, 1.6);
+        QPainterPath cut;
+        cut.arcMoveTo(QRectF(9.6, 6.6, 11.0, 11.0), 120.0);
+        cut.arcTo(QRectF(9.6, 6.6, 11.0, 11.0), 120.0, 120.0);
+        p.drawPath(cut);
+        break;
+    }
+    case SketchIcon::Intersect: {
+        // ONLY the lens. Both inputs subdued, because neither of them survives
+        // -- what comes out is the overlap and nothing else.
+        Stroke(p, ink.subdue, 1.3);
+        p.drawEllipse(QRectF(3.4, 6.6, 11.0, 11.0));
+        p.drawEllipse(QRectF(9.6, 6.6, 11.0, 11.0));
+        QPainterPath lens;
+        lens.arcMoveTo(QRectF(3.4, 6.6, 11.0, 11.0), 60.0);
+        lens.arcTo(QRectF(3.4, 6.6, 11.0, 11.0), 60.0, -120.0);
+        lens.arcTo(QRectF(9.6, 6.6, 11.0, 11.0), 240.0, 120.0);
+        lens.closeSubpath();
+        p.save();
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        p.drawPath(lens);
+        p.restore();
+        break;
+    }
+    case SketchIcon::CircularPattern: {
+        // Copies AROUND a centre. The centre dot is what makes it circular
+        // rather than a row, so the centre is drawn even though nothing is
+        // there in the model.
+        Dot(p, 12.0, 12.6, ink.subdue, 1.4);
+        Stroke(p, ink.subdue, 1.2, Qt::DashLine);
+        p.drawEllipse(QRectF(4.6, 5.2, 14.8, 14.8));
+        Stroke(p, ink.accent, 1.6);
+        p.drawRect(QRectF(10.0, 3.4, 4.0, 3.6));
+        p.drawRect(QRectF(17.0, 10.6, 4.0, 3.6));
+        p.drawRect(QRectF(3.0, 10.6, 4.0, 3.6));
+        break;
+    }
+    case SketchIcon::CurvePattern: {
+        // Copies ALONG a curve. The same squares as the circular pattern, on a
+        // path instead of a ring -- and the path is the accent because it is
+        // the input the user has to supply.
+        QPainterPath spine;
+        spine.moveTo(2.6, 17.4);
+        spine.cubicTo(7.0, 8.0, 15.0, 17.0, 21.4, 7.0);
+        Stroke(p, ink.accent, 1.7);
+        p.drawPath(spine);
+        Stroke(p, ink.subdue, 1.5);
+        p.drawRect(QRectF(2.4, 17.4, 3.4, 3.2));
+        p.drawRect(QRectF(10.2, 12.0, 3.4, 3.2));
+        p.drawRect(QRectF(18.2, 6.4, 3.4, 3.2));
+        break;
+    }
+    case SketchIcon::ExportModel: {
+        // The part, and an arrow LEAVING it. Import is the same drawing with
+        // the arrow reversed, for the same reason Pad and Pocket are.
+        Stroke(p, ink.subdue, 1.4);
+        p.drawRect(QRectF(3.4, 6.4, 9.4, 11.2));
+        Stroke(p, ink.accent, 1.9);
+        p.drawLine(QPointF(11.4, 12.0), QPointF(19.6, 12.0));
+        Arrow(p, QPointF(20.4, 12.0), QPointF(1.0, 0.0), ink.accent);
+        break;
+    }
+    case SketchIcon::ImportModel: {
+        Stroke(p, ink.subdue, 1.4);
+        p.drawRect(QRectF(11.2, 6.4, 9.4, 11.2));
+        Stroke(p, ink.accent, 1.9);
+        p.drawLine(QPointF(12.6, 12.0), QPointF(4.4, 12.0));
+        Arrow(p, QPointF(3.6, 12.0), QPointF(-1.0, 0.0), ink.accent);
+        break;
+    }
     case SketchIcon::Undo:
     case SketchIcon::Redo: {
         // A curved arrow, mirrored for Redo. The pair has to be legible as a
@@ -792,6 +958,11 @@ void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
         p.drawLine(QPointF(5.6, 14.6), QPointF(10.0, 14.6));
         break;
     }
+    case SketchIcon::Count:
+        // Not an icon. Painting nothing is right, and being in the switch at
+        // all is what keeps it exhaustive -- so a new icon is a compile error
+        // rather than a blank button.
+        break;
     case SketchIcon::Visibility: {
         // An eye. Show/Hide is a visibility toggle, and no amount of geometry
         // says "visible" the way an eye does.
@@ -864,10 +1035,22 @@ const char* SketchIconName(SketchIcon icon) noexcept {
     case SketchIcon::DimensionTool: return "DimensionTool";
     case SketchIcon::ReferenceDimension: return "ReferenceDimension";
     case SketchIcon::Slot: return "Slot";
+    case SketchIcon::Sweep: return "Sweep";
+    case SketchIcon::Loft: return "Loft";
+    case SketchIcon::Shell: return "Shell";
+    case SketchIcon::Hole: return "Hole";
+    case SketchIcon::Union: return "Union";
+    case SketchIcon::Subtract: return "Subtract";
+    case SketchIcon::Intersect: return "Intersect";
+    case SketchIcon::CircularPattern: return "CircularPattern";
+    case SketchIcon::CurvePattern: return "CurvePattern";
+    case SketchIcon::ExportModel: return "ExportModel";
+    case SketchIcon::ImportModel: return "ImportModel";
     case SketchIcon::Undo: return "Undo";
     case SketchIcon::Redo: return "Redo";
     case SketchIcon::Recompute: return "Recompute";
     case SketchIcon::Visibility: return "Visibility";
+    case SketchIcon::Count: return "Count";
     case SketchIcon::DeleteGeometry: return "DeleteGeometry";
     case SketchIcon::FitSketch: return "FitSketch";
     case SketchIcon::NewSketch: return "NewSketch";
@@ -878,26 +1061,17 @@ const char* SketchIconName(SketchIcon icon) noexcept {
 }
 
 const SketchIcon* AllSketchIcons(int* count) noexcept {
-    static const SketchIcon kAll[] = {
-        SketchIcon::Select,        SketchIcon::Line,          SketchIcon::Rectangle,
-        SketchIcon::Circle,        SketchIcon::Arc,           SketchIcon::Point,
-        SketchIcon::Coincident,    SketchIcon::Horizontal,    SketchIcon::Vertical,
-        SketchIcon::Fix,           SketchIcon::Parallel,      SketchIcon::Perpendicular,
-        SketchIcon::Equal,         SketchIcon::Concentric,    SketchIcon::Midpoint,
-        SketchIcon::PointOnObject, SketchIcon::Tangent,       SketchIcon::Dimension,
-        SketchIcon::Radius,        SketchIcon::Diameter,
-        SketchIcon::HorizontalDistance,                       SketchIcon::VerticalDistance,
-        SketchIcon::PointLineDistance,                        SketchIcon::Offset,
-        SketchIcon::Trim,      SketchIcon::Extend,       SketchIcon::Chamfer,
-        SketchIcon::Fillet,    SketchIcon::Symmetric,    SketchIcon::Mirror,
-        SketchIcon::AutoPlaceDimensions,
-        SketchIcon::OriginPoint,   SketchIcon::Construction,  SketchIcon::DeleteGeometry,
-        SketchIcon::FitSketch,     SketchIcon::NewSketch,     SketchIcon::EditSketch,
-        SketchIcon::FinishSketch,  SketchIcon::Undo,          SketchIcon::Redo,
-        SketchIcon::Recompute,     SketchIcon::Visibility,
-        SketchIcon::Pad,           SketchIcon::Pocket,        SketchIcon::Revolve};
-    if (count != nullptr) *count = static_cast<int>(sizeof(kAll) / sizeof(kAll[0]));
-    return kAll;
+    // Built once, from the enum's own extent. Adding an icon needs no change
+    // here, which is the whole point.
+    static const std::vector<SketchIcon> kAll = [] {
+        std::vector<SketchIcon> all;
+        all.reserve(static_cast<std::size_t>(SketchIcon::Count));
+        for (int i = 0; i < static_cast<int>(SketchIcon::Count); ++i)
+            all.push_back(static_cast<SketchIcon>(i));
+        return all;
+    }();
+    if (count != nullptr) *count = static_cast<int>(kAll.size());
+    return kAll.data();
 }
 
 QIcon MakeSketchIcon(SketchIcon icon, const QPalette& palette) {

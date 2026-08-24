@@ -44,7 +44,7 @@ AssemblyDocument::AssemblyDocument(ObjectId id, std::string name)
     createOriginFrame();
 }
 
-void AssemblyDocument::wireInstance(PartInstance& instance) {
+void AssemblyDocument::wireInstance(Instance& instance) {
     addRecomputableNode(instance);
     // THE ONE EDGE AN INSTANCE HAS: its frame. Moving the frame dirties the
     // instance through the ordinary graph, so nothing here walks anything and
@@ -59,13 +59,13 @@ void AssemblyDocument::wireInstance(PartInstance& instance) {
         addDependency(instance.id(), instance.frameId());
 }
 
-PartInstance& AssemblyDocument::addInstance(std::string name, std::string sourcePath,
+Instance& AssemblyDocument::addInstance(std::string name, std::string sourcePath,
                                            std::string bodyName) {
     if (sourcePath.empty())
         throw std::runtime_error("addInstance: an instance must name a part file");
     // The frame FIRST, so the instance never exists without a place to be.
     ReferenceFrame& placement = addFrame(FrameNameFor(name), kInvalidObjectId);
-    auto item = std::make_unique<PartInstance>(std::move(name), std::move(sourcePath),
+    auto item = std::make_unique<Instance>(std::move(name), std::move(sourcePath),
                                               std::move(bodyName), placement.id());
     auto& ref = *item;
     instances_.push_back(std::move(item));
@@ -82,14 +82,14 @@ PartInstance& AssemblyDocument::addInstance(std::string name, std::string source
     return ref;
 }
 
-PartInstance& AssemblyDocument::restoreInstance(ObjectId id, std::string name, ComputeState state,
+Instance& AssemblyDocument::restoreInstance(ObjectId id, std::string name, ComputeState state,
                                                std::string sourcePath, std::string bodyName,
                                                ObjectId frameId) {
     requireUnusedId(id, "restoreInstance");
     if (findFrame(frameId) == nullptr)
         throw std::runtime_error("restoreInstance: frame " + std::to_string(frameId) +
                                  " is not a reference frame in this document");
-    auto item = std::make_unique<PartInstance>(id, std::move(name), state, std::move(sourcePath),
+    auto item = std::make_unique<Instance>(id, std::move(name), state, std::move(sourcePath),
                                               std::move(bodyName), frameId);
     auto& ref = *item;
     instances_.push_back(std::move(item));
@@ -97,33 +97,33 @@ PartInstance& AssemblyDocument::restoreInstance(ObjectId id, std::string name, C
     return ref; // NOT recorded: deserialization is not a user edit (ADR-M9-001)
 }
 
-std::vector<const PartInstance*> AssemblyDocument::instances() const {
-    std::vector<const PartInstance*> result;
+std::vector<const Instance*> AssemblyDocument::instances() const {
+    std::vector<const Instance*> result;
     result.reserve(instances_.size());
-    for (const std::unique_ptr<PartInstance>& one : instances_) result.push_back(one.get());
+    for (const std::unique_ptr<Instance>& one : instances_) result.push_back(one.get());
     return result;
 }
 
-const PartInstance* AssemblyDocument::findInstance(ObjectId id) const noexcept {
-    for (const std::unique_ptr<PartInstance>& one : instances_)
+const Instance* AssemblyDocument::findInstance(ObjectId id) const noexcept {
+    for (const std::unique_ptr<Instance>& one : instances_)
         if (one->id() == id) return one.get();
     return nullptr;
 }
 
-const PartInstance* AssemblyDocument::findInstanceNamed(const std::string& name) const noexcept {
-    for (const std::unique_ptr<PartInstance>& one : instances_)
+const Instance* AssemblyDocument::findInstanceNamed(const std::string& name) const noexcept {
+    for (const std::unique_ptr<Instance>& one : instances_)
         if (one->name() == name) return one.get();
     return nullptr;
 }
 
-PartInstance* AssemblyDocument::findInstanceForEdit(ObjectId id) noexcept {
-    for (const std::unique_ptr<PartInstance>& one : instances_)
+Instance* AssemblyDocument::findInstanceForEdit(ObjectId id) noexcept {
+    for (const std::unique_ptr<Instance>& one : instances_)
         if (one->id() == id) return one.get();
     return nullptr;
 }
 
 bool AssemblyDocument::setInstanceTransform(ObjectId instanceId, const Transform3D& placement) {
-    const PartInstance* instance = findInstance(instanceId);
+    const Instance* instance = findInstance(instanceId);
     if (instance == nullptr) return false;
     // Through the FRAME. Not "as well as" -- there is nowhere else a placement
     // is kept, so this cannot leave two answers behind.
@@ -131,14 +131,14 @@ bool AssemblyDocument::setInstanceTransform(ObjectId instanceId, const Transform
 }
 
 Transform3D AssemblyDocument::instanceTransform(ObjectId instanceId) const noexcept {
-    const PartInstance* instance = findInstance(instanceId);
+    const Instance* instance = findInstance(instanceId);
     if (instance == nullptr) return Transform3D::Identity();
     const ReferenceFrame* frame = findFrame(instance->frameId());
     return frame == nullptr ? Transform3D::Identity() : frame->localTransform();
 }
 
 Transform3D AssemblyDocument::instanceWorldTransform(ObjectId instanceId) const noexcept {
-    const PartInstance* instance = findInstance(instanceId);
+    const Instance* instance = findInstance(instanceId);
     if (instance == nullptr) return Transform3D::Identity();
     return worldTransform(instance->frameId());
 }
@@ -147,9 +147,9 @@ Transform3D AssemblyDocument::mateConnectorWorldTransform(ObjectId instanceId,
                                                           const std::string& connectorName,
                                                           bool* found) const noexcept {
     if (found != nullptr) *found = false;
-    const PartInstance* instance = findInstance(instanceId);
+    const Instance* instance = findInstance(instanceId);
     if (instance == nullptr) return Transform3D::Identity();
-    const PartInstance::MateConnector* connector = instance->findConnector(connectorName);
+    const Instance::MateConnector* connector = instance->findConnector(connectorName);
     if (connector == nullptr) return Transform3D::Identity();
     if (found != nullptr) *found = true;
     return Compose(instanceWorldTransform(instanceId), connector->localTransform);
@@ -478,6 +478,284 @@ bool AssemblyDocument::setMateDriven(ObjectId mateId, bool driven) {
     return true;
 }
 
+// --- Patterns (M26, ADR-M26-003) ---------------------------------------------
+
+std::vector<ObjectId> AssemblyDocument::addInstancePattern(ObjectId instanceId, int count,
+                                                           const Vec3& step) {
+    const Instance* original = findInstance(instanceId);
+    if (original == nullptr)
+        throw std::runtime_error("addInstancePattern: " + std::to_string(instanceId) +
+                                 " is not an instance in this assembly");
+    if (count < 1)
+        throw std::runtime_error("addInstancePattern: a pattern needs at least one instance");
+
+    std::vector<ObjectId> made;
+    const std::string baseName = original->name();
+    const std::string source = original->sourcePath();
+    const std::string body = original->bodyName();
+    const ObjectId originalFrame = original->frameId();
+
+    for (int i = 1; i < count; ++i) {
+        // A NAME PER COPY, numbered from the original. Not "the original plus
+        // an index into a list" -- a copy is an ordinary instance and has to be
+        // nameable, mateable and deletable on its own.
+        std::string copyName = baseName + " " + std::to_string(i + 1);
+        for (int attempt = 2; findInstanceNamed(copyName) != nullptr; ++attempt)
+            copyName = baseName + " " + std::to_string(i + 1) + "." + std::to_string(attempt);
+
+        Instance& copy = addInstance(copyName, source, body);
+        // THE COPY'S FRAME HANGS OFF THE ORIGINAL'S. That is what makes the
+        // pattern parametric: move the original and every copy follows,
+        // because the frame hierarchy already composes (ADR-M10-002) and
+        // nothing here watches anything.
+        setFrameParent(copy.frameId(), originalFrame);
+        Transform3D offset;
+        offset.translation = Vec3{step.x * i, step.y * i, step.z * i};
+        setFrameTransform(copy.frameId(), offset);
+        made.push_back(copy.id());
+    }
+    return made;
+}
+
+// --- Named positions (M26, roadmap §49) --------------------------------------
+
+NamedPosition& AssemblyDocument::captureNamedPosition(std::string name) {
+    // EVERY MATE'S FREEDOMS, and every instance no mate places. The second
+    // half is easy to leave out and impossible to notice until an assembly
+    // with a loose part comes back with it somewhere else.
+    std::vector<NamedPosition::MateSetting> mates;
+    mates.reserve(mates_.size());
+    for (const std::unique_ptr<Mate>& mate : mates_)
+        mates.push_back(NamedPosition::MateSetting{mate->id(), mate->values()});
+
+    std::unordered_set<ObjectId> placedByAMate;
+    for (const std::unique_ptr<Mate>& mate : mates_) {
+        placedByAMate.insert(mate->leadingInstanceId());
+        placedByAMate.insert(mate->followingInstanceId());
+    }
+    std::vector<NamedPosition::LooseSetting> loose;
+    for (const std::unique_ptr<Instance>& one : instances_) {
+        if (placedByAMate.count(one->id()) != 0) continue;
+        loose.push_back(NamedPosition::LooseSetting{one->id(), instanceTransform(one->id())});
+    }
+
+    auto item = std::make_unique<NamedPosition>(std::move(name), std::move(mates),
+                                                std::move(loose));
+    auto& ref = *item;
+    namedPositions_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+
+    NamedPositionExistenceEdit edit;
+    edit.positionId = ref.id();
+    edit.name = ref.name();
+    edit.mates = ref.mates();
+    edit.loose = ref.loose();
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Capture " + ref.name());
+    return ref;
+}
+
+NamedPosition& AssemblyDocument::restoreNamedPosition(
+    ObjectId id, std::string name, std::vector<NamedPosition::MateSetting> mates,
+    std::vector<NamedPosition::LooseSetting> loose) {
+    requireUnusedId(id, "restoreNamedPosition");
+    auto item = std::make_unique<NamedPosition>(id, std::move(name), std::move(mates),
+                                                std::move(loose));
+    auto& ref = *item;
+    namedPositions_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref; // NOT recorded: deserialization is not a user edit (ADR-M9-001)
+}
+
+bool AssemblyDocument::applyNamedPosition(ObjectId positionId) {
+    const NamedPosition* pose = findNamedPosition(positionId);
+    if (pose == nullptr) return false;
+
+    // ONE UNDO STEP, because a pose is one thing the user chose. Without the
+    // transaction, undoing "go to Open" would walk backwards through every
+    // mate it touched, one press at a time.
+    const bool nested = isTransactionOpen();
+    if (!nested) beginTransaction("Apply " + pose->name());
+    for (const NamedPosition::MateSetting& setting : pose->mates()) {
+        Mate* mate = findMateForEdit(setting.mateId);
+        if (mate == nullptr) continue; // the mate is gone; the rest still applies
+        const MateFreedom freedom = mate->freedom();
+        for (std::size_t c = 0; c < kMateComponentCount; ++c) {
+            if (!freedom.free[c]) continue;
+            setMateComponentValue(setting.mateId, static_cast<MateComponent>(c),
+                                  setting.values[c]);
+        }
+    }
+    for (const NamedPosition::LooseSetting& setting : pose->loose())
+        setInstanceTransform(setting.instanceId, setting.transform);
+    if (!nested) commitTransaction();
+    return true;
+}
+
+std::vector<const NamedPosition*> AssemblyDocument::namedPositions() const {
+    std::vector<const NamedPosition*> out;
+    out.reserve(namedPositions_.size());
+    for (const std::unique_ptr<NamedPosition>& one : namedPositions_) out.push_back(one.get());
+    return out;
+}
+
+const NamedPosition* AssemblyDocument::findNamedPosition(ObjectId id) const noexcept {
+    for (const std::unique_ptr<NamedPosition>& one : namedPositions_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+const NamedPosition* AssemblyDocument::findNamedPositionNamed(
+    const std::string& name) const noexcept {
+    for (const std::unique_ptr<NamedPosition>& one : namedPositions_)
+        if (one->name() == name) return one.get();
+    return nullptr;
+}
+
+NamedPosition* AssemblyDocument::findNamedPositionForEdit(ObjectId id) noexcept {
+    for (const std::unique_ptr<NamedPosition>& one : namedPositions_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+// --- Exploded views (M26, roadmap §49) ---------------------------------------
+
+ExplodeView& AssemblyDocument::addExplodeView(std::string name) {
+    auto item = std::make_unique<ExplodeView>(std::move(name), std::vector<ExplodeStep>{});
+    auto& ref = *item;
+    explodeViews_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+
+    ExplodeViewExistenceEdit edit;
+    edit.viewId = ref.id();
+    edit.name = ref.name();
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Add " + ref.name());
+    return ref;
+}
+
+ExplodeView& AssemblyDocument::restoreExplodeView(ObjectId id, std::string name,
+                                                  std::vector<ExplodeStep> steps,
+                                                  std::size_t previewCut) {
+    requireUnusedId(id, "restoreExplodeView");
+    auto item = std::make_unique<ExplodeView>(id, std::move(name), std::move(steps), previewCut);
+    auto& ref = *item;
+    explodeViews_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+bool AssemblyDocument::addExplodeStep(ObjectId viewId, std::string stepName, ObjectId instanceId,
+                                      const Vec3& offset) {
+    ExplodeView* view = findExplodeViewForEdit(viewId);
+    if (view == nullptr) return false;
+    if (findInstance(instanceId) == nullptr) return false;
+
+    std::vector<ExplodeStep> steps = view->steps();
+    const std::vector<ExplodeStep> before = steps;
+    ExplodeStep step;
+    step.name = std::move(stepName);
+    step.instanceId = instanceId;
+    step.displacement.translation = offset;
+    steps.push_back(std::move(step));
+    view->setSteps(steps);
+
+    ExplodeStepsEdit edit;
+    edit.viewId = viewId;
+    edit.before = before;
+    edit.after = steps;
+    recordDelta(edit, "Explode " + objectName(instanceId));
+    return true;
+}
+
+bool AssemblyDocument::moveExplodeStep(ObjectId viewId, std::size_t from, std::size_t to) {
+    ExplodeView* view = findExplodeViewForEdit(viewId);
+    if (view == nullptr) return false;
+    std::vector<ExplodeStep> steps = view->steps();
+    if (from >= steps.size() || to >= steps.size()) return false;
+    if (from == to) return true;
+    const std::vector<ExplodeStep> before = steps;
+    ExplodeStep moved = steps[from];
+    steps.erase(steps.begin() + static_cast<std::ptrdiff_t>(from));
+    steps.insert(steps.begin() + static_cast<std::ptrdiff_t>(to), std::move(moved));
+    view->setSteps(steps);
+
+    ExplodeStepsEdit edit;
+    edit.viewId = viewId;
+    edit.before = before;
+    edit.after = steps;
+    recordDelta(edit, "Reorder " + view->name());
+    return true;
+}
+
+bool AssemblyDocument::removeExplodeStep(ObjectId viewId, std::size_t index) {
+    ExplodeView* view = findExplodeViewForEdit(viewId);
+    if (view == nullptr) return false;
+    std::vector<ExplodeStep> steps = view->steps();
+    if (index >= steps.size()) return false;
+    const std::vector<ExplodeStep> before = steps;
+    steps.erase(steps.begin() + static_cast<std::ptrdiff_t>(index));
+    view->setSteps(steps);
+
+    ExplodeStepsEdit edit;
+    edit.viewId = viewId;
+    edit.before = before;
+    edit.after = steps;
+    recordDelta(edit, "Delete a step of " + view->name());
+    return true;
+}
+
+bool AssemblyDocument::setExplodePreview(ObjectId viewId, std::size_t stepsShown) {
+    ExplodeView* view = findExplodeViewForEdit(viewId);
+    if (view == nullptr) return false;
+    const std::size_t before = view->previewCut();
+    if (before == stepsShown) return true;
+    view->setPreviewCut(stepsShown);
+
+    ExplodePreviewEdit edit;
+    edit.viewId = viewId;
+    edit.before = before;
+    edit.after = stepsShown;
+    recordDelta(edit, "Preview " + view->name());
+    return true;
+}
+
+std::vector<const ExplodeView*> AssemblyDocument::explodeViews() const {
+    std::vector<const ExplodeView*> out;
+    out.reserve(explodeViews_.size());
+    for (const std::unique_ptr<ExplodeView>& one : explodeViews_) out.push_back(one.get());
+    return out;
+}
+
+const ExplodeView* AssemblyDocument::findExplodeView(ObjectId id) const noexcept {
+    for (const std::unique_ptr<ExplodeView>& one : explodeViews_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+const ExplodeView* AssemblyDocument::findExplodeViewNamed(const std::string& name) const noexcept {
+    for (const std::unique_ptr<ExplodeView>& one : explodeViews_)
+        if (one->name() == name) return one.get();
+    return nullptr;
+}
+
+ExplodeView* AssemblyDocument::findExplodeViewForEdit(ObjectId id) noexcept {
+    for (const std::unique_ptr<ExplodeView>& one : explodeViews_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+Transform3D AssemblyDocument::explodedWorldTransform(ObjectId viewId,
+                                                     ObjectId instanceId) const noexcept {
+    const Transform3D placed = instanceWorldTransform(instanceId);
+    const ExplodeView* view = findExplodeView(viewId);
+    // NO VIEW MEANS NO EXPLOSION, and that is the assembly's own answer
+    // unchanged -- which is the evidence that an explosion is a picture rather
+    // than a move.
+    if (view == nullptr) return placed;
+    return Compose(placed, view->displacementOf(instanceId));
+}
+
 // --- The solve (M24, ADR-M24-003/004) ----------------------------------------
 
 // THE SPANNING FOREST, BUILT ONCE (M25, ADR-M25-002).
@@ -538,7 +816,7 @@ bool AssemblyDocument::buildMateForest(MateForest& forest) const {
     for (const std::unique_ptr<Mate>& mate : mates_) {
         for (const ObjectId end : {mate->leadingInstanceId(), mate->followingInstanceId()}) {
             if (forest.reached.count(end) != 0) continue;
-            const PartInstance* stranded = findInstance(end);
+            const Instance* stranded = findInstance(end);
             forest.message =
                 "'" + (stranded == nullptr ? std::string("an instance") : stranded->name()) +
                 "' is mated to things that are not connected to any ground, so there is no "
@@ -563,16 +841,16 @@ bool AssemblyDocument::placeThroughForest(const MateForest& forest,
 
     for (const MateForest::Step& step : forest.steps) {
         const Mate* mate = findMate(step.mateId);
-        const PartInstance* leader = findInstance(step.from);
-        const PartInstance* follower = findInstance(step.to);
+        const Instance* leader = findInstance(step.from);
+        const Instance* follower = findInstance(step.to);
         if (mate == nullptr || leader == nullptr || follower == nullptr) continue;
 
         // Both connectors have to still exist on the parts. A name that no
         // longer resolves is the mate's failure, not a reason to place the
         // follower somewhere plausible.
-        const PartInstance::MateConnector* leaderConnector =
+        const Instance::MateConnector* leaderConnector =
             leader->findConnector(mate->connectorOn(step.from));
-        const PartInstance::MateConnector* followerConnector =
+        const Instance::MateConnector* followerConnector =
             follower->findConnector(mate->connectorOn(step.to));
         if (leaderConnector == nullptr) {
             if (whyNot != nullptr)
@@ -619,12 +897,12 @@ bool AssemblyDocument::loopResiduals(const MateForest& forest,
     for (const ObjectId mateId : forest.loopClosers) {
         const Mate* mate = findMate(mateId);
         if (mate == nullptr) continue;
-        const PartInstance* leader = findInstance(mate->leadingInstanceId());
-        const PartInstance* follower = findInstance(mate->followingInstanceId());
+        const Instance* leader = findInstance(mate->leadingInstanceId());
+        const Instance* follower = findInstance(mate->followingInstanceId());
         if (leader == nullptr || follower == nullptr) return false;
-        const PartInstance::MateConnector* leaderConnector =
+        const Instance::MateConnector* leaderConnector =
             leader->findConnector(mate->leadingConnector());
-        const PartInstance::MateConnector* followerConnector =
+        const Instance::MateConnector* followerConnector =
             follower->findConnector(mate->followingConnector());
         if (leaderConnector == nullptr || followerConnector == nullptr) return false;
 
@@ -654,7 +932,7 @@ bool AssemblyDocument::solveMates() {
         // No mates: every instance is exactly where it was put, with all six
         // of its freedoms, and that is a complete and correct answer rather
         // than an unsolved one.
-        for (const std::unique_ptr<PartInstance>& one : instances_) {
+        for (const std::unique_ptr<Instance>& one : instances_) {
             const bool grounded = isInstanceGrounded(one->id());
             solveReport_.freedoms.push_back(MateSolveReport::InstanceFreedom{
                 one->id(), grounded ? 0 : 3, grounded ? 0 : 3,
@@ -833,12 +1111,12 @@ bool AssemblyDocument::solveMates() {
             // A DRIVEN mate says where it is; the solve does not get to
             // re-decide that, whichever side of the spanning tree it fell on.
             if (mate->isDriven()) continue;
-            const PartInstance* leader = findInstance(mate->leadingInstanceId());
-            const PartInstance* follower = findInstance(mate->followingInstanceId());
+            const Instance* leader = findInstance(mate->leadingInstanceId());
+            const Instance* follower = findInstance(mate->followingInstanceId());
             if (leader == nullptr || follower == nullptr) continue;
-            const PartInstance::MateConnector* leaderConnector =
+            const Instance::MateConnector* leaderConnector =
                 leader->findConnector(mate->leadingConnector());
-            const PartInstance::MateConnector* followerConnector =
+            const Instance::MateConnector* followerConnector =
                 follower->findConnector(mate->followingConnector());
             if (leaderConnector == nullptr || followerConnector == nullptr) continue;
             const Transform3D relative = Compose(
@@ -897,7 +1175,7 @@ bool AssemblyDocument::solveMates() {
     const bool wasApplying = applyingHistory_;
     applyingHistory_ = true;
     for (const auto& [instanceId, transform] : placed) {
-        const PartInstance* instance = findInstance(instanceId);
+        const Instance* instance = findInstance(instanceId);
         if (instance == nullptr) continue;
         const Transform3D current = instanceTransform(instanceId);
         if (SameTransform(current, transform)) continue;
@@ -905,7 +1183,7 @@ bool AssemblyDocument::solveMates() {
     }
     applyingHistory_ = wasApplying;
 
-    for (const std::unique_ptr<PartInstance>& one : instances_) {
+    for (const std::unique_ptr<Instance>& one : instances_) {
         const auto found = freedom.find(one->id());
         if (found != freedom.end()) {
             solveReport_.freedoms.push_back(found->second);
@@ -959,10 +1237,10 @@ AssemblyDocument::InterferenceReport AssemblyDocument::checkInterference() const
     // WHAT IS ACTUALLY THERE. An instance that has not been built is skipped
     // and SAID SO -- reporting it as clear would be the same sentence as "no
     // interference", which is the one thing this must never say by accident.
-    std::vector<const PartInstance*> built;
+    std::vector<const Instance*> built;
     std::vector<KernelBoundsResult> bounds;
     int skipped = 0;
-    for (const std::unique_ptr<PartInstance>& one : instances_) {
+    for (const std::unique_ptr<Instance>& one : instances_) {
         if (one->currentState() != ComputeState::Valid || !one->currentShape().isValid()) {
             ++skipped;
             continue;
@@ -1025,8 +1303,10 @@ void AssemblyDocument::requireUnusedIdHook(ObjectId id, const char* who) const {
 }
 
 std::string AssemblyDocument::ownObjectName(ObjectId id) const {
-    if (const PartInstance* instance = findInstance(id)) return instance->name();
+    if (const Instance* instance = findInstance(id)) return instance->name();
     if (const Mate* mate = findMate(id)) return mate->name();
+    if (const NamedPosition* pose = findNamedPosition(id)) return pose->name();
+    if (const ExplodeView* view = findExplodeView(id)) return view->name();
     return {};
 }
 
@@ -1035,7 +1315,15 @@ void AssemblyDocument::applyOwnName(ObjectId id, const std::string& name) {
         mate->setName(name);
         return;
     }
-    PartInstance* instance = findInstanceForEdit(id);
+    if (NamedPosition* pose = findNamedPositionForEdit(id)) {
+        pose->setName(name);
+        return;
+    }
+    if (ExplodeView* view = findExplodeViewForEdit(id)) {
+        view->setName(name);
+        return;
+    }
+    Instance* instance = findInstanceForEdit(id);
     if (instance == nullptr) return;
     instance->setName(name);
     // The placement frame is named after the instance, so it follows. Written
@@ -1047,9 +1335,13 @@ void AssemblyDocument::applyOwnName(ObjectId id, const std::string& name) {
 }
 
 bool AssemblyDocument::ownNameIsTaken(const std::string& name, ObjectId except) const {
-    for (const std::unique_ptr<PartInstance>& one : instances_)
+    for (const std::unique_ptr<Instance>& one : instances_)
         if (one->id() != except && one->name() == name) return true;
     for (const std::unique_ptr<Mate>& one : mates_)
+        if (one->id() != except && one->name() == name) return true;
+    for (const std::unique_ptr<NamedPosition>& one : namedPositions_)
+        if (one->id() != except && one->name() == name) return true;
+    for (const std::unique_ptr<ExplodeView>& one : explodeViews_)
         if (one->id() != except && one->name() == name) return true;
     return false;
 }
@@ -1089,6 +1381,36 @@ void AssemblyDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
     }
     if (const auto* edit = std::get_if<InstanceGroundEdit>(&delta)) {
         setInstanceGrounded(edit->instanceId, forward ? edit->after : edit->before);
+        return;
+    }
+    if (const auto* edit = std::get_if<NamedPositionExistenceEdit>(&delta)) {
+        const bool shouldExist = forward ? edit->addedByTheEdit : !edit->addedByTheEdit;
+        const bool doesExist = findNamedPosition(edit->positionId) != nullptr;
+        if (shouldExist == doesExist) return;
+        if (shouldExist)
+            restoreNamedPosition(edit->positionId, edit->name, edit->mates, edit->loose);
+        else
+            removeObject(edit->positionId);
+        return;
+    }
+    if (const auto* edit = std::get_if<ExplodeViewExistenceEdit>(&delta)) {
+        const bool shouldExist = forward ? edit->addedByTheEdit : !edit->addedByTheEdit;
+        const bool doesExist = findExplodeView(edit->viewId) != nullptr;
+        if (shouldExist == doesExist) return;
+        if (shouldExist)
+            restoreExplodeView(edit->viewId, edit->name, edit->steps, edit->previewCut);
+        else
+            removeObject(edit->viewId);
+        return;
+    }
+    if (const auto* edit = std::get_if<ExplodeStepsEdit>(&delta)) {
+        ExplodeView* view = findExplodeViewForEdit(edit->viewId);
+        if (view != nullptr) view->setSteps(forward ? edit->after : edit->before);
+        return;
+    }
+    if (const auto* edit = std::get_if<ExplodePreviewEdit>(&delta)) {
+        ExplodeView* view = findExplodeViewForEdit(edit->viewId);
+        if (view != nullptr) view->setPreviewCut(forward ? edit->after : edit->before);
         return;
     }
     // A delta this document cannot replay. THROWS rather than returning,
@@ -1135,7 +1457,46 @@ bool AssemblyDocument::removeObject(ObjectId id) {
         return true;
     }
 
-    const PartInstance* instance = findInstance(id);
+    // A POSE and an EXPLODED VIEW are the simplest things here: nothing owns
+    // them, nothing else reads them, and neither holds geometry.
+    if (const NamedPosition* pose = findNamedPosition(id)) {
+        if (!applyingHistory()) {
+            NamedPositionExistenceEdit edit;
+            edit.positionId = id;
+            edit.name = pose->name();
+            edit.mates = pose->mates();
+            edit.loose = pose->loose();
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Delete " + pose->name());
+        }
+        registry_.unregisterObject(id);
+        for (auto it = namedPositions_.begin(); it != namedPositions_.end(); ++it)
+            if ((*it)->id() == id) {
+                namedPositions_.erase(it);
+                break;
+            }
+        return true;
+    }
+    if (const ExplodeView* view = findExplodeView(id)) {
+        if (!applyingHistory()) {
+            ExplodeViewExistenceEdit edit;
+            edit.viewId = id;
+            edit.name = view->name();
+            edit.steps = view->steps();
+            edit.previewCut = view->previewCut();
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Delete " + view->name());
+        }
+        registry_.unregisterObject(id);
+        for (auto it = explodeViews_.begin(); it != explodeViews_.end(); ++it)
+            if ((*it)->id() == id) {
+                explodeViews_.erase(it);
+                break;
+            }
+        return true;
+    }
+
+    const Instance* instance = findInstance(id);
     if (instance != nullptr && !applyingHistory()) {
         InstanceExistenceEdit edit;
         edit.instanceId = id;

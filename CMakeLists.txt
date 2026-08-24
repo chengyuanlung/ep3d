@@ -14,7 +14,8 @@ add_library(ParametricCADCore
     src/Core/Assembly/AssemblyDocument.cpp
     src/Core/Assembly/Mate.cpp
     src/Core/Assembly/MateFreedom.cpp
-    src/Core/Assembly/PartInstance.cpp
+    src/Core/Assembly/AssemblyStates.cpp
+    src/Core/Assembly/Instance.cpp
     src/Core/Document/DocumentBase.cpp
     src/Core/Document/PartDocument.cpp
     src/Core/Recompute/DocumentRecomputeEngine.cpp

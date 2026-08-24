@@ -1,0 +1,154 @@
+# AN ASSEMBLY INSIDE AN ASSEMBLY, AND THREE WAYS TO SHOW IT (M26).
+#
+# Run it:
+#   ep3d --script examples/sub-assembly.ep3ds
+#
+# Three things are new here, and roadmap section 49 is emphatic that they stay
+# three separate things because they capture three different KINDS of state:
+#
+#   * a NAMED POSE is geometry evaluation input -- the mates' freedoms, plus
+#     where the loose parts were put. Apply it and the model rebuilds.
+#   * an EXPLODED VIEW is a derived picture. It never changes the model.
+#   * a DISPLAY STATE is pure presentation, and is deliberately NOT here:
+#     A02 keeps presentation out of Core, and EP3D has no assembly UI to hide
+#     anything in yet.
+#
+# Folding them into one "view state" is exactly what section 49 warns against.
+
+# --- the parts ----------------------------------------------------------------
+
+sketch PlateBar
+tool rect
+click 0 -15
+click 80 15
+pad Plate 8
+connector PlateA 0 0 8 0 0 1
+connector PlateB 80 0 8 0 0 1
+solve
+save build/sub-plate.ep3d
+
+sketch PinBar
+tool circle
+click 0 0
+click 5 0
+pad Pin 30
+connector PinBase 0 0 0 0 0 1
+solve
+save build/sub-parts.ep3d
+
+# --- the sub-assembly: a plate with two pins in it ----------------------------
+#
+# An ordinary assembly. What makes it a sub-assembly is that something else
+# instances it, and nothing here has to know that.
+
+assembly Bracket
+
+insert Plate build/sub-plate.ep3d Plate
+insert PinLeft build/sub-parts.ep3d Pin
+insert PinRight build/sub-parts.ep3d Pin
+
+ground Plate
+mate fastened Left Plate/PlateA PinLeft/PinBase
+mate fastened Right Plate/PlateB PinRight/PinBase
+
+echo --- the bracket, on its own ---
+solve
+measure
+
+save build/sub-bracket.ep3da
+
+# --- and now the assembly that contains it ------------------------------------
+#
+# `part` switches back to the part document, so this script can draw another
+# part after it has started assembling. Without it a rig built out of
+# sub-assemblies could not be written by one script at all -- an instance names
+# a FILE, and the file has to exist first.
+part
+#
+# This is the M26 structural claim: `insert` does not care whether the file
+# holds a part or an assembly. It reads the file's own documentType and asks the
+# right question. One instance type, because a mate names an instance by id and
+# two kinds would mean every mate lookup, rename, deletion and save had to ask
+# which.
+
+sketch BaseBar
+tool rect
+click -60 -40
+click 60 40
+pad Table 10
+connector TableTop 0 0 10 0 0 1
+solve
+save build/sub-table.ep3d
+
+assembly Rig
+
+insert Table build/sub-table.ep3d Table
+insert BracketOne build/sub-bracket.ep3da
+ground Table
+
+# The bracket goes on the table. Note what is being placed: a whole
+# sub-assembly, three parts deep, and its insides come with it because the
+# frame hierarchy composes -- nothing here was told about the pins.
+place BracketOne -40 0 10
+
+echo --- the table with one bracket on it ---
+solve
+measure
+
+# --- a row of them -----------------------------------------------------------
+#
+# A pattern of instances. Each copy's placement frame hangs off the ORIGINAL's,
+# so moving the original moves the whole row. That is what makes it a pattern
+# rather than three parts that happen to be lined up.
+
+row BracketOne 3 40 0 0
+
+echo --- three brackets, each a whole sub-assembly ---
+solve
+measure
+
+# --- a named pose ------------------------------------------------------------
+#
+# Where everything is, right now, under a name. Not a configuration: a
+# configuration changes what the model IS, a pose only changes where its
+# freedoms are sitting. Section 49 point 3 is explicit that the two must not be
+# merged.
+
+pose Closed
+
+# Move something, then put it back.
+place BracketOne -40 25 10
+echo --- moved ---
+solve
+measure
+
+pose Closed apply
+echo --- and back where the pose says ---
+solve
+measure
+
+# --- an exploded view --------------------------------------------------------
+#
+# An ordered list of steps, each named, with its OWN preview position -- which
+# is the third appearance of "ordered steps plus an evaluation position", after
+# the feature chain and feature editing. Section 49 point 2 says to extract
+# that rather than write it a third time, and M26 did.
+#
+# It never changes the model. `measure` prints where each instance IS and, when
+# a view is being shown, where the picture puts it.
+
+explode Service
+explode Service step LiftOne BracketOne 0 0 60
+explode Service step SlideTwo BracketOne 0 40 60
+
+explode Service show 1
+echo --- one step of the explosion ---
+solve
+measure
+
+explode Service show all
+echo --- the whole explosion ---
+solve
+measure
+
+save build/rig-with-subassembly.ep3da

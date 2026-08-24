@@ -89,19 +89,42 @@ enum class SketchIcon {
     DimensionTool,
     ReferenceDimension,
     Slot,
+    // M19-M22 solid modelling, on the Model toolbar. Every one of these
+    // shipped with "UI: script and API only" against it; this is that debt
+    // being paid.
+    Sweep,
+    Loft,
+    Shell,
+    Hole,
+    Union,
+    Subtract,
+    Intersect,
+    CircularPattern,
+    CurvePattern,
+    ExportModel,
+    ImportModel,
     // Document-level commands on the main toolbar.
     Undo,
     Redo,
     Recompute,
-    Visibility
+    Visibility,
+
+    // NOT AN ICON. The sweep below is 0..Count, which is what lets
+    // AllSketchIcons be derived rather than written down -- and a list written
+    // down is what this enum already outgrew once, silently, because nothing
+    // used it.
+    //
+    // Keep it LAST. Anything after it would be invisible to every sweep.
+    Count
 };
 
 // A stable, human-readable name. Used by the smoke test to say WHICH icon
 // failed, so a fingerprint clash names the pair rather than an index.
 const char* SketchIconName(SketchIcon icon) noexcept;
 
-// Every icon, in declaration order, so a test can sweep the set without
-// keeping a second list that drifts out of step with the enum.
+// Every icon, in declaration order. DERIVED from the enum's own extent rather
+// than written down: the hand-kept list this replaced had drifted by seventeen
+// entries without anybody noticing, because nothing called it.
 const SketchIcon* AllSketchIcons(int* count) noexcept;
 
 // Paints `icon` for the given palette, at every size the toolbar and menus ask

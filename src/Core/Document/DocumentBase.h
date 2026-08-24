@@ -21,6 +21,7 @@ namespace paramcad {
 class IRecomputable;
 class IGeometryKernel;
 class ISketchSolver;
+class IAssemblySolver;
 
 // EVERYTHING A DOCUMENT IS, REGARDLESS OF WHAT IT HOLDS (M23, ADR-M23-001).
 //
@@ -245,6 +246,13 @@ protected:
     // seeing it; an Assembly has no such back door and does nothing.
     virtual void beforeRecomputePass() {}
 
+    // The chain of assembly files open above this document, so an assembly
+    // that instances itself is refused rather than recursing (M26). Null for
+    // a Part, which cannot contain an instance of anything.
+    virtual const std::vector<std::string>* sourceChain() const { return nullptr; }
+    // The solver a node may need for a nested mechanism. Null for a Part.
+    virtual IAssemblySolver* assemblySolverForNodes() const { return nullptr; }
+
     // False for a node the pass must SKIP without failing it -- a Part's
     // rolled-back or suppressed features (M9.3/M9.4). Asked of the document
     // rather than baked into the graph, because the graph is generic and knows
@@ -297,6 +305,12 @@ protected:
     // runs BEFORE anything is unhooked (so a refusal leaves the document
     // unchanged); `eraseBaseOwned` runs after the graph and registry are clean.
     // Both are no-ops for a handle the base does not own.
+    // Moves every child of `frameId` onto ITS parent, keeping each one's world
+    // transform unchanged. Run when a frame is about to be removed -- see the
+    // definition for why a dangling parent link is worse than a dangling
+    // reference anywhere else here.
+    void liftChildFramesOf(ObjectId frameId);
+
     void recordBaseRemoval(const ObjectRegistry::ObjectRef& handle, ObjectId id);
     bool eraseBaseOwned(const ObjectRegistry::ObjectRef& handle, ObjectId id);
 

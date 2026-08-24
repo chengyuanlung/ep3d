@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/Assembly/AssemblyStates.h"
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/FeatureSnapshot.h"
 #include "Core/Geometry/MathTypes.h"
@@ -324,6 +325,48 @@ struct InstanceGroundEdit {
     bool after = false;
 };
 
+// M26: a named position was captured or deleted (roadmap §49).
+//
+// It carries the whole pose rather than a reference to one, because undoing a
+// delete has to give back what was in it -- and a pose is a snapshot by
+// definition, so there is nothing live to point at.
+struct NamedPositionExistenceEdit {
+    ObjectId positionId = kInvalidObjectId;
+    std::string name;
+    std::vector<NamedPosition::MateSetting> mates;
+    std::vector<NamedPosition::LooseSetting> loose;
+    bool addedByTheEdit = false;
+};
+
+// M26: an exploded view came into existence or left it.
+struct ExplodeViewExistenceEdit {
+    ObjectId viewId = kInvalidObjectId;
+    std::string name;
+    std::vector<ExplodeStep> steps;
+    std::size_t previewCut = EvaluationCut::kAll;
+    bool addedByTheEdit = false;
+};
+
+// M26: an exploded view's steps changed -- added, reordered or deleted.
+//
+// BOTH WHOLE LISTS, not a diff. §49 says steps can be reordered, and a reorder
+// is not expressible as one insertion or one removal; carrying both makes undo
+// and redo the same operation with the pair swapped, which is how every other
+// order-changing delta in this file works.
+struct ExplodeStepsEdit {
+    ObjectId viewId = kInvalidObjectId;
+    std::vector<ExplodeStep> before;
+    std::vector<ExplodeStep> after;
+};
+
+// M26: an exploded view's preview position moved. A POSITION, not an edit --
+// the same shape as a body's rollback, which is the point of EvaluationCut.
+struct ExplodePreviewEdit {
+    ObjectId viewId = kInvalidObjectId;
+    std::size_t before = EvaluationCut::kAll;
+    std::size_t after = EvaluationCut::kAll;
+};
+
 using UndoDelta =
     std::variant<ParameterValueEdit, FeatureExistenceEdit, SuppressionEdit, RollbackEdit,
                  ParameterExistenceEdit, FrameExistenceEdit, FrameTransformEdit,
@@ -332,7 +375,9 @@ using UndoDelta =
                  SketchDimensionPlacementEdit, SketchDimensionFormatEdit,
                  SketchEntityConstructionEdit, SketchEntityGeometryEdit, ObjectNameEdit,
                  SketchConstraintDrivenEdit, InstanceExistenceEdit, MateExistenceEdit,
-                 MateValueEdit, InstanceGroundEdit, MateLimitEdit, MateDrivenEdit>;
+                 MateValueEdit, InstanceGroundEdit, MateLimitEdit, MateDrivenEdit,
+                 NamedPositionExistenceEdit, ExplodeViewExistenceEdit,
+                 ExplodeStepsEdit, ExplodePreviewEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

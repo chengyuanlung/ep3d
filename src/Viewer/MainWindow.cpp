@@ -1,4 +1,11 @@
 #include "Viewer/MainWindow.h"
+#include "Core/Feature/TransformFeatures.h"
+#include "Core/Feature/ImportFeature.h"
+#include "Core/Feature/HoleFeature.h"
+#include "Core/Feature/ShellFeature.h"
+#include "Core/Feature/LoftFeature.h"
+#include "Core/Feature/SweepFeature.h"
+#include <set>
 
 #include "Core/Document/PartDocument.h"
 #include "Core/Physics/MassProperties.h"
@@ -209,6 +216,12 @@ void MainWindow::buildMenus() {
     rollForwardAction_ = model->addAction(QStringLiteral("Roll &Forward to End"));
     connect(rollForwardAction_, &QAction::triggered, this, &MainWindow::onRollForwardRequested);
 
+    QMenu* exchange = menuBar()->addMenu(QStringLiteral("&Exchange"));
+    exportAction_ = exchange->addAction(QStringLiteral("&Export Current Solid..."));
+    connect(exportAction_, &QAction::triggered, this, &MainWindow::onExportRequested);
+    importAction_ = exchange->addAction(QStringLiteral("&Import STEP..."));
+    connect(importAction_, &QAction::triggered, this, &MainWindow::onImportRequested);
+
     QMenu* insert = menuBar()->addMenu(QStringLiteral("&Insert"));
     insertPadAction_ = insert->addAction(QStringLiteral("&Pad from Selected Sketch"));
     connect(insertPadAction_, &QAction::triggered, this, &MainWindow::onInsertPadRequested);
@@ -217,6 +230,33 @@ void MainWindow::buildMenus() {
     insertRevolveAction_ = insert->addAction(QStringLiteral("&Revolve Selected Sketch"));
     connect(insertRevolveAction_, &QAction::triggered, this,
             &MainWindow::onInsertRevolveRequested);
+    insertSweepAction_ = insert->addAction(QStringLiteral("S&weep Two Selected Sketches"));
+    connect(insertSweepAction_, &QAction::triggered, this, &MainWindow::onInsertSweepRequested);
+    insertLoftAction_ = insert->addAction(QStringLiteral("&Loft Through Selected Sketches"));
+    connect(insertLoftAction_, &QAction::triggered, this, &MainWindow::onInsertLoftRequested);
+    insert->addSeparator();
+    insertShellAction_ = insert->addAction(QStringLiteral("S&hell, Open at Picked Face"));
+    connect(insertShellAction_, &QAction::triggered, this, &MainWindow::onInsertShellRequested);
+    insertHoleAction_ = insert->addAction(QStringLiteral("&Hole at Selected Sketch Points"));
+    connect(insertHoleAction_, &QAction::triggered, this, &MainWindow::onInsertHoleRequested);
+    insert->addSeparator();
+    insertUnionAction_ = insert->addAction(QStringLiteral("&Union the Two Solids"));
+    connect(insertUnionAction_, &QAction::triggered, this, &MainWindow::onInsertUnionRequested);
+    insertSubtractAction_ = insert->addAction(QStringLiteral("S&ubtract the Second Solid"));
+    connect(insertSubtractAction_, &QAction::triggered, this,
+            &MainWindow::onInsertSubtractRequested);
+    insertIntersectAction_ = insert->addAction(QStringLiteral("&Intersect the Two Solids"));
+    connect(insertIntersectAction_, &QAction::triggered, this,
+            &MainWindow::onInsertIntersectRequested);
+    insert->addSeparator();
+    insertCircularPatternAction_ =
+        insert->addAction(QStringLiteral("Circular &Pattern about the Origin"));
+    connect(insertCircularPatternAction_, &QAction::triggered, this,
+            &MainWindow::onInsertCircularPatternRequested);
+    insertCurvePatternAction_ =
+        insert->addAction(QStringLiteral("Pattern &Along Selected Sketch"));
+    connect(insertCurvePatternAction_, &QAction::triggered, this,
+            &MainWindow::onInsertCurvePatternRequested);
     insert->addSeparator();
     insertFilletAction_ = insert->addAction(QStringLiteral("&Fillet on Current Solid"));
     connect(insertFilletAction_, &QAction::triggered, this, &MainWindow::onInsertFilletRequested);
@@ -330,6 +370,88 @@ void MainWindow::buildToolbar() {
     model->addAction(insertRevolveAction_);
 
     model->addSeparator();
+    // M19-M22, in the order a part is usually built: make material, take it
+    // away, copy it, exchange it.
+    insertSweepAction_->setIcon(icon(ui::SketchIcon::Sweep));
+    insertSweepAction_->setIconText(QStringLiteral("Sweep"));
+    insertSweepAction_->setToolTip(
+        QStringLiteral("Sweep\nDrag the first selected sketch along the second.\n"
+                       "Select TWO sketches -- profile first, path second, in tree order."));
+    model->addAction(insertSweepAction_);
+
+    insertLoftAction_->setIcon(icon(ui::SketchIcon::Loft));
+    insertLoftAction_->setIconText(QStringLiteral("Loft"));
+    insertLoftAction_->setToolTip(
+        QStringLiteral("Loft\nSkin through two or more selected sketches.\n"
+                       "The ORDER is the shape, and it is the order in the tree."));
+    model->addAction(insertLoftAction_);
+
+    insertShellAction_->setIcon(icon(ui::SketchIcon::Shell));
+    insertShellAction_->setIconText(QStringLiteral("Shell"));
+    insertShellAction_->setToolTip(
+        QStringLiteral("Shell\nHollow the solid, leaving a wall.\n"
+                       "Click the face to leave OPEN in the 3D view first."));
+    model->addAction(insertShellAction_);
+
+    insertHoleAction_->setIcon(icon(ui::SketchIcon::Hole));
+    insertHoleAction_->setIconText(QStringLiteral("Hole"));
+    insertHoleAction_->setToolTip(
+        QStringLiteral("Hole\nDrill a bore at every point of the selected sketch.\n"
+                       "It goes all the way through until you give it a Depth."));
+    model->addAction(insertHoleAction_);
+
+    model->addSeparator();
+    insertUnionAction_->setIcon(icon(ui::SketchIcon::Union));
+    insertUnionAction_->setIconText(QStringLiteral("Union"));
+    insertUnionAction_->setToolTip(
+        QStringLiteral("Union\nJoin the body's two separate solids into one.\n"
+                       "Pad into the same body twice to make two."));
+    model->addAction(insertUnionAction_);
+
+    insertSubtractAction_->setIcon(icon(ui::SketchIcon::Subtract));
+    insertSubtractAction_->setIconText(QStringLiteral("Subtract"));
+    insertSubtractAction_->setToolTip(
+        QStringLiteral("Subtract\nRemove the later solid from the earlier one."));
+    model->addAction(insertSubtractAction_);
+
+    insertIntersectAction_->setIcon(icon(ui::SketchIcon::Intersect));
+    insertIntersectAction_->setIconText(QStringLiteral("Intersect"));
+    insertIntersectAction_->setToolTip(
+        QStringLiteral("Intersect\nKeep only what both solids occupy.\n"
+                       "Two solids that do not overlap are refused, not emptied."));
+    model->addAction(insertIntersectAction_);
+
+    model->addSeparator();
+    insertCircularPatternAction_->setIcon(icon(ui::SketchIcon::CircularPattern));
+    insertCircularPatternAction_->setIconText(QStringLiteral("Ring"));
+    insertCircularPatternAction_->setToolTip(
+        QStringLiteral("Circular Pattern\nCopies around the origin's Z axis.\n"
+                       "The step is PER COPY, so four at 90 deg is a full ring."));
+    model->addAction(insertCircularPatternAction_);
+
+    insertCurvePatternAction_->setIcon(icon(ui::SketchIcon::CurvePattern));
+    insertCurvePatternAction_->setIconText(QStringLiteral("Along"));
+    insertCurvePatternAction_->setToolTip(
+        QStringLiteral("Pattern Along a Curve\nCopies spaced along the selected sketch's "
+                       "curve.\nEvenly by ARC LENGTH, not by parameter."));
+    model->addAction(insertCurvePatternAction_);
+
+    model->addSeparator();
+    exportAction_->setIcon(icon(ui::SketchIcon::ExportModel));
+    exportAction_->setIconText(QStringLiteral("Export"));
+    exportAction_->setToolTip(
+        QStringLiteral("Export\nWrite the current solid as STEP or STL.\n"
+                       "The format comes from the extension you type."));
+    model->addAction(exportAction_);
+
+    importAction_->setIcon(icon(ui::SketchIcon::ImportModel));
+    importAction_->setIconText(QStringLiteral("Import"));
+    importAction_->setToolTip(
+        QStringLiteral("Import\nBring in a STEP file as a feature.\n"
+                       "It stores the PATH: edit that file and the model follows."));
+    model->addAction(importAction_);
+
+    model->addSeparator();
     insertFilletAction_->setIcon(icon(ui::SketchIcon::Fillet));
     insertFilletAction_->setIconText(QStringLiteral("Fillet"));
     insertFilletAction_->setToolTip(QStringLiteral("Fillet\nRound every edge of the current solid"));
@@ -353,7 +475,12 @@ void MainWindow::buildDocks() {
     // measured. Applying it is what makes the token real.
     tree_->setStyleSheet(QStringLiteral("QTreeWidget::item { height: %1px; }")
                              .arg(ui::size::kTreeRowHeight));
-    tree_->setSelectionMode(QAbstractItemView::SingleSelection);
+    // EXTENDED since M26.1, because a loft takes several sketches and a sweep
+    // takes two. `selectedId_` stays the FIRST of the selection, which is what
+    // every single-input command already means by "the selection" -- so
+    // nothing that worked before behaves differently, and the commands that
+    // need more ask selectedSketches() for it.
+    tree_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     tree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     tree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     connect(tree_, &QTreeWidget::itemSelectionChanged, this,
@@ -1029,6 +1156,25 @@ void MainWindow::refreshCommandStates() {
     const bool haveSketch = selectedSketch() != kInvalidObjectId;
     const bool haveTail = currentTail() != kInvalidObjectId;
     if (insertPadAction_ != nullptr) insertPadAction_->setEnabled(haveSketch);
+    // The same rule the commands themselves enforce, so the toolbar cannot
+    // offer something the command would refuse (M9's "availability cannot
+    // differ between the two surfaces").
+    const std::size_t sketchesChosen = selectedSketches().size();
+    const bool haveSolid = currentTail() != kInvalidObjectId;
+    const bool twoSolids = unconsumedSolids().size() >= 2;
+    if (insertSweepAction_ != nullptr) insertSweepAction_->setEnabled(sketchesChosen == 2);
+    if (insertLoftAction_ != nullptr) insertLoftAction_->setEnabled(sketchesChosen >= 2);
+    if (insertShellAction_ != nullptr) insertShellAction_->setEnabled(haveSolid);
+    if (insertHoleAction_ != nullptr) insertHoleAction_->setEnabled(haveSolid && haveSketch);
+    if (insertUnionAction_ != nullptr) insertUnionAction_->setEnabled(twoSolids);
+    if (insertSubtractAction_ != nullptr) insertSubtractAction_->setEnabled(twoSolids);
+    if (insertIntersectAction_ != nullptr) insertIntersectAction_->setEnabled(twoSolids);
+    if (insertCircularPatternAction_ != nullptr)
+        insertCircularPatternAction_->setEnabled(haveSolid);
+    if (insertCurvePatternAction_ != nullptr)
+        insertCurvePatternAction_->setEnabled(haveSolid && haveSketch);
+    if (exportAction_ != nullptr) exportAction_->setEnabled(haveSolid);
+    if (importAction_ != nullptr) importAction_->setEnabled(true);
     // A pocket needs BOTH: a profile to cut with and a solid to cut into.
     if (insertPocketAction_ != nullptr) insertPocketAction_->setEnabled(haveSketch && haveTail);
     if (insertFilletAction_ != nullptr) insertFilletAction_->setEnabled(haveTail);
@@ -1226,6 +1372,382 @@ MainWindow::DressSelection MainWindow::selectionForDress(ObjectId baseFeatureId)
     return chosen;
 }
 
+// --- M19-M22 features, on the Model toolbar ---------------------------------
+//
+// Every one of these shipped with "UI: script and API only" recorded against
+// it, from M19 to M22. What each command needs is exactly what the script verb
+// needs, and the RULES are the script's rules -- a boolean takes the body's two
+// unconsumed solids in the order they were drawn, a hole with no depth goes all
+// the way through, a ring turns about the world Z. Restating them differently
+// here would be two answers to one question.
+//
+// The shape of every one is Pad's: refuse BEFORE anything is created, so a
+// refusal costs the user nothing to undo; one transaction; then the FEATURE's
+// own diagnostic rather than "created" regardless (ADR-M17-022).
+
+std::vector<ObjectId> MainWindow::selectedSketches() const {
+    std::vector<ObjectId> found;
+    if (document_ == nullptr || tree_ == nullptr) return found;
+    std::set<ObjectId> chosen;
+    for (const QTreeWidgetItem* item : tree_->selectedItems())
+        chosen.insert(static_cast<ObjectId>(item->data(0, kIdRole).toULongLong()));
+    // IN DOCUMENT ORDER, walked from the document rather than read out of the
+    // selection. Qt does not keep the order things were clicked in, and a
+    // command whose answer depended on an order nobody can see would be a
+    // command nobody can predict. Document order is a rule the user controls:
+    // it is the order the sketches were made in, and it is what the tree shows.
+    for (const Sketch* sketch : document_->sketches())
+        if (chosen.count(sketch->id()) != 0) found.push_back(sketch->id());
+    return found;
+}
+
+std::vector<ObjectId> MainWindow::unconsumedSolids() const {
+    if (presenter_ == nullptr) return {};
+    return presenter_->displayableSolids();
+}
+
+MainWindow::PickedFaceQuery MainWindow::selectionForFace() const {
+    PickedFaceQuery out;
+    if (viewer_ == nullptr || viewer_->pickedFace().createdBy == 0) {
+        out.refusal = QStringLiteral("Click a face in the 3D view first");
+        return out;
+    }
+    // The same three conditions a face sketch uses (ADR-M17-036), from the same
+    // pick -- so this cannot disagree with what the user clicked. `createdBy`
+    // is provenance and survives the geometry moving; the two directions narrow
+    // it to the one face.
+    out.query.createdBy = static_cast<ObjectId>(viewer_->pickedFace().createdBy);
+    out.query.facing = viewer_->pickedFace().normal;
+    out.query.extremeTowards = viewer_->pickedFace().normal;
+    out.words = DescribeFaceQuery(out.query);
+    return out;
+}
+
+QString MainWindow::insertSweepFromSelection() {
+    const std::vector<ObjectId> sketches = selectedSketches();
+    if (sketches.size() != 2) {
+        const QString message =
+            QStringLiteral("Select TWO sketches to sweep: the profile and the path, in the "
+                           "order they appear in the tree");
+        statusLeft_->setText(message);
+        return message;
+    }
+    if (document_->bodies().empty()) document_->addBody("Body001");
+    Body& body = *document_->bodies().front();
+    document_->beginTransaction("Insert Sweep");
+    SweepFeature& sweep =
+        document_->addSweepFeature(body, uniqueObjectName("Sweep"), sketches[0], sketches[1]);
+    document_->commitTransaction();
+    const ObjectId created = sweep.id();
+    const DocumentRecomputeReport report = document_->recompute();
+    refreshAll();
+    selectObject(created);
+    QString message = describeCreatedFeature("Sweep", created, report);
+    if (message.startsWith(QStringLiteral("Sweep created")))
+        message += QStringLiteral("; %1 swept along %2")
+                       .arg(QString::fromStdString(document_->objectName(sketches[0])),
+                            QString::fromStdString(document_->objectName(sketches[1])));
+    sketchMessage_.clear();
+    statusLeft_->setText(message);
+    refreshCommandStates();
+    return message;
+}
+
+QString MainWindow::insertLoftFromSelection() {
+    const std::vector<ObjectId> sketches = selectedSketches();
+    if (sketches.size() < 2) {
+        const QString message =
+            QStringLiteral("Select two or more sketches to loft through, in the order they "
+                           "appear in the tree -- the order IS the shape");
+        statusLeft_->setText(message);
+        return message;
+    }
+    if (document_->bodies().empty()) document_->addBody("Body001");
+    Body& body = *document_->bodies().front();
+    document_->beginTransaction("Insert Loft");
+    LoftFeature& loft = document_->addLoftFeature(body, uniqueObjectName("Loft"), sketches);
+    document_->commitTransaction();
+    const ObjectId created = loft.id();
+    const DocumentRecomputeReport report = document_->recompute();
+    refreshAll();
+    selectObject(created);
+    QString message = describeCreatedFeature("Loft", created, report);
+    if (message.startsWith(QStringLiteral("Loft created")))
+        message += QStringLiteral(" through %1 sections").arg(sketches.size());
+    sketchMessage_.clear();
+    statusLeft_->setText(message);
+    refreshCommandStates();
+    return message;
+}
+
+QString MainWindow::insertShellOnTail() {
+    const ObjectId base = currentTail();
+    if (base == kInvalidObjectId) {
+        const QString message = QStringLiteral("No solid to shell");
+        statusLeft_->setText(message);
+        return message;
+    }
+    // WHICH FACE TO OPEN, decided before anything is created.
+    const PickedFaceQuery opening = selectionForFace();
+    if (!opening.refusal.isEmpty()) {
+        const QString message = QStringLiteral("Shell: %1 -- that face becomes the opening")
+                                    .arg(opening.refusal);
+        statusLeft_->setText(message);
+        return message;
+    }
+    Body& body = *document_->bodies().front();
+    document_->beginTransaction("Insert Shell");
+    Parameter& thickness =
+        document_->addParameter(uniqueObjectName("ShellThickness"), 2.0, UnitType::Millimeter);
+    ShellFeature& shell = document_->addShellFeature(body, uniqueObjectName("Shell"), base,
+                                                     FaceSelection{opening.query}, thickness.id());
+    document_->commitTransaction();
+    const ObjectId created = shell.id();
+    const DocumentRecomputeReport report = document_->recompute();
+    refreshAll();
+    selectObject(created);
+    QString message = describeCreatedFeature("Shell", created, report);
+    if (message.startsWith(QStringLiteral("Shell created")))
+        message += QStringLiteral(", open at %1 -- edit its Thickness in the panel")
+                       .arg(QString::fromStdString(opening.words));
+    statusLeft_->setText(message);
+    refreshCommandStates();
+    return message;
+}
+
+QString MainWindow::insertHoleFromSelection() {
+    const ObjectId base = currentTail();
+    if (base == kInvalidObjectId) {
+        const QString message = QStringLiteral("No solid to drill");
+        statusLeft_->setText(message);
+        return message;
+    }
+    const ObjectId sketch = selectedSketch();
+    if (sketch == kInvalidObjectId) {
+        const QString message =
+            QStringLiteral("Select a sketch of POINTS to drill -- each point becomes a bore");
+        statusLeft_->setText(message);
+        return message;
+    }
+    Body& body = *document_->bodies().front();
+    document_->beginTransaction("Insert Hole");
+    Parameter& diameter =
+        document_->addParameter(uniqueObjectName("HoleDiameter"), 5.0, UnitType::Millimeter);
+    // ZERO DEPTH MEANS ALL THE WAY THROUGH, which is what a hole usually is and
+    // what the feature spells a depth of nought as. The same rule the script's
+    // `hole` verb follows when its depth is left out.
+    Parameter& depth =
+        document_->addParameter(uniqueObjectName("HoleDepth"), 0.0, UnitType::Millimeter);
+    HoleFeature& hole = document_->addHoleFeature(body, uniqueObjectName("Hole"), base, sketch,
+                                                  diameter.id(), depth.id());
+    document_->commitTransaction();
+    const ObjectId created = hole.id();
+    const DocumentRecomputeReport report = document_->recompute();
+    refreshAll();
+    selectObject(created);
+    QString message = describeCreatedFeature("Hole", created, report);
+    if (message.startsWith(QStringLiteral("Hole created")))
+        message += QStringLiteral(
+            " through the part -- edit its Diameter, or set a Depth, in the panel");
+    sketchMessage_.clear();
+    statusLeft_->setText(message);
+    refreshCommandStates();
+    return message;
+}
+
+QString MainWindow::insertBooleanOnTail(BooleanOperation operation, const char* what) {
+    const std::vector<ObjectId> loose = unconsumedSolids();
+    if (loose.size() < 2) {
+        const QString message =
+            QStringLiteral("%1 needs TWO separate solids in the body; there %2 %3. "
+                           "Pad into the same body twice to make them.")
+                .arg(QString::fromUtf8(what),
+                     loose.size() == 1 ? QStringLiteral("is") : QStringLiteral("are"),
+                     QString::number(loose.size()));
+        statusLeft_->setText(message);
+        return message;
+    }
+    // THE LAST TWO, in the order they were drawn -- so Subtract removes the
+    // later one from the earlier, which is the order the tree reads in. The
+    // script's boolean verbs take the same two in the same order.
+    const ObjectId target = loose[loose.size() - 2];
+    const ObjectId tool = loose[loose.size() - 1];
+    Body& body = *document_->bodies().front();
+    document_->beginTransaction(std::string("Insert ") + what);
+    BooleanFeature& boolean = document_->addBooleanFeature(body, uniqueObjectName(what),
+                                                            operation, target, tool);
+    document_->commitTransaction();
+    const ObjectId created = boolean.id();
+    const DocumentRecomputeReport report = document_->recompute();
+    refreshAll();
+    selectObject(created);
+    QString message = describeCreatedFeature(what, created, report);
+    if (message.startsWith(QString::fromUtf8(what) + QStringLiteral(" created")))
+        message += QStringLiteral(" from %1 and %2")
+                       .arg(QString::fromStdString(document_->objectName(target)),
+                            QString::fromStdString(document_->objectName(tool)));
+    statusLeft_->setText(message);
+    refreshCommandStates();
+    return message;
+}
+
+QString MainWindow::insertCircularPatternOnTail() {
+    const ObjectId base = currentTail();
+    if (base == kInvalidObjectId) {
+        const QString message = QStringLiteral("No solid to pattern");
+        statusLeft_->setText(message);
+        return message;
+    }
+    Body& body = *document_->bodies().front();
+    document_->beginTransaction("Insert Circular Pattern");
+    // THE AXIS IS THE WORLD Z through the origin, which is what a frame at the
+    // origin gives -- the same convention the script's `ring` verb uses, and
+    // the same +Z a mirror's normal and a linear pattern's direction follow.
+    ReferenceFrame& axis = document_->addFrame(uniqueObjectName("RingAxis"));
+    Parameter& count =
+        document_->addParameter(uniqueObjectName("RingCount"), 4.0, UnitType::Unitless);
+    // THE STEP IS PER INSTANCE, not a total sweep: four at ninety degrees is a
+    // full ring. Four at three-hundred-and-sixty would be four copies on top of
+    // each other.
+    Parameter& step = document_->addParameter(uniqueObjectName("RingStep"),
+                                              90.0 * 3.14159265358979323846 / 180.0,
+                                              UnitType::Radian);
+    CircularPatternFeature& ring = document_->addCircularPatternFeature(
+        body, uniqueObjectName("Ring"), base, axis.id(), count.id(), step.id());
+    document_->commitTransaction();
+    const ObjectId created = ring.id();
+    const DocumentRecomputeReport report = document_->recompute();
+    refreshAll();
+    selectObject(created);
+    QString message = describeCreatedFeature("Ring", created, report);
+    if (message.startsWith(QStringLiteral("Ring created")))
+        message += QStringLiteral(
+            " -- four at 90 deg about the origin's Z; edit RingCount and RingStep in the panel");
+    statusLeft_->setText(message);
+    refreshCommandStates();
+    return message;
+}
+
+QString MainWindow::insertCurvePatternFromSelection() {
+    const ObjectId base = currentTail();
+    if (base == kInvalidObjectId) {
+        const QString message = QStringLiteral("No solid to pattern");
+        statusLeft_->setText(message);
+        return message;
+    }
+    const ObjectId path = selectedSketch();
+    if (path == kInvalidObjectId) {
+        const QString message =
+            QStringLiteral("Select the sketch whose curve the copies follow");
+        statusLeft_->setText(message);
+        return message;
+    }
+    Body& body = *document_->bodies().front();
+    document_->beginTransaction("Insert Curve Pattern");
+    Parameter& count =
+        document_->addParameter(uniqueObjectName("AlongCount"), 5.0, UnitType::Unitless);
+    CurvePatternFeature& along = document_->addCurvePatternFeature(
+        body, uniqueObjectName("Along"), base, path, count.id());
+    document_->commitTransaction();
+    const ObjectId created = along.id();
+    const DocumentRecomputeReport report = document_->recompute();
+    refreshAll();
+    selectObject(created);
+    QString message = describeCreatedFeature("Along", created, report);
+    if (message.startsWith(QStringLiteral("Along created")))
+        message += QStringLiteral(" along %1 -- edit AlongCount in the panel")
+                       .arg(QString::fromStdString(document_->objectName(path)));
+    sketchMessage_.clear();
+    statusLeft_->setText(message);
+    refreshCommandStates();
+    return message;
+}
+
+QString MainWindow::exportCurrentSolid() {
+    const ObjectId base = currentTail();
+    if (base == kInvalidObjectId) {
+        const QString message = QStringLiteral("No solid to export");
+        statusLeft_->setText(message);
+        return message;
+    }
+    const ISolidFeature* solid = nullptr;
+    for (const auto& body : document_->bodies())
+        for (const auto& feature : body->features())
+            if (feature->id() == base) solid = dynamic_cast<const ISolidFeature*>(feature.get());
+    if (solid == nullptr || solid->currentState() != ComputeState::Valid ||
+        !solid->currentShape().isValid()) {
+        const QString message = QStringLiteral("That solid has not been built yet -- recompute "
+                                               "before exporting");
+        statusLeft_->setText(message);
+        return message;
+    }
+    IGeometryKernel* kernel = document_->geometryKernel();
+    if (kernel == nullptr) {
+        const QString message = QStringLiteral("No geometry kernel configured");
+        statusLeft_->setText(message);
+        return message;
+    }
+
+    // THE FORMAT COMES FROM THE EXTENSION, and the filter is how the dialog
+    // says so. There is no format argument anywhere in EP3D (ADR-M22-001): a
+    // .step written as STL is a file whose name lies about it.
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Export solid"), QString(),
+        QStringLiteral("STEP (*.step *.stp);;STL (*.stl)"));
+    if (path.isEmpty()) return QStringLiteral("Export cancelled");
+
+    const QString lower = path.toLower();
+    IoResult written;
+    if (lower.endsWith(QStringLiteral(".stl"))) {
+        // The same default deflection the script uses, and said out loud for
+        // the same reason: a mesh written at a tolerance nobody chose is a mesh
+        // nobody can reproduce.
+        written = kernel->exportStl(solid->currentShape(), path.toStdString(), 0.05);
+    } else if (lower.endsWith(QStringLiteral(".step")) || lower.endsWith(QStringLiteral(".stp"))) {
+        written = kernel->exportStep(solid->currentShape(), path.toStdString());
+    } else {
+        const QString message =
+            QStringLiteral("'%1' has no extension this can write; use .step or .stl").arg(path);
+        statusLeft_->setText(message);
+        return message;
+    }
+    const QString message =
+        written ? QStringLiteral("Exported %1").arg(QFileInfo(path).fileName())
+                : QStringLiteral("Export failed: %1")
+                      .arg(QString::fromStdString(written.message));
+    statusLeft_->setText(message);
+    return message;
+}
+
+QString MainWindow::importSolidAsFeature() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Import STEP"), QString(),
+        QStringLiteral("STEP (*.step *.stp)"));
+    if (path.isEmpty()) return QStringLiteral("Import cancelled");
+
+    if (document_->bodies().empty()) document_->addBody("Body001");
+    Body& body = *document_->bodies().front();
+    document_->beginTransaction("Import");
+    // IT STORES THE PATH, NOT THE GEOMETRY (ADR-M22-003). The file is the
+    // source of truth and is read again on every rebuild -- so a re-exported
+    // source shows up here, and a source that went away stops this feature by
+    // name rather than leaving a copy nobody can trace back to anything.
+    ImportFeature& brought =
+        document_->addImportFeature(body, uniqueObjectName("Import"), path.toStdString());
+    document_->commitTransaction();
+    const ObjectId created = brought.id();
+    const DocumentRecomputeReport report = document_->recompute();
+    refreshAll();
+    selectObject(created);
+    QString message = describeCreatedFeature("Import", created, report);
+    if (message.startsWith(QStringLiteral("Import created")))
+        message += QStringLiteral(" from %1 -- it is re-read on every rebuild")
+                       .arg(QFileInfo(path).fileName());
+    statusLeft_->setText(message);
+    refreshCommandStates();
+    return message;
+}
+
 QString MainWindow::insertFilletOnTail() {
     const ObjectId base = currentTail();
     if (base == kInvalidObjectId) {
@@ -1420,6 +1942,24 @@ QString MainWindow::insertRevolveFromSelection(SketchEntityId axisEntityId,
     refreshCommandStates();
     return message;
 }
+void MainWindow::onInsertSweepRequested() { insertSweepFromSelection(); }
+void MainWindow::onInsertLoftRequested() { insertLoftFromSelection(); }
+void MainWindow::onInsertShellRequested() { insertShellOnTail(); }
+void MainWindow::onInsertHoleRequested() { insertHoleFromSelection(); }
+void MainWindow::onInsertUnionRequested() {
+    insertBooleanOnTail(BooleanOperation::Union, "Union");
+}
+void MainWindow::onInsertSubtractRequested() {
+    insertBooleanOnTail(BooleanOperation::Subtract, "Subtract");
+}
+void MainWindow::onInsertIntersectRequested() {
+    insertBooleanOnTail(BooleanOperation::Intersect, "Intersect");
+}
+void MainWindow::onInsertCircularPatternRequested() { insertCircularPatternOnTail(); }
+void MainWindow::onInsertCurvePatternRequested() { insertCurvePatternFromSelection(); }
+void MainWindow::onExportRequested() { exportCurrentSolid(); }
+void MainWindow::onImportRequested() { importSolidAsFeature(); }
+
 void MainWindow::onInsertFilletRequested() { insertFilletOnTail(); }
 void MainWindow::onInsertChamferRequested() { insertChamferOnTail(); }
 

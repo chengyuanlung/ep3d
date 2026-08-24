@@ -15,8 +15,10 @@ class Material;
 class Sketch;
 class ReferenceFrame;
 class Connector;
-class PartInstance;
+class Instance;
 class Mate;
+class NamedPosition;
+class ExplodeView;
 class IRecomputable;
 
 // Document-local ObjectId -> object lookup (ADR-010). Stores type-safe
@@ -38,10 +40,11 @@ public:
     // document objects rather than entries in a vector (ADR-M10-001).
     // Mate joins in M24: it is a named, id-carrying, save-and-load document
     // object like every other, so the one-id-once rule and removeObject have
-    // to be able to see it. PartInstance does NOT appear here -- it registers
+    // to be able to see it. Instance does NOT appear here -- it registers
     // under IRecomputable, because it is one.
     using ObjectRef = std::variant<Parameter*, Body*, Feature*, Material*, Sketch*,
-                                   ReferenceFrame*, Connector*, Mate*, IRecomputable*>;
+                                   ReferenceFrame*, Connector*, Mate*, NamedPosition*,
+                                   ExplodeView*, IRecomputable*>;
 
     // The same handle with const pointees, for callers that only INSPECT.
     //
@@ -61,6 +64,7 @@ public:
     using ConstObjectRef =
         std::variant<const Parameter*, const Body*, const Feature*, const Material*,
                      const Sketch*, const ReferenceFrame*, const Connector*, const Mate*,
+                     const NamedPosition*, const ExplodeView*,
                      const IRecomputable*>;
 
     // Rejects kInvalidObjectId, duplicate ids, null handles, and handles

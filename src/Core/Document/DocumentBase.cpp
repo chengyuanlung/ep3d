@@ -555,8 +555,50 @@ void DocumentBase::recordBaseRemoval(const ObjectRegistry::ObjectRef& handle, Ob
     }
 }
 
+// WHEN A FRAME GOES, ITS CHILDREN STAY WHERE THEY ARE (M26, ADR-M26-004).
+//
+// `worldTransform` walks up the parent chain and stops when it cannot find the
+// next frame, so a child whose parent was deleted quietly starts reporting its
+// LOCAL transform as its world one -- and whatever it places jumps somewhere
+// nobody chose. That is the silent relocation ADR-M10-003 named for a sketch on
+// a deleted support frame, arriving through the parent link instead.
+//
+// M26 made it reachable: an assembly pattern hangs each copy's frame off the
+// original's (ADR-M26-003), so deleting a patterned instance is now an ordinary
+// thing to try.
+//
+// The answer is neither to refuse nor to cascade. Each child is LIFTED to the
+// grandparent, with its local transform rewritten so its world transform is
+// unchanged -- so nothing moves, nothing is lost, and there is no message a
+// caller has to be given and might not pass on. A row whose original is deleted
+// becomes three independent instances exactly where they were, which is the
+// only outcome a user would not have to undo.
+void DocumentBase::liftChildFramesOf(ObjectId frameId) {
+    const ReferenceFrame* going = findFrame(frameId);
+    if (going == nullptr) return;
+    const ObjectId grandparent = going->parentFrameId();
+
+    std::vector<ObjectId> children;
+    for (const std::unique_ptr<ReferenceFrame>& frame : frames_)
+        if (frame->parentFrameId() == frameId) children.push_back(frame->id());
+
+    for (const ObjectId childId : children) {
+        // WORLD FIRST, then re-parent, then the local that reproduces it. Doing
+        // it in any other order measures against a hierarchy that has already
+        // changed.
+        const Transform3D world = worldTransform(childId);
+        restoreFrameParent(childId, grandparent);
+        const Transform3D under = worldTransform(grandparent);
+        // Recorded as an ordinary move so an undo puts the hierarchy back.
+        setFrameTransform(childId, Compose(Inverse(under), world));
+    }
+}
+
 bool DocumentBase::eraseBaseOwned(const ObjectRegistry::ObjectRef& handle, ObjectId id) {
     if (std::holds_alternative<ReferenceFrame*>(handle)) {
+        // Before it disappears, so its children still have something to be
+        // measured against while they are moved off it.
+        liftChildFramesOf(id);
         for (auto it = frames_.begin(); it != frames_.end(); ++it)
             if ((*it)->id() == id) {
                 frames_.erase(it);

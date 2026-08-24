@@ -3,6 +3,7 @@
 #include "Core/Assembly/Mate.h"
 #include "Core/Geometry/Transform.h"
 #include "Core/Assembly/AssemblyDocument.h"
+#include "Core/Document/EvaluationCut.h"
 #include "Core/Serialization/AssemblyDocumentSerializer.h"
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Kernel/IGeometryKernel.h"
@@ -239,10 +240,20 @@ public:
 
 private:
     IAssemblySolver* assemblySolver_ = nullptr;
-    // THE ASSEMBLY THIS SCRIPT IS BUILDING, if it is building one (M23).
-    // Owned here rather than passed in, because a script that never says
-    // `assembly` must behave exactly as it did before this existed.
-    std::unique_ptr<AssemblyDocument> assembly_;
+    // THE ASSEMBLIES THIS SCRIPT HAS BUILT, and which one is current (M23,
+    // extended in M26).
+    //
+    // M23 allowed exactly one, which was enough until a sub-assembly needed
+    // to exist BEFORE the assembly that instances it -- and both in one
+    // script, because an instance names a FILE and the file has to be written
+    // first. So `assembly NAME` now switches, creating on first use, and
+    // `part` switches back to the part document.
+    //
+    // `assembly_` is the current one, or null for the part. Naming it after
+    // the current thing rather than after a list is deliberate: every verb
+    // below asks "is there an assembly?" and means "am I working on one?".
+    std::vector<std::unique_ptr<AssemblyDocument>> assemblies_;
+    AssemblyDocument* assembly_ = nullptr;
     ScriptOutcome* outcome_{nullptr};
     int line_{0};
 
@@ -394,10 +405,14 @@ private:
         if (verb == "import") return doImport(tokens);
         if (verb == "connector") return doConnector(tokens);
         if (verb == "assembly") return doAssembly(tokens);
+        if (verb == "part") return doPart(tokens);
         if (verb == "ground") return doGround(tokens);
         if (verb == "mate") return doMate(tokens);
         if (verb == "drive") return doDrive(tokens);
         if (verb == "limit") return doLimit(tokens);
+        if (verb == "row") return doRow(tokens);
+        if (verb == "pose") return doPose(tokens);
+        if (verb == "explode") return doExplode(tokens);
         if (verb == "interference") return doInterference(tokens);
         if (verb == "insert") return doInsert(tokens);
         if (verb == "place") return doPlace(tokens);
@@ -412,8 +427,8 @@ private:
             note("dimensions: " + Join(ScriptDimensionNames()));
             note("commands: sketch, tool, click, finish, constrain, dimension, pad, sweep, "
                  "loft, shell, draft, hole, union, subtract, intersect, ring, along, "
-                 "export, import, connector, assembly, insert, place, ground, mate, "
-                 "drive, limit, interference, solve, save, measure, "
+                 "export, import, connector, assembly, part, insert, place, ground, mate, "
+                 "drive, limit, row, pose, explode, interference, solve, save, measure, "
                  "handle, echo, help");
             return true;
         }
@@ -1310,7 +1325,7 @@ private:
         if (assembly_ == nullptr)
             return fail("there is no assembly yet; use `assembly NAME` first");
         if (tokens.size() != 2) return fail("ground needs an instance");
-        const PartInstance* instance = assembly_->findInstanceNamed(tokens[1]);
+        const Instance* instance = assembly_->findInstanceNamed(tokens[1]);
         if (instance == nullptr)
             return fail("there is no instance called '" + tokens[1] + "'");
         if (!assembly_->setInstanceGrounded(instance->id(), true))
@@ -1344,7 +1359,7 @@ private:
             const std::size_t slash = text.find('/');
             if (slash == std::string::npos || slash == 0 || slash + 1 >= text.size())
                 return fail("'" + text + "' is not an INSTANCE/CONNECTOR pair");
-            const PartInstance* instance =
+            const Instance* instance =
                 assembly_->findInstanceNamed(text.substr(0, slash));
             if (instance == nullptr)
                 return fail("there is no instance called '" + text.substr(0, slash) + "'");
@@ -1438,6 +1453,116 @@ private:
         return true;
     }
 
+    bool doRow(const std::vector<std::string>& tokens) {
+        // row INSTANCE COUNT DX DY DZ
+        //
+        // A pattern of instances. Each copy's placement frame hangs off the
+        // ORIGINAL's, so moving the original moves the row -- which is what
+        // makes it a pattern rather than a handful of separate parts that
+        // happen to be lined up.
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 6)
+            return fail("row needs an instance, a count and a step in x y z");
+        const Instance* original = assembly_->findInstanceNamed(tokens[1]);
+        if (original == nullptr)
+            return fail("there is no instance called '" + tokens[1] + "'");
+        double count = 0.0;
+        Vec3 step{};
+        if (!ParseNumber(tokens[2], &count) || count < 1.0 ||
+            count != static_cast<double>(static_cast<int>(count)))
+            return fail("a row needs a whole count of one or more");
+        if (!ParseNumber(tokens[3], &step.x) || !ParseNumber(tokens[4], &step.y) ||
+            !ParseNumber(tokens[5], &step.z))
+            return fail("a row step is three numbers in mm");
+
+        const std::vector<ObjectId> made =
+            assembly_->addInstancePattern(original->id(), static_cast<int>(count), step);
+        note("row " + tokens[1] + " x" + tokens[2] + " -> " +
+             std::to_string(made.size()) + " more");
+        return true;
+    }
+
+    bool doPose(const std::vector<std::string>& tokens) {
+        // pose NAME        -- capture where everything is right now
+        // pose NAME apply  -- put it back
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 2 && tokens.size() != 3)
+            return fail("pose needs a name, and optionally `apply`");
+        if (tokens.size() == 3) {
+            if (tokens[2] != "apply")
+                return fail("the only thing to do with a pose is `apply` it");
+            const NamedPosition* pose = assembly_->findNamedPositionNamed(tokens[1]);
+            if (pose == nullptr) return fail("there is no pose called '" + tokens[1] + "'");
+            if (!assembly_->applyNamedPosition(pose->id()))
+                return fail("could not apply '" + tokens[1] + "'");
+            note("pose " + tokens[1] + " applied");
+            return true;
+        }
+        if (assembly_->findNamedPositionNamed(tokens[1]) != nullptr)
+            return fail("there is already a pose called '" + tokens[1] + "'");
+        const NamedPosition& captured = assembly_->captureNamedPosition(tokens[1]);
+        note("pose " + tokens[1] + " captured (" + std::to_string(captured.mates().size()) +
+             " mates, " + std::to_string(captured.loose().size()) + " loose)");
+        return true;
+    }
+
+    bool doExplode(const std::vector<std::string>& tokens) {
+        // explode VIEW                          -- start one
+        // explode VIEW step NAME INSTANCE DX DY DZ
+        // explode VIEW show N | all             -- how many steps to preview
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() < 2) return fail("explode needs a view name");
+
+        if (tokens.size() == 2) {
+            if (assembly_->findExplodeViewNamed(tokens[1]) != nullptr)
+                return fail("there is already an exploded view called '" + tokens[1] + "'");
+            assembly_->addExplodeView(tokens[1]);
+            note("explode " + tokens[1]);
+            return true;
+        }
+        const ExplodeView* view = assembly_->findExplodeViewNamed(tokens[1]);
+        if (view == nullptr)
+            return fail("there is no exploded view called '" + tokens[1] + "'");
+
+        if (tokens[2] == "step") {
+            if (tokens.size() != 8)
+                return fail("an explode step needs a name, an instance and an offset in x y z");
+            const Instance* instance = assembly_->findInstanceNamed(tokens[4]);
+            if (instance == nullptr)
+                return fail("there is no instance called '" + tokens[4] + "'");
+            Vec3 offset{};
+            if (!ParseNumber(tokens[5], &offset.x) || !ParseNumber(tokens[6], &offset.y) ||
+                !ParseNumber(tokens[7], &offset.z))
+                return fail("an explode offset is three numbers in mm");
+            if (!assembly_->addExplodeStep(view->id(), tokens[3], instance->id(), offset))
+                return fail("could not add that step");
+            note("explode " + tokens[1] + " step " + tokens[3] + ": " + tokens[4] + " by " +
+                 tokens[5] + ", " + tokens[6] + ", " + tokens[7]);
+            return true;
+        }
+        if (tokens[2] == "show") {
+            if (tokens.size() != 4) return fail("`show` needs a number of steps, or `all`");
+            std::size_t shown = EvaluationCut::kAll;
+            if (tokens[3] != "all") {
+                double howMany = 0.0;
+                if (!ParseNumber(tokens[3], &howMany) || howMany < 0.0 ||
+                    howMany != static_cast<double>(static_cast<int>(howMany)))
+                    return fail("`show` needs a whole number of steps, or `all`");
+                shown = static_cast<std::size_t>(howMany);
+            }
+            if (!assembly_->setExplodePreview(view->id(), shown))
+                return fail("could not set that preview");
+            // ...and this is the view `measure` reports through from now on.
+            shownExplodeView_ = view->id();
+            note("explode " + tokens[1] + " showing " + tokens[3]);
+            return true;
+        }
+        return fail("explode takes `step` or `show`");
+    }
+
     bool doInterference(const std::vector<std::string>& tokens) {
         // interference   -- which instances are inside each other
         if (assembly_ == nullptr)
@@ -1469,12 +1594,31 @@ private:
         // `save` that quietly wrote the wrong document would be discovered by
         // opening the file.
         if (tokens.size() != 2) return fail("assembly needs a name");
-        if (assembly_ != nullptr) return fail("this script already has an assembly");
-        assembly_ = std::make_unique<AssemblyDocument>(tokens[1]);
-        assembly_->setGeometryKernel(document_.geometryKernel());
-        assembly_->setSketchSolver(document_.sketchSolver());
-        assembly_->setAssemblySolver(assemblySolver_);
+        for (const std::unique_ptr<AssemblyDocument>& existing : assemblies_)
+            if (existing->name() == tokens[1]) {
+                assembly_ = existing.get();
+                note("assembly " + tokens[1] + " (back to it)");
+                return true;
+            }
+        auto made = std::make_unique<AssemblyDocument>(tokens[1]);
+        made->setGeometryKernel(document_.geometryKernel());
+        made->setSketchSolver(document_.sketchSolver());
+        made->setAssemblySolver(assemblySolver_);
+        assembly_ = made.get();
+        assemblies_.push_back(std::move(made));
         note("assembly " + tokens[1] + " (solve, measure and save now mean the assembly)");
+        return true;
+    }
+
+    bool doPart(const std::vector<std::string>& tokens) {
+        // part   -- solve, measure and save mean the PART document again
+        //
+        // The other half of `assembly`. Without it a script that started
+        // assembling could never draw another part, which is exactly what
+        // building a rig out of sub-assemblies needs to do.
+        if (tokens.size() != 1) return fail("part takes no arguments");
+        assembly_ = nullptr;
+        note("part (solve, measure and save mean the part document again)");
         return true;
     }
 
@@ -1503,7 +1647,7 @@ private:
             return fail("there is no assembly yet; use `assembly NAME` first");
         if (tokens.size() != 5 && tokens.size() != 6)
             return fail("place needs an instance and x y z, and optionally an angle about +Z");
-        const PartInstance* instance = assembly_->findInstanceNamed(tokens[1]);
+        const Instance* instance = assembly_->findInstanceNamed(tokens[1]);
         if (instance == nullptr)
             return fail("there is no instance called '" + tokens[1] + "'");
         Transform3D placement;
@@ -1529,13 +1673,19 @@ private:
     // Every instance, its size and where it ended up. The assembly's answer to
     // `measure`, and the evidence a script needs that the parts are really
     // there rather than merely listed.
+    // WHICH EXPLODED VIEW `measure` should report through, or none. Not a
+    // property of the document -- an explosion is a picture, and which picture
+    // is being looked at is the looker's business (A02). So it lives in the
+    // script session, exactly as "the current sketch" does.
+    ObjectId shownExplodeView_ = kInvalidObjectId;
+
     bool measureAssembly() {
         IGeometryKernel* kernel = assembly_->geometryKernel();
         if (kernel == nullptr) return fail("no geometry kernel configured");
-        const std::vector<const PartInstance*> instances = assembly_->instances();
+        const std::vector<const Instance*> instances = assembly_->instances();
         if (instances.empty()) return fail("this assembly has nothing in it yet");
         double total = 0.0;
-        for (const PartInstance* one : instances) {
+        for (const Instance* one : instances) {
             if (one->currentState() != ComputeState::Valid || !one->currentShape().isValid())
                 return fail("'" + one->name() +
                             "' has not been built yet -- `solve` before measuring");
@@ -1543,11 +1693,24 @@ private:
                 kernel->calculateMassProperties(one->currentShape());
             if (!mass) return fail(mass.message);
             total += mass.properties.volumeMm3;
+            // WHERE IT IS, and -- when a view is being shown -- where the
+            // picture puts it. Both, because they are different answers and a
+            // reader has to be able to tell which one they are looking at.
+            std::string where =
+                FormatNumber(mass.properties.centerOfMassMm.x) + ", " +
+                FormatNumber(mass.properties.centerOfMassMm.y) + ", " +
+                FormatNumber(mass.properties.centerOfMassMm.z);
+            if (shownExplodeView_ != kInvalidObjectId) {
+                const Transform3D placed = assembly_->instanceWorldTransform(one->id());
+                const Transform3D shown =
+                    assembly_->explodedWorldTransform(shownExplodeView_, one->id());
+                const Vec3 moved = ApplyTransform(
+                    Compose(shown, Inverse(placed)), mass.properties.centerOfMassMm);
+                where += " (shown at " + FormatNumber(moved.x) + ", " + FormatNumber(moved.y) +
+                         ", " + FormatNumber(moved.z) + ")";
+            }
             note("  " + one->name() + ": volume = " +
-                 FormatNumber(mass.properties.volumeMm3) + " mm^3, centre = " +
-                 FormatNumber(mass.properties.centerOfMassMm.x) + ", " +
-                 FormatNumber(mass.properties.centerOfMassMm.y) + ", " +
-                 FormatNumber(mass.properties.centerOfMassMm.z) + " mm");
+                 FormatNumber(mass.properties.volumeMm3) + " mm^3, centre = " + where + " mm");
         }
         note("  " + std::to_string(instances.size()) + " instances, total volume = " +
              FormatNumber(total) + " mm^3");

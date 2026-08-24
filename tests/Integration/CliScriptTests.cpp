@@ -1578,3 +1578,188 @@ TEST(CliScriptTest, M25_CLI_006_TwoConnectorsCannotShareANameInOneDocument) {
     EXPECT_NE(outcome.message.find("already a connector called"), std::string::npos)
         << outcome.message;
 }
+
+// --- M26: sub-assemblies, rows, poses and explosions from a script ----------
+
+TEST(CliScriptTest, M26_CLI_001_OneScriptBuildsAPartThenAnAssemblyThenAnotherPart) {
+    // The gap M26's example exposed. M23 allowed exactly one assembly per
+    // script and made `save` mean it from then on, which was enough until a
+    // sub-assembly had to exist BEFORE the assembly that instances it -- and an
+    // instance names a FILE, so the file has to be written first.
+    ScratchIo partA{"m26-a.ep3d"};
+    ScratchIo sub{"m26-sub.ep3da"};
+    ScratchIo partB{"m26-b.ep3d"};
+    ScratchIo rig{"m26-rig.ep3da"};
+
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -10 -10\nclick 10 10\npad Block 20\n"
+                        "connector BlockP 0 0 0\nsolve\nsave ") + partA.path + "\n"
+            "assembly Sub\n"
+            "insert One " + partA.path + " Block\n"
+            "ground One\nsolve\nsave " + sub.path + "\n"
+            // BACK TO THE PART DOCUMENT, which M23 could not do.
+            "part\n"
+            "sketch B\ntool rect\nclick -30 -30\nclick 30 30\npad Table 10\n"
+            "connector TableP 0 0 10\nsolve\nsave " + partB.path + "\n"
+            "assembly Rig\n"
+            "insert Table " + partB.path + " Table\n"
+            "insert Nested " + sub.path + "\n"
+            "ground Table\nplace Nested 0 0 10\nsolve\nmeasure\nsave " + rig.path + "\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(sub.exists());
+    EXPECT_TRUE(rig.exists());
+
+    // The sub-assembly came in as ONE instance carrying its whole contents:
+    // a 20 mm cube is 8000 mm^3, and it landed 10 mm up.
+    EXPECT_TRUE(LogMentions(outcome, "Nested: volume = 8000 mm^3, centre = 0, 0, 20 mm"))
+        << outcome.message;
+    // ...and each file is the kind it claims to be.
+    EXPECT_TRUE(loadAssemblyDocumentFromFile(sub.path)) << "the sub-assembly is not an assembly";
+    EXPECT_TRUE(loadPartDocumentFromFile(partB.path)) << "`part` did not go back to the part";
+}
+
+TEST(CliScriptTest, M26_CLI_002_ARowOfInstancesFollowsItsOriginal) {
+    ScratchIo part{"m26-row.ep3d"};
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -5 -5\nclick 5 5\npad Block 10\n"
+                        "solve\nsave ") + part.path + "\n"
+            "assembly Rig\n"
+            "insert Bolt " + part.path + " Block\n"
+            "ground Bolt\n"
+            "row Bolt 3 25 0 0\nsolve\nmeasure\n"
+            // Move the original: the row goes with it.
+            "place Bolt 100 0 0\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "Bolt 2: volume = 1000 mm^3, centre = 25, 0, 5 mm"))
+        << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "Bolt 3: volume = 1000 mm^3, centre = 50, 0, 5 mm"))
+        << outcome.message;
+    // ...and after the move, 100 further along -- which a row of three separate
+    // inserts would not do.
+    EXPECT_TRUE(LogMentions(outcome, "Bolt 2: volume = 1000 mm^3, centre = 125, 0, 5 mm"))
+        << "the row did not follow its original: " << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "Bolt 3: volume = 1000 mm^3, centre = 150, 0, 5 mm"))
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M26_CLI_003_APoseGoesBackToWhereItWasCaptured) {
+    ScratchIo part{"m26-pose.ep3d"};
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -5 -5\nclick 5 5\npad Block 10\n"
+                        "solve\nsave ") + part.path + "\n"
+            "assembly Rig\n"
+            "insert One " + part.path + " Block\n"
+            "ground One\n"
+            "place One 10 0 0\npose Home\n"
+            "place One 90 0 0\nsolve\nmeasure\n"
+            "pose Home apply\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "pose Home captured")) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "One: volume = 1000 mm^3, centre = 90, 0, 5 mm"))
+        << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "One: volume = 1000 mm^3, centre = 10, 0, 5 mm"))
+        << "the pose did not put it back: " << outcome.message;
+}
+
+TEST(CliScriptTest, M26_CLI_004_AnExplosionShowsWithoutMoving) {
+    // `measure` prints where each instance IS and, when a view is being shown,
+    // where the picture puts it. Both, because they are different answers and
+    // a reader has to be able to tell which one they are looking at.
+    ScratchIo part{"m26-explode.ep3d"};
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -5 -5\nclick 5 5\npad Block 10\n"
+                        "solve\nsave ") + part.path + "\n"
+            "assembly Rig\n"
+            "insert One " + part.path + " Block\n"
+            "ground One\n"
+            "explode Service\n"
+            "explode Service step Lift One 0 0 40\n"
+            "explode Service step Slide One 30 0 0\n"
+            "explode Service show 1\nsolve\nmeasure\n"
+            "explode Service show all\nsolve\nmeasure\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    // ONE STEP: lifted 40, not slid.
+    EXPECT_TRUE(LogMentions(outcome, "centre = 0, 0, 5 (shown at 0, 0, 45) mm"))
+        << outcome.message;
+    // BOTH: lifted and slid.
+    EXPECT_TRUE(LogMentions(outcome, "centre = 0, 0, 5 (shown at 30, 0, 45) mm"))
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M26_CLI_005_EachOfTheseVerbsRefusesWhatItCannotDo) {
+    // The refusals, together, because each one is a sentence a reader has to be
+    // able to act on and none of them is interesting enough for its own test.
+    ScriptRun beforeAssembly;
+    const ScriptOutcome noAssembly = beforeAssembly("row Bolt 3 10 0 0\n");
+    EXPECT_FALSE(noAssembly.ok);
+    EXPECT_NE(noAssembly.message.find("`assembly NAME` first"), std::string::npos)
+        << noAssembly.message;
+
+    ScriptRun run;
+    const ScriptOutcome badCount =
+        run("assembly Rig\ninsert Bolt parts/bolt.ep3d\nrow Bolt 0 10 0 0\n");
+    EXPECT_FALSE(badCount.ok);
+    EXPECT_NE(badCount.message.find("one or more"), std::string::npos) << badCount.message;
+
+    ScriptRun poses;
+    const ScriptOutcome noPose = poses("assembly Rig\npose Ghost apply\n");
+    EXPECT_FALSE(noPose.ok);
+    EXPECT_NE(noPose.message.find("no pose called 'Ghost'"), std::string::npos)
+        << noPose.message;
+
+    ScriptRun views;
+    const ScriptOutcome noView = views("assembly Rig\nexplode Ghost show 1\n");
+    EXPECT_FALSE(noView.ok);
+    EXPECT_NE(noView.message.find("no exploded view called 'Ghost'"), std::string::npos)
+        << noView.message;
+
+    ScriptRun twice;
+    const ScriptOutcome again = twice("assembly Rig\nexplode Service\nexplode Service\n");
+    EXPECT_FALSE(again.ok);
+    EXPECT_NE(again.message.find("already an exploded view"), std::string::npos)
+        << again.message;
+}
+
+TEST(CliScriptTest, M26_CLI_006_GoingBackToAnEarlierAssemblyReturnsToTHATOne) {
+    // `assembly NAME` switches, creating on first use. Going back to a name it
+    // has seen has to return to the SAME document -- making a second empty one
+    // would quietly discard everything put in the first, and `save` would write
+    // the empty one.
+    //
+    // Every other M26 test uses two different names, so none of them can see
+    // this: the difference only shows when a name is used twice.
+    ScratchIo part{"m26-switch.ep3d"};
+    ScratchIo rig{"m26-switch.ep3da"};
+
+    MechanismRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -5 -5\nclick 5 5\npad Block 10\n"
+                        "solve\nsave ") + part.path + "\n"
+            "assembly Rig\n"
+            "insert One " + part.path + " Block\n"
+            // ...off to a different assembly...
+            "assembly Other\n"
+            "insert Elsewhere " + part.path + " Block\n"
+            // ...and BACK to the first one.
+            "assembly Rig\n"
+            "insert Two " + part.path + " Block\n"
+            "ground One\nplace Two 40 0 0\nsolve\nmeasure\nsave " + rig.path + "\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "(back to it)"))
+        << "the second `assembly Rig` did not return to the first: " << outcome.message;
+
+    // BOTH instances are in it -- which is the claim. A fresh Rig would hold
+    // only the one added after the switch.
+    const AssemblyLoadResult loaded = loadAssemblyDocumentFromFile(rig.path);
+    ASSERT_TRUE(loaded) << loaded.message;
+    EXPECT_EQ(loaded.document->instances().size(), 2u)
+        << "going back to an assembly made a new one and lost what was in it";
+    EXPECT_NE(loaded.document->findInstanceNamed("One"), nullptr);
+    EXPECT_NE(loaded.document->findInstanceNamed("Two"), nullptr);
+    // ...and the OTHER assembly's instance did not leak into it.
+    EXPECT_EQ(loaded.document->findInstanceNamed("Elsewhere"), nullptr);
+}

@@ -364,6 +364,34 @@ public:
     virtual KernelInterferenceResult measureInterference(const KernelShape& a,
                                                          const KernelShape& b) = 0;
     virtual ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) = 0;
+
+    // SEVERAL SOLIDS, SIDE BY SIDE, STILL SEVERAL (M26).
+    //
+    // What a sub-assembly is: a handful of parts in their places, and NOT one
+    // part. Fusing them would invent material wherever two of them touch --
+    // which in an assembly is everywhere the design says they touch, so the
+    // fused answer would be wrong precisely where the assembly is right.
+    //
+    // It is not `fuseShapes` in a loop: that gives the same answer only while
+    // nothing touches, and an assembly whose parts never touch is not an
+    // assembly. This joins nothing.
+    //
+    // An empty list is refused -- an empty compound is a shape that measures
+    // zero and draws nothing, which is indistinguishable from a failure.
+    virtual ShapeResult compoundOf(const std::vector<KernelShape>& shapes) = 0;
+
+    // HOW MANY SOLIDS THIS SHAPE IS (M26).
+    //
+    // The question that tells a compound from a fuse, and it is not only a
+    // test's question: two touching parts fused have the same volume, the same
+    // bounding box and the same centre of mass as the same two side by side.
+    // The COUNT is the only thing that differs -- so "these are still two
+    // parts" is a claim that can only be checked by asking this.
+    //
+    // Zero for a shape that holds none, which is a real answer: a wireframe or
+    // a bare surface is not a failure to count (see importStep, which refuses
+    // such a file by saying so).
+    virtual int countSolids(const KernelShape& shape) = 0;
 };
 
 } // namespace paramcad

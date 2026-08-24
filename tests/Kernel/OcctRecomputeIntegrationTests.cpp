@@ -1,4 +1,5 @@
 #include "Core/Assembly/AssemblyDocument.h"
+#include "Core/Serialization/AssemblyDocumentSerializer.h"
 #include "Solver/GaussNewtonAssemblySolver.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/BoxFeature.h"
@@ -124,6 +125,15 @@ public:
     }
     ShapeResult translateShape(const KernelShape& shape, const Vec3& offsetMm) override {
         return inner_.translateShape(shape, offsetMm);
+    }
+    int countSolids(const KernelShape& shape) override {
+        (void)shape;
+        return 0;
+    }
+    ShapeResult compoundOf(const std::vector<KernelShape>& shapes) override {
+        (void)shapes;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "this kernel does not build compounds"};
     }
     ShapeResult fuseShapes(const KernelShape& a, const KernelShape& b) override {
         return inner_.fuseShapes(a, b);
@@ -1553,7 +1563,7 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_001_AnInstanceBuildsThePartWhereItWa
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& one = assembly.addInstance("One", file.path);
+    Instance& one = assembly.addInstance("One", file.path);
     ASSERT_TRUE(assembly.setInstanceTransform(one.id(), MovedTo(100, 0, 0)));
 
     ASSERT_TRUE(assembly.recompute().success);
@@ -1578,7 +1588,7 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_002_MovingAnInstanceMovesWhatItBuilt
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& one = assembly.addInstance("One", file.path);
+    Instance& one = assembly.addInstance("One", file.path);
     ASSERT_TRUE(assembly.recompute().success);
     EXPECT_NEAR(MassOf(kernel, one.currentShape()).centerOfMassMm.x, 0.0, 1e-6);
 
@@ -1603,14 +1613,14 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_003_THREEInstancesOfOnePartAreThreeS
     const double places[3] = {0.0, 60.0, 120.0};
     std::vector<ObjectId> ids;
     for (int i = 0; i < 3; ++i) {
-        PartInstance& one = assembly.addInstance("Cube" + std::to_string(i + 1), file.path);
+        Instance& one = assembly.addInstance("Cube" + std::to_string(i + 1), file.path);
         ASSERT_TRUE(assembly.setInstanceTransform(one.id(), MovedTo(places[i], 0, 0)));
         ids.push_back(one.id());
     }
     ASSERT_TRUE(assembly.recompute().success);
 
     for (int i = 0; i < 3; ++i) {
-        const PartInstance* one = assembly.findInstance(ids[i]);
+        const Instance* one = assembly.findInstance(ids[i]);
         ASSERT_NE(one, nullptr);
         ASSERT_EQ(one->currentState(), ComputeState::Valid);
         const KernelMassProperties placed = MassOf(kernel, one->currentShape());
@@ -1627,7 +1637,7 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_004_AMissingPartFileFAILSLoudly) {
     OcctGeometryKernel kernel;
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& ghost = assembly.addInstance("Ghost", "no-such-part.ep3d");
+    Instance& ghost = assembly.addInstance("Ghost", "no-such-part.ep3d");
 
     const DocumentRecomputeReport report = assembly.recompute();
     EXPECT_FALSE(report.success);
@@ -1646,7 +1656,7 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_005_APartWithTWOBodiesMustBeToldWhic
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& vague = assembly.addInstance("Vague", file.path);
+    Instance& vague = assembly.addInstance("Vague", file.path);
     const DocumentRecomputeReport report = assembly.recompute();
     EXPECT_FALSE(report.success);
     const std::string why = FailureMessageFor(report, vague.id());
@@ -1656,7 +1666,7 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_005_APartWithTWOBodiesMustBeToldWhic
     // ...and naming one resolves it, to THAT one: the smaller body is a
     // quarter the footprint, so the number says which was chosen.
     ASSERT_TRUE(assembly.removeObject(vague.id()));
-    PartInstance& named = assembly.addInstance("Named", file.path, "Right");
+    Instance& named = assembly.addInstance("Named", file.path, "Right");
     ASSERT_TRUE(assembly.recompute().success);
     EXPECT_NEAR(MassOf(kernel, named.currentShape()).volumeMm3, 10.0 * 10.0 * 20.0,
                 1e-6 * 2000.0);
@@ -1672,7 +1682,7 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_006_EditingThePartCHANGESTheAssembly
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& one = assembly.addInstance("One", file.path);
+    Instance& one = assembly.addInstance("One", file.path);
     ASSERT_TRUE(assembly.recompute().success);
     EXPECT_NEAR(MassOf(kernel, one.currentShape()).volumeMm3, 8000.0, 1e-6 * 8000.0);
 
@@ -1700,7 +1710,7 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_007_APartThatDoesNotBuildNAMESWhatFa
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& one = assembly.addInstance("One", file.path);
+    Instance& one = assembly.addInstance("One", file.path);
     const DocumentRecomputeReport report = assembly.recompute();
     EXPECT_FALSE(report.success);
     const std::string why = FailureMessageFor(report, one.id());
@@ -1720,7 +1730,7 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_008_APlacementRotatesFirstAndTHENTra
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& one = assembly.addInstance("One", file.path);
+    Instance& one = assembly.addInstance("One", file.path);
 
     Transform3D placement = MovedTo(100, 0, 0);
     const double quarter = 3.14159265358979323846 / 2.0;
@@ -1790,7 +1800,7 @@ TEST(OcctRecomputeIntegrationTest, M23_INST_010_AnInstanceTakesTheCHAINTIPNotThe
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& one = assembly.addInstance("One", file.path);
+    Instance& one = assembly.addInstance("One", file.path);
     ASSERT_TRUE(assembly.recompute().success);
 
     const double solidBlock = 60.0 * 60.0 * 60.0;
@@ -1882,8 +1892,8 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_001_AHingeTURNSAndDoesNotFALLAPART)
 
     AssemblyDocument assembly{"Hinge"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& base = assembly.addInstance("Base", bracket.path);
-    PartInstance& swing = assembly.addInstance("Swing", arm.path);
+    Instance& base = assembly.addInstance("Base", bracket.path);
+    Instance& swing = assembly.addInstance("Swing", arm.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
     Mate& elbow = assembly.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", swing.id(),
                                    "Eye", 0.0);
@@ -1933,8 +1943,8 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_002_ARevoluteReallyROTATESRatherTha
 
     AssemblyDocument assembly{"Swing"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& base = assembly.addInstance("Base", bracket.path);
-    PartInstance& swing = assembly.addInstance("Swing", arm.path);
+    Instance& base = assembly.addInstance("Base", bracket.path);
+    Instance& swing = assembly.addInstance("Swing", arm.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
     Mate& elbow = assembly.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", swing.id(),
                                    "Eye", 0.0);
@@ -1964,8 +1974,8 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_003_ASliderSlidesAlongTheSHAREDAxis
 
     AssemblyDocument assembly{"Slide"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& rail = assembly.addInstance("Rail", railPart.path);
-    PartInstance& shoe = assembly.addInstance("Shoe", shoePart.path);
+    Instance& rail = assembly.addInstance("Rail", railPart.path);
+    Instance& shoe = assembly.addInstance("Shoe", shoePart.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(rail.id(), true));
     Mate& slide =
         assembly.addMate("Slide", MateType::Slider, rail.id(), "Track", shoe.id(), "Foot", 0.0);
@@ -1994,8 +2004,8 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_004_AFastenedMatePutsTheConnectorsE
 
     AssemblyDocument assembly{"Stack"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& first = assembly.addInstance("First", a.path);
-    PartInstance& second = assembly.addInstance("Second", b.path);
+    Instance& first = assembly.addInstance("First", a.path);
+    Instance& second = assembly.addInstance("Second", b.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(first.id(), true));
     assembly.addMate("Bolt", MateType::Fastened, first.id(), "Face", second.id(), "Back");
 
@@ -2020,8 +2030,8 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_005_MatesThatReachNoGroundAreREFUSE
 
     AssemblyDocument assembly{"Floating"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& first = assembly.addInstance("First", a.path);
-    PartInstance& second = assembly.addInstance("Second", b.path);
+    Instance& first = assembly.addInstance("First", a.path);
+    Instance& second = assembly.addInstance("Second", b.path);
     assembly.addMate("Join", MateType::Fastened, first.id(), "P", second.id(), "Q");
 
     EXPECT_FALSE(assembly.recompute().success);
@@ -2045,9 +2055,9 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_006_AnInstanceStrandedFromEveryGrou
 
     AssemblyDocument assembly{"Islands"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& anchored = assembly.addInstance("Anchored", part.path);
-    PartInstance& lost = assembly.addInstance("Lost", part.path);
-    PartInstance& alsoLost = assembly.addInstance("AlsoLost", part.path);
+    Instance& anchored = assembly.addInstance("Anchored", part.path);
+    Instance& lost = assembly.addInstance("Lost", part.path);
+    Instance& alsoLost = assembly.addInstance("AlsoLost", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(anchored.id(), true));
     assembly.addMate("Floating", MateType::Fastened, lost.id(), "P", alsoLost.id(), "P");
 
@@ -2071,9 +2081,9 @@ TEST(OcctRecomputeIntegrationTest, M25_LOOP_001_AClosedLoopIsSOLVEDNowRatherThan
     AssemblyDocument assembly{"Loop"};
     assembly.setGeometryKernel(&kernel);
     assembly.setAssemblySolver(&solver);
-    PartInstance& a = assembly.addInstance("A", part.path);
-    PartInstance& b = assembly.addInstance("B", part.path);
-    PartInstance& c = assembly.addInstance("C", part.path);
+    Instance& a = assembly.addInstance("A", part.path);
+    Instance& b = assembly.addInstance("B", part.path);
+    Instance& c = assembly.addInstance("C", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
     assembly.addMate("AB", MateType::Fastened, a.id(), "P", b.id(), "P");
     assembly.addMate("BC", MateType::Fastened, b.id(), "P", c.id(), "P");
@@ -2100,9 +2110,9 @@ TEST(OcctRecomputeIntegrationTest, M25_LOOP_002_ALoopThatCANNOTCloseSaysSo) {
     AssemblyDocument assembly{"Impossible"};
     assembly.setGeometryKernel(&kernel);
     assembly.setAssemblySolver(&solver);
-    PartInstance& a = assembly.addInstance("A", part.path);
-    PartInstance& b = assembly.addInstance("B", part.path);
-    PartInstance& c = assembly.addInstance("C", part.path);
+    Instance& a = assembly.addInstance("A", part.path);
+    Instance& b = assembly.addInstance("B", part.path);
+    Instance& c = assembly.addInstance("C", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
 
     // Two DRIVEN sliders push C forty millimetres away from A...
@@ -2128,8 +2138,8 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_008_AConnectorNameThatDoesNotResolv
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& base = assembly.addInstance("Base", part.path);
-    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    Instance& base = assembly.addInstance("Base", part.path);
+    Instance& arm = assembly.addInstance("Arm", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
     assembly.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "NoSuchThing");
 
@@ -2148,10 +2158,10 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_009_DOFIsReportedPERINSTANCE) {
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& base = assembly.addInstance("Base", part.path);
-    PartInstance& swing = assembly.addInstance("Swing", part.path);
-    PartInstance& bolted = assembly.addInstance("Bolted", part.path);
-    PartInstance& loose = assembly.addInstance("Loose", part.path);
+    Instance& base = assembly.addInstance("Base", part.path);
+    Instance& swing = assembly.addInstance("Swing", part.path);
+    Instance& bolted = assembly.addInstance("Bolted", part.path);
+    Instance& loose = assembly.addInstance("Loose", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
     assembly.addMate("Elbow", MateType::Revolute, base.id(), "P", swing.id(), "P");
     assembly.addMate("Bolt", MateType::Fastened, swing.id(), "P", bolted.id(), "P");
@@ -2191,9 +2201,9 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_010_AChainOfThreeIsPlacedAllTheWayD
 
     AssemblyDocument assembly{"Tower"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& a = assembly.addInstance("A", part.path);
-    PartInstance& b = assembly.addInstance("B", part.path);
-    PartInstance& c = assembly.addInstance("C", part.path);
+    Instance& a = assembly.addInstance("A", part.path);
+    Instance& b = assembly.addInstance("B", part.path);
+    Instance& c = assembly.addInstance("C", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
     // Each block's connector is 20 mm up its own body, so fastening the next
     // one's connector to it raises each by exactly nothing -- the connectors
@@ -2224,8 +2234,8 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_011_SolvingIsNotSomethingTheUserDID
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& base = assembly.addInstance("Base", part.path);
-    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    Instance& base = assembly.addInstance("Base", part.path);
+    Instance& arm = assembly.addInstance("Arm", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
     Mate& elbow = assembly.addMate("Elbow", MateType::Revolute, base.id(), "P", arm.id(), "P");
 
@@ -2263,8 +2273,8 @@ TEST(OcctRecomputeIntegrationTest, M24_HINGE_012_DrivingAMateMarksWhatItAffectsD
 
     AssemblyDocument assembly{"Rig"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& base = assembly.addInstance("Base", part.path);
-    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    Instance& base = assembly.addInstance("Base", part.path);
+    Instance& arm = assembly.addInstance("Arm", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
     Mate& elbow = assembly.addMate("Elbow", MateType::Revolute, base.id(), "P", arm.id(), "P");
     ASSERT_TRUE(assembly.recompute().success) << SolveMessage(assembly);
@@ -2341,10 +2351,10 @@ TEST(OcctRecomputeIntegrationTest, M25_FOURBAR_001_DriveONELinkAndTheOtherTHREEF
     AssemblyDocument assembly{"FourBar"};
     assembly.setGeometryKernel(&kernel);
     assembly.setAssemblySolver(&solver);
-    PartInstance& ground = assembly.addInstance("Ground", groundPart.path);
-    PartInstance& crank = assembly.addInstance("Crank", crankPart.path);
-    PartInstance& coupler = assembly.addInstance("Coupler", couplerPart.path);
-    PartInstance& rocker = assembly.addInstance("Rocker", rockerPart.path);
+    Instance& ground = assembly.addInstance("Ground", groundPart.path);
+    Instance& crank = assembly.addInstance("Crank", crankPart.path);
+    Instance& coupler = assembly.addInstance("Coupler", couplerPart.path);
+    Instance& rocker = assembly.addInstance("Rocker", rockerPart.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(ground.id(), true));
 
     // Ground.A -- Crank.A -- Crank.B -- Coupler.A -- Coupler.B -- Rocker.A --
@@ -2418,10 +2428,10 @@ TEST(OcctRecomputeIntegrationTest, M25_FOURBAR_002_AnUndrivenLinkageReportsITSOn
     AssemblyDocument assembly{"FourBar"};
     assembly.setGeometryKernel(&kernel);
     assembly.setAssemblySolver(&solver);
-    PartInstance& ground = assembly.addInstance("Ground", groundPart.path);
-    PartInstance& crank = assembly.addInstance("Crank", crankPart.path);
-    PartInstance& coupler = assembly.addInstance("Coupler", couplerPart.path);
-    PartInstance& rocker = assembly.addInstance("Rocker", rockerPart.path);
+    Instance& ground = assembly.addInstance("Ground", groundPart.path);
+    Instance& crank = assembly.addInstance("Crank", crankPart.path);
+    Instance& coupler = assembly.addInstance("Coupler", couplerPart.path);
+    Instance& rocker = assembly.addInstance("Rocker", rockerPart.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(ground.id(), true));
     assembly.addMate("J1", MateType::Revolute, ground.id(), "A", crank.id(), "A");
     assembly.addMate("J2", MateType::Revolute, crank.id(), "B", coupler.id(), "A");
@@ -2457,8 +2467,8 @@ TEST(OcctRecomputeIntegrationTest, M25_MATE_004_ACylindricalMateTurnsANDSlides) 
 
     AssemblyDocument assembly{"Cyl"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& base = assembly.addInstance("Base", part.path);
-    PartInstance& shaft = assembly.addInstance("Shaft", part.path);
+    Instance& base = assembly.addInstance("Base", part.path);
+    Instance& shaft = assembly.addInstance("Shaft", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
     Mate& joint =
         assembly.addMate("Joint", MateType::Cylindrical, base.id(), "P", shaft.id(), "P");
@@ -2498,8 +2508,8 @@ TEST(OcctRecomputeIntegrationTest, M25_MATE_005_ABallMateHoldsThePointAndFreesTh
 
     AssemblyDocument assembly{"Ball"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& socket = assembly.addInstance("Socket", part.path);
-    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    Instance& socket = assembly.addInstance("Socket", part.path);
+    Instance& arm = assembly.addInstance("Arm", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(socket.id(), true));
     Mate& joint = assembly.addMate("Joint", MateType::Ball, socket.id(), "P", arm.id(), "P");
 
@@ -2531,8 +2541,8 @@ TEST(OcctRecomputeIntegrationTest, M25_LIMIT_001_ALimitSTOPSAMotionRatherThanRef
 
     AssemblyDocument assembly{"Limited"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& base = assembly.addInstance("Base", part.path);
-    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    Instance& base = assembly.addInstance("Base", part.path);
+    Instance& arm = assembly.addInstance("Arm", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
     Mate& hinge = assembly.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "P");
 
@@ -2577,8 +2587,8 @@ TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_001_TwoPartsInsideEachOtherAreR
 
     AssemblyDocument assembly{"Clash"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& first = assembly.addInstance("First", part.path);
-    PartInstance& second = assembly.addInstance("Second", part.path);
+    Instance& first = assembly.addInstance("First", part.path);
+    Instance& second = assembly.addInstance("Second", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(first.id(), true));
     // Both connectors at their parts' origins, fastened -- so the two blocks
     // occupy exactly the same space. Every mate is satisfied.
@@ -2613,8 +2623,8 @@ TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_002_TouchingIsNotInterfering) {
 
     AssemblyDocument assembly{"Touch"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& lower = assembly.addInstance("Lower", part.path);
-    PartInstance& upper = assembly.addInstance("Upper", part.path);
+    Instance& lower = assembly.addInstance("Lower", part.path);
+    Instance& upper = assembly.addInstance("Upper", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(lower.id(), true));
     // The part is 40 tall from z=0, so stacking the second exactly 40 up puts
     // its underside on the first's top face.
@@ -2664,8 +2674,8 @@ TEST(OcctRecomputeIntegrationTest, M25_MATE_006_APlanarMateFreesTheConnectorsOwn
 
     AssemblyDocument assembly{"Planar"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& table = assembly.addInstance("Table", part.path);
-    PartInstance& puck = assembly.addInstance("Puck", part.path);
+    Instance& table = assembly.addInstance("Table", part.path);
+    Instance& puck = assembly.addInstance("Puck", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(table.id(), true));
     Mate& lying = assembly.addMate("Lying", MateType::Planar, table.id(), "P", puck.id(), "P");
 
@@ -2711,8 +2721,8 @@ TEST(OcctRecomputeIntegrationTest, M25_LOOP_003_ALoopCloserRespectsWhatItsMateAS
     AssemblyDocument assembly{"OffsetLoop"};
     assembly.setGeometryKernel(&kernel);
     assembly.setAssemblySolver(&solver);
-    PartInstance& a = assembly.addInstance("A", part.path);
-    PartInstance& b = assembly.addInstance("B", part.path);
+    Instance& a = assembly.addInstance("A", part.path);
+    Instance& b = assembly.addInstance("B", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
 
     // One tree step puts B 25 mm along A's axis...
@@ -2752,8 +2762,8 @@ TEST(OcctRecomputeIntegrationTest, M25_LOOP_004_AMateWalkedBACKWARDSIsInverted) 
 
     AssemblyDocument assembly{"Backwards"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& base = assembly.addInstance("Base", part.path);
-    PartInstance& arm = assembly.addInstance("Arm", part.path);
+    Instance& base = assembly.addInstance("Base", part.path);
+    Instance& arm = assembly.addInstance("Arm", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(base.id(), true));
     // LEADING is Arm, FOLLOWING is Base -- the opposite of the direction the
     // solve will walk.
@@ -2780,8 +2790,8 @@ TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_004_ACheckThatCouldNotRunIsNotA
 
     AssemblyDocument assembly{"Clear"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& a = assembly.addInstance("A", part.path);
-    PartInstance& b = assembly.addInstance("B", part.path);
+    Instance& a = assembly.addInstance("A", part.path);
+    Instance& b = assembly.addInstance("B", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(a.id(), true));
     Transform3D away;
     away.translation = Vec3{500, 0, 0};
@@ -2824,8 +2834,8 @@ TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_005_TheBroadPhaseIsAFilterAndNo
 
     AssemblyDocument assembly{"Round"};
     assembly.setGeometryKernel(&kernel);
-    PartInstance& first = assembly.addInstance("First", part.path);
-    PartInstance& second = assembly.addInstance("Second", part.path);
+    Instance& first = assembly.addInstance("First", part.path);
+    Instance& second = assembly.addInstance("Second", part.path);
     ASSERT_TRUE(assembly.setInstanceGrounded(first.id(), true));
     Transform3D across;
     across.translation = Vec3{18.0, 18.0, 0.0};
@@ -2849,4 +2859,214 @@ TEST(OcctRecomputeIntegrationTest, M25_INTERFERE_005_TheBroadPhaseIsAFilterAndNo
     const AssemblyDocument::InterferenceReport clash = assembly.checkInterference();
     ASSERT_EQ(clash.overlaps.size(), 1u) << "two overlapping bars were not reported";
     EXPECT_GT(clash.overlaps.front().volumeMm3, 100.0);
+}
+
+// --- M26: a sub-assembly, against real geometry ------------------------------
+
+namespace {
+
+// A two-part assembly on disk: a block, and a second block fastened to it.
+// Its total volume is the sum, and its own connector is at the origin.
+void WriteSubAssembly(const std::string& path, const std::string& partPath, double side,
+                      OcctGeometryKernel& kernel) {
+    WriteConnectedPart(partPath, side, "Block", "P", Vec3{0, 0, 0});
+    AssemblyDocument sub{"Sub"};
+    sub.setGeometryKernel(&kernel);
+    Instance& a = sub.addInstance("A", partPath);
+    Instance& b = sub.addInstance("B", partPath);
+    ASSERT_TRUE(sub.setInstanceGrounded(a.id(), true));
+    Transform3D over;
+    // Clear of each other, so the compound's volume is the plain sum and a
+    // fuse would be visibly different.
+    over.translation = Vec3{side * 2.0, 0, 0};
+    ASSERT_TRUE(sub.setInstanceTransform(b.id(), over));
+    ASSERT_TRUE(sub.recompute().success);
+    ASSERT_TRUE(saveAssemblyDocumentToFile(sub, path));
+}
+
+} // namespace
+
+TEST(OcctRecomputeIntegrationTest, M26_SUB_001_AnAssemblyCanBeInstancedLikeAPart) {
+    // THE M26 STRUCTURAL CLAIM: `insert` does not care which kind of file it
+    // was given. It reads the file's own documentType and asks the right
+    // question, and there is ONE instance type either way -- because a mate
+    // names an instance by id, and two kinds would mean every mate lookup,
+    // rename, deletion and save had to ask which.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"sub-part.ep3d"};
+    ScratchPart subFile{"sub-assembly.ep3da"};
+    WriteSubAssembly(subFile.path, part.path, 20.0, kernel);
+
+    AssemblyDocument rig{"Rig"};
+    rig.setGeometryKernel(&kernel);
+    Instance& nested = rig.addInstance("Nested", subFile.path);
+    ASSERT_TRUE(rig.setInstanceGrounded(nested.id(), true));
+    ASSERT_TRUE(rig.recompute().success) << SolveMessage(rig);
+
+    EXPECT_TRUE(nested.isSubAssembly()) << "the file's own type was not read";
+    // BOTH BLOCKS, and no material invented between them: a compound, not a
+    // fuse. Two 20 mm cubes are 16000 mm^3.
+    const KernelMassProperties whole = MassOf(kernel, nested.currentShape());
+    EXPECT_NEAR(whole.volumeMm3, 2.0 * 8000.0, 1e-6 * 16000.0);
+    // The block is drawn CENTRED on its sketch origin, so one sits at x=0 and
+    // the other 40 mm along; the pair's centroid is midway between them.
+    EXPECT_NEAR(whole.centerOfMassMm.x, 20.0, 1e-6);
+}
+
+TEST(OcctRecomputeIntegrationTest, M26_SUB_002_MovingTheSubAssemblyMovesEverythingINSIDEIt) {
+    // The reason M23 made a placement a FRAME rather than a Transform3D, cashed
+    // in: the frame hierarchy already composes, so nothing here had to be told
+    // about the parts inside.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"sub-move-part.ep3d"};
+    ScratchPart subFile{"sub-move.ep3da"};
+    WriteSubAssembly(subFile.path, part.path, 20.0, kernel);
+
+    AssemblyDocument rig{"Rig"};
+    rig.setGeometryKernel(&kernel);
+    Instance& nested = rig.addInstance("Nested", subFile.path);
+    ASSERT_TRUE(rig.setInstanceGrounded(nested.id(), true));
+    ASSERT_TRUE(rig.recompute().success) << SolveMessage(rig);
+    const KernelMassProperties home = MassOf(kernel, nested.currentShape());
+
+    Transform3D across;
+    across.translation = Vec3{0, 200, 0};
+    ASSERT_TRUE(rig.setInstanceTransform(nested.id(), across));
+    ASSERT_TRUE(rig.recompute().success) << SolveMessage(rig);
+    const KernelMassProperties moved = MassOf(kernel, nested.currentShape());
+
+    EXPECT_NEAR(moved.centerOfMassMm.y - home.centerOfMassMm.y, 200.0, 1e-6);
+    EXPECT_NEAR(moved.centerOfMassMm.x, home.centerOfMassMm.x, 1e-6);
+    EXPECT_NEAR(moved.volumeMm3, home.volumeMm3, 1e-6 * home.volumeMm3)
+        << "moving the sub-assembly changed what is in it";
+}
+
+TEST(OcctRecomputeIntegrationTest, M26_SUB_003_AnAssemblyThatCONTAINSITSELFIsRefused) {
+    // Running off the end of the stack is not a failure a message can be
+    // attached to. The chain of files open above an instance is carried in the
+    // recompute context, and a source already in it is refused by name.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"cycle-part.ep3d"};
+    ScratchPart subFile{"cycle.ep3da"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+
+    // An assembly that instances ITSELF. Written by hand, because no facade
+    // would let this be built -- the file it names does not exist yet when the
+    // instance is added.
+    {
+        AssemblyDocument sub{"Sub"};
+        sub.setGeometryKernel(&kernel);
+        Instance& block = sub.addInstance("Block", part.path);
+        sub.addInstance("Me", subFile.path);
+        ASSERT_TRUE(sub.setInstanceGrounded(block.id(), true));
+        ASSERT_TRUE(saveAssemblyDocumentToFile(sub, subFile.path));
+    }
+
+    AssemblyLoadResult loaded = loadAssemblyDocumentFromFile(subFile.path);
+    ASSERT_TRUE(loaded) << loaded.message;
+    loaded.document->setGeometryKernel(&kernel);
+    const DocumentRecomputeReport report = loaded.document->recompute();
+    EXPECT_FALSE(report.success);
+    bool named = false;
+    for (const RecomputeItemReport& item : report.items)
+        if (item.message.find("contains itself") != std::string::npos) named = true;
+    EXPECT_TRUE(named) << "an assembly containing itself was not refused by name";
+}
+
+TEST(OcctRecomputeIntegrationTest, M26_SUB_004_ASubAssemblyOffersITSOwnConnectorsToMateBy) {
+    // Roadmap §21's reuse rule, one level up: what the level above mates to is
+    // the SUB-ASSEMBLY's own connectors, not the ones its parts brought in.
+    // Those belong to the parts and are already spoken for by the mates inside.
+    //
+    // It falls out for free because connectors live on DocumentBase -- an
+    // assembly has them for the same reason a part does (ADR-M23-001).
+    OcctGeometryKernel kernel;
+    ScratchPart part{"sub-conn-part.ep3d"};
+    ScratchPart subFile{"sub-conn.ep3da"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+    {
+        AssemblyDocument sub{"Sub"};
+        sub.setGeometryKernel(&kernel);
+        Instance& a = sub.addInstance("A", part.path);
+        ASSERT_TRUE(sub.setInstanceGrounded(a.id(), true));
+        // The assembly's OWN connector, 50 mm up.
+        ReferenceFrame& frame = sub.addFrame("Mount frame");
+        Transform3D up;
+        up.translation = Vec3{0, 0, 50};
+        sub.setFrameTransform(frame.id(), up);
+        sub.addConnector("Mount", ConnectorRole::Mount, frame.id(), ConnectorOwner::Assembly);
+        ASSERT_TRUE(sub.recompute().success);
+        ASSERT_TRUE(saveAssemblyDocumentToFile(sub, subFile.path));
+    }
+
+    AssemblyDocument rig{"Rig"};
+    rig.setGeometryKernel(&kernel);
+    Instance& base = rig.addInstance("Base", part.path);
+    Instance& nested = rig.addInstance("Nested", subFile.path);
+    ASSERT_TRUE(rig.setInstanceGrounded(base.id(), true));
+    // Mating to the SUB-ASSEMBLY's connector by name.
+    rig.addMate("Bolt", MateType::Fastened, base.id(), "P", nested.id(), "Mount");
+    ASSERT_TRUE(rig.recompute().success) << SolveMessage(rig);
+
+    EXPECT_NEAR(ConnectorGap(rig, base.id(), "P", nested.id(), "Mount"), 0.0, 1e-9);
+    // The sub-assembly hangs 50 mm BELOW the base's connector, because its own
+    // Mount is 50 mm above its contents.
+    const KernelMassProperties placed = MassOf(kernel, nested.currentShape());
+    EXPECT_NEAR(placed.centerOfMassMm.z, 10.0 - 50.0, 1e-6);
+
+    // ...and the parts' connectors are NOT offered up: "P" is a name inside
+    // the sub-assembly, and a mate to it from out here has to fail rather than
+    // reach in.
+    //
+    // A FRESH rig, because adding a second mate to the same pair would be a
+    // closed loop and the message would be about that instead -- which would
+    // make this assertion pass for the wrong reason.
+    AssemblyDocument reaching{"Reaching"};
+    reaching.setGeometryKernel(&kernel);
+    Instance& other = reaching.addInstance("Base", part.path);
+    Instance& inner = reaching.addInstance("Nested", subFile.path);
+    ASSERT_TRUE(reaching.setInstanceGrounded(other.id(), true));
+    reaching.addMate("Reach", MateType::Fastened, other.id(), "P", inner.id(), "P");
+    EXPECT_FALSE(reaching.recompute().success);
+    EXPECT_NE(SolveMessage(reaching).find("no mate connector called 'P'"), std::string::npos)
+        << SolveMessage(reaching);
+}
+
+TEST(OcctRecomputeIntegrationTest, M26_SUB_005_ACompoundIsNotAFUSE) {
+    // Two parts that TOUCH. A fuse would make them one solid whose volume is
+    // the union -- less than the sum wherever they overlap, and a single solid
+    // where the assembly says there are two. `compoundOf` joins nothing.
+    OcctGeometryKernel kernel;
+    ScratchPart part{"touching-part.ep3d"};
+    ScratchPart subFile{"touching.ep3da"};
+    WriteConnectedPart(part.path, 20.0, "Block", "P", Vec3{0, 0, 0});
+    {
+        AssemblyDocument sub{"Sub"};
+        sub.setGeometryKernel(&kernel);
+        Instance& a = sub.addInstance("A", part.path);
+        Instance& b = sub.addInstance("B", part.path);
+        ASSERT_TRUE(sub.setInstanceGrounded(a.id(), true));
+        // EXACTLY touching: the part is 20 tall from z=0, so 20 up rests the
+        // second on the first.
+        Transform3D stacked;
+        stacked.translation = Vec3{0, 0, 20};
+        ASSERT_TRUE(sub.setInstanceTransform(b.id(), stacked));
+        ASSERT_TRUE(sub.recompute().success);
+        ASSERT_TRUE(saveAssemblyDocumentToFile(sub, subFile.path));
+    }
+
+    AssemblyDocument rig{"Rig"};
+    rig.setGeometryKernel(&kernel);
+    Instance& nested = rig.addInstance("Nested", subFile.path);
+    ASSERT_TRUE(rig.setInstanceGrounded(nested.id(), true));
+    ASSERT_TRUE(rig.recompute().success) << SolveMessage(rig);
+
+    // THE PLAIN SUM. A fuse of two touching blocks gives the same volume here
+    // -- so the claim that separates them is the SHAPE COUNT, which a fused
+    // pair would have as one.
+    const KernelMassProperties whole = MassOf(kernel, nested.currentShape());
+    EXPECT_NEAR(whole.volumeMm3, 2.0 * 8000.0, 1e-6 * 16000.0);
+    // Two solids in there, not one.
+    EXPECT_EQ(kernel.countSolids(nested.currentShape()), 2)
+        << "the sub-assembly's parts were fused into one solid";
 }

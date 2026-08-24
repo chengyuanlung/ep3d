@@ -1249,6 +1249,27 @@ int main(int argc, char** argv) {
             if (!sawRevolve) fail("the model toolbar has no Revolve button");
             if (!sawOnFace) fail("the model toolbar has no Sketch-on-Face button");
 
+            // M26.1: the M19-M22 features, which had no button at all until
+            // now. Checked BY LABEL rather than by counting, so a button that
+            // was renamed or dropped says which one.
+            //
+            // The icons are already covered: the fingerprint sweep above
+            // refuses two buttons that carry the same picture, which is the
+            // check that catches "I drew the sweep icon like the pad icon".
+            for (const char* wanted : {"Sweep", "Loft", "Shell", "Hole", "Union", "Subtract",
+                                       "Intersect", "Ring", "Along", "Export", "Import"}) {
+                bool found = false;
+                for (int i = 0; i < buttons; ++i)
+                    if (window.modelToolbarLabel(i).find(wanted) != std::string::npos)
+                        found = true;
+                if (!found) {
+                    std::string message = "the model toolbar has no ";
+                    message += wanted;
+                    message += " button";
+                    fail(message.c_str());
+                }
+            }
+
             // THE SAME ACTIONS the Insert menu holds, so availability cannot
             // differ between the two surfaces. With nothing selected, the
             // sketch-driven commands are off.
@@ -1257,6 +1278,60 @@ int main(int argc, char** argv) {
                 if (window.modelToolbarLabel(i).find("Pad") == std::string::npos) continue;
                 if (window.modelToolbarButtonEnabled(i))
                     fail("Pad is offered on the toolbar with no sketch selected");
+            }
+
+            // M26.1: the same rule for every new command whose inputs are not
+            // there yet. A button that is offered and then refuses is worse
+            // than one that is greyed out, because the refusal arrives after
+            // the click.
+            //
+            // Import is the one exception and is checked as such: it needs
+            // nothing but a file, so it is always available.
+            for (const char* off : {"Sweep", "Loft", "Hole", "Union", "Subtract", "Intersect",
+                                    "Along"}) {
+                for (int i = 0; i < buttons; ++i) {
+                    if (window.modelToolbarLabel(i).find(off) == std::string::npos) continue;
+                    if (window.modelToolbarButtonEnabled(i)) {
+                        std::string message(off);
+                        message += " is offered on the toolbar with nothing selected to use it "
+                                   "on";
+                        fail(message.c_str());
+                    }
+                }
+            }
+            for (int i = 0; i < buttons; ++i) {
+                if (window.modelToolbarLabel(i).find("Import") == std::string::npos) continue;
+                if (!window.modelToolbarButtonEnabled(i))
+                    fail("Import is greyed out, but it needs nothing but a file");
+            }
+
+            // ...and each one SAYS WHAT IS MISSING rather than failing
+            // silently. The message is the whole value of a refusal, and a
+            // command that returned an empty string would pass every check
+            // above.
+            struct Refusal {
+                const char* what;
+                std::string message;
+            };
+            const Refusal refusals[] = {
+                {"Sweep", window.insertSweepFromSelection().toStdString()},
+                {"Loft", window.insertLoftFromSelection().toStdString()},
+                {"Hole", window.insertHoleFromSelection().toStdString()},
+                {"Union", window.insertBooleanOnTail(BooleanOperation::Union, "Union")
+                              .toStdString()},
+                {"Along", window.insertCurvePatternFromSelection().toStdString()},
+            };
+            for (const Refusal& refusal : refusals) {
+                if (refusal.message.empty()) {
+                    std::string message(refusal.what);
+                    message += " refused without saying why";
+                    fail(message.c_str());
+                }
+                if (refusal.message.find("reated") != std::string::npos) {
+                    std::string message(refusal.what);
+                    message += " reported success with nothing to work on";
+                    fail(message.c_str());
+                }
             }
 
             // --- Sketch on Face, with nothing picked -------------------------

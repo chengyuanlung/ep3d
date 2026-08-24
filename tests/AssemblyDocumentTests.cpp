@@ -7,6 +7,7 @@
 // something.
 
 #include "Core/Assembly/AssemblyDocument.h"
+#include "Core/Document/EvaluationCut.h"
 #include <algorithm>
 #include "Core/Assembly/MateFreedom.h"
 #include "Core/Document/PartDocument.h"
@@ -53,7 +54,7 @@ Transform3D TurnedAt(double x, double y, double z, double radians) {
     return t;
 }
 
-const PartInstance* InstanceNamed(const AssemblyDocument& document, const std::string& name) {
+const Instance* InstanceNamed(const AssemblyDocument& document, const std::string& name) {
     return document.findInstanceNamed(name);
 }
 
@@ -83,7 +84,7 @@ TEST(AssemblyDocumentTest, M23_ASM_002_AnInstanceCarriesAPlacementFrameAndNoTran
     // placement IS a frame. If it also held a Transform3D, the two would be
     // two answers to one question the first time anything moved one of them.
     AssemblyDocument document{"Rig"};
-    PartInstance& gear = document.addInstance("Gear", "parts/gear.ep3d");
+    Instance& gear = document.addInstance("Gear", "parts/gear.ep3d");
 
     ASSERT_NE(gear.frameId(), kInvalidObjectId);
     const ReferenceFrame* placement = document.findFrame(gear.frameId());
@@ -105,7 +106,7 @@ TEST(AssemblyDocumentTest, M23_ASM_003_MovingAnInstanceIsUndoable) {
     // For free, and that is the point: a move is a FrameTransformEdit, which
     // DocumentBase already knew how to replay before assemblies existed.
     AssemblyDocument document{"Rig"};
-    PartInstance& gear = document.addInstance("Gear", "parts/gear.ep3d");
+    Instance& gear = document.addInstance("Gear", "parts/gear.ep3d");
     ASSERT_TRUE(document.setInstanceTransform(gear.id(), At(10, 0, 0)));
     ASSERT_TRUE(document.setInstanceTransform(gear.id(), At(50, 0, 0)));
 
@@ -158,7 +159,7 @@ TEST(AssemblyDocumentTest, M23_ASM_006_RenamingAnInstanceRenamesThePlaceThatCarr
     // A tree showing "Gear origin" under an instance called "Pinion" would be
     // describing a document that does not exist.
     AssemblyDocument document{"Rig"};
-    PartInstance& gear = document.addInstance("Gear", "parts/gear.ep3d");
+    Instance& gear = document.addInstance("Gear", "parts/gear.ep3d");
     const ObjectId frameId = gear.frameId();
 
     const DocumentBase::RenameResult renamed = document.renameObject(gear.id(), "Pinion");
@@ -177,8 +178,8 @@ TEST(AssemblyDocumentTest, M23_ASM_007_ANameIsTakenWhateverKindOfThingTookIt) {
     // M23 frames were not even renameable, so this rule had nothing to say
     // about them; now they are objects a user can name and it has to.
     AssemblyDocument document{"Rig"};
-    PartInstance& first = document.addInstance("Gear", "parts/gear.ep3d");
-    PartInstance& second = document.addInstance("Shaft", "parts/shaft.ep3d");
+    Instance& first = document.addInstance("Gear", "parts/gear.ep3d");
+    Instance& second = document.addInstance("Shaft", "parts/shaft.ep3d");
 
     const DocumentBase::RenameResult clash = document.renameObject(second.id(), "Gear");
     EXPECT_FALSE(clash.ok);
@@ -198,7 +199,7 @@ TEST(AssemblyDocumentTest, M23_ASM_008_AnIdIsUsedONCEWhateverUsesIt) {
     // One rule, one place (DocumentBase::requireUnusedId). An assembly gets it
     // without writing it, which is the whole claim of ADR-M23-001.
     AssemblyDocument document{"Rig"};
-    PartInstance& gear = document.addInstance("Gear", "parts/gear.ep3d");
+    Instance& gear = document.addInstance("Gear", "parts/gear.ep3d");
 
     EXPECT_THROW(document.restoreInstance(gear.id(), "Copy", ComputeState::Dirty,
                                           "parts/gear.ep3d", {}, gear.frameId()),
@@ -222,9 +223,9 @@ TEST(AssemblyDocumentTest, M23_ASM_009_AnInstanceMustNameAFile) {
 
 TEST(AssemblyDocumentTest, M23_SER_001_THREEPartsSurviveASaveAndAReopenWhereTheyWerePut) {
     AssemblyDocument document{"Gearbox"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& gear = document.addInstance("Gear", "parts/gear.ep3d", "Main");
-    PartInstance& shaft = document.addInstance("Shaft", "parts/shaft.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& gear = document.addInstance("Gear", "parts/gear.ep3d", "Main");
+    Instance& shaft = document.addInstance("Shaft", "parts/shaft.ep3d");
 
     ASSERT_TRUE(document.setInstanceTransform(base.id(), At(0, 0, 0)));
     ASSERT_TRUE(document.setInstanceTransform(gear.id(), At(40, -15, 7.5)));
@@ -241,9 +242,9 @@ TEST(AssemblyDocumentTest, M23_SER_001_THREEPartsSurviveASaveAndAReopenWhereThey
     EXPECT_EQ(back.name(), "Gearbox");
     ASSERT_EQ(back.instances().size(), 3u);
 
-    const PartInstance* baseBack = InstanceNamed(back, "Base");
-    const PartInstance* gearBack = InstanceNamed(back, "Gear");
-    const PartInstance* shaftBack = InstanceNamed(back, "Shaft");
+    const Instance* baseBack = InstanceNamed(back, "Base");
+    const Instance* gearBack = InstanceNamed(back, "Gear");
+    const Instance* shaftBack = InstanceNamed(back, "Shaft");
     ASSERT_NE(baseBack, nullptr);
     ASSERT_NE(gearBack, nullptr);
     ASSERT_NE(shaftBack, nullptr);
@@ -325,7 +326,7 @@ TEST(AssemblyDocumentTest, M23_SER_005_AnInstancePlacedByAFrameThatIsNotThereIsR
     // The dangling reference the loader would otherwise throw on -- and a
     // loader that throws is a loader a caller cannot use.
     AssemblyDocument document{"Rig"};
-    PartInstance& gear = document.addInstance("Gear", "parts/gear.ep3d");
+    Instance& gear = document.addInstance("Gear", "parts/gear.ep3d");
     std::string text = SaveToString(document);
 
     const std::string realFrame = "\"" + std::to_string(gear.frameId()) + "\"";
@@ -343,7 +344,7 @@ TEST(AssemblyDocumentTest, M23_SER_006_ADuplicateIdIsRefusedACROSSKinds) {
     // The id rule spans the whole document, not each array. A frame's id
     // reused by an instance is exactly the collision a per-array check misses.
     AssemblyDocument document{"Rig"};
-    PartInstance& gear = document.addInstance("Gear", "parts/gear.ep3d");
+    Instance& gear = document.addInstance("Gear", "parts/gear.ep3d");
     std::string text = SaveToString(document);
 
     const std::string instanceId = "\"id\": \"" + std::to_string(gear.id()) + "\"";
@@ -361,7 +362,7 @@ TEST(AssemblyDocumentTest, M23_SER_007_ASavedAssemblyIsByteIdenticalOnARoundTrip
     // The test that catches what a field-by-field check cannot: something
     // written that is not read, or read into the wrong place.
     AssemblyDocument document{"Gearbox"};
-    PartInstance& gear = document.addInstance("Gear", "parts/gear.ep3d", "Main");
+    Instance& gear = document.addInstance("Gear", "parts/gear.ep3d", "Main");
     document.addInstance("Shaft", "parts/shaft.ep3d");
     ASSERT_TRUE(document.setInstanceTransform(gear.id(), TurnedAt(3, 4, 5, 0.75)));
     document.addConnector("Mount", ConnectorRole::Mount, gear.frameId(),
@@ -398,7 +399,7 @@ TEST(AssemblyDocumentTest, M23_SER_009_ATransformMissingAComponentIsREFUSED) {
     // filling in a default is how a file half-read becomes a document
     // half-right.
     AssemblyDocument document{"Rig"};
-    PartInstance& gear = document.addInstance("Gear", "parts/gear.ep3d");
+    Instance& gear = document.addInstance("Gear", "parts/gear.ep3d");
     ASSERT_TRUE(document.setInstanceTransform(gear.id(), TurnedAt(3, 4, 5, 0.75)));
 
     std::string text = SaveToString(document);
@@ -421,8 +422,8 @@ TEST(AssemblyDocumentTest, M24_MATE_001_AMateIsADocumentObjectLikeAnyOther) {
     // because a mate that was none of those would still solve, and would then
     // be the one thing in the tree a user could not point at.
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     Mate& elbow = document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(),
                                    "Eye", 0.0);
 
@@ -443,7 +444,7 @@ TEST(AssemblyDocumentTest, M24_MATE_002_AThingCannotBeMatedToItself) {
     // no-op or a contradiction depending on the value, and neither is what
     // anybody meant.
     AssemblyDocument document{"Rig"};
-    PartInstance& one = document.addInstance("One", "parts/one.ep3d");
+    Instance& one = document.addInstance("One", "parts/one.ep3d");
     EXPECT_THROW(document.addMate("Silly", MateType::Revolute, one.id(), "A", one.id(), "B", 0.0),
                  std::runtime_error);
     EXPECT_EQ(document.mates().size(), 0u);
@@ -454,8 +455,8 @@ TEST(AssemblyDocumentTest, M24_MATE_003_AFastenedMateHasNoFreedomToGiveAValueTo)
     // believing they had offset something. Both doors, because two doors that
     // disagree about what is legal is how a document saves and stops loading.
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
 
     EXPECT_THROW(document.addMate("Stuck", MateType::Fastened, base.id(), "A", arm.id(), "B",
                                   5.0),
@@ -473,8 +474,8 @@ TEST(AssemblyDocumentTest, M24_MATE_003_AFastenedMateHasNoFreedomToGiveAValueTo)
 
 TEST(AssemblyDocumentTest, M24_MATE_004_DrivingAMateIsAnOrdinaryUndoableEdit) {
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     Mate& elbow = document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(),
                                    "Eye", 0.0);
 
@@ -502,9 +503,9 @@ TEST(AssemblyDocumentTest, M24_MATE_005_DeletingAnInstanceDeletesTheMatesThatNam
     // it would put a permanent failure in the tree whose cause has already
     // been deleted.
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
-    PartInstance& tip = document.addInstance("Tip", "parts/tip.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& tip = document.addInstance("Tip", "parts/tip.ep3d");
     const ObjectId elbow =
         document.addMate("Elbow", MateType::Revolute, base.id(), "P", arm.id(), "E").id();
     const ObjectId wrist =
@@ -523,7 +524,7 @@ TEST(AssemblyDocumentTest, M24_MATE_006_GroundingIsUndoableAndDefaultsToNothing)
     // would make where everything ends up depend on the order things were
     // typed, which is position-as-meaning by another name.
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
     EXPECT_FALSE(document.isInstanceGrounded(base.id()));
 
     ASSERT_TRUE(document.setInstanceGrounded(base.id(), true));
@@ -707,8 +708,8 @@ TEST(AssemblyDocumentTest, M24_MATE_008_InverseUndoesAComposeExactly) {
 
 TEST(AssemblyDocumentTest, M24_SER_010_MatesAndGroundingSurviveASaveAndAReopen) {
     AssemblyDocument document{"Hinge"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d", "Bracket");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d", "Bracket");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     ASSERT_TRUE(document.setInstanceGrounded(base.id(), true));
     Mate& elbow = document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(),
                                    "Eye", 0.75);
@@ -730,7 +731,7 @@ TEST(AssemblyDocumentTest, M24_SER_010_MatesAndGroundingSurviveASaveAndAReopen) 
     EXPECT_NEAR(elbowBack->value(), 0.75, 1e-12);
     EXPECT_NEAR(back.findMateNamed("Slide")->value(), 12.5, 1e-12);
 
-    const PartInstance* baseBack = back.findInstanceNamed("Base");
+    const Instance* baseBack = back.findInstanceNamed("Base");
     ASSERT_NE(baseBack, nullptr);
     EXPECT_TRUE(back.isInstanceGrounded(baseBack->id()));
     EXPECT_FALSE(back.isInstanceGrounded(back.findInstanceNamed("Arm")->id()));
@@ -744,8 +745,8 @@ TEST(AssemblyDocumentTest, M24_SER_010_MatesAndGroundingSurviveASaveAndAReopen) 
 
 TEST(AssemblyDocumentTest, M24_SER_011_AMateNamingSomethingThatIsNotThereIsREFUSED) {
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "Eye");
     std::string text = SaveToString(document);
 
@@ -764,8 +765,8 @@ TEST(AssemblyDocumentTest, M24_SER_012_AMateNamingNOConnectorIsREFUSED) {
     // A mate that names no connector can never resolve, so it is refused at
     // the door rather than at solve time, a long way from the cause.
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "Eye");
 
     std::string text = SaveToString(document);
@@ -780,8 +781,8 @@ TEST(AssemblyDocumentTest, M24_SER_012_AMateNamingNOConnectorIsREFUSED) {
 
 TEST(AssemblyDocumentTest, M24_SER_013_AFastenedMateCarryingAValueInTheFileIsREFUSED) {
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     document.addMate("Fixed", MateType::Fastened, base.id(), "A", arm.id(), "B");
 
     // A fastened mate frees nothing, so every one of its six values is zero.
@@ -807,8 +808,8 @@ TEST(AssemblyDocumentTest, M25_SER_001_AV30FileWithASINGLEValueStillLoads) {
     // old serializer any more: this is what those files look like, and if that
     // ever stops being true this test is how it is found out.
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "Eye", 0.75);
 
     std::string text = SaveToString(document);
@@ -818,8 +819,14 @@ TEST(AssemblyDocumentTest, M25_SER_001_AV30FileWithASINGLEValueStillLoads) {
     const std::size_t end = text.find(']', at);
     ASSERT_NE(end, std::string::npos);
     text.replace(at, end - at + 1, "\"value\": 0.75");
-    text.replace(text.find("\"schemaVersion\": 31"), std::string("\"schemaVersion\": 31").size(),
-                 "\"schemaVersion\": 30");
+    // Whatever the current stamp is, relabelled as v30 -- asked of the string
+    // rather than written as a literal, because a version bump has nothing to
+    // do with what this test checks and should not turn it red.
+    const std::size_t stamp = text.find("\"schemaVersion\": ");
+    ASSERT_NE(stamp, std::string::npos) << text;
+    const std::size_t stampEnd = text.find(',', stamp);
+    ASSERT_NE(stampEnd, std::string::npos);
+    text.replace(stamp, stampEnd - stamp, "\"schemaVersion\": 30");
 
     const AssemblyLoadResult loaded = LoadFromString(text);
     ASSERT_TRUE(loaded) << loaded.message;
@@ -837,8 +844,8 @@ TEST(AssemblyDocumentTest, M24_SER_014_ADocumentWithABrokenMateIsRefusedAtSAVE) 
     // enforces is enforced before a byte is written, so a document that saves
     // can always be opened.
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     document.addMate("Elbow", MateType::Revolute, base.id(), "Pivot", arm.id(), "Eye");
     ASSERT_TRUE(TrySave(document));
 
@@ -846,8 +853,8 @@ TEST(AssemblyDocumentTest, M24_SER_014_ADocumentWithABrokenMateIsRefusedAtSAVE) 
     // path, which is how a loader builds a document and therefore the one that
     // has to be defended against.
     AssemblyDocument hand{"Rig"};
-    PartInstance& left = hand.addInstance("Left", "parts/base.ep3d");
-    PartInstance& right = hand.addInstance("Right", "parts/arm.ep3d");
+    Instance& left = hand.addInstance("Left", "parts/base.ep3d");
+    Instance& right = hand.addInstance("Right", "parts/arm.ep3d");
     hand.restoreMate(7001, "Elbow", MateType::Revolute, left.id(), "Pivot", right.id(), "Eye",
                      0.0);
     ASSERT_TRUE(TrySave(hand));
@@ -865,8 +872,8 @@ TEST(AssemblyDocumentTest, M25_SER_002_LimitsAndDrivingSurviveASaveAndAReopen) {
     // mechanism reopened with nothing driven is a mechanism the solver is free
     // to rearrange.
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     Mate& hinge = document.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "Q",
                                    0.5);
     Mate& slide = document.addMate("Slide", MateType::Slider, base.id(), "R", arm.id(), "S");
@@ -916,8 +923,8 @@ TEST(AssemblyDocumentTest, M25_SER_003_ALimitOnAFreedomTheMateDoesNotHaveIsREFUS
     // Both doors, because two doors that disagree about what is legal is how a
     // document saves and then refuses to open (ADR-M3-008).
     AssemblyDocument document{"Rig"};
-    PartInstance& base = document.addInstance("Base", "parts/base.ep3d");
-    PartInstance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
     Mate& hinge = document.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "Q");
     ASSERT_TRUE(document.setMateLimit(hinge.id(), MateComponent::RZ, -1.0, 1.0));
 
@@ -930,4 +937,362 @@ TEST(AssemblyDocumentTest, M25_SER_003_ALimitOnAFreedomTheMateDoesNotHaveIsREFUS
     const AssemblyLoadResult loaded = LoadFromString(text);
     EXPECT_FALSE(loaded);
     EXPECT_NE(loaded.message.find("does not have"), std::string::npos) << loaded.message;
+}
+
+// --- M26: sub-assemblies, poses, explosions, patterns -----------------------
+
+TEST(AssemblyDocumentTest, M26_CUT_001_AnEvaluationPositionClampsAndDefaultsToALL) {
+    // The rule roadmap §49 point 2 asked to be extracted at its third
+    // appearance. Tested here rather than only through a Body's rollback and
+    // an explosion's preview, because it is now ONE thing and the place to
+    // check a thing is where it lives.
+    EvaluationCut all;
+    EXPECT_EQ(all.stored(), EvaluationCut::kAll);
+    EXPECT_EQ(all.effective(3), 3u) << "the default is not the whole list";
+    EXPECT_FALSE(all.isPast(2, 3));
+
+    EvaluationCut two{2};
+    EXPECT_EQ(two.effective(5), 2u);
+    EXPECT_FALSE(two.isPast(1, 5));
+    EXPECT_TRUE(two.isPast(2, 5)) << "the item AT the cut is on the far side of it";
+
+    // A LIST THAT SHRANK under a stored cut means "all of it" again, rather
+    // than a position pointing past the end that somebody has to find and fix.
+    EvaluationCut nine{9};
+    EXPECT_EQ(nine.effective(4), 4u);
+    EXPECT_FALSE(nine.isPast(3, 4));
+
+    // ...and the STORED value survives, so a save writes kAll rather than
+    // however long the list happened to be when it was written.
+    EXPECT_EQ(nine.stored(), 9u);
+    EXPECT_NE(EvaluationCut{2}, EvaluationCut{3});
+}
+
+TEST(AssemblyDocumentTest, M26_POSE_001_APoseCapturesTheFreedomsANDTheLooseParts) {
+    // §49: a named position is "mate 自由度的值 + 無 mate 實例的絕對變換". The
+    // second half is easy to leave out and impossible to notice until an
+    // assembly with a hand-placed part comes back with it somewhere else.
+    AssemblyDocument document{"Rig"};
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& loose = document.addInstance("Loose", "parts/loose.ep3d");
+    Mate& hinge = document.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "Q");
+    ASSERT_TRUE(document.setMateValue(hinge.id(), 0.75));
+    Transform3D somewhere;
+    somewhere.translation = Vec3{11, 22, 33};
+    ASSERT_TRUE(document.setInstanceTransform(loose.id(), somewhere));
+
+    const NamedPosition& pose = document.captureNamedPosition("Open");
+    ASSERT_EQ(pose.mates().size(), 1u);
+    EXPECT_EQ(pose.mates().front().mateId, hinge.id());
+    EXPECT_NEAR(pose.mates().front().values[5], 0.75, 1e-12);
+    // ONLY the instances no mate places -- Base and Arm are the hinge's, so
+    // their transform is derived and recording it would be a second answer.
+    ASSERT_EQ(pose.loose().size(), 1u);
+    EXPECT_EQ(pose.loose().front().instanceId, loose.id());
+    EXPECT_NEAR(pose.loose().front().transform.translation.y, 22.0, 1e-12);
+}
+
+TEST(AssemblyDocumentTest, M26_POSE_002_ApplyingAPoseIsONEUndoStep) {
+    // A pose is one thing the user chose. Without the transaction, undoing "go
+    // to Open" would walk backwards through every mate it touched, one press
+    // at a time -- and stop somewhere that was never a pose at all.
+    AssemblyDocument document{"Rig"};
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& other = document.addInstance("Other", "parts/other.ep3d");
+    Mate& one = document.addMate("One", MateType::Revolute, base.id(), "P", arm.id(), "Q");
+    Mate& two = document.addMate("Two", MateType::Slider, base.id(), "R", other.id(), "S");
+
+    ASSERT_TRUE(document.setMateValue(one.id(), 1.0));
+    ASSERT_TRUE(document.setMateValue(two.id(), 20.0));
+    document.captureNamedPosition("Open");
+
+    ASSERT_TRUE(document.setMateValue(one.id(), 0.0));
+    ASSERT_TRUE(document.setMateValue(two.id(), 0.0));
+    const std::size_t before = document.undoDepth();
+
+    ASSERT_TRUE(document.applyNamedPosition(document.findNamedPositionNamed("Open")->id()));
+    EXPECT_NEAR(one.value(), 1.0, 1e-12);
+    EXPECT_NEAR(two.value(), 20.0, 1e-12);
+    EXPECT_EQ(document.undoDepth(), before + 1) << "applying a pose was more than one step";
+    EXPECT_EQ(document.nextUndoLabel(), "Apply Open");
+
+    // ONE press puts BOTH mates back.
+    ASSERT_TRUE(document.undo());
+    EXPECT_NEAR(one.value(), 0.0, 1e-12);
+    EXPECT_NEAR(two.value(), 0.0, 1e-12);
+}
+
+TEST(AssemblyDocumentTest, M26_POSE_003_APoseIsNotAConfiguration) {
+    // §49 point 3: a configuration changes what the model IS, a named position
+    // only changes where its freedoms are sitting. So a pose holds nothing
+    // that could define a part -- and applying one leaves the instances, the
+    // mates and the sources exactly as they were.
+    AssemblyDocument document{"Rig"};
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d", "Main");
+    Mate& hinge = document.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "Q");
+    document.captureNamedPosition("Shut");
+
+    ASSERT_TRUE(document.setMateValue(hinge.id(), 2.0));
+    ASSERT_TRUE(document.applyNamedPosition(document.findNamedPositionNamed("Shut")->id()));
+
+    EXPECT_EQ(document.instances().size(), 2u);
+    EXPECT_EQ(document.mates().size(), 1u);
+    EXPECT_EQ(document.findInstance(arm.id())->sourcePath(), "parts/arm.ep3d");
+    EXPECT_EQ(document.findInstance(arm.id())->bodyName(), "Main") << "a pose changed a source";
+    EXPECT_NEAR(hinge.value(), 0.0, 1e-12);
+}
+
+TEST(AssemblyDocumentTest, M26_EXPLODE_001_StepsComposeInOrderUpToThePreview) {
+    // An explosion is an ordered list, and its own evaluation position is what
+    // makes walking it forward a preview rather than an all-or-nothing switch.
+    AssemblyDocument document{"Rig"};
+    Instance& one = document.addInstance("One", "parts/one.ep3d");
+    Instance& two = document.addInstance("Two", "parts/two.ep3d");
+    ExplodeView& view = document.addExplodeView("Service");
+
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "Lift", one.id(), Vec3{0, 0, 50}));
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "Slide", one.id(), Vec3{30, 0, 0}));
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "Other", two.id(), Vec3{0, 60, 0}));
+
+    // ALL OF IT by default. The two steps on `One` compose.
+    EXPECT_NEAR(view.displacementOf(one.id()).translation.z, 50.0, 1e-12);
+    EXPECT_NEAR(view.displacementOf(one.id()).translation.x, 30.0, 1e-12);
+    EXPECT_NEAR(view.displacementOf(two.id()).translation.y, 60.0, 1e-12);
+    // ...and an instance no step touches is not moved.
+    EXPECT_NEAR(view.displacementOf(9999).translation.z, 0.0, 1e-12);
+
+    // ONE STEP SHOWN: the first only.
+    ASSERT_TRUE(document.setExplodePreview(view.id(), 1));
+    EXPECT_EQ(view.stepsShown(), 1u);
+    EXPECT_NEAR(view.displacementOf(one.id()).translation.z, 50.0, 1e-12);
+    EXPECT_NEAR(view.displacementOf(one.id()).translation.x, 0.0, 1e-12)
+        << "a step past the preview was applied anyway";
+    EXPECT_NEAR(view.displacementOf(two.id()).translation.y, 0.0, 1e-12);
+
+    // NONE shown is the unexploded assembly, which has to be reachable or the
+    // preview cannot be walked from the beginning.
+    ASSERT_TRUE(document.setExplodePreview(view.id(), 0));
+    EXPECT_NEAR(view.displacementOf(one.id()).translation.z, 0.0, 1e-12);
+}
+
+TEST(AssemblyDocumentTest, M26_EXPLODE_002_AnExplosionNeverMovesTheModel) {
+    // §49 calls it a derived display transform. So the assembly's own answer
+    // has to be unchanged by every step, and asking with no view has to give
+    // exactly that -- which is the only way a caller can tell the picture from
+    // the model.
+    AssemblyDocument document{"Rig"};
+    Instance& one = document.addInstance("One", "parts/one.ep3d");
+    Transform3D placed;
+    placed.translation = Vec3{7, 8, 9};
+    ASSERT_TRUE(document.setInstanceTransform(one.id(), placed));
+
+    ExplodeView& view = document.addExplodeView("Service");
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "Lift", one.id(), Vec3{0, 0, 100}));
+
+    // The model did not move.
+    EXPECT_NEAR(document.instanceWorldTransform(one.id()).translation.z, 9.0, 1e-12);
+    // No view asked for means the model's own answer.
+    EXPECT_NEAR(document.explodedWorldTransform(kInvalidObjectId, one.id()).translation.z, 9.0,
+                1e-12);
+    // The view's answer is the model's, displaced.
+    EXPECT_NEAR(document.explodedWorldTransform(view.id(), one.id()).translation.z, 109.0,
+                1e-12);
+    EXPECT_NEAR(document.explodedWorldTransform(view.id(), one.id()).translation.x, 7.0, 1e-12);
+}
+
+TEST(AssemblyDocumentTest, M26_EXPLODE_003_StepsCanBeReorderedAndRemoved) {
+    // §49 says a step can be named, reordered and deleted. Reordering matters
+    // because the steps compose: two rotations in the other order end
+    // somewhere else, and an explosion whose steps cannot be reordered is a
+    // list that has to be retyped to fix.
+    AssemblyDocument document{"Rig"};
+    Instance& one = document.addInstance("One", "parts/one.ep3d");
+    ExplodeView& view = document.addExplodeView("Service");
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "First", one.id(), Vec3{10, 0, 0}));
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "Second", one.id(), Vec3{0, 20, 0}));
+    ASSERT_EQ(view.steps().size(), 2u);
+    EXPECT_EQ(view.steps()[0].name, "First");
+
+    ASSERT_TRUE(document.moveExplodeStep(view.id(), 1, 0));
+    EXPECT_EQ(view.steps()[0].name, "Second");
+    EXPECT_EQ(view.steps()[1].name, "First");
+    // With one step shown, the reorder is what changes which one it is.
+    ASSERT_TRUE(document.setExplodePreview(view.id(), 1));
+    EXPECT_NEAR(view.displacementOf(one.id()).translation.y, 20.0, 1e-12);
+    EXPECT_NEAR(view.displacementOf(one.id()).translation.x, 0.0, 1e-12);
+
+    ASSERT_TRUE(document.removeExplodeStep(view.id(), 0));
+    ASSERT_EQ(view.steps().size(), 1u);
+    EXPECT_EQ(view.steps()[0].name, "First");
+    // An out-of-range index is refused rather than clamped: "delete step 7" of
+    // a two-step list is a mistake, not a request.
+    EXPECT_FALSE(document.removeExplodeStep(view.id(), 7));
+    EXPECT_FALSE(document.moveExplodeStep(view.id(), 0, 9));
+}
+
+TEST(AssemblyDocumentTest, M26_EXPLODE_004_EveryExplodeEditIsUndoable) {
+    AssemblyDocument document{"Rig"};
+    Instance& one = document.addInstance("One", "parts/one.ep3d");
+    ExplodeView& view = document.addExplodeView("Service");
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "First", one.id(), Vec3{10, 0, 0}));
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "Second", one.id(), Vec3{0, 20, 0}));
+    ASSERT_TRUE(document.moveExplodeStep(view.id(), 1, 0));
+    ASSERT_TRUE(document.setExplodePreview(view.id(), 1));
+
+    ASSERT_TRUE(document.undo()); // the preview
+    EXPECT_EQ(view.stepsShown(), 2u);
+    ASSERT_TRUE(document.undo()); // the reorder
+    EXPECT_EQ(view.steps()[0].name, "First");
+    ASSERT_TRUE(document.undo()); // the second step
+    EXPECT_EQ(view.steps().size(), 1u);
+    ASSERT_TRUE(document.undo()); // the first step
+    EXPECT_EQ(view.steps().size(), 0u);
+    ASSERT_TRUE(document.undo()); // the view itself
+    EXPECT_EQ(document.explodeViews().size(), 0u);
+
+    // ...and forward again, with the reorder still in it.
+    while (document.canRedo()) ASSERT_TRUE(document.redo());
+    ASSERT_EQ(document.explodeViews().size(), 1u);
+    const ExplodeView* back = document.findExplodeViewNamed("Service");
+    ASSERT_NE(back, nullptr);
+    ASSERT_EQ(back->steps().size(), 2u);
+    EXPECT_EQ(back->steps()[0].name, "Second") << "redo lost the reorder";
+    EXPECT_EQ(back->stepsShown(), 1u);
+}
+
+TEST(AssemblyDocumentTest, M26_PATTERN_001_APatternedCopyFOLLOWSTheOriginal) {
+    // The claim that makes it a pattern rather than three parts in a row: each
+    // copy's placement frame hangs off the ORIGINAL's, so moving the original
+    // moves the row and nothing here watches anything.
+    AssemblyDocument document{"Rig"};
+    Instance& one = document.addInstance("Bolt", "parts/bolt.ep3d");
+    const std::vector<ObjectId> made = document.addInstancePattern(one.id(), 3, Vec3{25, 0, 0});
+    ASSERT_EQ(made.size(), 2u) << "a row of three is the original plus two";
+    ASSERT_EQ(document.instances().size(), 3u);
+
+    EXPECT_NEAR(document.instanceWorldTransform(made[0]).translation.x, 25.0, 1e-12);
+    EXPECT_NEAR(document.instanceWorldTransform(made[1]).translation.x, 50.0, 1e-12);
+
+    // MOVE THE ORIGINAL and the whole row goes with it.
+    Transform3D moved;
+    moved.translation = Vec3{100, 5, 0};
+    ASSERT_TRUE(document.setInstanceTransform(one.id(), moved));
+    EXPECT_NEAR(document.instanceWorldTransform(made[0]).translation.x, 125.0, 1e-12);
+    EXPECT_NEAR(document.instanceWorldTransform(made[0]).translation.y, 5.0, 1e-12);
+    EXPECT_NEAR(document.instanceWorldTransform(made[1]).translation.x, 150.0, 1e-12);
+
+    // A copy is an ORDINARY instance: nameable, and its source is the
+    // original's.
+    EXPECT_EQ(document.findInstance(made[0])->sourcePath(), "parts/bolt.ep3d");
+    EXPECT_TRUE(document.renameObject(made[0], "Second bolt").ok);
+
+    // A count below one is a mistake, not a request.
+    EXPECT_THROW(document.addInstancePattern(one.id(), 0, Vec3{1, 0, 0}), std::runtime_error);
+}
+
+TEST(AssemblyDocumentTest, M26_PATTERN_002_DeletingTheOriginalLeavesTheCopiesWHERETHEYARE) {
+    // The hole M26's pattern opened: a copy's frame hangs off the original's,
+    // and worldTransform walks UP -- so a child whose parent was deleted
+    // quietly reports its LOCAL transform as its world one and jumps.
+    //
+    // Each child is lifted to the grandparent with its local transform
+    // rewritten, so nothing moves. ADR-M26-004.
+    AssemblyDocument document{"Rig"};
+    Instance& one = document.addInstance("Bolt", "parts/bolt.ep3d");
+    Transform3D start;
+    start.translation = Vec3{100, 0, 0};
+    ASSERT_TRUE(document.setInstanceTransform(one.id(), start));
+    const std::vector<ObjectId> made = document.addInstancePattern(one.id(), 3, Vec3{25, 0, 0});
+    ASSERT_EQ(made.size(), 2u);
+    ASSERT_NEAR(document.instanceWorldTransform(made[1]).translation.x, 150.0, 1e-12);
+
+    ASSERT_TRUE(document.removeObject(one.id()));
+    EXPECT_EQ(document.instances().size(), 2u);
+    // EXACTLY WHERE THEY WERE. Not at 25 and 50, which is where their own
+    // offsets alone would put them.
+    EXPECT_NEAR(document.instanceWorldTransform(made[0]).translation.x, 125.0, 1e-9);
+    EXPECT_NEAR(document.instanceWorldTransform(made[1]).translation.x, 150.0, 1e-9);
+}
+
+TEST(AssemblyDocumentTest, M26_SER_001_PosesAndExplosionsSurviveASaveAndAReopen) {
+    AssemblyDocument document{"Rig"};
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    Instance& loose = document.addInstance("Loose", "parts/loose.ep3d");
+    Mate& hinge = document.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "Q");
+    ASSERT_TRUE(document.setMateValue(hinge.id(), 0.4));
+    Transform3D somewhere;
+    somewhere.translation = Vec3{3, 4, 5};
+    ASSERT_TRUE(document.setInstanceTransform(loose.id(), somewhere));
+    document.captureNamedPosition("Open");
+
+    ExplodeView& view = document.addExplodeView("Service");
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "Lift", arm.id(), Vec3{0, 0, 40}));
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "Slide", loose.id(), Vec3{60, 0, 0}));
+    ASSERT_TRUE(document.setExplodePreview(view.id(), 1));
+
+    const std::string text = SaveToString(document);
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    ASSERT_TRUE(loaded) << loaded.message;
+    const AssemblyDocument& back = *loaded.document;
+
+    const NamedPosition* poseBack = back.findNamedPositionNamed("Open");
+    ASSERT_NE(poseBack, nullptr);
+    ASSERT_EQ(poseBack->mates().size(), 1u);
+    EXPECT_NEAR(poseBack->mates().front().values[5], 0.4, 1e-12);
+    ASSERT_EQ(poseBack->loose().size(), 1u);
+    EXPECT_NEAR(poseBack->loose().front().transform.translation.y, 4.0, 1e-12);
+
+    const ExplodeView* viewBack = back.findExplodeViewNamed("Service");
+    ASSERT_NE(viewBack, nullptr);
+    ASSERT_EQ(viewBack->steps().size(), 2u);
+    EXPECT_EQ(viewBack->steps()[0].name, "Lift");
+    EXPECT_NEAR(viewBack->steps()[1].displacement.translation.x, 60.0, 1e-12);
+    EXPECT_EQ(viewBack->stepsShown(), 1u) << "the preview position was lost";
+
+    EXPECT_EQ(back.undoDepth(), 0u);
+    EXPECT_EQ(SaveToString(back), text);
+}
+
+TEST(AssemblyDocumentTest, M26_SER_002_APreviewOfALLComesBackAsALLNotAsACount) {
+    // The stored cut, not the effective one. If a save wrote "2" for a
+    // two-step view showing everything, adding a third step after reopening
+    // would leave it hidden -- and nobody would connect that to the save.
+    AssemblyDocument document{"Rig"};
+    Instance& one = document.addInstance("One", "parts/one.ep3d");
+    ExplodeView& view = document.addExplodeView("Service");
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "A", one.id(), Vec3{1, 0, 0}));
+    ASSERT_TRUE(document.addExplodeStep(view.id(), "B", one.id(), Vec3{0, 1, 0}));
+    ASSERT_EQ(view.previewCut(), EvaluationCut::kAll);
+
+    const AssemblyLoadResult loaded = LoadFromString(SaveToString(document));
+    ASSERT_TRUE(loaded) << loaded.message;
+    const ExplodeView* back = loaded.document->findExplodeViewNamed("Service");
+    ASSERT_NE(back, nullptr);
+    EXPECT_EQ(back->previewCut(), EvaluationCut::kAll)
+        << "an explosion showing everything came back pinned to its step count";
+}
+
+TEST(AssemblyDocumentTest, M26_SER_003_APoseOrStepNamingSomethingGoneIsREFUSED) {
+    // ADR-M3-008 for the new kinds of reference, at both doors.
+    AssemblyDocument document{"Rig"};
+    Instance& base = document.addInstance("Base", "parts/base.ep3d");
+    Instance& arm = document.addInstance("Arm", "parts/arm.ep3d");
+    document.addMate("Hinge", MateType::Revolute, base.id(), "P", arm.id(), "Q");
+    document.captureNamedPosition("Open");
+
+    std::string text = SaveToString(document);
+    const std::string real = "\"mateId\": \"" + std::to_string(
+        document.findMateNamed("Hinge")->id()) + "\"";
+    const std::size_t at = text.find(real);
+    ASSERT_NE(at, std::string::npos) << text;
+    text.replace(at, real.size(), "\"mateId\": \"777333\"");
+
+    const AssemblyLoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded);
+    EXPECT_EQ(loaded.error, SerializationError::UnknownDependencyId);
+    EXPECT_NE(loaded.message.find("777333"), std::string::npos) << loaded.message;
 }

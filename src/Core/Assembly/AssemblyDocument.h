@@ -1,8 +1,9 @@
 #pragma once
 
+#include "Core/Assembly/AssemblyStates.h"
 #include "Core/Assembly/IAssemblySolver.h"
 #include "Core/Assembly/Mate.h"
-#include "Core/Assembly/PartInstance.h"
+#include "Core/Assembly/Instance.h"
 #include "Core/Document/DocumentBase.h"
 #include "Core/Geometry/MathTypes.h"
 
@@ -52,18 +53,18 @@ public:
     // Every instance gets its own ReferenceFrame, parented to Origin, named
     // "<instance> origin". That frame IS the placement: there is no second
     // transform anywhere, so an instance cannot be in two places.
-    PartInstance& addInstance(std::string name, std::string sourcePath,
+    Instance& addInstance(std::string name, std::string sourcePath,
                               std::string bodyName = {});
     // Restore path: the frame already exists and is passed in, because the
     // loader restores frames before instances and re-deriving one here would
     // give the file's frame and the instance's frame different ids.
-    PartInstance& restoreInstance(ObjectId id, std::string name, ComputeState state,
+    Instance& restoreInstance(ObjectId id, std::string name, ComputeState state,
                                   std::string sourcePath, std::string bodyName,
                                   ObjectId frameId);
 
-    std::vector<const PartInstance*> instances() const;
-    const PartInstance* findInstance(ObjectId id) const noexcept;
-    const PartInstance* findInstanceNamed(const std::string& name) const noexcept;
+    std::vector<const Instance*> instances() const;
+    const Instance* findInstance(ObjectId id) const noexcept;
+    const Instance* findInstanceNamed(const std::string& name) const noexcept;
 
     // Moves an instance. Goes through the frame, so it is undoable, it dirties
     // the instance through an ordinary graph edge, and a sub-assembly's
@@ -74,6 +75,69 @@ public:
     // world. Identity for an unknown id, exactly as worldTransform is.
     Transform3D instanceTransform(ObjectId instanceId) const noexcept;
     Transform3D instanceWorldTransform(ObjectId instanceId) const noexcept;
+
+    // --- Patterns (M26, ADR-M26-003) -----------------------------------------
+    //
+    // `count` copies of `instanceId`, each `step` further along than the last.
+    //
+    // A COPY'S FRAME IS A CHILD OF THE ORIGINAL'S, which is not an
+    // implementation detail: it is what makes the pattern parametric. Move the
+    // original and the copies follow, because the frame hierarchy already
+    // composes -- nothing here watches anything.
+    //
+    // Returns the ids of the copies (count - 1 of them; the original is the
+    // first of the row and is not touched). Throws if the id is not an
+    // instance or the count is below one.
+    //
+    // NOT A STORED FEATURE. Deleting the pattern means deleting the copies,
+    // which are ordinary instances -- and that is the honest shape while an
+    // assembly has no feature list to put a pattern in. Said out loud rather
+    // than implied: editing the count afterwards means deleting and redoing.
+    std::vector<ObjectId> addInstancePattern(ObjectId instanceId, int count,
+                                             const Vec3& step);
+
+    // --- Named positions (M26, roadmap §49) ----------------------------------
+    //
+    // `capture` reads the current pose -- every mate's freedoms, and where the
+    // instances no mate places are sitting. `apply` puts it back, as ONE undo
+    // step, because a pose is one thing a user chose.
+    NamedPosition& captureNamedPosition(std::string name);
+    NamedPosition& restoreNamedPosition(ObjectId id, std::string name,
+                                        std::vector<NamedPosition::MateSetting> mates,
+                                        std::vector<NamedPosition::LooseSetting> loose);
+    bool applyNamedPosition(ObjectId positionId);
+    std::vector<const NamedPosition*> namedPositions() const;
+    const NamedPosition* findNamedPosition(ObjectId id) const noexcept;
+    const NamedPosition* findNamedPositionNamed(const std::string& name) const noexcept;
+
+    // --- Exploded views (M26, roadmap §49) -----------------------------------
+    //
+    // An ordered list of displacements FOR A PICTURE. It never changes the
+    // model: `explodedWorldTransform` composes the view on top of where the
+    // assembly actually put the instance, and asking with no view gives the
+    // assembly's own answer.
+    ExplodeView& addExplodeView(std::string name);
+    ExplodeView& restoreExplodeView(ObjectId id, std::string name,
+                                    std::vector<ExplodeStep> steps, std::size_t previewCut);
+    // Appends a step. Throws if the instance is not one of this assembly's.
+    bool addExplodeStep(ObjectId viewId, std::string stepName, ObjectId instanceId,
+                        const Vec3& offset);
+    // Moves a step to a new position in the list, because §49 says steps can be
+    // reordered and an explosion whose steps cannot be reordered is a list that
+    // has to be retyped to fix.
+    bool moveExplodeStep(ObjectId viewId, std::size_t from, std::size_t to);
+    bool removeExplodeStep(ObjectId viewId, std::size_t index);
+    // How many steps to show. EvaluationCut::kAll is the finished explosion.
+    bool setExplodePreview(ObjectId viewId, std::size_t stepsShown);
+
+    std::vector<const ExplodeView*> explodeViews() const;
+    const ExplodeView* findExplodeView(ObjectId id) const noexcept;
+    const ExplodeView* findExplodeViewNamed(const std::string& name) const noexcept;
+
+    // Where an instance appears when `viewId` is being shown. Identity view
+    // (kInvalidObjectId) gives instanceWorldTransform unchanged, which is the
+    // evidence that an explosion is a picture and not a move.
+    Transform3D explodedWorldTransform(ObjectId viewId, ObjectId instanceId) const noexcept;
 
     // --- Grounding (M24) -----------------------------------------------------
     //
@@ -222,6 +286,9 @@ public:
     // normal, tested state, and an assembly with no loops never needs one.
     void setAssemblySolver(IAssemblySolver* solver) noexcept { assemblySolver_ = solver; }
     IAssemblySolver* assemblySolver() const noexcept { return assemblySolver_; }
+    // The chain of assembly files open above this one, so a sub-assembly that
+    // contains its own parent is refused rather than recursing (M26).
+    void setSourceChain(std::vector<std::string> chain) { sourceChain_ = std::move(chain); }
 
     DocumentRecomputeReport recompute() override;
 
@@ -233,14 +300,18 @@ protected:
     void applyOwnName(ObjectId id, const std::string& name) override;
     bool ownNameIsTaken(const std::string& name, ObjectId except) const override;
     void applyOwnDelta(const UndoDelta& delta, bool forward) override;
+    const std::vector<std::string>* sourceChain() const override { return &sourceChain_; }
+    IAssemblySolver* assemblySolverForNodes() const override { return assemblySolver_; }
 
 private:
-    PartInstance* findInstanceForEdit(ObjectId id) noexcept;
+    Instance* findInstanceForEdit(ObjectId id) noexcept;
     // The frame an instance is placed by, created and wired in one place so
     // add and restore cannot disagree about what an instance's frame is.
-    void wireInstance(PartInstance& instance);
+    void wireInstance(Instance& instance);
 
     Mate* findMateForEdit(ObjectId id) noexcept;
+    NamedPosition* findNamedPositionForEdit(ObjectId id) noexcept;
+    ExplodeView* findExplodeViewForEdit(ObjectId id) noexcept;
     // The rules a mate has to pass before it exists at all. Shared by add and
     // restore so the two doors cannot come to disagree about what a legal mate
     // is -- which is how a document that saves cleanly stops loading.
@@ -276,11 +347,14 @@ private:
     // Returns false and fills `solveReport_` when it cannot.
     bool solveMates();
 
-    std::vector<std::unique_ptr<PartInstance>> instances_;
+    std::vector<std::unique_ptr<Instance>> instances_;
     std::vector<std::unique_ptr<Mate>> mates_;
+    std::vector<std::unique_ptr<NamedPosition>> namedPositions_;
+    std::vector<std::unique_ptr<ExplodeView>> explodeViews_;
     std::vector<ObjectId> groundedInstances_;
     MateSolveReport solveReport_;
     IAssemblySolver* assemblySolver_ = nullptr;
+    std::vector<std::string> sourceChain_;
 };
 
 } // namespace paramcad

@@ -5,6 +5,7 @@
 #include "Core/Parameter/Parameter.h"
 #include "Core/Recompute/IRecomputable.h"
 #include "Core/Reference/ReferenceFrame.h"
+#include "Core/Assembly/AssemblyStates.h"
 #include "Core/Assembly/Mate.h"
 #include "Core/Connector/Connector.h"
 #include "Core/Sketch/Sketch.h"

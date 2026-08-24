@@ -48,6 +48,8 @@
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Compound.hxx>
+#include <BRep_Builder.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Ax2.hxx>
@@ -678,6 +680,42 @@ ShapeResult OcctGeometryKernel::translateShape(const KernelShape& shape, const V
     } catch (const Standard_Failure& error) {
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            std::string("OCCT translate failed: ") + error.GetMessageString()};
+    }
+}
+
+int OcctGeometryKernel::countSolids(const KernelShape& shape) {
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull()) return 0;
+    int solids = 0;
+    for (TopExp_Explorer it(occt->shape(), TopAbs_SOLID); it.More(); it.Next()) ++solids;
+    return solids;
+}
+
+ShapeResult OcctGeometryKernel::compoundOf(const std::vector<KernelShape>& shapes) {
+    if (shapes.empty())
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "there is nothing to put together"};
+    try {
+        TopoDS_Compound compound;
+        BRep_Builder builder;
+        builder.MakeCompound(compound);
+        int added = 0;
+        for (const KernelShape& one : shapes) {
+            const auto* occt = dynamic_cast<const OcctShape*>(one.handle());
+            if (occt == nullptr || occt->shape().IsNull()) continue;
+            builder.Add(compound, occt->shape());
+            ++added;
+        }
+        if (added == 0)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "none of those were solids this kernel can hold"};
+        auto handle = std::make_shared<OcctShape>(compound);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& error) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused the compound: ") +
+                               (error.GetMessageString() != nullptr ? error.GetMessageString()
+                                                                    : "no message")};
     }
 }
 

@@ -51,8 +51,10 @@ DocumentRecomputeReport DocumentRecomputeEngine::run() {
 
     DependencyGraph& graph = document_.graph_;
     ObjectRegistry& registry = document_.registry_;
-    const RecomputeContext context{document_, registry, document_.geometryKernel(),
-                                   document_.sketchSolver()};
+    RecomputeContext context{document_, registry, document_.geometryKernel(),
+                             document_.sketchSolver()};
+    context.sourceChain = document_.sourceChain();
+    context.assemblySolver = document_.assemblySolverForNodes();
 
     // Invocation log: which node callbacks actually ran, in execution order.
     // This is what distinguishes Failed from BlockedByDependency afterwards.
