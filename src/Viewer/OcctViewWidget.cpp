@@ -12,6 +12,9 @@
 
 #include <cmath>
 
+#include <gp_Quaternion.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 #include <Aspect_Handle.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS_Shape.hxx>
@@ -108,25 +111,36 @@ void OcctViewWidget::refreshFromDocument() {
         return;
     }
 
-    PartDocument& document = presenter_->document();
-    for (ObjectId id : presenter_->displayableSolids()) {
-        // Resolve the id back to its shape. The viewer reads document state; it
-        // never mutates it and never caches a semantic pointer beyond this call.
-        const ISolidFeature* solid = nullptr;
-        for (const auto& body : document.bodies()) {
-            for (const auto& feature : body->features()) {
-                if (feature->id() != id) continue;
-                solid = dynamic_cast<const ISolidFeature*>(feature.get());
-                break;
-            }
-            if (solid != nullptr) break;
-        }
-        if (solid == nullptr) continue;
-
-        const auto* occtShape = dynamic_cast<const OcctShape*>(solid->currentShape().handle());
+    // WHAT TO DRAW AND WHERE, asked of the presenter (M27).
+    //
+    // Resolving an id back to a shape used to happen here, by walking a part's
+    // bodies -- which is document knowledge, and precisely the knowledge that
+    // cannot live in the widget once there are two kinds of document. The
+    // widget's job is OCCT; which document type it is looking at is not its
+    // business and no longer reaches it.
+    for (const DocumentPresenter::DisplayedShape& displayed : presenter_->displayableShapes()) {
+        const ObjectId id = displayed.id;
+        const auto* occtShape = dynamic_cast<const OcctShape*>(displayed.shape->handle());
         if (occtShape == nullptr) continue; // a foreign kernel's shape is not displayable
 
         Handle(AIS_Shape) presentation = new AIS_Shape(occtShape->shape());
+        // WHERE IT GOES, as a display transform rather than transformed
+        // geometry. An assembly places the SAME part shape once per instance
+        // (§19), so moving the geometry would move every other instance with
+        // it -- and the viewer must not rewrite what it is shown in any case.
+        // Identity for a part costs nothing.
+        {
+            const Transform3D& place = displayed.placement;
+            gp_Trsf motion;
+            // ROTATION THEN TRANSLATION -- the same composition the kernel's
+            // placeShape fixes, quoted here so the picture and the geometry
+            // cannot disagree about what a placement means.
+            motion.SetTransformation(
+                gp_Quaternion(place.rotation.x, place.rotation.y, place.rotation.z,
+                              place.rotation.w),
+                gp_Vec(place.translation.x, place.translation.y, place.translation.z));
+            presentation->SetLocalTransformation(motion);
+        }
         // AIS_Shape defaults to wireframe; a CAD viewer showing a solid as
         // yellow edges is not showing a solid. AIS_Shaded is display mode 1.
         // FACES are what is selectable, not the whole solid (M17.5, superseding
@@ -154,7 +168,13 @@ void OcctViewWidget::refreshFromDocument() {
     // solid and must not read as one. The colour is not the only channel: a
     // sketch has no faces, so it is visibly a set of curves however it is
     // shaded.
-    for (ObjectId id : presenter_->displayableSketches()) {
+    // SKETCHES ARE A PART'S. displayableSketches() is already empty for an
+    // assembly, so this loop simply does not run there -- but the document
+    // it reads through has to be asked for as a part, not assumed to be one.
+    PartDocument* partDocument = presenter_->partOrNull();
+    for (ObjectId id : partDocument == nullptr ? std::vector<ObjectId>{}
+                                              : presenter_->displayableSketches()) {
+        PartDocument& document = *partDocument;
         const Sketch* sketch = document.findSketch(id);
         if (sketch == nullptr) continue;
         // A support frame that is GONE means the sketch's plane is unknown, and
@@ -288,7 +308,9 @@ void OcctViewWidget::readPickedFace() {
     // is a face nothing can name, and picking it is refused.
     if (pickedFace_.planar && presenter_ != nullptr &&
         selectedObjectId_ != kInvalidObjectId) {
-        PartDocument& document = presenter_->document();
+        PartDocument* pickPart = presenter_->partOrNull();
+        if (pickPart == nullptr) return;
+        PartDocument& document = *pickPart;
         for (const auto& body : document.bodies())
             for (const auto& feature : body->features()) {
                 if (feature->id() != selectedObjectId_) continue;

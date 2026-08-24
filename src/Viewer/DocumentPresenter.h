@@ -1,12 +1,15 @@
 #pragma once
 
 #include "Core/Document/ObjectId.h"
+#include "Core/Geometry/MathTypes.h"
 #include <set>
 #include <vector>
 
 namespace paramcad {
 
+class DocumentBase;
 class PartDocument;
+class KernelShape;
 
 // What the viewer is allowed to know about a document (ADR-M4-006).
 //
@@ -23,16 +26,20 @@ class DocumentPresenter {
 public:
     // document must outlive this presenter (same non-owning contract
     // PartDocument::setGeometryKernel uses for the kernel, ADR-M3-003).
-    explicit DocumentPresenter(PartDocument& document) noexcept : document_(&document) {}
+    explicit DocumentPresenter(DocumentBase& document) noexcept : document_(&document) {}
 
-    PartDocument& document() const noexcept { return *document_; }
+    DocumentBase& document() const noexcept { return *document_; }
+    // The document AS A PART, or null. The chain rule, the sketch underlay and
+    // face picking are all part-shaped questions, and an assembly answers none
+    // of them -- so they ask this rather than assuming.
+    PartDocument* partOrNull() const noexcept;
     // Points at a DIFFERENT document -- what File > Open needs.
     //
     // Possible only because this was always a pointer, not a reference:
     // PartDocument is deliberately non-copyable and non-movable, so opening a
     // file cannot replace a document's contents in place. It has to replace
     // WHICH document everything looks at.
-    void setDocument(PartDocument& document) noexcept { document_ = &document; }
+    void setDocument(DocumentBase& document) noexcept { document_ = &document; }
 
     // ObjectIds of the features that currently hold a valid runtime shape, in
     // document order. A feature whose ComputeState is not Valid is omitted:
@@ -58,6 +65,24 @@ public:
     // disagrees.
     std::vector<ObjectId> displayableSketches() const;
 
+    // --- What to draw, whatever kind of document this is (M27) --------------
+    //
+    // ONE SHAPE, WHERE IT GOES. A part's solids are already where they belong,
+    // so their placement is the identity; an assembly's instances are the same
+    // part geometry placed differently, which is the whole of what an assembly
+    // is (§19: placement is never baked back into the part).
+    //
+    // THIS IS WHERE THE DOCUMENT TYPE STOPS. The widget below it knows OCCT and
+    // nothing about documents; resolving an id to a shape used to live in the
+    // widget, walking a part's bodies, which is exactly the knowledge that
+    // cannot be there once there are two kinds of document.
+    struct DisplayedShape {
+        ObjectId id{kInvalidObjectId};
+        const KernelShape* shape{nullptr}; // never null in a returned entry
+        Transform3D placement{};           // identity for a part's own solids
+    };
+    std::vector<DisplayedShape> displayableShapes() const;
+
     // Recomputes and reports whether the display should be rebuilt. The viewer
     // calls this rather than touching the graph itself.
     bool recomputeForDisplay();
@@ -71,7 +96,7 @@ public:
     void toggleHidden(ObjectId id) { setHidden(id, !isHidden(id)); }
 
 private:
-    PartDocument* document_;
+    DocumentBase* document_;
     std::set<ObjectId> hidden_;
 };
 

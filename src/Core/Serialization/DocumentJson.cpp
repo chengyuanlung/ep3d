@@ -4,6 +4,8 @@
 #include "Core/Reference/ReferenceFrame.h"
 
 #include <charconv>
+#include <fstream>
+#include <sstream>
 #include <utility>
 
 namespace paramcad {
@@ -44,6 +46,33 @@ std::optional<ObjectId> idFromString(std::string_view text) {
     const auto result = std::from_chars(first, last, id);
     if (result.ec != std::errc{} || result.ptr != last) return std::nullopt;
     return id;
+}
+
+
+std::optional<DocumentType> documentTypeOfFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+
+    JsonParseError parseError;
+    const JsonValue root = parseJson(buffer.str(), parseError);
+    if (parseError.ok == false || root.type() != JsonType::Object) return std::nullopt;
+
+    // FORMAT FIRST. A JSON file that is not one of ours has no documentType to
+    // read, and answering "Part" for it would send a caller down the part
+    // loader to get a message about a missing field rather than about a file
+    // that is not an EP3D document at all.
+    const JsonValue* format = root.find("format");
+    if (format == nullptr || format->type() != JsonType::String ||
+        format->asString() != kFormatName)
+        return std::nullopt;
+
+    const JsonValue* type = root.find("documentType");
+    if (type == nullptr || type->type() != JsonType::String) return std::nullopt;
+    if (type->asString() == "Assembly") return DocumentType::Assembly;
+    if (type->asString() == "Part") return DocumentType::Part;
+    return std::nullopt;
 }
 
 JsonValue transformToJson(const Transform3D& transform) {

@@ -43,6 +43,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <stdexcept>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -3609,6 +3610,100 @@ int main(int argc, char** argv) {
         // over (ADR-M26-008).
         if (screenshotPath != nullptr && !screenshotWritten)
             fail("--screenshot was given and no file was written");
+
+        // AN UNCAUGHT EXCEPTION IS abort() WITH NO MESSAGE, which is the
+        // silent failure this self test exists to prevent -- reachable, it
+        // turns out, from inside the self test. It says what threw now.
+        try {
+        // --- M27's GATE: the window opens an ASSEMBLY -------------------
+        //
+        // Everything below is reachable only here. AssemblyOutlineTests proves
+        // what the tree SAYS; nothing but starting the program can prove that
+        // the shell holds an assembly at all, draws its instances where the
+        // mates put them, and turns off the commands an assembly does not have.
+        //
+        // The file is built by the CLI from the same example the docs quote, so
+        // this cannot pass against a fixture that has drifted from what a user
+        // would actually open.
+        {
+            const QString assemblyPath = QDir::tempPath() +
+                                         QStringLiteral("/ep3d-selftest/m27-hinge.ep3da");
+            QDir().mkpath(QFileInfo(assemblyPath).path());
+            const QString script = QDir::tempPath() +
+                                   QStringLiteral("/ep3d-selftest/m27-hinge.ep3ds");
+            {
+                QFile out(script);
+                if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                    fail("could not write the assembly script the self test opens");
+                std::string text;
+                {
+                    QFile source(QStringLiteral("examples/hinge.ep3ds"));
+                    if (!source.open(QIODevice::ReadOnly))
+                        fail("examples/hinge.ep3ds is not readable from the working directory");
+                    text = source.readAll().toStdString();
+                }
+                // Save it WHERE THIS TEST CAN FIND IT, without editing the
+                // example: the last `save` line decides, and appending one wins.
+                text += "\nsave " + assemblyPath.toStdString() + "\n";
+                out.write(text.c_str());
+            }
+            const QString ran = window.runScriptFile(script);
+            if (ran.contains(QStringLiteral("stopped")))
+                fail(("the hinge script did not run: " + ran.toStdString()).c_str());
+
+            const QString opened = window.openDocumentFile(assemblyPath);
+            if (opened.contains(QStringLiteral("Could not open")))
+                fail(("the window could not open an assembly: " + opened.toStdString()).c_str());
+
+            // IT IS AN ASSEMBLY, and the shell knows it.
+            if (window.openedDocumentType() != DocumentType::Assembly)
+                fail("File > Open read an assembly file as something else");
+
+            // THE TREE IS INSTANCES AND MATES.
+            const OutlineNode root = window.probeOutline();
+            std::size_t instanceRows = 0;
+            std::size_t mateRows = 0;
+            const std::function<void(const OutlineNode&)> count = [&](const OutlineNode& node) {
+                if (node.kind == OutlineKind::Instance) ++instanceRows;
+                if (node.kind == OutlineKind::Mate) ++mateRows;
+                for (const OutlineNode& child : node.children) count(child);
+            };
+            count(root);
+            if (instanceRows != 2)
+                fail("the assembly tree does not show its two instances");
+            if (mateRows != 1) fail("the assembly tree does not show its mate");
+
+            // AND ON SCREEN, each where its mates put it. Two instances of two
+            // different parts, so two shapes -- and NOT at the same place,
+            // which is the difference between drawing an assembly and drawing
+            // one part twice.
+            const std::vector<DocumentPresenter::DisplayedShape> drawn =
+                presenter.displayableShapes();
+            if (drawn.size() != 2)
+                fail("the viewer is not drawing both instances of the assembly");
+            const Vec3 a = drawn[0].placement.translation;
+            const Vec3 b = drawn[1].placement.translation;
+            if (std::fabs(a.x - b.x) < 1e-9 && std::fabs(a.y - b.y) < 1e-9 &&
+                std::fabs(a.z - b.z) < 1e-9)
+                fail("both instances are drawn in the same place, so the mate did not place them");
+
+            // AND THE PART COMMANDS ARE OFF. part() throws by design; the menus
+            // are the reason it never has to.
+            if (window.insertPadEnabled())
+                fail("Pad is offered on an assembly, which has no sketches to pad");
+
+            // ...and going back to a PART turns them on again, because a
+            // one-way switch would be a different defect.
+            window.newDocumentCommand();
+            if (window.openedDocumentType() != DocumentType::Part)
+                fail("File > New did not go back to a part document");
+        }
+
+        } catch (const std::exception& problem) {
+            fail((std::string("uncaught exception: ") + problem.what()).c_str());
+        } catch (...) {
+            fail("an exception that is not a std::exception escaped the self test");
+        }
 
         if (status == 0) std::printf("SELFTEST OK\n");
         app.quit();

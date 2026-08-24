@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Connector/Connector.h"
+#include "Core/Document/CadDocument.h"
 #include "Core/Document/ObjectId.h"
 #include "Core/Geometry/MathTypes.h"
 #include "Core/Serialization/JsonValue.h"
@@ -74,6 +75,22 @@ void writeHeader(JsonValue& root, std::string_view documentType, ObjectId id,
 // carries the refusal; the return is false on any of them.
 bool readHeader(const JsonValue& root, std::string_view expectedType, FieldError& err,
                 ObjectId& id, std::string& name);
+
+// WHAT KIND OF DOCUMENT A FILE HOLDS, read from the file itself (M27).
+//
+// From the HEADER, not the extension: an extension is a convention and the
+// header is the format (ADR-M26-005 settled this for sub-assemblies, and File >
+// Open needs the same answer). A file renamed by hand still says what it is.
+//
+// nullopt when the file is missing, unreadable, not this format, or has no
+// documentType -- every one of which is a refusal the CALLER must report with
+// its own wording, because "what kind is it" and "why can it not be opened"
+// are different questions and only the caller knows which it is asking.
+//
+// HEADER ONLY. The obvious alternative -- try the assembly loader and take
+// WrongDocumentType as "it is a part" -- reads the whole file to answer a
+// yes/no and then reads it again to use it.
+std::optional<DocumentType> documentTypeOfFile(const std::string& path);
 
 // A Transform3D as seven numbers. Not a matrix: the stored form is the same
 // translation + quaternion the type carries, so a save/load cannot renormalise

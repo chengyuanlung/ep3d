@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/Document/CadDocument.h"
 #include "Core/Document/ObjectId.h"
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Kernel/EdgeQuery.h"
@@ -13,6 +14,7 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <source_location>
 #include <string>
 #include <vector>
 #include <set>
@@ -130,6 +132,13 @@ public:
     // line 90 would throw away the 89 lines that worked, and finding out WHERE
     // a script goes wrong is most of what running one is for.
     QString runScriptFile(const QString& path);
+    // WHAT KIND of document this window is looking at (M27). A readback,
+    // so a self test can assert that File > Open read the file right.
+    DocumentType openedDocumentType() const;
+    // The tree AS BUILT, for the same reason: a builder that produced the
+    // right nodes and was never called would pass every other check.
+    OutlineNode probeOutline() const { return buildOutline(); }
+    bool insertPadEnabled() const;
     // Where this document was last saved or opened from, or empty.
     QString documentPath() const { return documentPath_; }
     // Counted off the document the WINDOW is looking at, which after an Open is
@@ -522,11 +531,21 @@ private:
     //
     // The MENUS are what keep this from being reached on an assembly: every
     // part command is disabled when the document is not one (refreshCommandStates).
-    PartDocument& part() const;
+    // NAMES ITS CALLER when it throws. "this command needs a part document"
+    // with no location is a message that sends a reader through the whole
+    // shell looking for which call it was -- which is exactly what it cost
+    // the first time. source_location is free at every call site that
+    // never throws.
+    PartDocument& part(std::source_location where = std::source_location::current()) const;
     // ...and the same question asked WITHOUT insisting, for the code that has
     // to decide what to show rather than what to do.
     PartDocument* partOrNull() const noexcept;
 
+    // The tree, from whichever builder the document type calls for.
+    OutlineNode buildOutline() const;
+    // Every command that needs a PART. Disabled wholesale when the document
+    // is not one, which is what keeps part() from ever being reached.
+    std::vector<QAction*> partOnlyActions() const;
     void rebuildProperties();
     // The rendering half, shared by the tree's selection and the canvas's.
     void showPropertyRows(const std::vector<PropertyRow>& rows);
@@ -598,7 +617,9 @@ private:
     // Documents this window LOADED, and therefore owns. The one it was
     // constructed with belongs to whoever built it and is never freed here --
     // which is why this holds only what File > Open brought in.
-    std::unique_ptr<PartDocument> ownedDocument_;
+    // OF WHICHEVER TYPE (M27). File > Open decides which by reading the
+    // file's own documentType, so this cannot be the concrete part type.
+    std::unique_ptr<DocumentBase> ownedDocument_;
     QString documentPath_;
     DocumentPresenter* presenter_;
 

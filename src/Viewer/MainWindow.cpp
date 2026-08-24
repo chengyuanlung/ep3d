@@ -9,6 +9,11 @@
 #include <stdexcept>
 
 #include "Cli/SketchScript.h"
+#include "Core/Assembly/AssemblyDocument.h"
+#include "Core/Document/DocumentBase.h"
+#include "Core/Serialization/AssemblyDocumentSerializer.h"
+#include "Core/Serialization/DocumentJson.h"
+#include "Viewer/AssemblyOutline.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Physics/MassProperties.h"
 #include "Viewer/DesignTokens.h"
@@ -551,9 +556,17 @@ void MainWindow::buildDocks() {
     addDockWidget(Qt::RightDockWidgetArea, propertyDock);
 }
 
+OutlineNode MainWindow::buildOutline() const {
+    if (const auto* assembly = dynamic_cast<const AssemblyDocument*>(document_))
+        return AssemblyOutline(*assembly).build(hiddenIds());
+    return DocumentOutline(part()).build(hiddenIds());
+}
+
 void MainWindow::rebuildTree() {
-    const DocumentOutline outline(part());
-    const OutlineNode root = outline.build(hiddenIds());
+    // WHICH BUILDER, by what the document IS (M27). The node type is shared, so
+    // everything below this line -- the widget, the state markers, the colours,
+    // the selection -- does not know or care which one produced the tree.
+    const OutlineNode root = buildOutline();
 
     tree_->clear();
     const std::function<QTreeWidgetItem*(const OutlineNode&)> makeItem =
@@ -596,11 +609,19 @@ void MainWindow::rebuildTree() {
     tree_->expandAll();
 }
 
+DocumentType MainWindow::openedDocumentType() const {
+    return document_ != nullptr ? document_->type() : DocumentType::Part;
+}
+
+bool MainWindow::insertPadEnabled() const {
+    return insertPadAction_ != nullptr && insertPadAction_->isEnabled();
+}
+
 PartDocument* MainWindow::partOrNull() const noexcept {
     return dynamic_cast<PartDocument*>(document_);
 }
 
-PartDocument& MainWindow::part() const {
+PartDocument& MainWindow::part(std::source_location where) const {
     PartDocument* asPart = partOrNull();
     // THROWS rather than returning a reference to nothing. Reaching a part
     // command on an assembly is a programming error -- the menus are what
@@ -608,11 +629,21 @@ PartDocument& MainWindow::part() const {
     // with no name on it. RecomputeContext::part() made the same choice for
     // the same reason.
     if (asPart == nullptr)
-        throw std::logic_error("this command needs a part document, and this one is not");
+        throw std::logic_error(std::string("this command needs a part document, and this "
+                                           "one is not -- asked from ") +
+                               where.file_name() + ":" + std::to_string(where.line()) +
+                               " in " + where.function_name());
     return *asPart;
 }
 
 void MainWindow::rebuildProperties() {
+    // AN ASSEMBLY'S OWN PANEL. An instance, a mate, a named position and an
+    // exploded view are described by AssemblyOutline; a part's parameters,
+    // sketches and features by DocumentOutline. Neither knows about the other.
+    if (const auto* assembly = dynamic_cast<const AssemblyDocument*>(document_)) {
+        showPropertyRows(AssemblyOutline(*assembly).propertiesOf(selectedId_));
+        return;
+    }
     const DocumentOutline outline(part());
 
     // WHAT THE CANVAS HAS PICKED WINS while a sketch is open (M26.7).
@@ -795,6 +826,9 @@ void MainWindow::forgetProvenanceFor(ObjectId sketchId) {
 void MainWindow::forgetAllProvenance() { reconstructionReports_.clear(); }
 
 void MainWindow::pruneProvenance() {
+    // Reconstruction provenance is a PART's: it maps a sketch to what a
+    // DXF import made of it, and an assembly has neither.
+    if (partOrNull() == nullptr) return;
     // Provenance describes a sketch that is IN this document. An entry whose
     // sketch has gone is not merely stale -- ObjectIds are handed out by a
     // process counter and a loaded document's ids come from its file, so the
@@ -869,6 +903,25 @@ bool MainWindow::propertyPanelFitsItsPanel() const {
 }
 
 void MainWindow::updateStatus() {
+    // AN ASSEMBLY HAS NO MASS PROPERTIES of its own (M27). It has instances,
+    // each with a volume of their own, and adding them up is a different
+    // number with a different meaning -- so this reports what an assembly IS
+    // rather than a total nobody asked for.
+    //
+    // Found by the M27 gate: this ran on every refresh and threw out of
+    // part(), which is the accessor doing its job. Every OTHER part-shaped
+    // call in the shell is behind a disabled menu; this one is behind nothing,
+    // because a status bar updates itself.
+    if (const auto* assembly = dynamic_cast<const AssemblyDocument*>(document_)) {
+        const std::size_t instances = assembly->instances().size();
+        const std::size_t mates = assembly->mates().size();
+        statusRight_->setText(QStringLiteral("%1 instance%2   %3 mate%4")
+                                  .arg(instances)
+                                  .arg(instances == 1 ? "" : "s")
+                                  .arg(mates)
+                                  .arg(mates == 1 ? "" : "s"));
+        return;
+    }
     const MassProperties& mp = part().massProperties();
     if (mp.valid) {
         statusRight_->setText(
@@ -936,6 +989,22 @@ void MainWindow::refreshAll() {
 }
 
 std::set<ObjectId> MainWindow::hiddenIds() const {
+    // Hiding is view state keyed by ObjectId and works for either document
+    // type -- but the walk below asks a PART for its tree in order to find out
+    // which ids are still real. For an assembly the same question is asked of
+    // the assembly's own tree, which buildOutline() already picks.
+    if (partOrNull() == nullptr) {
+        std::set<ObjectId> hidden;
+        const std::function<void(const OutlineNode&)> visitAssembly =
+            [&](const OutlineNode& node) {
+                if (node.id != kInvalidObjectId && presenter_->isHidden(node.id))
+                    hidden.insert(node.id);
+                for (const OutlineNode& child : node.children) visitAssembly(child);
+            };
+        if (const auto* assembly = dynamic_cast<const AssemblyDocument*>(document_))
+            visitAssembly(AssemblyOutline(*assembly).build());
+        return hidden;
+    }
     // Ask the presenter which ids are hidden, without the outline needing any
     // notion of a viewer.
     std::set<ObjectId> hidden;
@@ -949,8 +1018,11 @@ std::set<ObjectId> MainWindow::hiddenIds() const {
 }
 
 void MainWindow::reportHealth() {
-    const DocumentOutline outline(part());
-    const OutlineNode root = outline.build(hiddenIds());
+    // THE TREE, from whichever builder the document calls for -- the thing this
+    // reads is a failed ROW, and a row is a row whatever produced it. Asking
+    // DocumentOutline directly was the last part-shaped call left on the
+    // refresh path.
+    const OutlineNode root = buildOutline();
     for (const OutlineNode& child : root.children) {
         if (child.state != OutlineState::Failed) continue;
         // Name the affected object AND the reason, never just "failed"
@@ -967,6 +1039,8 @@ void MainWindow::reportHealth() {
 }
 
 QString MainWindow::selectionSummary() const {
+    // The status bar runs on every refresh with no menu in front of it.
+    if (partOrNull() == nullptr) return QString();
     if (selectedId_ == kInvalidObjectId) return QStringLiteral("No selection");
     // A name, not an ObjectId: UI spec 17 requires that no task need knowledge
     // of internal ids or developer terminology, and the status bar was showing
@@ -1168,6 +1242,7 @@ QString MainWindow::editPropertyByLabel(const std::string& label, const QString&
 }
 
 ObjectId MainWindow::selectedFeatureBody(std::size_t* indexOut) const {
+    if (partOrNull() == nullptr) return kInvalidObjectId;
     if (indexOut != nullptr) *indexOut = static_cast<std::size_t>(-1);
     if (document_ == nullptr || selectedId_ == kInvalidObjectId) return kInvalidObjectId;
     for (const auto& body : part().bodies())
@@ -1198,6 +1273,27 @@ void MainWindow::refreshCommandStates() {
                                  ? QStringLiteral("&Redo")
                                  : QStringLiteral("&Redo %1").arg(QString::fromStdString(label)));
     }
+    // --- AN ASSEMBLY HAS NO PADS (M27) --------------------------------------
+    //
+    // EARLY, not at the end. Everything below asks a PART-shaped question --
+    // is a sketch selected, is there a solid to dress, is there a tail to
+    // build on -- and computing those answers for a document that has none of
+    // them is how part() came to be reached on every refresh. Undo and Redo
+    // above are already settled, and they belong to any document.
+    //
+    // THIS IS WHAT KEEPS part() FROM BEING REACHED. That accessor throws by
+    // design; this is the reason it never has to. Disabling is also the honest
+    // form of the refusal -- a command that is offered and then explains
+    // itself is worse than one that was never offered, because the refusal
+    // arrives after the click.
+    if (partOrNull() == nullptr) {
+        for (QAction* action : partOnlyActions())
+            if (action != nullptr) action->setEnabled(false);
+        for (QAction* action : sketchModeActions_)
+            if (action != nullptr) action->setEnabled(false);
+        return;
+    }
+
     const ObjectId body = selectedFeatureBody();
     if (suppressAction_ != nullptr) suppressAction_->setEnabled(body != kInvalidObjectId);
     if (rollbackAction_ != nullptr) rollbackAction_->setEnabled(body != kInvalidObjectId);
@@ -1263,9 +1359,27 @@ void MainWindow::refreshCommandStates() {
     if (finishSketchAction_ != nullptr) finishSketchAction_->setEnabled(sketching);
     for (QAction* action : sketchModeActions_)
         if (action != nullptr) action->setEnabled(sketching);
+
+}
+
+std::vector<QAction*> MainWindow::partOnlyActions() const {
+    // ONE LIST, because "which commands need a part" is one fact. Built from
+    // the members rather than from a hand-kept name list, so a command that is
+    // added and forgotten here is a compile-visible omission rather than a
+    // button that quietly works on the wrong document type.
+    return {insertPadAction_,      insertPocketAction_,    insertRevolveAction_,
+            insertSweepAction_,    insertLoftAction_,      insertShellAction_,
+            insertHoleAction_,     insertUnionAction_,     insertSubtractAction_,
+            insertIntersectAction_, insertCircularPatternAction_,
+            insertCurvePatternAction_, insertFilletAction_, insertChamferAction_,
+            exportAction_,         sketchOnFaceAction_,    newSketchAction_,
+            editSketchAction_,     finishSketchAction_,    suppressAction_,
+            rollbackAction_,       rollForwardAction_,     deleteObjectAction_};
 }
 
 ObjectId MainWindow::selectedSketch() const {
+    // An assembly has no sketches, so nothing is selected in one.
+    if (partOrNull() == nullptr) return kInvalidObjectId;
     if (document_ == nullptr) return kInvalidObjectId;
     for (const Sketch* sketch : part().sketches())
         if (sketch->id() == selectedId_) return sketch->id();
@@ -1273,6 +1387,8 @@ ObjectId MainWindow::selectedSketch() const {
 }
 
 ObjectId MainWindow::currentTail() const {
+    // ...and no feature chain to have a tail.
+    if (partOrNull() == nullptr) return kInvalidObjectId;
     // The presenter already computes exactly this -- the ACTIVE, unconsumed
     // solid -- and asking it twice would be two places to keep in step.
     if (presenter_ == nullptr) return kInvalidObjectId;
@@ -1308,6 +1424,7 @@ QString MainWindow::describeCreatedFeature(const char* what, ObjectId featureId,
 // Numbered from 1 and skipping what is taken, so deleting Pocket2 and adding
 // another gives Pocket2 back rather than climbing forever.
 std::string MainWindow::uniqueObjectName(const std::string& base) const {
+    if (partOrNull() == nullptr) return base;
     std::set<std::string> taken;
     // PARAMETERS TOO, and this half is not cosmetic: an expression names a
     // parameter by NAME (`#PocketDepth`), and findByName answers with the
@@ -1461,6 +1578,7 @@ MainWindow::DressSelection MainWindow::selectionForDress(ObjectId baseFeatureId)
 // own diagnostic rather than "created" regardless (ADR-M17-022).
 
 std::vector<ObjectId> MainWindow::selectedSketches() const {
+    if (partOrNull() == nullptr) return {};
     std::vector<ObjectId> found;
     if (document_ == nullptr || tree_ == nullptr) return found;
     std::set<ObjectId> chosen;
@@ -1477,11 +1595,14 @@ std::vector<ObjectId> MainWindow::selectedSketches() const {
 }
 
 std::vector<ObjectId> MainWindow::unconsumedSolids() const {
+    if (partOrNull() == nullptr) return {};
     if (presenter_ == nullptr) return {};
     return presenter_->displayableSolids();
 }
 
 MainWindow::PickedFaceQuery MainWindow::selectionForFace() const {
+    // Faces belong to a part's solids. An assembly picks instances.
+    if (partOrNull() == nullptr) return PickedFaceQuery{};
     PickedFaceQuery out;
     if (viewer_ == nullptr || viewer_->pickedFace().createdBy == 0) {
         out.refusal = QStringLiteral("Click a face in the 3D view first");
@@ -2169,7 +2290,7 @@ QString MainWindow::newDocumentCommand() {
 
     ownedDocument_ = std::move(fresh);
     document_ = ownedDocument_.get();
-    presenter_->setDocument(part());
+    presenter_->setDocument(*document_);
     if (sketchCanvas_ != nullptr) sketchCanvas_->setSketch(partOrNull(), kInvalidObjectId);
     selectedId_ = kInvalidObjectId;
     // NO PATH. The next Save must ask where, or the new document would
@@ -2267,19 +2388,23 @@ void MainWindow::onSaveAsRequested() {
 }
 
 std::vector<const Sketch*> MainWindow::openedSketches() const {
+    if (partOrNull() == nullptr) return {};
     return document_ != nullptr ? part().sketches() : std::vector<const Sketch*>{};
 }
 
 const Sketch* MainWindow::openedSketchById(ObjectId id) const {
+    if (partOrNull() == nullptr) return nullptr;
     return document_ != nullptr ? part().findSketch(id) : nullptr;
 }
 
 std::size_t MainWindow::openedDocumentFeatureCount() const {
+    if (partOrNull() == nullptr) return 0;
     if (document_ == nullptr || part().bodies().empty()) return 0;
     return part().bodies().front()->features().size();
 }
 
 std::size_t MainWindow::openedDocumentParameterCount() const {
+    if (partOrNull() == nullptr) return 0;
     return document_ != nullptr ? part().parameters().items().size() : 0;
 }
 
@@ -2289,6 +2414,20 @@ QString MainWindow::saveDocumentFile(const QString& path) {
     // makes what is on screen match what is in the file.
     if (inSketchMode()) finishSketchCommand();
 
+    // WHICHEVER KIND IT IS (M27). Save is on Ctrl+S and in the File menu, and
+    // neither is disabled for an assembly -- nor should they be: an assembly is
+    // a document and saving it is the most ordinary thing to want. This is the
+    // matching half of File > Open reading documentType.
+    if (const auto* assembly = dynamic_cast<const AssemblyDocument*>(document_)) {
+        const SaveResult savedAssembly =
+            saveAssemblyDocumentToFile(*assembly, path.toStdString());
+        if (!savedAssembly)
+            return QStringLiteral("Could not save: %1")
+                .arg(QString::fromStdString(savedAssembly.message));
+        documentPath_ = path;
+        setWindowTitle(QStringLiteral("EP3D - %1").arg(QFileInfo(path).fileName()));
+        return QStringLiteral("Saved to %1").arg(path);
+    }
     const SaveResult saved = savePartDocumentToFile(part(), path.toStdString());
     if (!saved) {
         // NAMES the reason. "Could not save" leaves a user staring at a
@@ -2301,11 +2440,27 @@ QString MainWindow::saveDocumentFile(const QString& path) {
 }
 
 QString MainWindow::openDocumentFile(const QString& path) {
-    LoadResult loaded = loadPartDocumentFromFile(path.toStdString());
-    if (!loaded) {
-        // NOTHING CHANGED. The loader never returns a half-restored document,
+    // WHICH KIND OF DOCUMENT, ASKED OF THE FILE (M27).
+    //
+    // Not of the extension. ADR-M26-005 settled this for sub-assemblies and the
+    // reason is the same here: an extension is a convention and the header is
+    // the format. A file renamed by hand still says what it is, and a file that
+    // lies about what it is gets refused by name rather than half-loaded.
+    std::unique_ptr<DocumentBase> adopted;
+    std::string failure;
+    if (docjson::documentTypeOfFile(path.toStdString()) == DocumentType::Assembly) {
+        AssemblyLoadResult loaded = loadAssemblyDocumentFromFile(path.toStdString());
+        if (loaded) adopted = std::move(loaded.document);
+        else failure = loaded.message;
+    } else {
+        LoadResult loaded = loadPartDocumentFromFile(path.toStdString());
+        if (loaded) adopted = std::move(loaded.document);
+        else failure = loaded.message;
+    }
+    if (adopted == nullptr) {
+        // NOTHING CHANGED. Neither loader returns a half-restored document,
         // so the one on screen is still exactly what it was.
-        return QStringLiteral("Could not open: %1").arg(QString::fromStdString(loaded.message));
+        return QStringLiteral("Could not open: %1").arg(QString::fromStdString(failure));
     }
 
     // The kernel and the solver are the APPLICATION'S, not the file's -- they
@@ -2313,17 +2468,19 @@ QString MainWindow::openDocumentFile(const QString& path) {
     // neither. Carried across from the document being replaced, which is where
     // this window got them in the first place.
     if (document_ != nullptr) {
-        loaded.document->setGeometryKernel(document_->geometryKernel());
-        loaded.document->setSketchSolver(document_->sketchSolver());
+        adopted->setGeometryKernel(document_->geometryKernel());
+        adopted->setSketchSolver(document_->sketchSolver());
     }
 
     if (inSketchMode()) finishSketchCommand();
     // ADOPTED, then pointed at. The previous document is freed only if THIS
     // window owned it; the one passed to the constructor belongs to its own
     // owner and outlives us.
-    ownedDocument_ = std::move(loaded.document);
+    ownedDocument_ = std::move(adopted);
     document_ = ownedDocument_.get();
-    presenter_->setDocument(part());
+    presenter_->setDocument(*document_);
+    // NULL FOR AN ASSEMBLY, which is what the canvas is told rather than being
+    // handed something it cannot sketch on.
     if (sketchCanvas_ != nullptr) sketchCanvas_->setSketch(partOrNull(), kInvalidObjectId);
     selectedId_ = kInvalidObjectId;
 
@@ -2366,6 +2523,13 @@ QString MainWindow::runScriptFile(const QString& path) {
     // THE SAME INTERPRETER the CLI and the socket use. A second one that
     // understood "nearly the same" vocabulary would be this project's
     // best-known defect shape, reached through the File menu.
+    // THE INTERPRETER IS A PART'S. Its vocabulary builds sketches and
+    // features, and an assembly has neither -- so this refuses by name rather
+    // than throwing out of part(). (The CLI drives assemblies through its own
+    // `assembly` verb, against documents it owns.)
+    if (partOrNull() == nullptr)
+        return say(QStringLiteral("Scripts run against a part, and this document is an "
+                                  "assembly. File > New first to start a part."));
     const ScriptOutcome outcome = RunSketchScript(part(), text.toStdString());
 
     // THE VIEW, whatever happened. A script that fails at line 90 has already
