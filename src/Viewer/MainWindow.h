@@ -29,6 +29,7 @@ class QPushButton;
 
 namespace paramcad {
 
+class DocumentBase;
 class PartDocument;
 class DocumentPresenter;
 class OcctViewWidget;
@@ -510,6 +511,22 @@ private:
     // Puts a one-line message where it belongs for the current mode.
     void reportSketchOrPlainStatus(const QString& message);
     void rebuildTree();
+    // THE DOCUMENT AS A PART, checked.
+    //
+    // Every part-authoring command -- pad, pocket, sketch, pattern -- goes
+    // through here, and an assembly has none of them. Written as a checked
+    // accessor rather than a cast at each of ninety-three call sites for the
+    // reason RecomputeContext::part() already gives: one place asks the
+    // question, so one place can answer it wrongly, and it throws rather than
+    // returning a null nobody checks.
+    //
+    // The MENUS are what keep this from being reached on an assembly: every
+    // part command is disabled when the document is not one (refreshCommandStates).
+    PartDocument& part() const;
+    // ...and the same question asked WITHOUT insisting, for the code that has
+    // to decide what to show rather than what to do.
+    PartDocument* partOrNull() const noexcept;
+
     void rebuildProperties();
     // The rendering half, shared by the tree's selection and the canvas's.
     void showPropertyRows(const std::vector<PropertyRow>& rows);
@@ -567,7 +584,17 @@ private:
     ObjectId selectedSketch() const;
     std::set<ObjectId> hiddenIds() const;
 
-    PartDocument* document_;
+    // THE DOCUMENT, of whichever type (M27).
+    //
+    // A DocumentBase, because the shell is about to hold two kinds and the
+    // alternative -- a second window with its own menu, toolbar, tree,
+    // property panel, undo and save -- is four of the five things P3 exists to
+    // stop being written twice.
+    //
+    // Everything that is TRUE OF ANY DOCUMENT goes through this pointer:
+    // transactions, undo, recompute, frames, names. Everything that is only
+    // true of a PART goes through part() below, which says so.
+    DocumentBase* document_;
     // Documents this window LOADED, and therefore owns. The one it was
     // constructed with belongs to whoever built it and is never freed here --
     // which is why this holds only what File > Open brought in.

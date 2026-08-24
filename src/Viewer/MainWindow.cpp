@@ -6,6 +6,7 @@
 #include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/SweepFeature.h"
 #include <set>
+#include <stdexcept>
 
 #include "Cli/SketchScript.h"
 #include "Core/Document/PartDocument.h"
@@ -551,7 +552,7 @@ void MainWindow::buildDocks() {
 }
 
 void MainWindow::rebuildTree() {
-    const DocumentOutline outline(*document_);
+    const DocumentOutline outline(part());
     const OutlineNode root = outline.build(hiddenIds());
 
     tree_->clear();
@@ -595,8 +596,24 @@ void MainWindow::rebuildTree() {
     tree_->expandAll();
 }
 
+PartDocument* MainWindow::partOrNull() const noexcept {
+    return dynamic_cast<PartDocument*>(document_);
+}
+
+PartDocument& MainWindow::part() const {
+    PartDocument* asPart = partOrNull();
+    // THROWS rather than returning a reference to nothing. Reaching a part
+    // command on an assembly is a programming error -- the menus are what
+    // prevent it -- and a null dereference here would report it as a crash
+    // with no name on it. RecomputeContext::part() made the same choice for
+    // the same reason.
+    if (asPart == nullptr)
+        throw std::logic_error("this command needs a part document, and this one is not");
+    return *asPart;
+}
+
 void MainWindow::rebuildProperties() {
-    const DocumentOutline outline(*document_);
+    const DocumentOutline outline(part());
 
     // WHAT THE CANVAS HAS PICKED WINS while a sketch is open (M26.7).
     //
@@ -740,7 +757,7 @@ void MainWindow::showPropertyRows(const std::vector<PropertyRow>& rows) {
             // says so, and names the expression: a number whose source is
             // invisible is a number the user cannot check.
             if (row.label == "Value" && row.parameterId != kInvalidObjectId) {
-                const Parameter* driver = document_->parameters().findById(row.parameterId);
+                const Parameter* driver = part().parameters().findById(row.parameterId);
                 value->setToolTip(
                     QString::fromStdString(row.value) + QStringLiteral("\n") +
                     QString::fromStdString(
@@ -790,7 +807,7 @@ void MainWindow::pruneProvenance() {
         return;
     }
     for (auto it = reconstructionReports_.begin(); it != reconstructionReports_.end();)
-        it = document_->findSketch(it->first) == nullptr ? reconstructionReports_.erase(it)
+        it = part().findSketch(it->first) == nullptr ? reconstructionReports_.erase(it)
                                                          : std::next(it);
 }
 
@@ -852,7 +869,7 @@ bool MainWindow::propertyPanelFitsItsPanel() const {
 }
 
 void MainWindow::updateStatus() {
-    const MassProperties& mp = document_->massProperties();
+    const MassProperties& mp = part().massProperties();
     if (mp.valid) {
         statusRight_->setText(
             QStringLiteral("Volume %1 mm^3   Mass %2 kg   COM (%3, %4, %5) mm")
@@ -922,7 +939,7 @@ std::set<ObjectId> MainWindow::hiddenIds() const {
     // Ask the presenter which ids are hidden, without the outline needing any
     // notion of a viewer.
     std::set<ObjectId> hidden;
-    const DocumentOutline outline(*document_);
+    const DocumentOutline outline(part());
     const std::function<void(const OutlineNode&)> visit = [&](const OutlineNode& node) {
         if (node.id != kInvalidObjectId && presenter_->isHidden(node.id)) hidden.insert(node.id);
         for (const OutlineNode& child : node.children) visit(child);
@@ -932,7 +949,7 @@ std::set<ObjectId> MainWindow::hiddenIds() const {
 }
 
 void MainWindow::reportHealth() {
-    const DocumentOutline outline(*document_);
+    const DocumentOutline outline(part());
     const OutlineNode root = outline.build(hiddenIds());
     for (const OutlineNode& child : root.children) {
         if (child.state != OutlineState::Failed) continue;
@@ -954,7 +971,7 @@ QString MainWindow::selectionSummary() const {
     // A name, not an ObjectId: UI spec 17 requires that no task need knowledge
     // of internal ids or developer terminology, and the status bar was showing
     // "Selected object 12".
-    const DocumentOutline outline(*document_);
+    const DocumentOutline outline(part());
     const OutlineNode root = outline.build(hiddenIds());
     const std::function<const OutlineNode*(const OutlineNode&)> find =
         [&](const OutlineNode& node) -> const OutlineNode* {
@@ -1051,7 +1068,7 @@ void MainWindow::onPropertyCommitted(int row, int column) {
     // What is left here is what only a widget can do: show the result. That
     // split is the M6.14 lesson applied on purpose rather than after the fact.
     const PropertyEditOutcome outcome =
-        ApplyPropertyEdit(*document_, parameterId, field, typed);
+        ApplyPropertyEdit(part(), parameterId, field, typed);
 
     // Immediate feedback, no modal dialog (UI spec 7).
     statusLeft_->setText(QString::fromStdString(outcome.status));
@@ -1153,7 +1170,7 @@ QString MainWindow::editPropertyByLabel(const std::string& label, const QString&
 ObjectId MainWindow::selectedFeatureBody(std::size_t* indexOut) const {
     if (indexOut != nullptr) *indexOut = static_cast<std::size_t>(-1);
     if (document_ == nullptr || selectedId_ == kInvalidObjectId) return kInvalidObjectId;
-    for (const auto& body : document_->bodies())
+    for (const auto& body : part().bodies())
         for (std::size_t i = 0; i < body->features().size(); ++i)
             if (body->features()[i]->id() == selectedId_) {
                 if (indexOut != nullptr) *indexOut = i;
@@ -1185,7 +1202,7 @@ void MainWindow::refreshCommandStates() {
     if (suppressAction_ != nullptr) suppressAction_->setEnabled(body != kInvalidObjectId);
     if (rollbackAction_ != nullptr) rollbackAction_->setEnabled(body != kInvalidObjectId);
     if (rollForwardAction_ != nullptr)
-        rollForwardAction_->setEnabled(!document_->bodies().empty());
+        rollForwardAction_->setEnabled(!part().bodies().empty());
 
     // DISABLED IN SKETCH MODE, and that is what frees the Del key.
     //
@@ -1250,7 +1267,7 @@ void MainWindow::refreshCommandStates() {
 
 ObjectId MainWindow::selectedSketch() const {
     if (document_ == nullptr) return kInvalidObjectId;
-    for (const Sketch* sketch : document_->sketches())
+    for (const Sketch* sketch : part().sketches())
         if (sketch->id() == selectedId_) return sketch->id();
     return kInvalidObjectId;
 }
@@ -1298,10 +1315,10 @@ std::string MainWindow::uniqueObjectName(const std::string& base) const {
     // mentioning it binds to whichever was created first -- and the panel
     // shows two identical rows, so the user cannot see which one they are
     // editing either.
-    for (const auto& parameter : document_->parameters().items())
+    for (const auto& parameter : part().parameters().items())
         taken.insert(parameter->name());
-    for (const Sketch* sketch : document_->sketches()) taken.insert(sketch->name());
-    for (const auto& body : document_->bodies())
+    for (const Sketch* sketch : part().sketches()) taken.insert(sketch->name());
+    for (const auto& body : part().bodies())
         for (const auto& feature : body->features()) taken.insert(feature->name());
 
     for (int suffix = 1; suffix < 10000; ++suffix) {
@@ -1320,12 +1337,12 @@ QString MainWindow::insertPadFromSelection() {
         statusLeft_->setText(message);
         return message;
     }
-    if (document_->bodies().empty()) document_->addBody("Body001");
-    Body& body = *document_->bodies().front();
+    if (part().bodies().empty()) part().addBody("Body001");
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Pad");
     Parameter& length =
-        document_->addParameter(uniqueObjectName("PadLength"), 20.0, UnitType::Millimeter);
-    PadFeature& pad = document_->addPadFeature(body, uniqueObjectName("Pad"), sketch, length.id());
+        part().addParameter(uniqueObjectName("PadLength"), 20.0, UnitType::Millimeter);
+    PadFeature& pad = part().addPadFeature(body, uniqueObjectName("Pad"), sketch, length.id());
     document_->commitTransaction();
     const ObjectId created = pad.id();
     const DocumentRecomputeReport report = document_->recompute();
@@ -1348,14 +1365,14 @@ QString MainWindow::insertPocketFromSelection() {
         statusLeft_->setText(message);
         return message;
     }
-    Body& body = *document_->bodies().front();
+    Body& body = *part().bodies().front();
     // Measured BEFORE the pocket exists, so the comparison below is against the
     // solid the user was actually looking at.
-    const double volumeBefore = document_->massProperties().volumeMm3;
+    const double volumeBefore = part().massProperties().volumeMm3;
     document_->beginTransaction("Insert Pocket");
     Parameter& depth =
-        document_->addParameter(uniqueObjectName("PocketDepth"), 10.0, UnitType::Millimeter);
-    PocketFeature& pocket = document_->addPocketFeature(body, uniqueObjectName("Pocket"), base, sketch, depth.id());
+        part().addParameter(uniqueObjectName("PocketDepth"), 10.0, UnitType::Millimeter);
+    PocketFeature& pocket = part().addPocketFeature(body, uniqueObjectName("Pocket"), base, sketch, depth.id());
     document_->commitTransaction();
     const ObjectId created = pocket.id();
     const DocumentRecomputeReport report = document_->recompute();
@@ -1378,7 +1395,7 @@ QString MainWindow::insertPocketFromSelection() {
         // Failing it in Core would overturn a deliberate decision to make one
         // common mistake legible. The shell is where "what just happened"
         // belongs, and it can say so without changing what is allowed.
-        const double volumeAfter = document_->massProperties().volumeMm3;
+        const double volumeAfter = part().massProperties().volumeMm3;
         if (volumeBefore > 0.0 && volumeAfter >= volumeBefore * (1.0 - 1e-9)) {
             message = QStringLiteral(
                 "Pocket created, but it removed no material -- its tool is entirely outside "
@@ -1410,7 +1427,7 @@ MainWindow::DressSelection MainWindow::selectionForDress(ObjectId baseFeatureId)
     // Every face of the solid about to be dressed -- the base's own shape,
     // which is what the query will be answered against.
     const ISolidFeature* solid = nullptr;
-    for (const auto& body : document_->bodies())
+    for (const auto& body : part().bodies())
         for (const auto& feature : body->features())
             if (feature->id() == baseFeatureId)
                 solid = dynamic_cast<const ISolidFeature*>(feature.get());
@@ -1454,7 +1471,7 @@ std::vector<ObjectId> MainWindow::selectedSketches() const {
     // command whose answer depended on an order nobody can see would be a
     // command nobody can predict. Document order is a rule the user controls:
     // it is the order the sketches were made in, and it is what the tree shows.
-    for (const Sketch* sketch : document_->sketches())
+    for (const Sketch* sketch : part().sketches())
         if (chosen.count(sketch->id()) != 0) found.push_back(sketch->id());
     return found;
 }
@@ -1490,11 +1507,11 @@ QString MainWindow::insertSweepFromSelection() {
         statusLeft_->setText(message);
         return message;
     }
-    if (document_->bodies().empty()) document_->addBody("Body001");
-    Body& body = *document_->bodies().front();
+    if (part().bodies().empty()) part().addBody("Body001");
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Sweep");
     SweepFeature& sweep =
-        document_->addSweepFeature(body, uniqueObjectName("Sweep"), sketches[0], sketches[1]);
+        part().addSweepFeature(body, uniqueObjectName("Sweep"), sketches[0], sketches[1]);
     document_->commitTransaction();
     const ObjectId created = sweep.id();
     const DocumentRecomputeReport report = document_->recompute();
@@ -1520,10 +1537,10 @@ QString MainWindow::insertLoftFromSelection() {
         statusLeft_->setText(message);
         return message;
     }
-    if (document_->bodies().empty()) document_->addBody("Body001");
-    Body& body = *document_->bodies().front();
+    if (part().bodies().empty()) part().addBody("Body001");
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Loft");
-    LoftFeature& loft = document_->addLoftFeature(body, uniqueObjectName("Loft"), sketches);
+    LoftFeature& loft = part().addLoftFeature(body, uniqueObjectName("Loft"), sketches);
     document_->commitTransaction();
     const ObjectId created = loft.id();
     const DocumentRecomputeReport report = document_->recompute();
@@ -1553,11 +1570,11 @@ QString MainWindow::insertShellOnTail() {
         statusLeft_->setText(message);
         return message;
     }
-    Body& body = *document_->bodies().front();
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Shell");
     Parameter& thickness =
-        document_->addParameter(uniqueObjectName("ShellThickness"), 2.0, UnitType::Millimeter);
-    ShellFeature& shell = document_->addShellFeature(body, uniqueObjectName("Shell"), base,
+        part().addParameter(uniqueObjectName("ShellThickness"), 2.0, UnitType::Millimeter);
+    ShellFeature& shell = part().addShellFeature(body, uniqueObjectName("Shell"), base,
                                                      FaceSelection{opening.query}, thickness.id());
     document_->commitTransaction();
     const ObjectId created = shell.id();
@@ -1587,16 +1604,16 @@ QString MainWindow::insertHoleFromSelection() {
         statusLeft_->setText(message);
         return message;
     }
-    Body& body = *document_->bodies().front();
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Hole");
     Parameter& diameter =
-        document_->addParameter(uniqueObjectName("HoleDiameter"), 5.0, UnitType::Millimeter);
+        part().addParameter(uniqueObjectName("HoleDiameter"), 5.0, UnitType::Millimeter);
     // ZERO DEPTH MEANS ALL THE WAY THROUGH, which is what a hole usually is and
     // what the feature spells a depth of nought as. The same rule the script's
     // `hole` verb follows when its depth is left out.
     Parameter& depth =
-        document_->addParameter(uniqueObjectName("HoleDepth"), 0.0, UnitType::Millimeter);
-    HoleFeature& hole = document_->addHoleFeature(body, uniqueObjectName("Hole"), base, sketch,
+        part().addParameter(uniqueObjectName("HoleDepth"), 0.0, UnitType::Millimeter);
+    HoleFeature& hole = part().addHoleFeature(body, uniqueObjectName("Hole"), base, sketch,
                                                   diameter.id(), depth.id());
     document_->commitTransaction();
     const ObjectId created = hole.id();
@@ -1630,9 +1647,9 @@ QString MainWindow::insertBooleanOnTail(BooleanOperation operation, const char* 
     // script's boolean verbs take the same two in the same order.
     const ObjectId target = loose[loose.size() - 2];
     const ObjectId tool = loose[loose.size() - 1];
-    Body& body = *document_->bodies().front();
+    Body& body = *part().bodies().front();
     document_->beginTransaction(std::string("Insert ") + what);
-    BooleanFeature& boolean = document_->addBooleanFeature(body, uniqueObjectName(what),
+    BooleanFeature& boolean = part().addBooleanFeature(body, uniqueObjectName(what),
                                                             operation, target, tool);
     document_->commitTransaction();
     const ObjectId created = boolean.id();
@@ -1656,21 +1673,21 @@ QString MainWindow::insertCircularPatternOnTail() {
         statusLeft_->setText(message);
         return message;
     }
-    Body& body = *document_->bodies().front();
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Circular Pattern");
     // THE AXIS IS THE WORLD Z through the origin, which is what a frame at the
     // origin gives -- the same convention the script's `ring` verb uses, and
     // the same +Z a mirror's normal and a linear pattern's direction follow.
     ReferenceFrame& axis = document_->addFrame(uniqueObjectName("RingAxis"));
     Parameter& count =
-        document_->addParameter(uniqueObjectName("RingCount"), 4.0, UnitType::Unitless);
+        part().addParameter(uniqueObjectName("RingCount"), 4.0, UnitType::Unitless);
     // THE STEP IS PER INSTANCE, not a total sweep: four at ninety degrees is a
     // full ring. Four at three-hundred-and-sixty would be four copies on top of
     // each other.
-    Parameter& step = document_->addParameter(uniqueObjectName("RingStep"),
+    Parameter& step = part().addParameter(uniqueObjectName("RingStep"),
                                               90.0 * 3.14159265358979323846 / 180.0,
                                               UnitType::Radian);
-    CircularPatternFeature& ring = document_->addCircularPatternFeature(
+    CircularPatternFeature& ring = part().addCircularPatternFeature(
         body, uniqueObjectName("Ring"), base, axis.id(), count.id(), step.id());
     document_->commitTransaction();
     const ObjectId created = ring.id();
@@ -1700,11 +1717,11 @@ QString MainWindow::insertCurvePatternFromSelection() {
         statusLeft_->setText(message);
         return message;
     }
-    Body& body = *document_->bodies().front();
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Curve Pattern");
     Parameter& count =
-        document_->addParameter(uniqueObjectName("AlongCount"), 5.0, UnitType::Unitless);
-    CurvePatternFeature& along = document_->addCurvePatternFeature(
+        part().addParameter(uniqueObjectName("AlongCount"), 5.0, UnitType::Unitless);
+    CurvePatternFeature& along = part().addCurvePatternFeature(
         body, uniqueObjectName("Along"), base, path, count.id());
     document_->commitTransaction();
     const ObjectId created = along.id();
@@ -1729,7 +1746,7 @@ QString MainWindow::exportCurrentSolid() {
         return message;
     }
     const ISolidFeature* solid = nullptr;
-    for (const auto& body : document_->bodies())
+    for (const auto& body : part().bodies())
         for (const auto& feature : body->features())
             if (feature->id() == base) solid = dynamic_cast<const ISolidFeature*>(feature.get());
     if (solid == nullptr || solid->currentState() != ComputeState::Valid ||
@@ -1783,15 +1800,15 @@ QString MainWindow::importSolidAsFeature() {
         QStringLiteral("STEP (*.step *.stp)"));
     if (path.isEmpty()) return QStringLiteral("Import cancelled");
 
-    if (document_->bodies().empty()) document_->addBody("Body001");
-    Body& body = *document_->bodies().front();
+    if (part().bodies().empty()) part().addBody("Body001");
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Import");
     // IT STORES THE PATH, NOT THE GEOMETRY (ADR-M22-003). The file is the
     // source of truth and is read again on every rebuild -- so a re-exported
     // source shows up here, and a source that went away stops this feature by
     // name rather than leaving a copy nobody can trace back to anything.
     ImportFeature& brought =
-        document_->addImportFeature(body, uniqueObjectName("Import"), path.toStdString());
+        part().addImportFeature(body, uniqueObjectName("Import"), path.toStdString());
     document_->commitTransaction();
     const ObjectId created = brought.id();
     const DocumentRecomputeReport report = document_->recompute();
@@ -1820,12 +1837,12 @@ QString MainWindow::insertFilletOnTail() {
         statusLeft_->setText(chosen.refusal);
         return chosen.refusal;
     }
-    Body& body = *document_->bodies().front();
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Fillet");
     Parameter& radius =
-        document_->addParameter(uniqueObjectName("FilletRadius"), 2.0, UnitType::Millimeter);
-    FilletFeature& fillet = document_->addFilletFeature(body, uniqueObjectName("Fillet"), base, radius.id());
-    document_->setFeatureEdgeSelection(fillet.id(), chosen.selection);
+        part().addParameter(uniqueObjectName("FilletRadius"), 2.0, UnitType::Millimeter);
+    FilletFeature& fillet = part().addFilletFeature(body, uniqueObjectName("Fillet"), base, radius.id());
+    part().setFeatureEdgeSelection(fillet.id(), chosen.selection);
     document_->commitTransaction();
     const ObjectId created = fillet.id();
     // The FEATURE's own diagnostic (ADR-M17-022), which Fillet and Chamfer were
@@ -1859,14 +1876,14 @@ QString MainWindow::insertChamferOnTail() {
         statusLeft_->setText(chosen.refusal);
         return chosen.refusal;
     }
-    Body& body = *document_->bodies().front();
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Chamfer");
     Parameter& distance =
-        document_->addParameter(uniqueObjectName("ChamferDistance"), 2.0,
+        part().addParameter(uniqueObjectName("ChamferDistance"), 2.0,
                                 UnitType::Millimeter);
     ChamferFeature& chamfer =
-        document_->addChamferFeature(body, uniqueObjectName("Chamfer"), base, distance.id());
-    document_->setFeatureEdgeSelection(chamfer.id(), chosen.selection);
+        part().addChamferFeature(body, uniqueObjectName("Chamfer"), base, distance.id());
+    part().setFeatureEdgeSelection(chamfer.id(), chosen.selection);
     document_->commitTransaction();
     const ObjectId created = chamfer.id();
     const DocumentRecomputeReport report = document_->recompute();
@@ -1890,7 +1907,7 @@ void MainWindow::onInsertRevolveRequested() {
         statusLeft_->setText(QStringLiteral("Select a sketch to revolve"));
         return;
     }
-    const Sketch* sketch = document_->findSketch(sketchId);
+    const Sketch* sketch = part().findSketch(sketchId);
     if (sketch == nullptr) return;
 
     // THE AXIS. A single construction line is the draughtsman's centreline and
@@ -1944,7 +1961,7 @@ void MainWindow::onInsertRevolveRequested() {
 }
 
 SketchEntityId MainWindow::obviousRevolveAxis(ObjectId sketchId) const {
-    const Sketch* sketch = document_ != nullptr ? document_->findSketch(sketchId) : nullptr;
+    const Sketch* sketch = document_ != nullptr ? part().findSketch(sketchId) : nullptr;
     if (sketch == nullptr) return kInvalidSketchEntityId;
     SketchEntityId found = kInvalidSketchEntityId;
     for (const SketchEntity& entity : sketch->entities()) {
@@ -1966,21 +1983,21 @@ QString MainWindow::insertRevolveFromSelection(SketchEntityId axisEntityId,
         statusLeft_->setText(message);
         return message;
     }
-    const Sketch* sketch = document_->findSketch(sketchId);
+    const Sketch* sketch = part().findSketch(sketchId);
     if (sketch == nullptr || sketch->findEntity(axisEntityId) == nullptr) {
         const QString message = QStringLiteral("That axis is not in the selected sketch");
         statusLeft_->setText(message);
         return message;
     }
 
-    if (document_->bodies().empty()) document_->addBody("Body001");
-    Body& body = *document_->bodies().front();
+    if (part().bodies().empty()) part().addBody("Body001");
+    Body& body = *part().bodies().front();
     document_->beginTransaction("Insert Revolve");
-    Parameter& angle = document_->addParameter(uniqueObjectName("RevolveAngle"),
+    Parameter& angle = part().addParameter(uniqueObjectName("RevolveAngle"),
                                                angleDegrees * 3.14159265358979323846 / 180.0,
                                                UnitType::Radian);
     RevolveFeature& revolve =
-        document_->addRevolveFeature(body, uniqueObjectName("Revolve"), sketchId, axisEntityId,
+        part().addRevolveFeature(body, uniqueObjectName("Revolve"), sketchId, axisEntityId,
                                      angle.id());
     document_->commitTransaction();
     const ObjectId created = revolve.id();
@@ -2054,8 +2071,8 @@ QString MainWindow::toggleSuppressSelected() {
         statusLeft_->setText(message);
         return message;
     }
-    const bool suppressed = !document_->isFeatureActive(selectedId_);
-    document_->setSuppressed(selectedId_, !suppressed);
+    const bool suppressed = !part().isFeatureActive(selectedId_);
+    part().setSuppressed(selectedId_, !suppressed);
     const ObjectId keep = selectedId_;
     onRecomputeRequested();
     selectObject(keep);
@@ -2076,7 +2093,7 @@ QString MainWindow::rollbackToSelected() {
     }
     // "To selected" means the selected feature is the LAST one evaluated, which
     // is what a user means by "show me the model at this step".
-    document_->setRollbackPosition(body, index + 1);
+    part().setRollbackPosition(body, index + 1);
     const ObjectId keep = selectedId_;
     onRecomputeRequested();
     selectObject(keep);
@@ -2088,13 +2105,13 @@ QString MainWindow::rollbackToSelected() {
 }
 
 QString MainWindow::rollForwardToEnd() {
-    if (document_->bodies().empty()) {
+    if (part().bodies().empty()) {
         const QString message = QStringLiteral("Nothing to roll forward");
         statusLeft_->setText(message);
         return message;
     }
-    for (const auto& body : document_->bodies())
-        document_->setRollbackPosition(body->id(), Body::kNoRollback);
+    for (const auto& body : part().bodies())
+        part().setRollbackPosition(body->id(), Body::kNoRollback);
     const ObjectId keep = selectedId_;
     onRecomputeRequested();
     selectObject(keep);
@@ -2152,8 +2169,8 @@ QString MainWindow::newDocumentCommand() {
 
     ownedDocument_ = std::move(fresh);
     document_ = ownedDocument_.get();
-    presenter_->setDocument(*document_);
-    if (sketchCanvas_ != nullptr) sketchCanvas_->setSketch(document_, kInvalidObjectId);
+    presenter_->setDocument(part());
+    if (sketchCanvas_ != nullptr) sketchCanvas_->setSketch(partOrNull(), kInvalidObjectId);
     selectedId_ = kInvalidObjectId;
     // NO PATH. The next Save must ask where, or the new document would
     // overwrite whatever the last one was saved as.
@@ -2212,7 +2229,7 @@ QString MainWindow::deleteSelectedObjectCommand() {
     } else {
         message = QStringLiteral("Deleted -- this cannot be undone");
     }
-    for (const std::unique_ptr<Body>& body : document_->bodies())
+    for (const std::unique_ptr<Body>& body : part().bodies())
         for (const std::unique_ptr<Feature>& feature : body->features())
             if (feature->state() == ComputeState::Failed) {
                 message += QStringLiteral(" -- something downstream now fails; check the tree");
@@ -2250,20 +2267,20 @@ void MainWindow::onSaveAsRequested() {
 }
 
 std::vector<const Sketch*> MainWindow::openedSketches() const {
-    return document_ != nullptr ? document_->sketches() : std::vector<const Sketch*>{};
+    return document_ != nullptr ? part().sketches() : std::vector<const Sketch*>{};
 }
 
 const Sketch* MainWindow::openedSketchById(ObjectId id) const {
-    return document_ != nullptr ? document_->findSketch(id) : nullptr;
+    return document_ != nullptr ? part().findSketch(id) : nullptr;
 }
 
 std::size_t MainWindow::openedDocumentFeatureCount() const {
-    if (document_ == nullptr || document_->bodies().empty()) return 0;
-    return document_->bodies().front()->features().size();
+    if (document_ == nullptr || part().bodies().empty()) return 0;
+    return part().bodies().front()->features().size();
 }
 
 std::size_t MainWindow::openedDocumentParameterCount() const {
-    return document_ != nullptr ? document_->parameters().items().size() : 0;
+    return document_ != nullptr ? part().parameters().items().size() : 0;
 }
 
 QString MainWindow::saveDocumentFile(const QString& path) {
@@ -2272,7 +2289,7 @@ QString MainWindow::saveDocumentFile(const QString& path) {
     // makes what is on screen match what is in the file.
     if (inSketchMode()) finishSketchCommand();
 
-    const SaveResult saved = savePartDocumentToFile(*document_, path.toStdString());
+    const SaveResult saved = savePartDocumentToFile(part(), path.toStdString());
     if (!saved) {
         // NAMES the reason. "Could not save" leaves a user staring at a
         // document they now cannot trust.
@@ -2306,8 +2323,8 @@ QString MainWindow::openDocumentFile(const QString& path) {
     // owner and outlives us.
     ownedDocument_ = std::move(loaded.document);
     document_ = ownedDocument_.get();
-    presenter_->setDocument(*document_);
-    if (sketchCanvas_ != nullptr) sketchCanvas_->setSketch(document_, kInvalidObjectId);
+    presenter_->setDocument(part());
+    if (sketchCanvas_ != nullptr) sketchCanvas_->setSketch(partOrNull(), kInvalidObjectId);
     selectedId_ = kInvalidObjectId;
 
     onRecomputeRequested();
@@ -2349,7 +2366,7 @@ QString MainWindow::runScriptFile(const QString& path) {
     // THE SAME INTERPRETER the CLI and the socket use. A second one that
     // understood "nearly the same" vocabulary would be this project's
     // best-known defect shape, reached through the File menu.
-    const ScriptOutcome outcome = RunSketchScript(*document_, text.toStdString());
+    const ScriptOutcome outcome = RunSketchScript(part(), text.toStdString());
 
     // THE VIEW, whatever happened. A script that fails at line 90 has already
     // built 89 lines' worth of geometry, and leaving the window showing the
@@ -2401,7 +2418,7 @@ QString MainWindow::importDxfFile(const QString& path) {
 
     const QString name = QFileInfo(path).completeBaseName();
     const SketchImportResult imported = ImportGeometryIntoNewSketch(
-        *document_, name.isEmpty() ? std::string("Imported") : name.toStdString(),
+        part(), name.isEmpty() ? std::string("Imported") : name.toStdString(),
         read.geometry);
     if (!imported) {
         const QString message =
@@ -2423,7 +2440,7 @@ QString MainWindow::importDxfFile(const QString& path) {
     // A reconstruction FAILURE is not an import failure: the geometry is
     // already in and usable. It is reported, not rolled back over.
     const ReconstructionResult reconstruction =
-        ReconstructSketch(*document_, imported.sketchId, read.geometry.dimensions);
+        ReconstructSketch(part(), imported.sketchId, read.geometry.dimensions);
     if (reconstruction) reconstructionReports_[imported.sketchId] = reconstruction.report;
 
     // Solve FIRST, then extrude.
@@ -2450,18 +2467,18 @@ QString MainWindow::importDxfFile(const QString& path) {
     // Only when the sketch actually yields a closed profile: an open or
     // multi-loop import is a legal state, and failing the import over it would
     // be worse than showing nothing.
-    if (const Sketch* importedSketch = document_->findSketch(imported.sketchId)) {
+    if (const Sketch* importedSketch = part().findSketch(imported.sketchId)) {
         if (BuildProfile(*importedSketch)) {
-            Body* body = document_->bodies().empty() ? &document_->addBody("Body001")
-                                                     : document_->bodies().front().get();
-            const Parameter* existing = document_->parameters().findByName("PadLength");
+            Body* body = part().bodies().empty() ? &part().addBody("Body001")
+                                                     : part().bodies().front().get();
+            const Parameter* existing = part().parameters().findByName("PadLength");
             const ObjectId lengthId =
                 existing != nullptr
                     ? existing->id()
-                    : document_->addParameter(uniqueObjectName("PadLength"), 20.0,
+                    : part().addParameter(uniqueObjectName("PadLength"), 20.0,
                                               UnitType::Millimeter)
                           .id();
-            document_->addPadFeature(*body, name.toStdString() + "_Pad", imported.sketchId,
+            part().addPadFeature(*body, name.toStdString() + "_Pad", imported.sketchId,
                                      lengthId);
         }
     }
@@ -3204,7 +3221,7 @@ bool MainWindow::constraintPanelOnLeft() const {
 
 void MainWindow::enterSketchMode(ObjectId sketchId) {
     editingSketch_ = sketchId;
-    sketchCanvas_->setSketch(document_, sketchId);
+    sketchCanvas_->setSketch(partOrNull(), sketchId);
     centralStack_->setCurrentWidget(sketchCanvas_);
     sketchToolBar_->setVisible(true);
     if (sketchToolBarSecond_ != nullptr) sketchToolBarSecond_->setVisible(true);
@@ -3236,7 +3253,7 @@ QString MainWindow::newSketchCommand() {
     // Counting sketches gave the same name twice after one was deleted; the
     // tree is how a user picks which to edit.
     const std::string name = uniqueObjectName("Sketch");
-    Sketch& created = document_->addSketch(name);
+    Sketch& created = part().addSketch(name);
     enterSketchMode(created.id());
     // Every new sketch starts with a real, fixed origin point.
     //
@@ -3273,7 +3290,7 @@ QString MainWindow::sketchOnFaceCommand() {
     }
 
     const std::string name = uniqueObjectName("Sketch");
-    Sketch& created = document_->addSketch(name, plan.frame);
+    Sketch& created = part().addSketch(name, plan.frame);
     // The face's boundary, projected, as a tracing underlay (M17.6). Added
     // BEFORE the sketch is opened, so the canvas has it the first time it
     // paints rather than a frame later.
@@ -3282,7 +3299,7 @@ QString MainWindow::sketchOnFaceCommand() {
     // not an undo step (see newSketchCommand), and an underlay that could be
     // undone out from under the sketch it belongs to would leave a face sketch
     // that no longer knows what it was made on.
-    document_->addSketchReferences(created.id(), plan.reference.geometry);
+    part().addSketchReferences(created.id(), plan.reference.geometry);
 
     // MAKE IT FOLLOW THE FACE (M17.14, ADR-M17-036), when the pick can be
     // said as a query. The frame above is still set, and is what the sketch
@@ -3300,7 +3317,7 @@ QString MainWindow::sketchOnFaceCommand() {
         query.createdBy = static_cast<ObjectId>(viewer_->pickedFace().createdBy);
         query.facing = viewer_->pickedFace().normal;
         query.extremeTowards = viewer_->pickedFace().normal;
-        if (document_->setSketchTrackedFace(created.id(), query)) {
+        if (part().setSketchTrackedFace(created.id(), query)) {
             tracking = QStringLiteral(" It follows %1, so it moves when the model does.")
                            .arg(QString::fromStdString(DescribeFaceQuery(query)));
         } else {
@@ -3334,7 +3351,7 @@ QString MainWindow::editSelectedSketchCommand() {
         return message;
     }
     enterSketchMode(sketchId);
-    const Sketch* sketch = document_->findSketch(sketchId);
+    const Sketch* sketch = part().findSketch(sketchId);
     const QString message =
         QStringLiteral("Editing %1 -- %2 entities, %3 constraints")
             .arg(QString::fromStdString(sketch != nullptr ? sketch->name() : std::string()))
@@ -3353,7 +3370,7 @@ QString MainWindow::finishSketchCommand() {
     }
     const ObjectId finished = editingSketch_;
     editingSketch_ = kInvalidObjectId;
-    sketchCanvas_->setSketch(document_, kInvalidObjectId);
+    sketchCanvas_->setSketch(partOrNull(), kInvalidObjectId);
     centralStack_->setCurrentWidget(viewer_);
     sketchToolBar_->setVisible(false);
     if (sketchToolBarSecond_ != nullptr) sketchToolBarSecond_->setVisible(false);
@@ -3370,7 +3387,7 @@ QString MainWindow::finishSketchCommand() {
     // next step: the command it needs is already armed.
     selectObject(finished);
     refreshAll();
-    const Sketch* sketch = document_->findSketch(finished);
+    const Sketch* sketch = part().findSketch(finished);
     QString message = QStringLiteral("Sketch closed");
     if (sketch != nullptr) {
         const SketchStatusLine line = DescribeSketchStatus(*sketch);
@@ -3388,7 +3405,7 @@ void MainWindow::rebuildConstraintPanel() {
     if (constraints_ == nullptr) return;
     const Sketch* sketch =
         (document_ != nullptr && editingSketch_ != kInvalidObjectId)
-            ? document_->findSketch(editingSketch_)
+            ? part().findSketch(editingSketch_)
             : nullptr;
 
     // Which constraint was selected, BY ID. The panel is rebuilt on every
@@ -3408,7 +3425,7 @@ void MainWindow::rebuildConstraintPanel() {
         return;
     }
 
-    const std::vector<ConstraintRow> rows = ConstraintRowsFor(*document_, *sketch);
+    const std::vector<ConstraintRow> rows = ConstraintRowsFor(part(), *sketch);
     constraints_->setRowCount(static_cast<int>(rows.size()));
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         const ConstraintRow& row = rows[i];
@@ -3892,10 +3909,10 @@ void MainWindow::onConstraintRowActivated(int row, int column) {
 
 void MainWindow::onDimensionActivated(qulonglong constraintId) {
     if (document_ == nullptr || sketchCanvas_ == nullptr || !inSketchMode()) return;
-    const Sketch* sketch = document_->findSketch(editingSketch_);
+    const Sketch* sketch = part().findSketch(editingSketch_);
     if (sketch == nullptr) return;
     const auto id = static_cast<SketchConstraintId>(static_cast<ObjectId>(constraintId));
-    const std::string current = DimensionEditText(*document_, *sketch, id);
+    const std::string current = DimensionEditText(part(), *sketch, id);
     if (current.empty()) return; // not a dimension: nothing to edit
 
     bool accepted = false;
