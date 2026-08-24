@@ -5,21 +5,25 @@
 
 namespace paramcad {
 
-class PartDocument;
+class DocumentBase;
 
 // Document-level recompute driver. Wraps the generic DependencyGraph
-// recompute with CAD semantics: resolves node ids through the document's
+// recompute with CAD semantics. ONE engine drives every document type
+// (M23): what differs is asked for through DocumentBase's virtuals --
+// beforeRecomputePass, isNodeActive, resolveExpressionVariable -- rather
+// than by the engine knowing what kind of document it holds.
+// It resolves node ids through the document's
 // ObjectRegistry, executes IRecomputable objects, auto-validates dirty-source
 // nodes (Parameters), and translates the graph report into a
 // DocumentRecomputeReport that distinguishes Failed (callback ran and
 // reported failure) from BlockedByDependency (never invoked because a
 // prerequisite failed; message names the first failed direct prerequisite so
 // a UI can explain the block without re-running anything).
-// Mutation entry points live on the PartDocument facade (markDirty etc.);
+// Mutation entry points live on the document facade (markDirty etc.);
 // the engine only exposes recompute entry points (ADR-011).
 class DocumentRecomputeEngine {
 public:
-    explicit DocumentRecomputeEngine(PartDocument& document) noexcept;
+    explicit DocumentRecomputeEngine(DocumentBase& document) noexcept;
 
     // Recomputes the current dirty set of the document graph.
     DocumentRecomputeReport recompute();
@@ -33,7 +37,7 @@ public:
 private:
     DocumentRecomputeReport run();
 
-    PartDocument& document_;
+    DocumentBase& document_;
 };
 
 } // namespace paramcad

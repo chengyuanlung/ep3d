@@ -2,6 +2,7 @@
 
 #include "Core/Document/ObjectId.h"
 #include <string>
+#include <utility>
 
 namespace paramcad {
 
@@ -63,7 +64,12 @@ public:
     ConnectorOwner owner() const noexcept { return owner_; }
 
 private:
-    friend class PartDocument;
+    // DocumentBase since M23: the frame hierarchy and the connectors are
+    // document machinery rather than part machinery, so the one class allowed
+    // to write these is the one that owns them (ADR-M23-001).
+    friend class DocumentBase;
+
+    void setName(std::string name) { name_ = std::move(name); }
 
     void setRole(ConnectorRole role) noexcept { role_ = role; }
     void setFrameId(ObjectId frameId) noexcept { frameId_ = frameId; }

@@ -297,6 +297,15 @@ public:
     // convenience -- it is exactly what makes a circular pattern's arithmetic
     // checkable without OCCT, the way translateShape already does for a linear
     // one.
+    ShapeResult placeShape(const KernelShape& shape, const Transform3D& placement) override {
+        ++placeShapeCallCount;
+        (void)shape;
+        (void)placement;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "this counting kernel does not model placements"};
+    }
+    int placeShapeCallCount = 0;
+
     ShapeResult rotateShape(const KernelShape& shape, const Vec3& axisOriginMm,
                             const Vec3& axisDirection, double angleRad) override {
         ++rotateShapeCallCount;

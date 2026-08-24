@@ -541,7 +541,7 @@ RecomputeResult Sketch::recompute(const RecomputeContext& context) {
         // Written through the DOCUMENT, so the parameter's dependents are
         // dirtied by the same machinery an ordinary edit uses -- an expression
         // reading a reference dimension has to see the new number.
-        context.document.setDrivenParameterValue(parameterId, *measured);
+        context.part().setDrivenParameterValue(parameterId, *measured);
     }
 
     solveStatus_ = result.status;

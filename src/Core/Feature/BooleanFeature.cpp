@@ -70,9 +70,9 @@ RecomputeResult BooleanFeature::recompute(const RecomputeContext& context) {
     // Both through ACTIVITY, exactly as every other chain feature resolves its
     // base (ADR-M9-002): suppressing a middle feature closes the chain over it.
     const ISolidFeature* target = resolveSolidFeature(
-        context.registry, context.document.activeChainBase(targetFeatureId_));
+        context.registry, context.part().activeChainBase(targetFeatureId_));
     const ISolidFeature* tool = resolveSolidFeature(
-        context.registry, context.document.activeChainBase(toolFeatureId_));
+        context.registry, context.part().activeChainBase(toolFeatureId_));
     if (target == nullptr) return fail("boolean target feature not found or is not a solid");
     if (tool == nullptr) return fail("boolean tool feature not found or is not a solid");
     if (target->currentState() != ComputeState::Valid)

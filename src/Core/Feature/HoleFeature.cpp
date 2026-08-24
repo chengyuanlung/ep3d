@@ -73,7 +73,7 @@ RecomputeResult HoleFeature::recompute(const RecomputeContext& context) {
     if (context.kernel == nullptr) return fail("no geometry kernel configured");
 
     const ISolidFeature* base = resolveSolidFeature(
-        context.registry, context.document.activeChainBase(baseFeatureId_));
+        context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr) return fail("hole base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
         return fail("hole base feature is not in a valid state");
@@ -81,7 +81,7 @@ RecomputeResult HoleFeature::recompute(const RecomputeContext& context) {
 
     const Sketch* sketch = resolveSketch(context.registry, sketchId_);
     if (sketch == nullptr) return fail("hole sketch not found");
-    if (context.document.sketchSupportFrameIsMissing(sketch->id()))
+    if (context.part().sketchSupportFrameIsMissing(sketch->id()))
         return fail("hole sketch's support frame is missing");
 
     const Parameter* diameter = resolveParameter(context.registry, diameterParameterId_);
@@ -130,7 +130,7 @@ RecomputeResult HoleFeature::recompute(const RecomputeContext& context) {
     ShapeResult carried{base->currentShape(), KernelError::None, {}};
     for (const Vec2& centre : centres) {
         PlanarProfileDefinition tool;
-        tool.plane = PlaneOfSketchFrame(context.document.effectiveSketchFrame(sketch->id()));
+        tool.plane = PlaneOfSketchFrame(context.part().effectiveSketchFrame(sketch->id()));
         tool.segments = {ProfileCircleSegment{centre, diameter->value() / 2.0}};
 
         // A THROUGH hole runs A FULL SPAN EACH WAY from the sketch plane.

@@ -1,3 +1,4 @@
+#include "Core/Assembly/AssemblyDocument.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
@@ -47,6 +48,15 @@ public:
         ++subtractCallCount;
         return inner_.subtractShape(base, tool);
     }
+    ShapeResult placeShape(const KernelShape& shape, const Transform3D& placement) override {
+        ++placeShapeCallCount;
+        (void)shape;
+        (void)placement;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "this counting kernel does not model placements"};
+    }
+    int placeShapeCallCount = 0;
+
     ShapeResult rotateShape(const KernelShape& shape, const Vec3& axisOriginMm,
                             const Vec3& axisDirection, double angleRad) override {
         return inner_.rotateShape(shape, axisOriginMm, axisDirection, angleRad);
@@ -1475,4 +1485,311 @@ TEST(OcctRecomputeIntegrationTest, M22_FEAT_004_AnImportsFacesAreTaggedAsITSOwn)
         << "the import's faces answered to a feature that never touched them";
 
     std::remove(path.c_str());
+}
+
+// --- M23: an assembly instance, built and placed against real geometry -------
+
+namespace {
+
+// A scratch part on disk, removed when the test ends -- an instance names a
+// FILE, so there has to be one.
+struct ScratchPart {
+    std::string path;
+    explicit ScratchPart(const char* name) {
+        path = (std::filesystem::temp_directory_path() / (std::string("ep3d-asm-") + name))
+                   .string();
+        std::remove(path.c_str());
+    }
+    ~ScratchPart() { std::remove(path.c_str()); }
+};
+
+// A cube of `side`, in a body called `bodyName`, written to `path`.
+void WriteCubePart(const std::string& path, double side, const std::string& bodyName,
+                   const std::string& secondBody = {}) {
+    PartDocument part{"Source"};
+    Sketch& sketch = part.addSketch("Base");
+    AddSquare(part, sketch.id(), side);
+    Parameter& tall = part.addParameter("H", side, UnitType::Millimeter);
+    Body& body = part.addBody(bodyName);
+    part.addPadFeature(body, "Pad1", sketch.id(), tall.id());
+    if (!secondBody.empty()) {
+        Sketch& other = part.addSketch("Other");
+        AddSquare(part, other.id(), side / 2.0);
+        Body& second = part.addBody(secondBody);
+        part.addPadFeature(second, "Pad2", other.id(), tall.id());
+    }
+    ASSERT_TRUE(savePartDocumentToFile(part, path));
+}
+
+KernelMassProperties MassOf(OcctGeometryKernel& kernel, const KernelShape& shape) {
+    const KernelMassPropertiesResult result = kernel.calculateMassProperties(shape);
+    EXPECT_TRUE(result) << result.message;
+    return result.properties;
+}
+
+Transform3D MovedTo(double x, double y, double z) {
+    Transform3D t;
+    t.translation = Vec3{x, y, z};
+    return t;
+}
+
+} // namespace
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_001_AnInstanceBuildsThePartWhereItWasPut) {
+    // The whole path in one test: a real part on disk, instanced, moved, and
+    // measured where it ended up. A volume alone would pass on an instance
+    // that ignored its placement entirely, so the CENTROID is what carries the
+    // claim -- it is the only number that moves when the part does.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"cube.ep3d"};
+    WriteCubePart(file.path, 40.0, "Block");
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& one = assembly.addInstance("One", file.path);
+    ASSERT_TRUE(assembly.setInstanceTransform(one.id(), MovedTo(100, 0, 0)));
+
+    ASSERT_TRUE(assembly.recompute().success);
+    EXPECT_EQ(one.currentState(), ComputeState::Valid);
+
+    const KernelMassProperties placed = MassOf(kernel, one.currentShape());
+    EXPECT_NEAR(placed.volumeMm3, 40.0 * 40.0 * 40.0, 1e-6 * 64000.0);
+    // The part is drawn centred on its sketch origin and extruded upwards, so
+    // an unplaced copy would sit at (0, 0, 20).
+    EXPECT_NEAR(placed.centerOfMassMm.x, 100.0, 1e-6);
+    EXPECT_NEAR(placed.centerOfMassMm.y, 0.0, 1e-6);
+    EXPECT_NEAR(placed.centerOfMassMm.z, 20.0, 1e-6);
+}
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_002_MovingAnInstanceMovesWhatItBuilt) {
+    // Through the graph: nothing here tells the instance it is stale, the
+    // frame -> instance edge does. An instance that cached its shape would
+    // pass a first-build test and fail this one.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"cube.ep3d"};
+    WriteCubePart(file.path, 20.0, "Block");
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& one = assembly.addInstance("One", file.path);
+    ASSERT_TRUE(assembly.recompute().success);
+    EXPECT_NEAR(MassOf(kernel, one.currentShape()).centerOfMassMm.x, 0.0, 1e-6);
+
+    ASSERT_TRUE(assembly.setInstanceTransform(one.id(), MovedTo(-75, 30, 0)));
+    ASSERT_TRUE(assembly.recompute().success);
+    const KernelMassProperties moved = MassOf(kernel, one.currentShape());
+    EXPECT_NEAR(moved.centerOfMassMm.x, -75.0, 1e-6);
+    EXPECT_NEAR(moved.centerOfMassMm.y, 30.0, 1e-6);
+    EXPECT_NEAR(moved.volumeMm3, 8000.0, 1e-6 * 8000.0) << "moving it changed its size";
+}
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_003_THREEInstancesOfOnePartAreThreeSolids) {
+    // The M23 gate, geometry half: three parts in, each somewhere, each real.
+    // Instancing the same file three times is the case a cache would break,
+    // and the case an assembly exists for.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"cube.ep3d"};
+    WriteCubePart(file.path, 30.0, "Block");
+
+    AssemblyDocument assembly{"Row"};
+    assembly.setGeometryKernel(&kernel);
+    const double places[3] = {0.0, 60.0, 120.0};
+    std::vector<ObjectId> ids;
+    for (int i = 0; i < 3; ++i) {
+        PartInstance& one = assembly.addInstance("Cube" + std::to_string(i + 1), file.path);
+        ASSERT_TRUE(assembly.setInstanceTransform(one.id(), MovedTo(places[i], 0, 0)));
+        ids.push_back(one.id());
+    }
+    ASSERT_TRUE(assembly.recompute().success);
+
+    for (int i = 0; i < 3; ++i) {
+        const PartInstance* one = assembly.findInstance(ids[i]);
+        ASSERT_NE(one, nullptr);
+        ASSERT_EQ(one->currentState(), ComputeState::Valid);
+        const KernelMassProperties placed = MassOf(kernel, one->currentShape());
+        EXPECT_NEAR(placed.volumeMm3, 27000.0, 1e-6 * 27000.0);
+        EXPECT_NEAR(placed.centerOfMassMm.x, places[i], 1e-6)
+            << "instance " << (i + 1) << " did not go where it was put";
+    }
+}
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_004_AMissingPartFileFAILSLoudly) {
+    // The cost of storing the sentence rather than the geometry, and the
+    // point: an assembly that quietly kept showing a part whose file was
+    // deleted is an assembly nobody can reproduce (ADR-M22-003, ADR-M23-002).
+    OcctGeometryKernel kernel;
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& ghost = assembly.addInstance("Ghost", "no-such-part.ep3d");
+
+    const DocumentRecomputeReport report = assembly.recompute();
+    EXPECT_FALSE(report.success);
+    EXPECT_EQ(ghost.currentState(), ComputeState::Failed);
+    EXPECT_NE(FailureMessageFor(report, ghost.id()).find("no-such-part.ep3d"), std::string::npos)
+        << FailureMessageFor(report, ghost.id());
+}
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_005_APartWithTWOBodiesMustBeToldWhichOne) {
+    // Taking the first would make this instance silently mean a different part
+    // the day someone added a body to that file. Refused WITH THE NAMES,
+    // because the reader's next move is to type one of them.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"two-bodies.ep3d"};
+    WriteCubePart(file.path, 20.0, "Left", "Right");
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& vague = assembly.addInstance("Vague", file.path);
+    const DocumentRecomputeReport report = assembly.recompute();
+    EXPECT_FALSE(report.success);
+    const std::string why = FailureMessageFor(report, vague.id());
+    EXPECT_NE(why.find("Left"), std::string::npos) << why;
+    EXPECT_NE(why.find("Right"), std::string::npos) << why;
+
+    // ...and naming one resolves it, to THAT one: the smaller body is a
+    // quarter the footprint, so the number says which was chosen.
+    ASSERT_TRUE(assembly.removeObject(vague.id()));
+    PartInstance& named = assembly.addInstance("Named", file.path, "Right");
+    ASSERT_TRUE(assembly.recompute().success);
+    EXPECT_NEAR(MassOf(kernel, named.currentShape()).volumeMm3, 10.0 * 10.0 * 20.0,
+                1e-6 * 2000.0);
+}
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_006_EditingThePartCHANGESTheAssembly) {
+    // The other consequence of storing the path, and the reason the file is
+    // read again on every rebuild rather than cached: a user who changed the
+    // part expects the assembly to follow it.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"growing.ep3d"};
+    WriteCubePart(file.path, 20.0, "Block");
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& one = assembly.addInstance("One", file.path);
+    ASSERT_TRUE(assembly.recompute().success);
+    EXPECT_NEAR(MassOf(kernel, one.currentShape()).volumeMm3, 8000.0, 1e-6 * 8000.0);
+
+    WriteCubePart(file.path, 40.0, "Block");
+    ASSERT_TRUE(assembly.markDirty(one.id()));
+    ASSERT_TRUE(assembly.recompute().success);
+    EXPECT_NEAR(MassOf(kernel, one.currentShape()).volumeMm3, 64000.0, 1e-6 * 64000.0);
+}
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_007_APartThatDoesNotBuildNAMESWhatFailed) {
+    // The reader's next move is to open that file and fix something, and which
+    // feature it was is the difference between doing that and guessing.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"broken.ep3d"};
+    {
+        PartDocument part{"Source"};
+        Sketch& sketch = part.addSketch("Base");
+        AddSquare(part, sketch.id(), 30.0);
+        // A pad of ZERO length: the sketch is fine, the feature cannot build.
+        Parameter& tall = part.addParameter("H", 0.0, UnitType::Millimeter);
+        Body& body = part.addBody("Block");
+        part.addPadFeature(body, "TooShort", sketch.id(), tall.id());
+        ASSERT_TRUE(savePartDocumentToFile(part, file.path));
+    }
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& one = assembly.addInstance("One", file.path);
+    const DocumentRecomputeReport report = assembly.recompute();
+    EXPECT_FALSE(report.success);
+    const std::string why = FailureMessageFor(report, one.id());
+    EXPECT_NE(why.find("TooShort"), std::string::npos)
+        << "the assembly did not name the feature that failed: " << why;
+}
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_008_APlacementRotatesFirstAndTHENTranslates) {
+    // The order is a decision, and a caller that got it backwards would put a
+    // part somewhere by an amount that looks like a modelling mistake. It is
+    // decided once, in placeShape, and this is what pins it: the part's
+    // centroid sits on its own axis, so rotate-then-move leaves it at
+    // (100, 0, h/2) and move-then-rotate swings it round to (0, 100, h/2).
+    OcctGeometryKernel kernel;
+    ScratchPart file{"turned.ep3d"};
+    WriteCubePart(file.path, 30.0, "Block");
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& one = assembly.addInstance("One", file.path);
+
+    Transform3D placement = MovedTo(100, 0, 0);
+    const double quarter = 3.14159265358979323846 / 2.0;
+    placement.rotation = Quaternion{std::cos(quarter / 2.0), 0.0, 0.0, std::sin(quarter / 2.0)};
+    ASSERT_TRUE(assembly.setInstanceTransform(one.id(), placement));
+    ASSERT_TRUE(assembly.recompute().success);
+
+    const KernelMassProperties placed = MassOf(kernel, one.currentShape());
+    EXPECT_NEAR(placed.centerOfMassMm.x, 100.0, 1e-6) << "the placement translated before it turned";
+    EXPECT_NEAR(placed.centerOfMassMm.y, 0.0, 1e-6) << "the placement translated before it turned";
+    EXPECT_NEAR(placed.centerOfMassMm.z, 15.0, 1e-6);
+
+    // ...and the part really did turn: a corner that was at (+15, +15) is now
+    // at (-15, +15), which the bounding box cannot see on a square but the
+    // volume confirms is still the same solid.
+    EXPECT_NEAR(placed.volumeMm3, 27000.0, 1e-6 * 27000.0);
+}
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_009_APlacementWithAScaleInItIsREFUSED) {
+    // A non-unit quaternion is a SCALE hiding inside a rigid motion. Refused
+    // rather than normalised: normalising would place the part correctly while
+    // the caller believed it had asked for something else, and an assembly
+    // that can silently resize a part is an assembly whose parts are not the
+    // parts.
+    OcctGeometryKernel kernel;
+    Transform3D bad;
+    bad.rotation = Quaternion{2.0, 0.0, 0.0, 0.0}; // twice as long as it should be
+    BoxDefinition definition;
+    definition.widthMm = 10.0;
+    definition.heightMm = 10.0;
+    definition.depthMm = 10.0;
+    const ShapeResult box = kernel.createBox(definition);
+    ASSERT_TRUE(box) << box.message;
+    const ShapeResult refused = kernel.placeShape(box.shape, bad);
+    EXPECT_FALSE(refused);
+    EXPECT_NE(refused.message.find("unit quaternion"), std::string::npos) << refused.message;
+
+    // ...and the ordinary identity placement is still accepted, so the guard
+    // is a guard and not a wall.
+    EXPECT_TRUE(kernel.placeShape(box.shape, Transform3D::Identity()));
+}
+
+TEST(OcctRecomputeIntegrationTest, M23_INST_010_AnInstanceTakesTheCHAINTIPNotTheFirstFeature) {
+    // What an instance means by "that body" is the body AS IT STANDS -- after
+    // everything that consumed anything. Taking the first solid feature would
+    // instance the block a part was carved out of rather than the part, and
+    // every test up to here missed it because every test part had exactly one
+    // feature per body, where first and last are the same thing.
+    //
+    // So this part has a CHAIN: a pad, then a shell that eats it. The two
+    // volumes are far apart, and the number says which one arrived.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"chained.ep3d"};
+    {
+        PartDocument part{"Source"};
+        Sketch& sketch = part.addSketch("Base");
+        AddSquare(part, sketch.id(), 60.0);
+        Parameter& tall = part.addParameter("H", 60.0, UnitType::Millimeter);
+        Body& body = part.addBody("Case");
+        const ObjectId pad = part.addPadFeature(body, "Pad1", sketch.id(), tall.id()).id();
+        Parameter& wall = part.addParameter("W", 5.0, UnitType::Millimeter);
+        FaceQuery top;
+        top.extremeTowards = Vec3{0, 0, 1};
+        part.addShellFeature(body, "Shell1", pad, {top}, wall.id());
+        ASSERT_TRUE(savePartDocumentToFile(part, file.path));
+    }
+
+    AssemblyDocument assembly{"Rig"};
+    assembly.setGeometryKernel(&kernel);
+    PartInstance& one = assembly.addInstance("One", file.path);
+    ASSERT_TRUE(assembly.recompute().success);
+
+    const double solidBlock = 60.0 * 60.0 * 60.0;
+    const double hollowed = solidBlock - 50.0 * 50.0 * 55.0;
+    const double measured = MassOf(kernel, one.currentShape()).volumeMm3;
+    EXPECT_NEAR(measured, hollowed, 1e-6 * hollowed)
+        << "the instance brought in the block, not the part carved out of it";
+    EXPECT_LT(measured, 0.6 * solidBlock);
 }

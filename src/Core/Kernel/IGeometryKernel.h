@@ -4,6 +4,7 @@
 #include "Core/Kernel/FaceQuery.h"
 
 #include <cstdint>
+#include "Core/Geometry/MathTypes.h"
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Kernel/KernelTypes.h"
 #include "Core/Kernel/ProfileDefinition.h"
@@ -312,6 +313,20 @@ public:
     // any frame conversion; the kernel never re-derives a frame (ADR-M4-002).
     virtual ShapeResult rotateShape(const KernelShape& shape, const Vec3& axisOriginMm,
                                     const Vec3& axisDirection, double angleRad) = 0;
+
+    // `placeShape` is the ASSEMBLY's verb (M23): a whole rigid placement in
+    // one call -- rotate about the origin, then translate.
+    //
+    // It exists rather than letting the caller compose rotateShape and
+    // translateShape because that composition has an ORDER, and a caller that
+    // gets it backwards produces a part in the wrong place by an amount that
+    // looks like a modelling mistake. One verb, one order, stated once.
+    //
+    // The transform arrives as a Transform3D because that is what a frame
+    // already is; the kernel does not re-derive a frame (ADR-M4-002), it just
+    // applies the rigid motion it is handed. A non-finite or non-unit rotation
+    // is refused.
+    virtual ShapeResult placeShape(const KernelShape& shape, const Transform3D& placement) = 0;
 
     // `intersectShapes` keeps ONLY what both solids occupy (M21).
     //

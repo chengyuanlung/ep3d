@@ -1,4 +1,5 @@
 #include "Core/Serialization/PartDocumentSerializer.h"
+#include "Core/Serialization/DocumentJson.h"
 #include "Core/Dependency/DependencyGraph.h"
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
@@ -130,13 +131,27 @@ void WriteSketchGeometry(JsonValue& entry, const SketchGeometry& geometry) {
 }
 
 
-constexpr int kSchemaVersion = 28;          // v28 adds STEP import (M22)
+// The version counter is shared with every other document type since M23
+// (DocumentJson.h): one format, one number.
 // v15 added PointLineDistance (M17).
 // v14 added construction geometry (M17).
 // v13 added Horizontal/VerticalDistance (M17).
 // v12 added user-placed dimension positions (M16).
-constexpr int kMinSupportedSchemaVersion = 1; // v1 (no edges) and v2 files still load
-constexpr std::string_view kFormatName = "ParametricCAD";
+// The shared vocabulary (M23, ADR-M23-003). These used to be spelled out
+// here; they moved to DocumentJson when the Assembly serializer needed the
+// same header, the same ids, the same transforms and the same frames.
+using docjson::connectorOwnerFromString;
+using docjson::connectorRoleFromString;
+using docjson::FieldError;
+using docjson::fieldError;
+using docjson::idFromString;
+using docjson::idToString;
+using docjson::kFormatName;
+using docjson::kMinSupportedSchemaVersion;
+using docjson::kSchemaVersion;
+using docjson::requireField;
+using docjson::toString;
+using docjson::transformToJson;
 
 // Sub-element names, used in both directions. Written as strings, never as the
 // enum's underlying integer: an integer would silently change meaning the day a
@@ -203,54 +218,15 @@ std::optional<ParameterState> parameterStateFromString(std::string_view text) {
     return std::nullopt;
 }
 
-// A Transform3D as seven numbers. Not a matrix: the stored form is the same
-// translation + quaternion the type carries, so a save/load cannot renormalise
-// or re-decompose it into something subtly different (M10, ADR-M10-002).
-JsonValue transformToJson(const Transform3D& transform) {
-    JsonValue out = JsonValue::makeObject();
-    out.set("tx", JsonValue::makeNumber(transform.translation.x));
-    out.set("ty", JsonValue::makeNumber(transform.translation.y));
-    out.set("tz", JsonValue::makeNumber(transform.translation.z));
-    out.set("qw", JsonValue::makeNumber(transform.rotation.w));
-    out.set("qx", JsonValue::makeNumber(transform.rotation.x));
-    out.set("qy", JsonValue::makeNumber(transform.rotation.y));
-    out.set("qz", JsonValue::makeNumber(transform.rotation.z));
-    return out;
-}
 
-std::string_view toString(ConnectorRole role) {
-    switch (role) {
-        case ConnectorRole::Generic: return "Generic";
-        case ConnectorRole::Mount: return "Mount";
-        case ConnectorRole::Shaft: return "Shaft";
-        case ConnectorRole::LinearGuide: return "LinearGuide";
-        case ConnectorRole::ToolFlange: return "ToolFlange";
-        case ConnectorRole::Electrical: return "Electrical";
-        case ConnectorRole::Pneumatic: return "Pneumatic";
-    }
-    return "Generic";
-}
 
-std::optional<ConnectorRole> connectorRoleFromString(std::string_view text) {
-    if (text == "Generic") return ConnectorRole::Generic;
-    if (text == "Mount") return ConnectorRole::Mount;
-    if (text == "Shaft") return ConnectorRole::Shaft;
-    if (text == "LinearGuide") return ConnectorRole::LinearGuide;
-    if (text == "ToolFlange") return ConnectorRole::ToolFlange;
-    if (text == "Electrical") return ConnectorRole::Electrical;
-    if (text == "Pneumatic") return ConnectorRole::Pneumatic;
-    return std::nullopt;
-}
 
-std::string_view toString(ConnectorOwner owner) {
-    return owner == ConnectorOwner::Assembly ? "Assembly" : "PartDefinition";
-}
 
-std::optional<ConnectorOwner> connectorOwnerFromString(std::string_view text) {
-    if (text == "PartDefinition") return ConnectorOwner::PartDefinition;
-    if (text == "Assembly") return ConnectorOwner::Assembly;
-    return std::nullopt;
-}
+
+
+
+
+
 
 std::string_view toString(ComputeState state) {
     switch (state) {
@@ -272,11 +248,7 @@ std::optional<ComputeState> computeStateFromString(std::string_view text) {
 
 // --- id <-> decimal string --------------------------------------------------
 
-std::string idToString(ObjectId id) {
-    char buffer[24];
-    const auto result = std::to_chars(buffer, buffer + sizeof(buffer), id);
-    return std::string(buffer, result.ptr);
-}
+
 
 // One face query as a JSON object (v19, M17.14).
 //
@@ -341,15 +313,7 @@ JsonValue WriteEdgeQuery(const EdgeQuery& query) {
 }
 
 
-std::optional<ObjectId> idFromString(std::string_view text) {
-    if (text.empty()) return std::nullopt;
-    ObjectId id = 0;
-    const char* first = text.data();
-    const char* last = text.data() + text.size();
-    const auto result = std::from_chars(first, last, id);
-    if (result.ec != std::errc{} || result.ptr != last) return std::nullopt;
-    return id;
-}
+
 
 // --- save -------------------------------------------------------------------
 
@@ -898,32 +862,14 @@ JsonValue toJson(const PartDocument& document) {
             dependencies.add(std::move(edge));
         }
     }
-    // v10: frames and connectors (M10). The Origin frame is written like any
-    // other -- ADR-009 D6's "re-created fresh on load" is superseded, because a
-    // frame the user moved has to survive a save, and a re-created Origin would
+    // v10: frames and connectors (M10). Written by DocumentJson since M23,
+    // because they belong to DocumentBase and therefore to every document type
+    // -- ADR-009 D6's "re-created fresh on load" is superseded, because a frame
+    // the user moved has to survive a save, and a re-created Origin would
     // silently discard that move.
-    JsonValue frames = JsonValue::makeArray();
-    for (const ReferenceFrame* frame : document.frames()) {
-        JsonValue entry = JsonValue::makeObject();
-        entry.set("id", JsonValue::makeString(idToString(frame->id())));
-        entry.set("name", JsonValue::makeString(frame->name()));
-        entry.set("parentFrameId", JsonValue::makeString(idToString(frame->parentFrameId())));
-        entry.set("transform", transformToJson(frame->localTransform()));
-        frames.add(std::move(entry));
-    }
-    root.set("frames", std::move(frames));
+    root.set("frames", docjson::framesToJson(document));
+    root.set("connectors", docjson::connectorsToJson(document));
 
-    JsonValue connectors = JsonValue::makeArray();
-    for (const Connector* connector : document.connectors()) {
-        JsonValue entry = JsonValue::makeObject();
-        entry.set("id", JsonValue::makeString(idToString(connector->id())));
-        entry.set("name", JsonValue::makeString(connector->name()));
-        entry.set("role", JsonValue::makeString(std::string(toString(connector->role()))));
-        entry.set("frameId", JsonValue::makeString(idToString(connector->frameId())));
-        entry.set("owner", JsonValue::makeString(std::string(toString(connector->owner()))));
-        connectors.add(std::move(entry));
-    }
-    root.set("connectors", std::move(connectors));
 
     root.set("dependencies", std::move(dependencies));
     return root;
@@ -931,32 +877,7 @@ JsonValue toJson(const PartDocument& document) {
 
 // --- load helpers -----------------------------------------------------------
 
-struct FieldError {
-    SerializationError error = SerializationError::None;
-    std::string message;
-    bool ok() const noexcept { return error == SerializationError::None; }
-};
 
-FieldError fieldError(SerializationError error, std::string message) {
-    return FieldError{error, std::move(message)};
-}
-
-const JsonValue* requireField(const JsonValue& object, std::string_view key,
-                              JsonType expectedType, const std::string& context,
-                              FieldError& err) {
-    const JsonValue* field = object.find(key);
-    if (field == nullptr) {
-        err = fieldError(SerializationError::MissingField,
-                         context + ": missing required field '" + std::string(key) + "'");
-        return nullptr;
-    }
-    if (field->type() != expectedType) {
-        err = fieldError(SerializationError::InvalidFieldType,
-                         context + ": field '" + std::string(key) + "' has the wrong JSON type");
-        return nullptr;
-    }
-    return field;
-}
 
 // The inverse of WriteSketchGeometry, sharing its keys by construction.
 //
@@ -2004,117 +1925,16 @@ LoadResult loadPartDocument(std::istream& in) {
                                     contact};
     }
 
-    struct FrameData {
-        ObjectId id;
-        std::string name;
-        ObjectId parentFrameId = kInvalidObjectId;
-        Transform3D transform;
-    };
-    struct ConnectorData {
-        ObjectId id;
-        std::string name;
-        ConnectorRole role = ConnectorRole::Generic;
-        ObjectId frameId = kInvalidObjectId;
-        ConnectorOwner owner = ConnectorOwner::PartDefinition;
-    };
-    std::vector<FrameData> frameData;
-    std::vector<ConnectorData> connectorData;
-
-    // v10 frames. Absent in every earlier file, which is why this is not a
-    // required field: those documents get the Origin frame the constructor
-    // makes, exactly as they always did.
-    if (const JsonValue* framesField = root.find("frames")) {
-        if (framesField->type() != JsonType::Array)
-            return loadFailure(SerializationError::InvalidFieldType,
-                               "document: field 'frames' is not an array");
-        for (std::size_t i = 0; i < framesField->items().size(); ++i) {
-            const JsonValue& entry = framesField->items()[i];
-            const std::string context = "frames[" + std::to_string(i) + "]";
-            if (entry.type() != JsonType::Object)
-                return loadFailure(SerializationError::InvalidFieldType,
-                                   context + ": entry is not an object");
-            const auto id = requireIdField(entry, context, err);
-            if (!id.has_value()) return loadFailure(err.error, err.message);
-            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
-            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
-            if (name == nullptr) return loadFailure(err.error, err.message);
-
-            FrameData frame{*id, name->asString(), kInvalidObjectId, Transform3D{}};
-            if (const JsonValue* parent = entry.find("parentFrameId")) {
-                if (parent->type() != JsonType::String)
-                    return loadFailure(SerializationError::InvalidFieldType,
-                                       context + ": field 'parentFrameId' is not a string");
-                const auto parsed = idFromString(parent->asString());
-                if (parsed.has_value()) frame.parentFrameId = *parsed;
-            }
-            if (const JsonValue* transform = entry.find("transform")) {
-                if (transform->type() != JsonType::Object)
-                    return loadFailure(SerializationError::InvalidFieldType,
-                                       context + ": field 'transform' is not an object");
-                const auto number = [&](const char* key, double& out) {
-                    const JsonValue* field = transform->find(key);
-                    if (field == nullptr || field->type() != JsonType::Number) return false;
-                    out = field->asNumber();
-                    return true;
-                };
-                Transform3D t;
-                if (!number("tx", t.translation.x) || !number("ty", t.translation.y) ||
-                    !number("tz", t.translation.z) || !number("qw", t.rotation.w) ||
-                    !number("qx", t.rotation.x) || !number("qy", t.rotation.y) ||
-                    !number("qz", t.rotation.z))
-                    return loadFailure(SerializationError::InvalidFieldType,
-                                       context + ": 'transform' is missing a numeric component");
-                frame.transform = t;
-            }
-            frameData.push_back(std::move(frame));
-        }
-    }
-
-    if (const JsonValue* connectorsField = root.find("connectors")) {
-        if (connectorsField->type() != JsonType::Array)
-            return loadFailure(SerializationError::InvalidFieldType,
-                               "document: field 'connectors' is not an array");
-        for (std::size_t i = 0; i < connectorsField->items().size(); ++i) {
-            const JsonValue& entry = connectorsField->items()[i];
-            const std::string context = "connectors[" + std::to_string(i) + "]";
-            if (entry.type() != JsonType::Object)
-                return loadFailure(SerializationError::InvalidFieldType,
-                                   context + ": entry is not an object");
-            const auto id = requireIdField(entry, context, err);
-            if (!id.has_value()) return loadFailure(err.error, err.message);
-            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
-            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
-            if (name == nullptr) return loadFailure(err.error, err.message);
-            const JsonValue* role = requireField(entry, "role", JsonType::String, context, err);
-            if (role == nullptr) return loadFailure(err.error, err.message);
-            const auto roleValue = connectorRoleFromString(role->asString());
-            if (!roleValue.has_value())
-                return loadFailure(SerializationError::InvalidEnumValue,
-                                   context + ": unknown connector role '" + role->asString() +
-                                       "'");
-            const JsonValue* frameId =
-                requireField(entry, "frameId", JsonType::String, context, err);
-            if (frameId == nullptr) return loadFailure(err.error, err.message);
-            const auto frameValue = idFromString(frameId->asString());
-            if (!frameValue.has_value())
-                return loadFailure(SerializationError::InvalidFieldType,
-                                   context + ": field 'frameId' is not a valid ObjectId");
-            ConnectorOwner owner = ConnectorOwner::PartDefinition;
-            if (const JsonValue* ownerField = entry.find("owner")) {
-                if (ownerField->type() != JsonType::String)
-                    return loadFailure(SerializationError::InvalidFieldType,
-                                       context + ": field 'owner' is not a string");
-                const auto parsed = connectorOwnerFromString(ownerField->asString());
-                if (!parsed.has_value())
-                    return loadFailure(SerializationError::InvalidEnumValue,
-                                       context + ": unknown connector owner '" +
-                                           ownerField->asString() + "'");
-                owner = *parsed;
-            }
-            connectorData.push_back(
-                ConnectorData{*id, name->asString(), *roleValue, *frameValue, owner});
-        }
-    }
+    // FRAMES AND CONNECTORS, read by DocumentJson (M23, ADR-M23-003). They
+    // belong to DocumentBase, so both document types read them with the same
+    // code and the same messages; `registerId` is passed in because the SET of
+    // ids that must be unique differs by document type while the rule does not.
+    std::vector<docjson::FrameData> frameData;
+    std::vector<docjson::ConnectorData> connectorData;
+    if (!docjson::readFrames(root, registerId, err, frameData))
+        return loadFailure(err.error, err.message);
+    if (!docjson::readConnectors(root, registerId, err, connectorData))
+        return loadFailure(err.error, err.message);
 
     std::vector<BodyData> bodyData;
     for (std::size_t i = 0; i < bodies->items().size(); ++i) {
@@ -3581,15 +3401,7 @@ LoadResult loadPartDocument(std::istream& in) {
     // later puts the child first. Creating them all parentless and then wiring
     // the hierarchy is order-independent, and the cycle check still runs on the
     // second pass, so a cyclic file is still refused.
-    for (auto& frame : frameData)
-        document->restoreFrame(frame.id, std::move(frame.name), kInvalidObjectId,
-                               frame.transform);
-    for (const auto& frame : frameData)
-        if (frame.parentFrameId != kInvalidObjectId)
-            document->restoreFrameParent(frame.id, frame.parentFrameId);
-    for (auto& connector : connectorData)
-        document->restoreConnector(connector.id, std::move(connector.name), connector.role,
-                                   connector.frameId, connector.owner);
+    docjson::restoreFramesAndConnectors(*document, frameData, connectorData);
 
     // Sketches first: restorePadFeature wires an edge to its Sketch node, so
     // the sketch must already exist in the registry and graph.

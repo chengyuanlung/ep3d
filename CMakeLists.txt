@@ -11,8 +11,12 @@ option(PARAMCAD_BUILD_KERNEL_OCCT "Build the OpenCASCADE geometry kernel" ON)
 add_library(ParametricCADCore
     src/Core/Document/CadDocument.cpp
     src/Core/Document/ObjectRegistry.cpp
+    src/Core/Assembly/AssemblyDocument.cpp
+    src/Core/Assembly/PartInstance.cpp
+    src/Core/Document/DocumentBase.cpp
     src/Core/Document/PartDocument.cpp
     src/Core/Recompute/DocumentRecomputeEngine.cpp
+    src/Core/Recompute/RecomputeContext.cpp
     src/Core/Parameter/Parameter.cpp
     src/Core/Parameter/ParameterManager.cpp
     src/Core/Material/Material.cpp
@@ -45,6 +49,8 @@ add_library(ParametricCADCore
     src/Core/Measure/SketchMeasure.cpp
     src/Core/Physics/MassPropertiesNode.cpp
     src/Core/Serialization/JsonValue.cpp
+    src/Core/Serialization/DocumentJson.cpp
+    src/Core/Serialization/AssemblyDocumentSerializer.cpp
     src/Core/Serialization/PartDocumentSerializer.cpp
     src/Core/Import/ImportedGeometry.cpp
     src/Core/Import/SketchImporter.cpp
@@ -496,6 +502,7 @@ if(PARAMCAD_BUILD_TESTS)
     # comment, never below tests/SerializationTests.cpp.
     add_executable(ParametricCADCoreTests
         tests/CoreSmokeTests.cpp
+        tests/AssemblyDocumentTests.cpp
         tests/DependencyGraphTests.cpp
         tests/ObjectRegistryTests.cpp
         tests/DocumentRecomputeTests.cpp

@@ -71,9 +71,9 @@ RecomputeResult SweepFeature::recompute(const RecomputeContext& context) {
     // A support frame that is GONE fails loudly (M10 gate I). Falling back to
     // the embedded plane would move the geometry back to world XY on its own,
     // silently, which is exactly what a deleted reference must never do.
-    if (context.document.sketchSupportFrameIsMissing(profileSketch->id()))
+    if (context.part().sketchSupportFrameIsMissing(profileSketch->id()))
         return fail("sweep profile sketch's support frame is missing");
-    if (context.document.sketchSupportFrameIsMissing(pathSketch->id()))
+    if (context.part().sketchSupportFrameIsMissing(pathSketch->id()))
         return fail("sweep path sketch's support frame is missing");
 
     // EACH THROUGH ITS OWN sketch's effective frame. The whole point of a sweep
@@ -82,13 +82,13 @@ RecomputeResult SweepFeature::recompute(const RecomputeContext& context) {
     // check above exists to refuse.
     PlanarProfileDefinition profileDefinition;
     if (!BuildKernelProfile(*profileSketch, profile.profile,
-                            context.document.effectiveSketchFrame(profileSketch->id()),
+                            context.part().effectiveSketchFrame(profileSketch->id()),
                             profileDefinition))
         return fail("sweep profile references an entity that is no longer in the sketch");
 
     PlanarPathDefinition pathDefinition;
     if (!BuildKernelPath(*pathSketch, path.path,
-                         context.document.effectiveSketchFrame(pathSketch->id()),
+                         context.part().effectiveSketchFrame(pathSketch->id()),
                          pathDefinition))
         return fail("sweep path references an entity that is no longer in the sketch");
 

@@ -112,7 +112,7 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
     // user has switched off and produce a healthy-looking wrong solid -- the
     // exact failure M8 gate E exists to prevent, reached from a new direction.
     const ISolidFeature* base = resolveSolidFeature(
-        context.registry, context.document.activeChainBase(baseFeatureId_));
+        context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr)
         return fail("pocket base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
@@ -134,13 +134,13 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
     // A support frame that is GONE fails loudly (M10 gate I). Falling back to
     // the embedded plane would move the geometry back to world XY on its own,
     // silently, which is exactly what a deleted reference must never do.
-    if (context.document.sketchSupportFrameIsMissing(sketch->id()))
+    if (context.part().sketchSupportFrameIsMissing(sketch->id()))
         return fail("pocket sketch's support frame is missing");
     // The sketch's EFFECTIVE plane, which is its support frame's world
     // transform when it has one (M10.2, ADR-M10-003). Reading `sketch->frame()`
     // here instead would leave the geometry at the origin after the frame moved.
     if (!BuildKernelProfile(*sketch, profile.profile,
-                            context.document.effectiveSketchFrame(sketch->id()), definition))
+                            context.part().effectiveSketchFrame(sketch->id()), definition))
         return fail("pocket profile references an entity that is no longer in the sketch");
 
     // The tool grows along the sketch's +normal by Depth -- the SAME direction

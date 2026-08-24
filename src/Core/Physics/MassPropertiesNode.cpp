@@ -66,7 +66,7 @@ void MassPropertiesNode::setSource(ObjectId boxFeatureId, ObjectId materialId) n
 // upstream-state check in recompute().
 RecomputeResult MassPropertiesNode::failAndMarkStale(const RecomputeContext& context,
                                                      std::string message) {
-    context.document.massProperties().valid = false;
+    context.part().massProperties().valid = false;
     return {RecomputeStatus::Failed, std::move(message)};
 }
 
@@ -121,7 +121,7 @@ RecomputeResult MassPropertiesNode::recompute(const RecomputeContext& context) {
     // above overwrites the document's last valid NUMBERS, exactly mirroring
     // BoxFeature::currentShape_'s retention policy -- they only strip the
     // `valid` flag that marks those numbers as current (ADR-M3-004).
-    context.document.massProperties() = result;
+    context.part().massProperties() = result;
     return {RecomputeStatus::Success, {}};
 }
 

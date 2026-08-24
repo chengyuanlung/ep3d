@@ -219,3 +219,29 @@ solid, which is the part a mesh could not have done.
 ```
 ep3d --script examples/step-round-trip.ep3ds
 ```
+
+## `assembly-three-parts.ep3ds` (M23)
+
+Three parts put together. One script does both halves -- it **builds** the
+parts, saves them as files, and then assembles them -- because an assembly
+stores the **path** to each part, so the parts have to be real files before
+anything can be inserted.
+
+An instance names a file and a body inside it: the sentence "that body, in that
+file". Not a copy of the geometry. A part that is edited shows up in the
+assembly on the next rebuild, and a part whose file goes away stops its
+instance **by name** rather than leaving a copy nobody can trace back to
+anything.
+
+Where an instance sits is a **reference frame** -- there is no second transform
+anywhere, in memory or in the file -- so moving one is undoable, dirties
+exactly what it should through an ordinary graph edge, and sub-assemblies in
+M26 will be a frame parented to a frame rather than a new way of saying where
+something is.
+
+After `assembly NAME`, the words `solve`, `measure` and `save` are about the
+assembly rather than the part, and the log says so at the moment it changes.
+
+```
+ep3d --script examples/assembly-three-parts.ep3ds
+```

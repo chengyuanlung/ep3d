@@ -26,6 +26,7 @@ public:
     KernelShape tagCreatedFaces(const KernelShape& result, const KernelShape& base,
                                 std::uint64_t tag) override;
 
+    ShapeResult placeShape(const KernelShape& shape, const Transform3D& placement) override;
     ShapeResult rotateShape(const KernelShape& shape, const Vec3& axisOriginMm,
                             const Vec3& axisDirection, double angleRad) override;
     ShapeResult intersectShapes(const KernelShape& a, const KernelShape& b) override;

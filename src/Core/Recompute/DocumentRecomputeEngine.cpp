@@ -1,7 +1,7 @@
 #include "Core/Recompute/DocumentRecomputeEngine.h"
 #include "Core/Dependency/DependencyGraph.h"
 #include "Core/Document/ObjectRegistry.h"
-#include "Core/Document/PartDocument.h"
+#include "Core/Document/DocumentBase.h"
 #include "Core/Expression/ExpressionEvaluator.h"
 #include "Core/Parameter/Parameter.h"
 #include "Core/Recompute/IRecomputable.h"
@@ -26,7 +26,7 @@ ObjectId firstFailedPrerequisite(const DependencyGraph& graph, ObjectId id) {
 
 } // namespace
 
-DocumentRecomputeEngine::DocumentRecomputeEngine(PartDocument& document) noexcept
+DocumentRecomputeEngine::DocumentRecomputeEngine(DocumentBase& document) noexcept
     : document_(document) {}
 
 DocumentRecomputeReport DocumentRecomputeEngine::recompute() {
@@ -47,7 +47,7 @@ DocumentRecomputeReport DocumentRecomputeEngine::run() {
     // Sketch constraints can be mutated through a raw Sketch& (see
     // reconcileAllSketchParameterEdges), so the graph is made to agree with the
     // constraint set before the pass rather than assumed to already agree.
-    document_.reconcileAllSketchParameterEdges();
+    document_.beforeRecomputePass();
 
     DependencyGraph& graph = document_.graph_;
     ObjectRegistry& registry = document_.registry_;
@@ -63,7 +63,7 @@ DocumentRecomputeReport DocumentRecomputeEngine::run() {
     // Rolled-back features are not evaluated (M9.4). Asked of the document
     // rather than baked into the graph, because the graph is generic and knows
     // nothing about bodies or feature order.
-    const auto skip = [&](ObjectId id) { return !document_.isFeatureActive(id); };
+    const auto skip = [&](ObjectId id) { return !document_.isNodeActive(id); };
 
     const RecomputeReport graphReport = graph.recompute([&](ObjectId id) {
         invocationOrder.push_back(id);

@@ -60,11 +60,11 @@ TransformFeature::TransformFeature(ObjectId id, std::string name, ComputeState s
 
 bool TransformFeature::frameWorldOrFail(const RecomputeContext& context, Transform3D& out,
                                        std::string& why) const {
-    if (context.document.findFrame(frameId_) == nullptr) {
+    if (context.part().findFrame(frameId_) == nullptr) {
         why = std::string(typeName()) + " frame is missing";
         return false;
     }
-    out = context.document.worldTransform(frameId_);
+    out = context.part().worldTransform(frameId_);
     return true;
 }
 
@@ -84,7 +84,7 @@ RecomputeResult TransformFeature::recompute(const RecomputeContext& context) {
     // are walked past, and a chain that runs out fails loudly rather than
     // building on geometry the user switched off.
     const ISolidFeature* base =
-        resolveSolidFeature(context.registry, context.document.activeChainBase(baseFeatureId_));
+        resolveSolidFeature(context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr)
         return fail(noun + " base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
@@ -304,7 +304,7 @@ ShapeResult CurvePatternFeature::buildCopies(const RecomputeContext& context,
     if (path == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "curve pattern path sketch not found"};
-    if (context.document.sketchSupportFrameIsMissing(path->id()))
+    if (context.part().sketchSupportFrameIsMissing(path->id()))
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "curve pattern path sketch's support frame is missing"};
 
@@ -322,7 +322,7 @@ ShapeResult CurvePatternFeature::buildCopies(const RecomputeContext& context,
     // WHERE ALONG IT. The stations are sampled from the path's own geometry in
     // the sketch's plane, then placed in the world through that sketch's
     // effective frame -- the one conversion site (ADR-M4-002).
-    const SketchFrame frame = context.document.effectiveSketchFrame(path->id());
+    const SketchFrame frame = context.part().effectiveSketchFrame(path->id());
     const std::vector<Vec2> walkPoints = PathPolyline(*path, walked.path);
     if (walkPoints.size() < 2)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,

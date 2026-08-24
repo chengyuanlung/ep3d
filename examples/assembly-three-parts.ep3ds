@@ -1,0 +1,84 @@
+# THREE PARTS, PUT TOGETHER (M23).
+#
+# The M23 gate: three parts go into an assembly, get moved to where they
+# belong, and the whole thing is saved and can be opened again with everything
+# still where it was put.
+#
+# Run it:
+#   ep3d --script examples/assembly-three-parts.ep3ds
+#
+# One script does both halves -- it BUILDS the three parts, saves them, and
+# then assembles them. That is not a convenience: an assembly stores the PATH
+# to each part, so the parts have to be real files before anything can be
+# inserted, and a script that could only do one half could not show that.
+
+# --- part 1: the base plate ---------------------------------------------------
+
+sketch Plate
+tool rect
+click -60 -40
+click 60 40
+pad Base 10
+
+echo --- the base plate ---
+solve
+measure
+save build/asm-base.ep3d
+
+# --- part 2: a post -----------------------------------------------------------
+#
+# A new script would normally start a new document. This one keeps going, so
+# the second part is a second BODY -- and `save` writes the whole document, so
+# the file holds both. That is why the inserts below name a body: a file with
+# two bodies in it and no name given is REFUSED, with the names it does have,
+# rather than resolved to whichever came first.
+
+sketch Column
+tool circle
+click 0 0
+click 12 0
+pad Post 50
+
+echo --- the post ---
+solve
+measure
+save build/asm-parts.ep3d
+
+# --- the assembly -------------------------------------------------------------
+#
+# From here on `solve`, `measure` and `save` are about the ASSEMBLY. The part
+# verbs still work; what changed is what those three words are about, and the
+# log says so when the switch happens.
+
+assembly Rig
+
+# An instance names a FILE and a BODY inside it -- the sentence "that body, in
+# that file". Not a copy of the geometry: the part file is the source of
+# truth, so a part that is edited shows up here on the next rebuild, and a part
+# whose file goes away stops its instance BY NAME rather than leaving a copy
+# nobody can trace back to anything.
+insert Plate build/asm-base.ep3d Base
+
+# The same part file, twice, at two places. Three instances of one part is the
+# case an assembly exists for, and the case any cache of "the part" would
+# break.
+insert PostLeft build/asm-parts.ep3d Post
+insert PostRight build/asm-parts.ep3d Post
+
+# WHERE. The placement is a reference frame -- there is no second transform
+# anywhere -- so it is undoable, it dirties exactly what it should through an
+# ordinary graph edge, and a sub-assembly in M26 is a frame parented to a frame
+# rather than a new way of saying where something is.
+place Plate 0 0 0
+place PostLeft -40 0 10
+place PostRight 40 0 10 45
+
+# The plate is 120 x 80 x 10 = 96000, and each post is pi * 12^2 * 50 = 22619.5,
+# so the three together are about 141239. The CENTRES are what carry the claim:
+# a volume alone would be identical for three parts all sitting on top of each
+# other at the origin.
+echo --- three parts, each somewhere ---
+solve
+measure
+
+save build/rig.ep3da

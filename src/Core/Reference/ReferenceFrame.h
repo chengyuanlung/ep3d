@@ -3,6 +3,7 @@
 #include "Core/Document/ObjectId.h"
 #include "Core/Geometry/MathTypes.h"
 #include <string>
+#include <utility>
 
 namespace paramcad {
 
@@ -41,7 +42,12 @@ private:
     // that day: a sketch now reads its support frame, so a transform changed
     // behind the facade would leave the graph undirtied and the geometry stale
     // -- the exact class ADR-M3-004 exists to prevent.
-    friend class PartDocument;
+    // DocumentBase since M23: the frame hierarchy and the connectors are
+    // document machinery rather than part machinery, so the one class allowed
+    // to write these is the one that owns them (ADR-M23-001).
+    friend class DocumentBase;
+
+    void setName(std::string name) { name_ = std::move(name); }
 
     void setLocalTransform(const Transform3D& transform) { localTransform_ = transform; }
     void setParentFrameId(ObjectId parentFrameId) noexcept { parentFrameId_ = parentFrameId; }

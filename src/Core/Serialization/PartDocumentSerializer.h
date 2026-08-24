@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Document/PartDocument.h"
+#include "Core/Serialization/SerializationError.h"
 #include <iosfwd>
 #include <memory>
 #include <string>
@@ -50,27 +51,7 @@ namespace paramcad {
 // not one.
 int CurrentSchemaVersion() noexcept;
 
-enum class SerializationError {
-    None,
-    FileNotFound,
-    IoError,
-    MalformedJson,
-    WrongFormat,
-    UnsupportedSchemaVersion,
-    WrongDocumentType,
-    MissingField,
-    InvalidFieldType,
-    InvalidEnumValue,
-    DuplicateId,
-    UnknownDependencyId, // dependency endpoint is not a graph-node object in this file
-    InvalidDependency    // dependency edge is a self-edge or would create a cycle
-};
 
-struct SaveResult {
-    SerializationError error = SerializationError::None;
-    std::string message;
-    explicit operator bool() const noexcept { return error == SerializationError::None; }
-};
 
 struct LoadResult {
     std::unique_ptr<PartDocument> document;

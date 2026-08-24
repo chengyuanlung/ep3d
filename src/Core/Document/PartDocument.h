@@ -3,7 +3,7 @@
 #include "Core/Body/Body.h"
 #include "Core/Connector/Connector.h"
 #include "Core/Dependency/DependencyGraph.h"
-#include "Core/Document/CadDocument.h"
+#include "Core/Document/DocumentBase.h"
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Expression/ExpressionTypes.h"
 #include "Core/Feature/TransformFeatures.h"
@@ -59,7 +59,7 @@ class ChamferFeature;
 // graph -> registry -> owner in that order so no dangling reference is
 // reachable through a public path. Registry/graph accessors are const-only;
 // all mutation goes through the facade.
-class PartDocument final : public CadDocument {
+class PartDocument final : public DocumentBase {
 public:
     explicit PartDocument(std::string name);
     // Restore constructor (deserialization): keeps the persisted document id.
@@ -151,7 +151,7 @@ public:
     // dimension -- three different reasons the caller cannot act on
     // differently at this point, and which setParameterExpression distinguishes
     // before an expression is ever stored.
-    std::optional<Quantity> resolveExpressionVariable(std::string_view name) const;
+    std::optional<Quantity> resolveExpressionVariable(std::string_view name) const override;
     // BREAKING vs M1: const-only. Use addParameter/setParameterValue/
     // removeObject for mutation (single registration path). Parameter's own
     // mutators are private since M8 round 3, so the Parameter* this hands out
@@ -181,53 +181,9 @@ public:
     // "inert -- and closed the day a consumer appears" is closed, because a
     // sketch now reads its support frame and a transform changed behind the
     // facade would leave the graph undirtied.
-    std::vector<const ReferenceFrame*> frames() const;
-    const ReferenceFrame* findFrame(ObjectId id) const noexcept;
-    // --- Connectors as first-class objects (M10.3, ADR-M10-004) -------------
-    //
-    // Registered and resolvable, whichever route created them (§18.1). A
-    // connector holds no geometry: it references a frame, and the frame answers
-    // where it is -- `connectorWorldTransform` is the composition of the two.
-    //
-    // Throws when `frameId` is not a frame of this document: a connector on
-    // nothing is a mate anchor that cannot be resolved, which is A03's failure
-    // mode rather than a recoverable state.
-    Connector& addConnector(std::string name, ConnectorRole role, ObjectId frameId,
-                            ConnectorOwner owner = ConnectorOwner::PartDefinition);
-    Connector& restoreConnector(ObjectId id, std::string name, ConnectorRole role,
-                                ObjectId frameId, ConnectorOwner owner);
-    std::vector<const Connector*> connectors() const;
-    const Connector* findConnector(ObjectId id) const noexcept;
-    // The connector's frame, composed to world. Identity for an unknown id.
-    Transform3D connectorWorldTransform(ObjectId connectorId) const noexcept;
 
-    // --- Reference frames as first-class objects (M10, ADR-M10-001) ---------
-    //
-    // Registered, graph-participating, undoable. `parentFrameId` may be
-    // kInvalidObjectId for a root frame.
-    //
-    // Throws std::runtime_error when the parent is not a frame of this
-    // document, or when the parent chain would CYCLE -- refused at the door
-    // rather than discovered by an unbounded walk at recompute time, which is
-    // the cost M9.1 measured on itself.
-    ReferenceFrame& addFrame(std::string name, ObjectId parentFrameId = kInvalidObjectId);
-    ReferenceFrame& restoreFrame(ObjectId id, std::string name, ObjectId parentFrameId,
-                                 const Transform3D& localTransform);
 
-    // Sets a frame's transform relative to its parent. Dirties the frame, which
-    // dirties every sketch it supports and every feature built on those, through
-    // the ordinary M2 machinery. False if the id is not a frame.
-    bool setFrameTransform(ObjectId frameId, const Transform3D& transform);
-    // Re-parents. Same refusals as addFrame; false if either id is wrong.
-    bool setFrameParent(ObjectId frameId, ObjectId parentFrameId);
 
-    // The frame's transform in PART-LOCAL world coordinates, COMPOSED from the
-    // parent chain (ADR-M10-002). Never stored: a cached world transform is two
-    // truths that disagree the moment a parent moves.
-    //
-    // Identity for an unknown id, which is the same answer a document with no
-    // frames gives, so a caller that never uses frames is unaffected.
-    Transform3D worldTransform(ObjectId frameId) const noexcept;
 
     // --- Sketch on frame (M10.2, ADR-M10-003) -------------------------------
     //
@@ -238,8 +194,7 @@ public:
     bool setSketchSupportFrame(ObjectId sketchId, ObjectId frameId);
     // The restore-path twin: records no undo step (ADR-M9-001).
     bool restoreSketchSupportFrame(ObjectId sketchId, ObjectId frameId);
-    // The restore-path twin of setFrameParent: records no undo step.
-    bool restoreFrameParent(ObjectId frameId, ObjectId parentFrameId);
+
 
     // The plane a sketch's (u,v) actually lives on: its support frame's WORLD
     // transform when it has one, otherwise its own embedded SketchFrame.
@@ -523,14 +478,7 @@ public:
     // Does NOT dirty anything. A name has no geometric consequence, and
     // marking the object dirty would rebuild the whole chain below it to
     // produce identical shapes.
-    struct RenameResult {
-        bool ok{false};
-        std::string message; // empty on success
-    };
-    RenameResult renameObject(ObjectId id, std::string name);
 
-    // The name the tree shows for an object, or empty for one that has none.
-    std::string objectName(ObjectId id) const;
 
     // Publishes what a DRIVEN dimension measured (M17.19, ADR-M17-042).
     //
@@ -769,15 +717,13 @@ public:
     // for this input it did not, and "load a file, then inject the backend" is
     // an ordinary ordering because loadPartDocument returns a document with
     // neither backend set.
-    void setGeometryKernel(IGeometryKernel* kernel) noexcept;
-    IGeometryKernel* geometryKernel() const noexcept { return kernel_; }
+    void setGeometryKernel(IGeometryKernel* kernel) noexcept override;
 
     // Same non-owning contract as the kernel, for the same reason (ADR-M3-003
     // extended to M5): the caller owns the concrete solver and keeps it alive
     // for every subsequent recompute. PartDocument never constructs one, so
     // Core keeps no dependency on Eigen (ADR-M5-003).
-    void setSketchSolver(ISketchSolver* solver) noexcept;
-    ISketchSolver* sketchSolver() const noexcept { return sketchSolver_; }
+    void setSketchSolver(ISketchSolver* solver) noexcept override;
 
     // --- Feature activity: suppression and rollback (M9.3 / M9.4) -----------
     //
@@ -844,59 +790,32 @@ public:
     //     worse than no history: these operations CLEAR both stacks. The
     //     clearing is observable (`undoDepth()` drops to zero), so a UI can
     //     tell the user rather than offering an undo that would lie.
-    void beginTransaction(std::string label);
-    // Closes the open transaction. An EMPTY transaction records nothing --
-    // "the user did something that changed nothing" must not consume an undo
-    // step. False if no transaction was open.
-    bool commitTransaction();
-    // Undoes everything recorded since `beginTransaction` and records NOTHING:
-    // the document is left as if the transaction had never started (M9 spec
-    // section 6). False if no transaction was open.
-    bool abortTransaction();
-    bool isTransactionOpen() const noexcept { return openTransaction_.has_value(); }
 
-    // False when there is nothing to undo/redo -- a no-op, never a corruption.
-    bool undo();
-    bool redo();
-    std::size_t undoDepth() const noexcept { return undoStack_.size(); }
-    std::size_t redoDepth() const noexcept { return redoStack_.size(); }
-    // What the next undo/redo would do, or empty. M9 spec section 4: a user
-    // must be able to tell what an undo will undo.
-    std::string nextUndoLabel() const;
-    std::string nextRedoLabel() const;
 
     // --- Recompute infrastructure facade -----------------------------------
     // Registers an externally owned recomputable (e.g. a test stub) and gives
     // it a graph node. The caller guarantees the object outlives its
     // registration (remove with removeObject).
-    GraphResult addRecomputableNode(IRecomputable& object);
-    GraphResult addDependency(ObjectId dependent, ObjectId prerequisite);
-    GraphResult removeDependency(ObjectId dependent, ObjectId prerequisite);
-    // Graph markDirty plus the ADR-011 bridge: a Parameter node also gets
-    // ParameterState::Dirty. False if the id has no graph node.
-    bool markDirty(ObjectId id);
+
     GraphResult setSuppressed(ObjectId id, bool suppressed);
-    DocumentRecomputeReport recompute();
+    DocumentRecomputeReport recompute() override;
+    // Graph markDirty plus the ADR-011 bridge: a Parameter node also gets
+    // its evaluation state marked dirty.
+    bool markDirty(ObjectId id) override;
+
     // markDirty(id) + full dirty-set recompute (see DocumentRecomputeEngine).
-    DocumentRecomputeReport recomputeFrom(ObjectId id);
+    DocumentRecomputeReport recomputeFrom(ObjectId id) override;
 
     // Removes a registered object everywhere, in this order: graph node
     // (edges cleaned, former dependents dirtied per ADR-007) -> registry ->
     // owning container (Parameter/Body; externally owned IRecomputables have
     // no owner step here). False if the id is not registered.
-    bool removeObject(ObjectId id);
-    // The restore-path twin: removes recording NO undo step. Used by the loader
-    // to drop the constructor's auto-created Origin when the file supplies its
-    // own frames -- without it, every v10 load arrived with one undo step that
-    // would delete the document's Origin (ADR-M9-001; caught by gate H).
-    bool restoreRemoveObject(ObjectId id);
+    bool removeObject(ObjectId id) override;
 
     // Const-only access; mutation goes through the facade above.
-    const ObjectRegistry& objectRegistry() const noexcept { return registry_; }
-    const DependencyGraph& dependencyGraph() const noexcept { return graph_; }
+
 
 private:
-    friend class DocumentRecomputeEngine; // engine drives graph_/registry_
 
     // Shared box-feature registration/wiring logic for addBoxFeature and
     // restoreBoxFeature (single registration path, spec 13).
@@ -953,15 +872,11 @@ private:
     // One helper, called before ANYTHING is stored, so a throw leaves no
     // residue. `who` is the caller's own name, because the loader mirrors
     // these strings and round-2/3 findings pin several of them word for word.
-    // Creates the Origin frame during construction, recording nothing.
-    void createOriginFrame();
 
-    void requireUnusedId(ObjectId id, const char* who) const;
 
-    // Refuses a parent that is not a frame, or that would close a loop
-    // (M10). Pass kInvalidObjectId as `frameId` when the frame does not exist
-    // yet -- a brand-new frame cannot be its own ancestor.
-    void requireAcyclicParent(ObjectId frameId, ObjectId parentFrameId) const;
+
+
+
 
     // The chain rule at the door (ADR-M8-001, amended by review round 1's
     // R1-C1/R1-M2): a consumer's base must be a SOLID feature of the SAME
@@ -1053,34 +968,41 @@ private:
     // Writes a name with no validation and no undo record -- the shared tail
     // of renameObject and of undo, so a replayed rename cannot take a path
     // the original did not.
-    void applyName(ObjectId id, const std::string& name);
 
-    void recordDelta(UndoDelta delta, std::string label);
+
+
+
+    // --- What this document owes DocumentBase (M23, ADR-M23-001) ------------
+    //
+    // Each of these is the Part half of a rule the base states once. They are
+    // private and the base is a friend of nothing: it reaches them through the
+    // virtuals it declared, so there is no second way in.
+    void requireUnusedIdHook(ObjectId id, const char* who) const override;
+    std::string ownObjectName(ObjectId id) const override;
+    void applyOwnName(ObjectId id, const std::string& name) override;
+    bool ownNameIsTaken(const std::string& name, ObjectId except) const override;
+    void applyOwnDelta(const UndoDelta& delta, bool forward) override;
+    void onGraphDirtied() noexcept override { syncFeatureStatesFromGraph(); }
+    void beforeRecomputePass() override { reconcileAllSketchParameterEdges(); }
+    bool isNodeActive(ObjectId id) const noexcept override { return isFeatureActive(id); }
+
     void recordFeatureAdded(const Body& body, const Feature& feature);
-    void applyDelta(const UndoDelta& delta, bool forward);
-    void clearHistory(const char* becauseOfWhat) noexcept;
+
+
     // Re-points the mass source at the body's chain TAIL -- the last solid
     // feature nothing else consumes -- or detaches it if the body has none.
     void rewireMassPropertiesToTail(const Body& body);
 
-    std::vector<UndoRecord> undoStack_;
-    std::vector<UndoRecord> redoStack_;
-    std::optional<UndoRecord> openTransaction_;
-    bool applyingHistory_ = false;
+
 
     ParameterManager parameters_;
     std::vector<std::unique_ptr<Body>> bodies_;
-    std::vector<std::unique_ptr<ReferenceFrame>> frames_;
-    std::vector<std::unique_ptr<Connector>> connectors_;
+
     std::vector<std::unique_ptr<Sketch>> sketches_;
     std::shared_ptr<Material> material_;
     MassProperties massProperties_;
-    ObjectRegistry registry_;
-    DependencyGraph graph_;
+
     MassPropertiesNode massPropertiesNode_;
-    IGeometryKernel* kernel_ = nullptr;
-    ISketchSolver* sketchSolver_ = nullptr;
-    DocumentRecomputeEngine engine_{*this};
 };
 
 } // namespace paramcad

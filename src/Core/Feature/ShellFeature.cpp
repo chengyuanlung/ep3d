@@ -63,7 +63,7 @@ RecomputeResult ShellFeature::recompute(const RecomputeContext& context) {
     // suppressing a middle feature closes the chain over it, and the stored
     // reference is never rewritten because suppression is a state, not an edit.
     const ISolidFeature* base = resolveSolidFeature(
-        context.registry, context.document.activeChainBase(baseFeatureId_));
+        context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr) return fail("shell base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
         return fail("shell base feature is not in a valid state");

@@ -80,7 +80,7 @@ RecomputeResult EdgeDressFeature::recompute(const RecomputeContext& context) {
     // user has switched off and produce a healthy-looking wrong solid -- the
     // exact failure M8 gate E exists to prevent, reached from a new direction.
     const ISolidFeature* base = resolveSolidFeature(
-        context.registry, context.document.activeChainBase(baseFeatureId_));
+        context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr)
         return fail(noun + " base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)

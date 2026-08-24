@@ -33,7 +33,7 @@ public:
     // Resolves the source BoxFeature/Material through the registry, applies
     // the density policy (ADR-M3-005: finite and non-negative; zero is
     // valid), and performs the single traceable mm->m unit conversion
-    // (ADR-M3-002) before committing into context.document.massProperties().
+    // (ADR-M3-002) before committing into context.part().massProperties().
     // Commits ONLY on full success (transactional, spec 12): no failure path
     // overwrites the document's last valid numbers; they only strip the
     // `valid` flag marking those numbers current (ADR-M3-004).

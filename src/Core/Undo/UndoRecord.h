@@ -247,6 +247,22 @@ struct ObjectNameEdit {
     std::string after;
 };
 
+// M23: an assembly instance came into existence or left it.
+//
+// Carries the SENTENCE that defines the instance -- which file, which body,
+// which frame -- and nothing about geometry, exactly as every other delta
+// here does. Notice what is NOT in it: the placement. Moving an instance is a
+// FrameTransformEdit, because an instance's placement IS its frame, so undo
+// gets the move for free and there is no second way to say where something is.
+struct InstanceExistenceEdit {
+    ObjectId instanceId = kInvalidObjectId;
+    std::string name;
+    std::string sourcePath;
+    std::string bodyName;
+    ObjectId frameId = kInvalidObjectId;
+    bool addedByTheEdit = false;
+};
+
 using UndoDelta =
     std::variant<ParameterValueEdit, FeatureExistenceEdit, SuppressionEdit, RollbackEdit,
                  ParameterExistenceEdit, FrameExistenceEdit, FrameTransformEdit,
@@ -254,7 +270,7 @@ using UndoDelta =
                  SketchEntityExistenceEdit, SketchConstraintExistenceEdit,
                  SketchDimensionPlacementEdit, SketchDimensionFormatEdit,
                  SketchEntityConstructionEdit, SketchEntityGeometryEdit, ObjectNameEdit,
-                 SketchConstraintDrivenEdit>;
+                 SketchConstraintDrivenEdit, InstanceExistenceEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

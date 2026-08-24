@@ -61,7 +61,7 @@ RecomputeResult DraftFeature::recompute(const RecomputeContext& context) {
     if (context.kernel == nullptr) return fail("no geometry kernel configured");
 
     const ISolidFeature* base = resolveSolidFeature(
-        context.registry, context.document.activeChainBase(baseFeatureId_));
+        context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr) return fail("draft base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
         return fail("draft base feature is not in a valid state");

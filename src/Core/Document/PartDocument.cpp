@@ -133,7 +133,7 @@ std::pair<bool, Vec2> CurrentPlacement(const Sketch& sketch, SketchConstraintId 
 
 
 PartDocument::PartDocument(std::string name)
-    : CadDocument(std::move(name)) {
+    : DocumentBase(std::move(name)) {
     createOriginFrame();
     // MassPropertiesNode is auto-created fresh and auto-registered in the
     // registry (never persisted, ADR-M3-005 -- exactly like the Origin
@@ -145,7 +145,7 @@ PartDocument::PartDocument(std::string name)
 }
 
 PartDocument::PartDocument(ObjectId id, std::string name)
-    : CadDocument(id, std::move(name)) {
+    : DocumentBase(id, std::move(name)) {
     createOriginFrame();
     registry_.registerObject(massPropertiesNode_.id(), &massPropertiesNode_);
 }
@@ -552,139 +552,6 @@ Body& PartDocument::restoreBody(ObjectId id, std::string name) {
     return ref;
 }
 
-void PartDocument::createOriginFrame() {
-    // The Origin frame is part of CONSTRUCTING a document, not something the
-    // user did, so it records nothing. Without this every document -- including
-    // one that has just been loaded -- arrived carrying one undo step, and
-    // "Undo" on a freshly opened part would delete its Origin.
-    //
-    // Caught by M9_UNDO_402 and GATE_G2 the moment frames became recordable,
-    // which is the second time the "a loaded document starts empty" rule has
-    // paid for itself in as many milestones.
-    const bool wasApplying = applyingHistory_;
-    applyingHistory_ = true;
-    addFrame("Origin");
-    applyingHistory_ = wasApplying;
-}
-
-std::vector<const ReferenceFrame*> PartDocument::frames() const {
-    std::vector<const ReferenceFrame*> result;
-    result.reserve(frames_.size());
-    for (const std::unique_ptr<ReferenceFrame>& frame : frames_) result.push_back(frame.get());
-    return result;
-}
-
-const ReferenceFrame* PartDocument::findFrame(ObjectId id) const noexcept {
-    for (const std::unique_ptr<ReferenceFrame>& frame : frames_)
-        if (frame->id() == id) return frame.get();
-    return nullptr;
-}
-
-// Would making `frameId`'s parent `parentFrameId` close a loop? Walks UP from
-// the proposed parent looking for the child. Bounded by the frame count: a
-// cycle that already existed would otherwise spin here for ever, and refusing
-// to create one is worth nothing if the check itself can hang (M9.1's lesson,
-// paid once).
-void PartDocument::requireAcyclicParent(ObjectId frameId, ObjectId parentFrameId) const {
-    if (parentFrameId == kInvalidObjectId) return;
-    if (findFrame(parentFrameId) == nullptr)
-        throw std::runtime_error("frame parent " + std::to_string(parentFrameId) +
-                                 " is not a reference frame in this document");
-    ObjectId walk = parentFrameId;
-    for (std::size_t step = 0; step <= frames_.size(); ++step) {
-        if (walk == kInvalidObjectId) return;
-        if (walk == frameId)
-            throw std::runtime_error("frame " + std::to_string(frameId) +
-                                     " cannot be parented to " +
-                                     std::to_string(parentFrameId) +
-                                     ": the parent chain would cycle");
-        const ReferenceFrame* parent = findFrame(walk);
-        if (parent == nullptr) return;
-        walk = parent->parentFrameId();
-    }
-    throw std::runtime_error("frame parent chain is already cyclic");
-}
-
-ReferenceFrame& PartDocument::addFrame(std::string name, ObjectId parentFrameId) {
-    requireAcyclicParent(kInvalidObjectId, parentFrameId);
-    auto item = std::make_unique<ReferenceFrame>(std::move(name), parentFrameId);
-    auto& ref = *item;
-    frames_.push_back(std::move(item));
-    // FIRST-CLASS since M10 (ADR-M10-001): resolvable by id, and a graph node
-    // so that moving it dirties whatever it supports. Before M10 this function
-    // stopped at the push_back, which is why a frame had an ObjectId nothing
-    // could resolve and `removeObject` could not see it.
-    registry_.registerObject(ref.id(), &ref);
-    graph_.addNode(ref.id());
-    if (parentFrameId != kInvalidObjectId) graph_.addDependency(ref.id(), parentFrameId);
-    FrameExistenceEdit edit;
-    edit.frameId = ref.id();
-    edit.name = ref.name();
-    edit.parentFrameId = parentFrameId;
-    edit.localTransform = ref.localTransform();
-    edit.addedByTheEdit = true;
-    recordDelta(edit, "Add " + ref.name());
-    return ref;
-}
-
-ReferenceFrame& PartDocument::restoreFrame(ObjectId id, std::string name, ObjectId parentFrameId,
-                                           const Transform3D& localTransform) {
-    requireUnusedId(id, "restoreFrame");
-    requireAcyclicParent(id, parentFrameId);
-    auto item = std::make_unique<ReferenceFrame>(id, std::move(name), parentFrameId,
-                                                 localTransform);
-    auto& ref = *item;
-    frames_.push_back(std::move(item));
-    registry_.registerObject(ref.id(), &ref);
-    graph_.addNode(ref.id());
-    if (parentFrameId != kInvalidObjectId) graph_.addDependency(ref.id(), parentFrameId);
-    return ref; // NOT recorded: deserialization is not a user edit (ADR-M9-001)
-}
-
-bool PartDocument::setFrameTransform(ObjectId frameId, const Transform3D& transform) {
-    ReferenceFrame* frame = nullptr;
-    for (const std::unique_ptr<ReferenceFrame>& candidate : frames_)
-        if (candidate->id() == frameId) frame = candidate.get();
-    if (frame == nullptr) return false;
-
-    FrameTransformEdit edit;
-    edit.frameId = frameId;
-    edit.before = frame->localTransform();
-    edit.after = transform;
-    frame->setLocalTransform(transform);
-    // Dirty the FRAME, and let the graph carry it to the sketches this frame
-    // supports and the features built on those. Nothing walks the tree here:
-    // the parent edge and the frame -> sketch edge are ordinary graph edges, so
-    // a grandparent move reaches a grandchild's pad by the same machinery a
-    // Parameter edit uses (ADR-M10-002).
-    graph_.markDirty(frameId);
-    syncFeatureStatesFromGraph();
-    recordDelta(edit, "Move " + frame->name());
-    return true;
-}
-
-bool PartDocument::setFrameParent(ObjectId frameId, ObjectId parentFrameId) {
-    ReferenceFrame* frame = nullptr;
-    for (const std::unique_ptr<ReferenceFrame>& candidate : frames_)
-        if (candidate->id() == frameId) frame = candidate.get();
-    if (frame == nullptr) return false;
-    requireAcyclicParent(frameId, parentFrameId);
-
-    const ObjectId before = frame->parentFrameId();
-    if (before == parentFrameId) return true;
-    if (before != kInvalidObjectId) graph_.removeDependency(frameId, before);
-    frame->setParentFrameId(parentFrameId);
-    if (parentFrameId != kInvalidObjectId) graph_.addDependency(frameId, parentFrameId);
-    graph_.markDirty(frameId);
-    syncFeatureStatesFromGraph();
-
-    FrameParentEdit edit;
-    edit.frameId = frameId;
-    edit.before = before;
-    edit.after = parentFrameId;
-    recordDelta(edit, "Reparent " + frame->name());
-    return true;
-}
 
 bool PartDocument::setSketchSupportFrame(ObjectId sketchId, ObjectId frameId) {
     Sketch* sketch = findSketchForEdit(sketchId);
@@ -727,13 +594,6 @@ bool PartDocument::sketchSupportFrameIsMissing(ObjectId sketchId) const noexcept
     return frameId != kInvalidObjectId && findFrame(frameId) == nullptr;
 }
 
-bool PartDocument::restoreFrameParent(ObjectId frameId, ObjectId parentFrameId) {
-    const bool wasApplying = applyingHistory_;
-    applyingHistory_ = true;
-    const bool ok = setFrameParent(frameId, parentFrameId);
-    applyingHistory_ = wasApplying;
-    return ok;
-}
 
 SketchFrame PartDocument::effectiveSketchFrame(ObjectId sketchId) const noexcept {
     const Sketch* sketch = findSketch(sketchId);
@@ -746,80 +606,6 @@ SketchFrame PartDocument::effectiveSketchFrame(ObjectId sketchId) const noexcept
     return SketchFrame{worldTransform(frameId)};
 }
 
-Transform3D PartDocument::worldTransform(ObjectId frameId) const noexcept {
-    // COMPOSED, never stored (ADR-M10-002). Walked from the frame up to the
-    // root and composed on the way back down, so a parent's rotation applies to
-    // a child's offset rather than merely being added to it.
-    std::vector<const ReferenceFrame*> chain;
-    ObjectId walk = frameId;
-    for (std::size_t step = 0; step <= frames_.size(); ++step) {
-        const ReferenceFrame* frame = findFrame(walk);
-        if (frame == nullptr) break;
-        chain.push_back(frame);
-        walk = frame->parentFrameId();
-        if (walk == kInvalidObjectId) break;
-    }
-    Transform3D world = Transform3D::Identity();
-    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
-        world = Compose(world, (*it)->localTransform());
-    return world;
-}
-
-Connector& PartDocument::addConnector(std::string name, ConnectorRole role, ObjectId frameId,
-                                      ConnectorOwner owner) {
-    if (findFrame(frameId) == nullptr)
-        throw std::runtime_error("addConnector: frame " + std::to_string(frameId) +
-                                 " is not a reference frame in this document");
-    auto item = std::make_unique<Connector>(std::move(name), role, frameId, owner);
-    auto& ref = *item;
-    connectors_.push_back(std::move(item));
-    registry_.registerObject(ref.id(), &ref);
-
-    ConnectorExistenceEdit edit;
-    edit.connectorId = ref.id();
-    edit.name = ref.name();
-    edit.role = static_cast<int>(role);
-    edit.frameId = frameId;
-    edit.owner = static_cast<int>(owner);
-    edit.addedByTheEdit = true;
-    recordDelta(edit, "Add " + ref.name());
-    return ref;
-}
-
-Connector& PartDocument::restoreConnector(ObjectId id, std::string name, ConnectorRole role,
-                                          ObjectId frameId, ConnectorOwner owner) {
-    requireUnusedId(id, "restoreConnector");
-    if (findFrame(frameId) == nullptr)
-        throw std::runtime_error("restoreConnector: frame " + std::to_string(frameId) +
-                                 " is not a reference frame in this document");
-    auto item = std::make_unique<Connector>(id, std::move(name), role, frameId, owner);
-    auto& ref = *item;
-    connectors_.push_back(std::move(item));
-    registry_.registerObject(ref.id(), &ref);
-    return ref; // NOT recorded: deserialization is not a user edit (ADR-M9-001)
-}
-
-std::vector<const Connector*> PartDocument::connectors() const {
-    std::vector<const Connector*> result;
-    result.reserve(connectors_.size());
-    for (const std::unique_ptr<Connector>& c : connectors_) result.push_back(c.get());
-    return result;
-}
-
-const Connector* PartDocument::findConnector(ObjectId id) const noexcept {
-    for (const std::unique_ptr<Connector>& c : connectors_)
-        if (c->id() == id) return c.get();
-    return nullptr;
-}
-
-Transform3D PartDocument::connectorWorldTransform(ObjectId connectorId) const noexcept {
-    // A connector holds no geometry of its own (ADR-M10-004): it IS its frame,
-    // plus meaning. So this is the frame's world transform, and a connector on
-    // a moved frame reports the moved place with nothing to keep in step.
-    const Connector* connector = findConnector(connectorId);
-    if (connector == nullptr) return Transform3D::Identity();
-    return worldTransform(connector->frameId());
-}
 
 void PartDocument::detachCurrentMaterial() noexcept {
     if (!material_) return;
@@ -1574,7 +1360,7 @@ namespace {
 // picks what to delete or edit, and for a PARAMETER a duplicate is worse than
 // confusing: expressions resolve by name and findByName answers with the first
 // match (ADR-M17-038).
-bool NameIsFree(const PartDocument& document, ObjectId self, const std::string& name) {
+bool PartNameIsFree(const PartDocument& document, ObjectId self, const std::string& name) {
     for (const auto& parameter : document.parameters().items())
         if (parameter->id() != self && parameter->name() == name) return false;
     for (const Sketch* sketch : document.sketches())
@@ -1592,7 +1378,11 @@ bool NameIsFree(const PartDocument& document, ObjectId self, const std::string& 
 
 } // namespace
 
-void PartDocument::applyName(ObjectId id, const std::string& name) {
+bool PartDocument::ownNameIsTaken(const std::string& name, ObjectId except) const {
+    return !PartNameIsFree(*this, except, name);
+}
+
+void PartDocument::applyOwnName(ObjectId id, const std::string& name) {
     for (const auto& parameter : parameters_.items())
         if (parameter->id() == id) {
             parameter->setName(name);
@@ -1617,31 +1407,8 @@ void PartDocument::applyName(ObjectId id, const std::string& name) {
     if (material_ && material_->id() == id) material_->setName(name);
 }
 
-PartDocument::RenameResult PartDocument::renameObject(ObjectId id, std::string name) {
-    // Trimmed, because a name that differs from another only by a space it is
-    // impossible to see is not a name a user can tell apart.
-    const std::size_t first = name.find_first_not_of(" 	");
-    const std::size_t last = name.find_last_not_of(" 	");
-    name = first == std::string::npos ? std::string() : name.substr(first, last - first + 1);
-    if (name.empty()) return RenameResult{false, "a name cannot be empty"};
 
-    const std::string current = objectName(id);
-    if (current.empty()) return RenameResult{false, "that object cannot be renamed"};
-    if (current == name) return RenameResult{true, {}}; // nothing to record
-
-    if (!NameIsFree(*this, id, name))
-        return RenameResult{false, "'" + name + "' is already taken"};
-
-    ObjectNameEdit edit;
-    edit.objectId = id;
-    edit.before = current;
-    edit.after = name;
-    applyName(id, name);
-    recordDelta(edit, "Rename to " + name);
-    return RenameResult{true, {}};
-}
-
-std::string PartDocument::objectName(ObjectId id) const {
+std::string PartDocument::ownObjectName(ObjectId id) const {
     for (const auto& parameter : parameters_.items())
         if (parameter->id() == id) return parameter->name();
     for (const Sketch* sketch : sketches()) 
@@ -2000,37 +1767,8 @@ void PartDocument::recordFeatureAdded(const Body& body, const Feature& feature) 
 }
 
 
-void PartDocument::recordDelta(UndoDelta delta, std::string label) {
-    // Undo and redo drive these very facade methods. Without this guard the
-    // first undo would record its own inverse and the stack would oscillate
-    // forever between two states.
-    if (applyingHistory_) return;
-    if (openTransaction_.has_value()) {
-        openTransaction_->deltas.push_back(std::move(delta));
-        return;
-    }
-    UndoRecord record;
-    record.label = std::move(label);
-    record.deltas.push_back(std::move(delta));
-    undoStack_.push_back(std::move(record));
-    // A new edit after an undo DISCARDS the redo branch. Keeping it would let
-    // a redo replay a change against a document that has since moved, which is
-    // the one way an undo system can silently produce a state the user never
-    // had.
-    redoStack_.clear();
-}
 
-void PartDocument::clearHistory(const char* becauseOfWhat) noexcept {
-    // Named argument, unused at runtime: it exists so every call site has to
-    // say WHY it is throwing the history away, in the code rather than in a
-    // comment somewhere else.
-    (void)becauseOfWhat;
-    undoStack_.clear();
-    redoStack_.clear();
-    openTransaction_.reset();
-}
-
-void PartDocument::applyDelta(const UndoDelta& delta, bool forward) {
+void PartDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
     // M12 -- sketch geometry and constraints.
     //
     // Both branches go through the SKETCH's restore path, not the add path, so
@@ -2225,76 +1963,6 @@ void PartDocument::applyDelta(const UndoDelta& delta, bool forward) {
     rewireMassPropertiesToTail(*body);
 }
 
-void PartDocument::beginTransaction(std::string label) {
-    // A second begin closes nothing and loses nothing: the outer transaction
-    // simply keeps collecting. Nesting is not a feature M9.1 offers, and
-    // silently discarding the outer record would be the dangerous reading.
-    if (openTransaction_.has_value()) return;
-    UndoRecord record;
-    record.label = std::move(label);
-    openTransaction_ = std::move(record);
-}
-
-bool PartDocument::commitTransaction() {
-    if (!openTransaction_.has_value()) return false;
-    UndoRecord record = std::move(*openTransaction_);
-    openTransaction_.reset();
-    // An empty transaction is not an undo step. "The user opened a dialog and
-    // pressed OK without changing anything" must not consume one.
-    if (record.deltas.empty()) return true;
-    undoStack_.push_back(std::move(record));
-    redoStack_.clear();
-    return true;
-}
-
-bool PartDocument::abortTransaction() {
-    if (!openTransaction_.has_value()) return false;
-    const UndoRecord record = std::move(*openTransaction_);
-    openTransaction_.reset();
-    // Nothing is recorded: the document is left as if the transaction had
-    // never started (M9 spec section 6). The deltas are undone in REVERSE, for
-    // the same reason undo() does it.
-    applyingHistory_ = true;
-    for (auto it = record.deltas.rbegin(); it != record.deltas.rend(); ++it)
-        applyDelta(*it, /*forward=*/false);
-    applyingHistory_ = false;
-    return true;
-}
-
-bool PartDocument::undo() {
-    // An open transaction is not undoable -- it is not a step yet. Abort it
-    // first, or commit it.
-    if (openTransaction_.has_value()) return false;
-    if (undoStack_.empty()) return false; // a no-op, never a corruption
-    UndoRecord record = std::move(undoStack_.back());
-    undoStack_.pop_back();
-    applyingHistory_ = true;
-    for (auto it = record.deltas.rbegin(); it != record.deltas.rend(); ++it)
-        applyDelta(*it, /*forward=*/false);
-    applyingHistory_ = false;
-    redoStack_.push_back(std::move(record));
-    return true;
-}
-
-bool PartDocument::redo() {
-    if (openTransaction_.has_value()) return false;
-    if (redoStack_.empty()) return false;
-    UndoRecord record = std::move(redoStack_.back());
-    redoStack_.pop_back();
-    applyingHistory_ = true;
-    for (const UndoDelta& delta : record.deltas) applyDelta(delta, /*forward=*/true);
-    applyingHistory_ = false;
-    undoStack_.push_back(std::move(record));
-    return true;
-}
-
-std::string PartDocument::nextUndoLabel() const {
-    return undoStack_.empty() ? std::string() : undoStack_.back().label;
-}
-
-std::string PartDocument::nextRedoLabel() const {
-    return redoStack_.empty() ? std::string() : redoStack_.back().label;
-}
 
 void PartDocument::rewireMassPropertiesToTail(const Body& body) {
     // The TAIL is the last solid feature nothing else consumes (ADR-M8-003).
@@ -2344,22 +2012,11 @@ void PartDocument::rewireMassPropertiesToTail(const Body& body) {
     rewireMassPropertiesSource(tail->id(), materialId);
 }
 
-void PartDocument::requireUnusedId(ObjectId id, const char* who) const {
-    // Half zero: the document's OWN id. A PartDocument does not register
-    // itself, so it is the registry's third blind spot (round 4, R2R4-m1) --
-    // restoring anything onto it built cleanly and then refused to save, for
-    // ever. Cheapest of the three checks, so it goes first.
-    if (id == this->id())
-        throw std::runtime_error(std::string(who) + ": id " + std::to_string(id) +
-                                 " is already used by this document itself");
-    // Half one: every REGISTERED object -- parameters, materials, bodies,
-    // sketches, and every feature that reached the registry.
-    if (registry_.contains(id))
-        throw std::runtime_error(std::string(who) + ": id " + std::to_string(id) +
-                                 " is already registered in this document");
-    // Half two: features the registry cannot see. PlaceholderFeature is
-    // deliberately never registered (ADR-009 D4), so without this scan a
-    // placeholder-held id passes half one and collides anyway -- which is
+
+void PartDocument::requireUnusedIdHook(ObjectId id, const char* who) const {
+    // Features the registry cannot see. PlaceholderFeature is deliberately
+    // never registered (ADR-009 D4), so without this scan a placeholder-held
+    // id passes the base's registry check and collides anyway -- which is
     // exactly how round 4's R1R4-C1 built two features with one ObjectId in
     // one Body through public calls alone.
     for (const auto& anyBody : bodies_)
@@ -2977,30 +2634,15 @@ BoxFeature& PartDocument::restoreBoxFeature(Body& body, ObjectId id, std::string
     return feature;
 }
 
-GraphResult PartDocument::addRecomputableNode(IRecomputable& object) {
-    if (!registry_.registerObject(object.id(), &object)) {
-        return {object.id() == kInvalidObjectId ? GraphError::NodeNotFound
-                                                : GraphError::NodeAlreadyExists};
-    }
-    const GraphResult result = graph_.addNode(object.id());
-    if (!result) registry_.unregisterObject(object.id()); // keep the two in sync
-    return result;
-}
-
-GraphResult PartDocument::addDependency(ObjectId dependent, ObjectId prerequisite) {
-    return graph_.addDependency(dependent, prerequisite);
-}
-
-GraphResult PartDocument::removeDependency(ObjectId dependent, ObjectId prerequisite) {
-    return graph_.removeDependency(dependent, prerequisite);
-}
 
 bool PartDocument::markDirty(ObjectId id) {
-    if (!graph_.markDirty(id)) return false;
+    // The graph half is generic and lives in DocumentBase. This is the ADR-011
+    // BRIDGE, which is not: ParameterState is a Part concept, and an Assembly
+    // has no parameters to bridge to.
+    if (!DocumentBase::markDirty(id)) return false;
     if (const ObjectRegistry::ObjectRef* ref = registry_.find(id))
         if (auto* const* parameter = std::get_if<Parameter*>(ref))
-            (*parameter)->markEvaluationDirty(); // ADR-011 bridge
-    syncFeatureStatesFromGraph();
+            (*parameter)->markEvaluationDirty();
     return true;
 }
 
@@ -3176,14 +2818,6 @@ DocumentRecomputeReport PartDocument::recomputeFrom(ObjectId id) {
     refreshMassPropertiesCurrency(report);
     syncFeatureStatesFromGraph();
     return report;
-}
-
-bool PartDocument::restoreRemoveObject(ObjectId id) {
-    const bool wasApplying = applyingHistory_;
-    applyingHistory_ = true;
-    const bool ok = removeObject(id);
-    applyingHistory_ = wasApplying;
-    return ok;
 }
 
 bool PartDocument::removeObject(ObjectId id) {

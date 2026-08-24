@@ -14,6 +14,7 @@
 #include <BRepGProp.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <gp_Quaternion.hxx>
 #include <gp_Trsf.hxx>
 #include <BRepLib.hxx>
 #include <TopoDS_Solid.hxx>
@@ -904,6 +905,48 @@ FaceQueryResult OcctGeometryKernel::resolveFace(const KernelShape& shape,
 KernelShape OcctGeometryKernel::tagCreatedFaces(const KernelShape& result,
                                                const KernelShape& base, std::uint64_t tag) {
     return WithProvenance(result, base, tag);
+}
+
+ShapeResult OcctGeometryKernel::placeShape(const KernelShape& shape,
+                                           const Transform3D& placement) {
+    const auto* occtShape = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occtShape == nullptr || occtShape->shape().IsNull())
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "place input is not an OcctShape (null or foreign kernel)"};
+    const Quaternion& q = placement.rotation;
+    const Vec3& t = placement.translation;
+    if (!std::isfinite(q.w) || !std::isfinite(q.x) || !std::isfinite(q.y) ||
+        !std::isfinite(q.z) || !std::isfinite(t.x) || !std::isfinite(t.y) || !std::isfinite(t.z))
+        return ShapeResult{KernelShape{}, KernelError::NonFinite,
+                           "a placement must be finite"};
+    const double norm = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+    // A non-unit quaternion is a SCALE hiding in a rigid motion. Refused
+    // rather than normalised: silently normalising would place a part
+    // correctly while the caller believed it had asked for something else,
+    // and the caller here is a frame, which should never carry a scale.
+    if (!std::isfinite(norm) || std::fabs(norm - 1.0) > 1e-9)
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "a placement's rotation must be a unit quaternion"};
+
+    try {
+        gp_Trsf motion;
+        // ROTATION THEN TRANSLATION, in that order, and this is the one place
+        // that order is decided. gp_Trsf::SetTransformation with a quaternion
+        // and a vector builds exactly that composition.
+        motion.SetTransformation(gp_Quaternion(q.x, q.y, q.z, q.w), gp_Vec(t.x, t.y, t.z));
+        // COPY, not in place: the same part shape is placed once per instance,
+        // so transforming it where it lies would move every other instance too.
+        BRepBuilderAPI_Transform maker(occtShape->shape(), motion, Standard_True);
+        maker.Build();
+        if (!maker.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "OCCT could not place that shape"};
+        auto handle = std::make_shared<OcctShape>(maker.Shape());
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& error) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT place failed: ") + error.GetMessageString()};
+    }
 }
 
 ShapeResult OcctGeometryKernel::rotateShape(const KernelShape& shape,

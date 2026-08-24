@@ -5,6 +5,7 @@
 // document, a real solver and a real kernel would be checking it against a stub.
 
 #include <cstdio>
+#include "Core/Serialization/AssemblyDocumentSerializer.h"
 #include "Cli/SketchScript.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Body/Body.h"
@@ -1153,4 +1154,114 @@ TEST(CliScriptTest, M22_CLI_008_AFailedRecomputeNAMESWhatFailedAndWhy) {
     EXPECT_NE(outcome.message.find("CaseDraft"), std::string::npos) << outcome.message;
     EXPECT_NE(outcome.message.find("matches 2 faces"), std::string::npos) << outcome.message;
     EXPECT_EQ(outcome.message.find("see the log above"), std::string::npos) << outcome.message;
+}
+
+// --- M23: assembling from a script -------------------------------------------
+
+TEST(CliScriptTest, M23_CLI_001_OneScriptBuildsThePartsAndThenPutsThemTogether) {
+    // The regression test for examples/assembly-three-parts.ep3ds, and the M23
+    // gate seen from where a user stands. Both halves in one script, because an
+    // instance names a FILE: the parts have to be real files on disk before
+    // anything can be inserted, and a script that could only do one half could
+    // not show that.
+    ScratchIo part{"asm-part.ep3d"};
+    ScratchIo rig{"asm-rig.ep3da"};
+
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch Plate\ntool rect\nclick -60 -40\nclick 60 40\npad Base 10\n"
+                        "solve\nsave ") + part.path + "\n"
+            "assembly Rig\n"
+            "insert Left " + part.path + " Base\n"
+            "insert Right " + part.path + " Base\n"
+            "place Left -100 0 0\n"
+            "place Right 100 0 0\n"
+            "solve\nmeasure\nsave " + rig.path + "\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(rig.exists()) << "the assembly did not reach disk";
+
+    // Two instances of ONE file, at two places. The volumes are equal and the
+    // CENTRES are not, which is the whole claim -- a volume-only assertion
+    // would pass on two copies sitting on top of each other.
+    EXPECT_TRUE(LogMentions(outcome, "Left: volume = 96000 mm^3, centre = -100, 0, 5 mm"))
+        << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "Right: volume = 96000 mm^3, centre = 100, 0, 5 mm"))
+        << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "2 instances, total volume = 192000 mm^3"))
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M23_CLI_002_SaveWritesWHICHEVERDocumentTheScriptIsAbout) {
+    // `assembly` changes what solve, measure and save are ABOUT, and a save
+    // that quietly wrote the wrong document would only be discovered by
+    // opening the file. The log says which, and so does the file.
+    ScratchIo part{"which-part.ep3d"};
+    ScratchIo rig{"which-rig.ep3da"};
+
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch Plate\ntool rect\nclick -10 -10\nclick 10 10\npad Base 5\n"
+                        "solve\nsave ") + part.path + "\n"
+            "assembly Rig\ninsert One " + part.path + " Base\nsolve\nsave " + rig.path + "\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "(assembly)")) << outcome.message;
+
+    // Each file is the kind it claims to be, checked by the loader that would
+    // refuse the other.
+    EXPECT_TRUE(loadPartDocumentFromFile(part.path)) << "the part file is not a part";
+    EXPECT_TRUE(loadAssemblyDocumentFromFile(rig.path)) << "the assembly file is not an assembly";
+    EXPECT_FALSE(loadAssemblyDocumentFromFile(part.path));
+    EXPECT_FALSE(loadPartDocumentFromFile(rig.path));
+}
+
+TEST(CliScriptTest, M23_CLI_003_InsertingBeforeThereIsAnAssemblySaysSo) {
+    // "Unknown command" would be true of nothing here -- the verb exists, the
+    // document does not -- so the message names the missing step.
+    ScriptRun run;
+    const ScriptOutcome outcome = run("insert One parts/one.ep3d\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("`assembly NAME` first"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M23_CLI_004_TwoInstancesCannotShareAName) {
+    // They would be indistinguishable in every later `place`, and the second
+    // one would silently move the first.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("assembly Rig\ninsert One parts/one.ep3d\ninsert One parts/two.ep3d\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("already an instance called"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M23_CLI_005_PlacingSomethingThatIsNotThereNamesIt) {
+    ScriptRun run;
+    const ScriptOutcome outcome = run("assembly Rig\nplace Ghost 1 2 3\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("no instance called 'Ghost'"), std::string::npos)
+        << outcome.message;
+}
+
+TEST(CliScriptTest, M23_CLI_006_AnAssemblyThatCannotBuildNAMESTheInstance) {
+    // The same rule the part side got in M22: a failure that cannot be acted
+    // on is barely better than no failure at all.
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run("assembly Rig\ninsert Ghost no-such-part.ep3d\nsolve\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("Ghost"), std::string::npos) << outcome.message;
+    EXPECT_NE(outcome.message.find("no-such-part.ep3d"), std::string::npos) << outcome.message;
+}
+
+TEST(CliScriptTest, M23_CLI_007_MeasuringBeforeSolvingSaysWhichStepIsMissing) {
+    ScratchIo part{"unsolved-asm.ep3d"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch Plate\ntool rect\nclick -10 -10\nclick 10 10\npad Base 5\n"
+                        "solve\nsave ") + part.path + "\n"
+            "assembly Rig\ninsert One " + part.path + " Base\nmeasure\n");
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_NE(outcome.message.find("`solve` before measuring"), std::string::npos)
+        << outcome.message;
 }

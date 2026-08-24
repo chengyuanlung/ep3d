@@ -69,14 +69,14 @@ RecomputeResult LoftFeature::recompute(const RecomputeContext& context) {
         if (!profile)
             return fail("invalid loft section '" + sketch->name() + "': " + profile.message);
 
-        if (context.document.sketchSupportFrameIsMissing(sketch->id()))
+        if (context.part().sketchSupportFrameIsMissing(sketch->id()))
             return fail("loft section '" + sketch->name() + "' has a missing support frame");
 
         // EACH THROUGH ITS OWN frame -- the sections lie on different planes,
         // which is the entire point of a loft.
         PlanarProfileDefinition definition;
         if (!BuildKernelProfile(*sketch, profile.profile,
-                                context.document.effectiveSketchFrame(sketch->id()), definition))
+                                context.part().effectiveSketchFrame(sketch->id()), definition))
             return fail("loft section '" + sketch->name() +
                         "' references an entity that is no longer in the sketch");
         // IN THE ORDER THEY WERE GIVEN. Nothing here sorts them, and nothing

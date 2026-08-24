@@ -1,5 +1,7 @@
 #include "Cli/SketchScript.h"
 
+#include "Core/Assembly/AssemblyDocument.h"
+#include "Core/Serialization/AssemblyDocumentSerializer.h"
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Feature/ISolidFeature.h"
@@ -228,6 +230,10 @@ public:
 
 private:
     PartDocument& document_;
+    // THE ASSEMBLY THIS SCRIPT IS BUILDING, if it is building one (M23).
+    // Owned here rather than passed in, because a script that never says
+    // `assembly` must behave exactly as it did before this existed.
+    std::unique_ptr<AssemblyDocument> assembly_;
     ScriptOutcome* outcome_{nullptr};
     int line_{0};
 
@@ -377,6 +383,9 @@ private:
         if (verb == "along") return doAlong(tokens);
         if (verb == "export") return doExport(tokens);
         if (verb == "import") return doImport(tokens);
+        if (verb == "assembly") return doAssembly(tokens);
+        if (verb == "insert") return doInsert(tokens);
+        if (verb == "place") return doPlace(tokens);
         if (verb == "solve") return doSolve();
         if (verb == "save") return doSave(tokens);
         if (verb == "help") {
@@ -388,7 +397,8 @@ private:
             note("dimensions: " + Join(ScriptDimensionNames()));
             note("commands: sketch, tool, click, finish, constrain, dimension, pad, sweep, "
                  "loft, shell, draft, hole, union, subtract, intersect, ring, along, "
-                 "export, import, solve, save, measure, handle, echo, help");
+                 "export, import, assembly, insert, place, solve, save, measure, "
+                 "handle, echo, help");
             return true;
         }
         if (verb == "handle") {
@@ -458,6 +468,7 @@ private:
             // Even so it is the number a script needs: it is the evidence that
             // a pad, a sweep or a loft actually produced a solid, and without
             // it the only evidence was that nothing complained.
+            if (tokens.size() == 1 && assembly_ != nullptr) return measureAssembly();
             if (tokens.size() == 1) {
                 const MassProperties& mass = document_.massProperties();
                 if (!mass.valid)
@@ -1125,6 +1136,10 @@ private:
     }
 
     bool doSolve() {
+        // THE PART FIRST, ALWAYS. A script that builds parts and then
+        // assembles them needs both current, and the assembly reads the parts
+        // from FILES rather than from this document -- so the order here is
+        // not a dependency, it is just the order the log reads best in.
         const DocumentRecomputeReport report = document_.recompute();
         for (const Sketch* one : document_.sketches()) {
             std::string what = "  " + one->name() + ": DOF " +
@@ -1148,12 +1163,133 @@ private:
             }
             return fail(why.empty() ? "recompute failed" : "recompute failed -- " + why);
         }
+        if (assembly_ != nullptr) {
+            const DocumentRecomputeReport built = assembly_->recompute();
+            if (!built.success) {
+                std::string why;
+                for (const RecomputeItemReport& item : built.items) {
+                    if (item.status == RecomputeStatus::Success) continue;
+                    std::string named = assembly_->objectName(item.id);
+                    if (named.empty()) named = "#" + std::to_string(item.id);
+                    why += (why.empty() ? "" : "; ") + named + ": " +
+                           (item.message.empty() ? RecomputeStatusName(item.status)
+                                                 : item.message);
+                }
+                return fail(why.empty() ? "the assembly did not build"
+                                        : "the assembly did not build -- " + why);
+            }
+        }
         note("solve");
+        return true;
+    }
+
+    bool doAssembly(const std::vector<std::string>& tokens) {
+        // assembly NAME
+        //
+        // FROM HERE ON THIS SCRIPT IS ASSEMBLING. The part verbs still work --
+        // one script can build three parts, save them, and then put them
+        // together, which is the most useful thing a script can do here and
+        // the shape of the M23 example.
+        //
+        // What changes is what `solve`, `measure` and `save` are ABOUT. Said
+        // out loud in the log rather than left to be inferred, because a
+        // `save` that quietly wrote the wrong document would be discovered by
+        // opening the file.
+        if (tokens.size() != 2) return fail("assembly needs a name");
+        if (assembly_ != nullptr) return fail("this script already has an assembly");
+        assembly_ = std::make_unique<AssemblyDocument>(tokens[1]);
+        assembly_->setGeometryKernel(document_.geometryKernel());
+        assembly_->setSketchSolver(document_.sketchSolver());
+        note("assembly " + tokens[1] + " (solve, measure and save now mean the assembly)");
+        return true;
+    }
+
+    bool doInsert(const std::vector<std::string>& tokens) {
+        // insert NAME FILE [BODY]
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 3 && tokens.size() != 4)
+            return fail("insert needs a name and a part file");
+        if (assembly_->findInstanceNamed(tokens[1]) != nullptr)
+            return fail("there is already an instance called '" + tokens[1] + "'");
+        const std::string body = tokens.size() == 4 ? tokens[3] : std::string();
+        assembly_->addInstance(tokens[1], tokens[2], body);
+        note("insert " + tokens[1] + " <- " + tokens[2] + (body.empty() ? "" : " [" + body + "]"));
+        return true;
+    }
+
+    bool doPlace(const std::vector<std::string>& tokens) {
+        // place NAME X Y Z [DEGREES]
+        //
+        // The angle is about +Z, which is the one axis a script can name
+        // without a vocabulary for axes. Anything else is M24's business: a
+        // mate says where a part goes by what it touches, and typing three
+        // Euler angles is the thing mates exist to replace.
+        if (assembly_ == nullptr)
+            return fail("there is no assembly yet; use `assembly NAME` first");
+        if (tokens.size() != 5 && tokens.size() != 6)
+            return fail("place needs an instance and x y z, and optionally an angle about +Z");
+        const PartInstance* instance = assembly_->findInstanceNamed(tokens[1]);
+        if (instance == nullptr)
+            return fail("there is no instance called '" + tokens[1] + "'");
+        Transform3D placement;
+        if (!ParseNumber(tokens[2], &placement.translation.x) ||
+            !ParseNumber(tokens[3], &placement.translation.y) ||
+            !ParseNumber(tokens[4], &placement.translation.z))
+            return fail("a place needs three numbers in mm");
+        double degrees = 0.0;
+        if (tokens.size() == 6 && !ParseNumber(tokens[5], &degrees))
+            return fail("an angle is given in degrees");
+        const double radians = degrees * 3.14159265358979323846 / 180.0;
+        placement.rotation = Quaternion{std::cos(radians / 2.0), 0.0, 0.0,
+                                        std::sin(radians / 2.0)};
+        if (!assembly_->setInstanceTransform(instance->id(), placement))
+            return fail("could not place '" + tokens[1] + "'");
+        note("place " + tokens[1] + " at " + FormatNumber(placement.translation.x) + ", " +
+             FormatNumber(placement.translation.y) + ", " +
+             FormatNumber(placement.translation.z) +
+             (degrees == 0.0 ? "" : " turned " + FormatNumber(degrees) + " deg"));
+        return true;
+    }
+
+    // Every instance, its size and where it ended up. The assembly's answer to
+    // `measure`, and the evidence a script needs that the parts are really
+    // there rather than merely listed.
+    bool measureAssembly() {
+        IGeometryKernel* kernel = assembly_->geometryKernel();
+        if (kernel == nullptr) return fail("no geometry kernel configured");
+        const std::vector<const PartInstance*> instances = assembly_->instances();
+        if (instances.empty()) return fail("this assembly has nothing in it yet");
+        double total = 0.0;
+        for (const PartInstance* one : instances) {
+            if (one->currentState() != ComputeState::Valid || !one->currentShape().isValid())
+                return fail("'" + one->name() +
+                            "' has not been built yet -- `solve` before measuring");
+            const KernelMassPropertiesResult mass =
+                kernel->calculateMassProperties(one->currentShape());
+            if (!mass) return fail(mass.message);
+            total += mass.properties.volumeMm3;
+            note("  " + one->name() + ": volume = " +
+                 FormatNumber(mass.properties.volumeMm3) + " mm^3, centre = " +
+                 FormatNumber(mass.properties.centerOfMassMm.x) + ", " +
+                 FormatNumber(mass.properties.centerOfMassMm.y) + ", " +
+                 FormatNumber(mass.properties.centerOfMassMm.z) + " mm");
+        }
+        note("  " + std::to_string(instances.size()) + " instances, total volume = " +
+             FormatNumber(total) + " mm^3");
         return true;
     }
 
     bool doSave(const std::vector<std::string>& tokens) {
         if (tokens.size() != 2) return fail("save needs a path");
+        if (assembly_ != nullptr) {
+            const SaveResult wrote = saveAssemblyDocumentToFile(*assembly_, tokens[1]);
+            if (!wrote)
+                return fail(wrote.message.empty() ? "the assembly refused to save"
+                                                  : wrote.message);
+            note("save " + tokens[1] + " (assembly)");
+            return true;
+        }
         const SaveResult saved = savePartDocumentToFile(document_, tokens[1]);
         if (!saved)
             return fail(saved.message.empty() ? "the document refused to save" : saved.message);

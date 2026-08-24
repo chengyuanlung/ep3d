@@ -76,13 +76,13 @@ RecomputeResult PadFeature::recompute(const RecomputeContext& context) {
     // A support frame that is GONE fails loudly (M10 gate I). Falling back to
     // the embedded plane would move the geometry back to world XY on its own,
     // silently, which is exactly what a deleted reference must never do.
-    if (context.document.sketchSupportFrameIsMissing(sketch->id()))
+    if (context.part().sketchSupportFrameIsMissing(sketch->id()))
         return fail("pad sketch's support frame is missing");
     // The sketch's EFFECTIVE plane, which is its support frame's world
     // transform when it has one (M10.2, ADR-M10-003). Reading `sketch->frame()`
     // here instead would leave the geometry at the origin after the frame moved.
     if (!BuildKernelProfile(*sketch, profile.profile,
-                            context.document.effectiveSketchFrame(sketch->id()), definition))
+                            context.part().effectiveSketchFrame(sketch->id()), definition))
         return fail("profile references an entity that is no longer in the sketch");
 
     // Transactional (spec 13, mirroring BoxFeature): build into a LOCAL result
