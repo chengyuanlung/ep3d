@@ -2419,9 +2419,18 @@ void MainWindow::refreshCommandStates() {
     // command that refuses after the click.
     {
         const bool isAssembly = partOrNull() == nullptr && document_ != nullptr;
-        // ONE BAR OR THE OTHER, never both and never neither.
-        if (assemblyToolBar_ != nullptr) assemblyToolBar_->setVisible(isAssembly);
-        if (modelToolBar_ != nullptr) modelToolBar_->setVisible(!isAssembly);
+        // ONE BAR OR THE OTHER, never both and never neither -- AND NEITHER
+        // WHILE A SKETCH IS OPEN.
+        //
+        // That last clause is not decoration: M26.2 hides the model toolbar on
+        // entering sketch mode, because its commands act on FEATURES and a
+        // sketch has none. This rule runs on every refresh, so without the
+        // check it turned that bar straight back on and undid M26.2 from a
+        // completely different function.
+        const bool sketching = inSketchMode();
+        if (assemblyToolBar_ != nullptr)
+            assemblyToolBar_->setVisible(isAssembly && !sketching);
+        if (modelToolBar_ != nullptr) modelToolBar_->setVisible(!isAssembly && !sketching);
         const bool haveInstance = selectedInstance() != kInvalidObjectId;
         if (assemblyMenu_ != nullptr) assemblyMenu_->setEnabled(isAssembly);
         if (insertInstanceAction_ != nullptr) insertInstanceAction_->setEnabled(isAssembly);
