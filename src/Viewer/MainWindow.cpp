@@ -108,6 +108,22 @@ MainWindow::MainWindow(PartDocument& document, DocumentPresenter& presenter, QWi
     centralStack_->setCurrentWidget(viewer_);
     setCentralWidget(centralStack_);
 
+    // --- The drawing canvas talks back (M33/M34) ----------------------------
+    //
+    // THREE SIGNALS, THREE COMMANDS. The canvas reports what the pointer did;
+    // every change to the document goes through a command on this window, so
+    // there is one path in and the undo stack sees all of it.
+    connect(drawingCanvas_, &DrawingCanvasWidget::toolFinished, this,
+            [this](DrawingTool tool, std::vector<Vec2> points) {
+                drawShapeCommand(tool, points);
+                setDrawingToolCommand(DrawingTool::None);
+            });
+    connect(drawingCanvas_, &DrawingCanvasWidget::objectPicked, this, [this](ObjectId id) {
+        selectObject(id);
+    });
+    connect(drawingCanvas_, &DrawingCanvasWidget::dimensionDropped, this,
+            [this](ObjectId id, Vec2 at) { moveDimensionCommand(id, at); });
+
     connect(sketchCanvas_, &SketchCanvasWidget::documentChanged, this,
             &MainWindow::onSketchDocumentChanged);
     connect(sketchCanvas_, &SketchCanvasWidget::presentationChanged, this,
@@ -312,6 +328,89 @@ void MainWindow::buildMenus() {
     addLayerAction_ = drawingMenu_->addAction(QStringLiteral("Add &Layer..."));
     addLayerAction_->setToolTip(QStringLiteral("A new layer, with a colour and a linetype."));
     connect(addLayerAction_, &QAction::triggered, this, &MainWindow::onAddDrawingLayerRequested);
+
+    // --- Sheet geometry (M33) -----------------------------------------------
+    //
+    // CHECKABLE, because a tool is a MODE: the button stays pressed while the
+    // pointer means "draw", and a user who cannot see which mode they are in
+    // has to find out by clicking.
+    drawingMenu_->addSeparator();
+    drawLineAction_ = drawingMenu_->addAction(QStringLiteral("Draw &Line"));
+    drawLineAction_->setCheckable(true);
+    drawLineAction_->setToolTip(QStringLiteral("Two clicks. Snaps to what is already drawn."));
+    connect(drawLineAction_, &QAction::triggered, this, [this](bool on) {
+        setDrawingToolCommand(on ? DrawingTool::Line : DrawingTool::None);
+    });
+    drawCircleAction_ = drawingMenu_->addAction(QStringLiteral("Draw &Circle"));
+    drawCircleAction_->setCheckable(true);
+    drawCircleAction_->setToolTip(QStringLiteral("Centre, then a point on the rim."));
+    connect(drawCircleAction_, &QAction::triggered, this, [this](bool on) {
+        setDrawingToolCommand(on ? DrawingTool::Circle : DrawingTool::None);
+    });
+    drawRectangleAction_ = drawingMenu_->addAction(QStringLiteral("Draw &Rectangle"));
+    drawRectangleAction_->setCheckable(true);
+    drawRectangleAction_->setToolTip(
+        QStringLiteral("Two opposite corners. Drawn as four lines, so each side can be "
+                       "dimensioned and trimmed on its own."));
+    connect(drawRectangleAction_, &QAction::triggered, this, [this](bool on) {
+        setDrawingToolCommand(on ? DrawingTool::Rectangle : DrawingTool::None);
+    });
+
+    // --- Dimensions (M34) ---------------------------------------------------
+    //
+    // Six entries, not one "Dimension" that guesses: a circle can honestly
+    // take a radius OR a diameter, and a tool that picked for the user would
+    // be picking what the drawing SAYS about the part.
+    drawingMenu_->addSeparator();
+    linearDimensionAction_ = drawingMenu_->addAction(QStringLiteral("&Dimension"));
+    linearDimensionAction_->setToolTip(
+        QStringLiteral("The true distance between what is selected.\n"
+                       "It measures the geometry, so it follows when the geometry moves."));
+    connect(linearDimensionAction_, &QAction::triggered, this, [this] {
+        onAddDimensionRequested(DimensionKind::Linear, LinearDirection::Aligned);
+    });
+    horizontalDimensionAction_ = drawingMenu_->addAction(QStringLiteral("&Horizontal Dimension"));
+    horizontalDimensionAction_->setToolTip(
+        QStringLiteral("Across only -- the X distance, whatever angle the geometry sits at."));
+    connect(horizontalDimensionAction_, &QAction::triggered, this, [this] {
+        onAddDimensionRequested(DimensionKind::Linear, LinearDirection::Horizontal);
+    });
+    verticalDimensionAction_ = drawingMenu_->addAction(QStringLiteral("&Vertical Dimension"));
+    verticalDimensionAction_->setToolTip(QStringLiteral("Up and down only -- the Y distance."));
+    connect(verticalDimensionAction_, &QAction::triggered, this, [this] {
+        onAddDimensionRequested(DimensionKind::Linear, LinearDirection::Vertical);
+    });
+    radiusDimensionAction_ = drawingMenu_->addAction(QStringLiteral("&Radius"));
+    radiusDimensionAction_->setToolTip(QStringLiteral("Of the selected circle or arc."));
+    connect(radiusDimensionAction_, &QAction::triggered, this, [this] {
+        onAddDimensionRequested(DimensionKind::Radius, LinearDirection::Aligned);
+    });
+    diameterDimensionAction_ = drawingMenu_->addAction(QStringLiteral("Dia&meter"));
+    diameterDimensionAction_->setToolTip(
+        QStringLiteral("Of the selected circle or arc. A hole is dimensioned by its "
+                       "diameter, because that is the drill."));
+    connect(diameterDimensionAction_, &QAction::triggered, this, [this] {
+        onAddDimensionRequested(DimensionKind::Diameter, LinearDirection::Aligned);
+    });
+    angularDimensionAction_ = drawingMenu_->addAction(QStringLiteral("An&gle"));
+    angularDimensionAction_->setToolTip(
+        QStringLiteral("Between two selected lines, in degrees, about where they cross."));
+    connect(angularDimensionAction_, &QAction::triggered, this, [this] {
+        onAddDimensionRequested(DimensionKind::Angular, LinearDirection::Aligned);
+    });
+
+    dimensionTextAction_ = drawingMenu_->addAction(QStringLiteral("Dimension &Text..."));
+    dimensionTextAction_->setToolTip(
+        QStringLiteral("Show something else instead of the number.\n"
+                       "It still MEASURES -- an override changes the text, never the size."));
+    connect(dimensionTextAction_, &QAction::triggered, this,
+            &MainWindow::onDimensionTextRequested);
+    dimensionStyleAction_ = drawingMenu_->addAction(QStringLiteral("Dimension St&yle..."));
+    dimensionStyleAction_->setToolTip(
+        QStringLiteral("Text height, arrows, decimals and suffix, in paper millimetres.\n"
+                       "Every dimension using the style follows."));
+    connect(dimensionStyleAction_, &QAction::triggered, this,
+            &MainWindow::onDimensionStyleRequested);
 
     drawingMenu_->addSeparator();
     deleteDrawingObjectAction_ = drawingMenu_->addAction(QStringLiteral("&Delete"));
@@ -764,6 +863,16 @@ void MainWindow::buildToolbar() {
     drawing->addSeparator();
     addDrawing(sheetSetupAction_, ui::SketchIcon::SheetSetup, "Sheet");
     addDrawing(addLayerAction_, ui::SketchIcon::DrawingLayer, "Layer");
+    drawing->addSeparator();
+    addDrawing(drawLineAction_, ui::SketchIcon::Line, "Line");
+    addDrawing(drawCircleAction_, ui::SketchIcon::Circle, "Circle");
+    addDrawing(drawRectangleAction_, ui::SketchIcon::Rectangle, "Rect");
+    drawing->addSeparator();
+    addDrawing(linearDimensionAction_, ui::SketchIcon::LinearDimension, "Dim");
+    addDrawing(radiusDimensionAction_, ui::SketchIcon::RadiusDimension, "Radius");
+    addDrawing(diameterDimensionAction_, ui::SketchIcon::DiameterDimension, "Dia");
+    addDrawing(angularDimensionAction_, ui::SketchIcon::AngularDimension, "Angle");
+    addDrawing(dimensionStyleAction_, ui::SketchIcon::DimensionStyleIcon, "Style");
     drawingToolBar_ = drawing;
     drawingToolBar_->setVisible(false);
     // Hidden until an assembly is open, as the sketch bar is hidden until a
@@ -2984,6 +3093,32 @@ void MainWindow::refreshCommandStates() {
         if (addLayerAction_ != nullptr) addLayerAction_->setEnabled(isDrawing);
         if (deleteDrawingObjectAction_ != nullptr)
             deleteDrawingObjectAction_->setEnabled(isDrawing && selectedId_ != kInvalidObjectId);
+
+        // A DIMENSION TOOL IS ONLY LIVE WHEN IT WOULD SUCCEED. Asking the same
+        // proposal the command asks means an enabled button never answers "no
+        // dimension: ..." -- and it cannot drift from the command's rule,
+        // because there is only the one rule.
+        const DrawingDocument* asDrawing = AsDrawing(document_);
+        const std::vector<ObjectId> pickedEntities = selectedDrawingEntities();
+        const auto canDimension = [&](DimensionKind kind) {
+            return asDrawing != nullptr && asDrawing->proposeDimension(kind, pickedEntities).ok;
+        };
+        const bool linear = canDimension(DimensionKind::Linear);
+        if (linearDimensionAction_ != nullptr) linearDimensionAction_->setEnabled(linear);
+        if (horizontalDimensionAction_ != nullptr)
+            horizontalDimensionAction_->setEnabled(linear);
+        if (verticalDimensionAction_ != nullptr) verticalDimensionAction_->setEnabled(linear);
+        if (radiusDimensionAction_ != nullptr)
+            radiusDimensionAction_->setEnabled(canDimension(DimensionKind::Radius));
+        if (diameterDimensionAction_ != nullptr)
+            diameterDimensionAction_->setEnabled(canDimension(DimensionKind::Diameter));
+        if (angularDimensionAction_ != nullptr)
+            angularDimensionAction_->setEnabled(canDimension(DimensionKind::Angular));
+        if (dimensionTextAction_ != nullptr)
+            dimensionTextAction_->setEnabled(selectedDimension() != kInvalidObjectId);
+        if (dimensionStyleAction_ != nullptr) dimensionStyleAction_->setEnabled(isDrawing);
+        for (QAction* tool : {drawLineAction_, drawCircleAction_, drawRectangleAction_})
+            if (tool != nullptr) tool->setEnabled(isDrawing);
         const bool haveInstance = selectedInstance() != kInvalidObjectId;
         if (assemblyMenu_ != nullptr) assemblyMenu_->setEnabled(isAssembly);
         if (insertInstanceAction_ != nullptr) insertInstanceAction_->setEnabled(isAssembly);
@@ -4181,6 +4316,306 @@ QString MainWindow::setSheetCommand(SheetSize size, SheetOrientation orientation
                         QString::fromUtf8(std::string(toString(angle)).c_str())));
 }
 
+std::vector<ObjectId> MainWindow::selectedDrawingEntities() const {
+    std::vector<ObjectId> found;
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || tree_ == nullptr) return found;
+    std::set<ObjectId> chosen;
+    for (const QTreeWidgetItem* item : tree_->selectedItems())
+        chosen.insert(static_cast<ObjectId>(item->data(0, kIdRole).toULongLong()));
+    // IN DOCUMENT ORDER, for the reason selectedInstances() gives: Qt does not
+    // keep click order, and an angular dimension whose FIRST arm depended on
+    // an order nobody can see would measure the explement half the time.
+    for (const paramcad::DrawingEntity* entity : drawing->entities())
+        if (chosen.count(entity->id()) != 0) found.push_back(entity->id());
+    return found;
+}
+
+ObjectId MainWindow::selectedDimension() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return kInvalidObjectId;
+    return drawing->findDimension(selectedId_) != nullptr ? selectedId_ : kInvalidObjectId;
+}
+
+std::size_t MainWindow::dimensionCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->dimensions().size();
+}
+
+std::size_t MainWindow::danglingDimensionCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->danglingDimensions().size();
+}
+
+QString MainWindow::dimensionTextForTesting(ObjectId id) const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const DrawingDimension* dimension = drawing->findDimension(id);
+    if (dimension == nullptr) return {};
+    return QString::fromStdString(drawing->dimensionText(*dimension));
+}
+
+std::size_t MainWindow::drawnDimensionCountForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnDimensionCountForTesting();
+}
+
+std::size_t MainWindow::danglingDrawnForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->danglingDrawnForTesting();
+}
+
+QString MainWindow::addDimensionCommand(DimensionKind kind, LinearDirection direction) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Dimensions belong to a drawing."));
+
+    // THE DOCUMENT DECIDES WHAT THE PICK MEANS. The window's job is to know
+    // what is selected; turning that into two anchors is one rule, and it
+    // lives where a script can reach it too.
+    const auto proposal = drawing->proposeDimension(kind, selectedDrawingEntities());
+    if (!proposal.ok)
+        return say(QStringLiteral("No dimension: %1.").arg(QString::fromStdString(proposal.why)));
+
+    document_->beginTransaction("Add dimension");
+    DrawingDimension* made = nullptr;
+    try {
+        made = &drawing->addDimension(kind, proposal.first, proposal.second,
+                                      proposal.linePositionMm);
+        if (kind == DimensionKind::Linear && direction != LinearDirection::Aligned)
+            drawing->setDimensionDirection(made->id(), direction);
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That dimension was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction())
+        return say(QStringLiteral("That dimension was refused."));
+    selectedId_ = made->id();
+    const QString reads = QString::fromStdString(drawing->dimensionText(*made));
+    refreshAll();
+    return say(QStringLiteral("Added a dimension reading %1").arg(reads));
+}
+
+QString MainWindow::setDimensionDirectionCommand(LinearDirection direction) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Dimensions belong to a drawing."));
+    const ObjectId id = selectedDimension();
+    if (id == kInvalidObjectId) return say(QStringLiteral("Select a dimension first."));
+    if (!drawing->setDimensionDirection(id, direction))
+        return say(QStringLiteral("That direction was refused."));
+    const QString reads = dimensionTextForTesting(id);
+    refreshAll();
+    return say(QStringLiteral("It now reads %1").arg(reads));
+}
+
+QString MainWindow::setDimensionTextCommand(const QString& text) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Dimensions belong to a drawing."));
+    const ObjectId id = selectedDimension();
+    if (id == kInvalidObjectId) return say(QStringLiteral("Select a dimension first."));
+    if (!drawing->setDimensionTextOverride(id, text.toStdString()))
+        return say(QStringLiteral("That text was refused."));
+    refreshAll();
+    // SAID OUT LOUD, because an override is the one edit that makes a drawing
+    // stop showing what it measures -- and a user who forgets they typed it
+    // has a drawing that no longer tracks its model.
+    return say(text.isEmpty()
+                   ? QStringLiteral("Back to the measured size: %1").arg(dimensionTextForTesting(id))
+                   : QStringLiteral("Overridden to \"%1\" -- it still measures %2")
+                         .arg(text)
+                         .arg(QString::number(
+                             drawing->measure(*drawing->findDimension(id)).valueMm, 'f', 2)));
+}
+
+QString MainWindow::drawShapeCommand(DrawingTool tool, const std::vector<Vec2>& pointsMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Only a drawing has sheet geometry."));
+    if (static_cast<int>(pointsMm.size()) < ClicksNeededBy(tool))
+        return say(QStringLiteral("That tool needs more points."));
+
+    // ONE PLACE THAT TURNS CLICKS INTO A SHAPE. The canvas knows how many
+    // clicks a tool takes and this knows what they mean -- the two halves of
+    // the same fact, kept apart on purpose so neither can quietly hold a
+    // different idea of the other.
+    std::vector<DrawShape> shapes;
+    QString what;
+    switch (tool) {
+        case DrawingTool::None: return say(QStringLiteral("No tool is armed."));
+        case DrawingTool::Line:
+            if (std::hypot(pointsMm[1].x - pointsMm[0].x, pointsMm[1].y - pointsMm[0].y) < 1e-9)
+                return say(QStringLiteral("A line of no length is not a line."));
+            shapes.push_back(DrawLine{pointsMm[0], pointsMm[1]});
+            what = QStringLiteral("line");
+            break;
+        case DrawingTool::Circle: {
+            const double radius =
+                std::hypot(pointsMm[1].x - pointsMm[0].x, pointsMm[1].y - pointsMm[0].y);
+            if (!(radius > 1e-9)) return say(QStringLiteral("A circle of no radius is a point."));
+            shapes.push_back(DrawCircle{pointsMm[0], radius});
+            what = QStringLiteral("circle");
+            break;
+        }
+        case DrawingTool::Rectangle: {
+            // FOUR LINES, not a closed polyline -- so each side can be
+            // trimmed, dimensioned and put on its own layer, which is what a
+            // drafter does to a rectangle about a minute after drawing it.
+            const Vec2 a = pointsMm[0];
+            const Vec2 b = pointsMm[1];
+            if (std::fabs(a.x - b.x) < 1e-9 || std::fabs(a.y - b.y) < 1e-9)
+                return say(QStringLiteral("A rectangle with no width or no height is a line."));
+            const Vec2 corners[4] = {a, Vec2{b.x, a.y}, b, Vec2{a.x, b.y}};
+            for (int i = 0; i < 4; ++i)
+                shapes.push_back(DrawLine{corners[i], corners[(i + 1) % 4]});
+            what = QStringLiteral("rectangle");
+            break;
+        }
+    }
+
+    // ONE UNDO STEP FOR ONE GESTURE. A rectangle that took four Ctrl+Z to
+    // remove would be the shell contradicting what the user did.
+    document_->beginTransaction("Draw " + what.toStdString());
+    ObjectId last = kInvalidObjectId;
+    try {
+        for (DrawShape& shape : shapes) last = drawing->addEntity(std::move(shape)).id();
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That was refused: %1").arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction()) return say(QStringLiteral("That was refused."));
+    selectedId_ = last;
+    refreshAll();
+    return say(QStringLiteral("Drew a %1").arg(what));
+}
+
+void MainWindow::setDrawingToolCommand(DrawingTool tool) {
+    if (drawingCanvas_ == nullptr) return;
+    drawingCanvas_->setTool(tool);
+    if (drawLineAction_ != nullptr)
+        drawLineAction_->setChecked(tool == DrawingTool::Line);
+    if (drawCircleAction_ != nullptr)
+        drawCircleAction_->setChecked(tool == DrawingTool::Circle);
+    if (drawRectangleAction_ != nullptr)
+        drawRectangleAction_->setChecked(tool == DrawingTool::Rectangle);
+    statusLeft_->setText(tool == DrawingTool::None
+                             ? QStringLiteral("Select.")
+                             : QStringLiteral("Click on the sheet. Esc backs out."));
+}
+
+DrawingTool MainWindow::drawingToolForTesting() const {
+    return drawingCanvas_ == nullptr ? DrawingTool::None : drawingCanvas_->tool();
+}
+
+void MainWindow::pickOnSheetForTesting(Vec2 sheetMm) {
+    if (drawingCanvas_ != nullptr) drawingCanvas_->pickForTesting(sheetMm);
+}
+
+std::size_t MainWindow::drawingEntityCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->entities().size();
+}
+
+QString MainWindow::moveDimensionCommand(ObjectId id, Vec2 toMm) {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    if (!drawing->setDimensionLinePosition(id, toMm)) return {};
+    refreshAll();
+    return QStringLiteral("Moved a dimension");
+}
+
+ObjectId MainWindow::drawingEntityIdForTesting(std::size_t index) const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return kInvalidObjectId;
+    const std::vector<const paramcad::DrawingEntity*> all = drawing->entities();
+    return index < all.size() ? all[index]->id() : kInvalidObjectId;
+}
+
+ObjectId MainWindow::dimensionIdForTesting(std::size_t index) const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return kInvalidObjectId;
+    const std::vector<const DrawingDimension*> all = drawing->dimensions();
+    return index < all.size() ? all[index]->id() : kInvalidObjectId;
+}
+
+bool MainWindow::scaleEntityForTesting(ObjectId id, Vec2 aboutMm, double factor) {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return false;
+    const bool changed = drawing->transformEntities({id}, Matrix2D::scaleAbout(aboutMm, factor));
+    if (changed) refreshAll();
+    return changed;
+}
+
+QString MainWindow::addDimensionStyleCommand(const QString& name) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Dimension styles belong to a drawing."));
+    document_->beginTransaction("Add dimension style");
+    paramcad::DimensionStyle* made = nullptr;
+    try {
+        made = &drawing->addDimensionStyle(name.toStdString());
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(
+            QStringLiteral("That style was refused: %1").arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction()) return say(QStringLiteral("That style was refused."));
+    drawing->setCurrentDimensionStyle(made->id());
+    selectedId_ = made->id();
+    refreshAll();
+    return say(QStringLiteral("Added dimension style %1, and it is now the current one").arg(name));
+}
+
+QString MainWindow::editDimensionStyleCommand(double textHeightMm, double arrowSizeMm,
+                                              int decimals, const QString& suffix) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Dimension styles belong to a drawing."));
+    // The SELECTED style if one is, otherwise the current one -- which is the
+    // one a new dimension would use, so "Style..." with nothing selected edits
+    // what the user is about to draw with.
+    ObjectId id = drawing->findDimensionStyle(selectedId_) != nullptr
+                      ? selectedId_
+                      : drawing->currentDimensionStyleId();
+    const paramcad::DimensionStyle* was = drawing->findDimensionStyle(id);
+    if (was == nullptr) return say(QStringLiteral("There is no style to edit."));
+
+    paramcad::DimensionStyle wanted = *was;
+    wanted.setTextHeightMm(textHeightMm);
+    wanted.setArrowSizeMm(arrowSizeMm);
+    wanted.setDecimals(decimals);
+    wanted.setSuffix(suffix.toStdString());
+    if (!drawing->editDimensionStyle(id, wanted))
+        return say(QStringLiteral("That style change was refused."));
+    refreshAll();
+    return say(QStringLiteral("Restyled %1 -- every dimension using it followed")
+                   .arg(QString::fromStdString(was->name())));
+}
+
 QString MainWindow::addDrawingLayerCommand(const QString& name, int color) {
     const auto say = [this](const QString& message) {
         statusLeft_->setText(message);
@@ -4394,6 +4829,54 @@ void MainWindow::onSheetSetupRequested() {
                     scale,
                     pickedAngle == QStringLiteral("Third") ? ProjectionAngle::Third
                                                            : ProjectionAngle::First);
+}
+
+void MainWindow::onAddDimensionRequested(DimensionKind kind, LinearDirection direction) {
+    addDimensionCommand(kind, direction);
+}
+
+void MainWindow::onDimensionTextRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    const ObjectId id = selectedDimension();
+    if (drawing == nullptr || id == kInvalidObjectId) {
+        statusLeft_->setText(QStringLiteral("Select a dimension first."));
+        return;
+    }
+    bool ok = false;
+    const QString text = QInputDialog::getText(
+        this, QStringLiteral("Dimension Text"),
+        QStringLiteral("Text (empty puts back the measured size):"), QLineEdit::Normal,
+        QString::fromStdString(drawing->findDimension(id)->textOverride()), &ok);
+    if (!ok) return;
+    setDimensionTextCommand(text);
+}
+
+void MainWindow::onDimensionStyleRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const ObjectId id = drawing->findDimensionStyle(selectedId_) != nullptr
+                            ? selectedId_
+                            : drawing->currentDimensionStyleId();
+    const paramcad::DimensionStyle* style = drawing->findDimensionStyle(id);
+    if (style == nullptr) return;
+    bool ok = false;
+    const double height = QInputDialog::getDouble(
+        this, QStringLiteral("Dimension Style"), QStringLiteral("Text height (mm on paper):"),
+        style->textHeightMm(), 0.5, 50.0, 2, &ok);
+    if (!ok) return;
+    const double arrow = QInputDialog::getDouble(
+        this, QStringLiteral("Dimension Style"), QStringLiteral("Arrow size (mm on paper):"),
+        style->arrowSizeMm(), 0.5, 50.0, 2, &ok);
+    if (!ok) return;
+    const int decimals =
+        QInputDialog::getInt(this, QStringLiteral("Dimension Style"),
+                             QStringLiteral("Decimal places:"), style->decimals(), 0, 9, 1, &ok);
+    if (!ok) return;
+    const QString suffix = QInputDialog::getText(
+        this, QStringLiteral("Dimension Style"), QStringLiteral("Suffix (e.g. \" mm\"):"),
+        QLineEdit::Normal, QString::fromStdString(style->suffix()), &ok);
+    if (!ok) return;
+    editDimensionStyleCommand(height, arrow, decimals, suffix);
 }
 
 void MainWindow::onAddDrawingLayerRequested() {

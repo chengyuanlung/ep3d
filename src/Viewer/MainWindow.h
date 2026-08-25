@@ -10,6 +10,7 @@
 #include "Core/Kernel/FaceQuery.h"
 #include "Core/Recompute/RecomputeTypes.h"
 #include "Viewer/DocumentOutline.h"
+#include "Viewer/DrawingCanvas.h"
 #include "Core/Reconstruction/SketchReconstructor.h"
 #include "Viewer/SketchCanvas.h"
 #include <QMainWindow>
@@ -243,6 +244,55 @@ public:
     QString setSheetCommand(SheetSize size, SheetOrientation orientation,
                             const QString& scale, ProjectionAngle angle);
     QString addDrawingLayerCommand(const QString& name, int color);
+
+    // --- Dimensions (M34) ----------------------------------------------------
+    //
+    // WHAT IS SELECTED decides what is measured, through the document's ONE
+    // proposal rule -- so this command does not hold a second opinion about
+    // which snap point a circle means. It refuses loudly rather than putting a
+    // number on the paper that measures something the user did not point at.
+    QString addDimensionCommand(DimensionKind kind,
+                                LinearDirection direction = LinearDirection::Aligned);
+    QString setDimensionDirectionCommand(LinearDirection direction);
+    // An override REPLACES THE TEXT, never the measurement -- an empty string
+    // hands the dimension back to what it measures.
+    QString setDimensionTextCommand(const QString& text);
+    QString addDimensionStyleCommand(const QString& name);
+    // --- Drawing geometry (M33's tools, reachable at last) --------------------
+    //
+    // The canvas collects the clicks and hands them over; the WINDOW makes the
+    // geometry, because the canvas never touches the document (A02).
+    QString drawShapeCommand(DrawingTool tool, const std::vector<Vec2>& pointsMm);
+    void setDrawingToolCommand(DrawingTool tool);
+    DrawingTool drawingToolForTesting() const;
+    void pickOnSheetForTesting(Vec2 sheetMm);
+    std::size_t drawingEntityCountForTesting() const;
+    QString moveDimensionCommand(ObjectId id, Vec2 toMm);
+    // BY POSITION, in document order -- so a self test can say "the first line
+    // I drew" without knowing what id it got.
+    ObjectId drawingEntityIdForTesting(std::size_t index) const;
+    ObjectId dimensionIdForTesting(std::size_t index) const;
+    // Moves geometry out from under a dimension the way an edit would, so a
+    // test can prove the dimension FOLLOWED rather than remembered. Through
+    // the SAME transform every move, rotate and scale goes through -- a second
+    // edit path that only tests use is a path nothing else proves.
+    bool scaleEntityForTesting(ObjectId id, Vec2 aboutMm, double factor);
+    QString editDimensionStyleCommand(double textHeightMm, double arrowSizeMm, int decimals,
+                                      const QString& suffix);
+
+    // --- Readbacks -----------------------------------------------------------
+    std::size_t dimensionCountForTesting() const;
+    std::size_t danglingDimensionCountForTesting() const;
+    // What the drawing SAYS, asked of the same function the canvas paints
+    // from -- so a test that reads this is reading the screen's own answer.
+    QString dimensionTextForTesting(ObjectId id) const;
+    std::size_t drawnDimensionCountForTesting() const;
+    // How many painted "<?>" instead of a number. Asked of the CANVAS, not the
+    // document: "the drawing knows it is dangling" and "the reader can see it"
+    // are two claims.
+    std::size_t danglingDrawnForTesting() const;
+    ObjectId selectedDimension() const;
+    std::vector<ObjectId> selectedDrawingEntities() const;
     QString deleteSelectedDrawingObject();
 
     ObjectId selectedDrawingView() const;
@@ -700,6 +750,9 @@ private slots:
     void onUpdateViewsRequested();
     void onSheetSetupRequested();
     void onAddDrawingLayerRequested();
+    void onAddDimensionRequested(DimensionKind kind, LinearDirection direction);
+    void onDimensionTextRequested();
+    void onDimensionStyleRequested();
     void onDeleteDrawingObjectRequested();
     void onCaptureNamedPositionRequested();
     void onApplyNamedPositionRequested();
@@ -941,6 +994,17 @@ private:
     QAction* sheetSetupAction_ = nullptr;
     QAction* addLayerAction_ = nullptr;
     QAction* deleteDrawingObjectAction_ = nullptr;
+    QAction* linearDimensionAction_ = nullptr;
+    QAction* horizontalDimensionAction_ = nullptr;
+    QAction* verticalDimensionAction_ = nullptr;
+    QAction* radiusDimensionAction_ = nullptr;
+    QAction* diameterDimensionAction_ = nullptr;
+    QAction* angularDimensionAction_ = nullptr;
+    QAction* dimensionTextAction_ = nullptr;
+    QAction* dimensionStyleAction_ = nullptr;
+    QAction* drawLineAction_ = nullptr;
+    QAction* drawCircleAction_ = nullptr;
+    QAction* drawRectangleAction_ = nullptr;
     // The Assembly menu's actions, enabled only when the document is one.
     QAction* insertInstanceAction_ = nullptr;
     QAction* groundInstanceAction_ = nullptr;

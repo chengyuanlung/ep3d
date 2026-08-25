@@ -1,12 +1,15 @@
 #pragma once
 
 #include "Core/Document/DocumentBase.h"
+#include "Core/Drawing/DimensionStyle.h"
+#include "Core/Drawing/DrawingDimension.h"
 #include "Core/Drawing/DrawingEntity.h"
 #include "Core/Drawing/DrawingTables.h"
 #include "Core/Drawing/DrawingView.h"
 #include "Core/Drawing/Sheet.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -90,6 +93,7 @@ public:
     // layer current, and refusing it here would silently move the current
     // layer somewhere the user did not put it.
     void restoreCurrentLayer(ObjectId layerId);
+    void restoreCurrentDimensionStyle(ObjectId styleId);
 
     bool setLayerColor(ObjectId layerId, int color);
     bool setLayerLinetype(ObjectId layerId, std::string linetype);
@@ -210,6 +214,78 @@ public:
     std::string resolvedLinetypeOf(const DrawingEntity& entity) const;
     int resolvedLineweightOf(const DrawingEntity& entity) const;
     bool isEntityVisible(const DrawingEntity& entity) const;
+    // A DIMENSION IS ON A LAYER TOO, and it obeys the same two rules -- so it
+    // asks the same two functions rather than a copy of them. A dimension
+    // carries no colour of its own yet, which is why it always resolves
+    // ByLayer.
+    int resolvedColorOfDimension(const DrawingDimension& dimension) const;
+    bool isDimensionVisible(const DrawingDimension& dimension) const;
+
+    // --- Dimension styles (M34) ----------------------------------------------
+    //
+    // Every drawing has ISO-25 from the moment it is constructed and it cannot
+    // be deleted -- the same rule layer "0" follows, and for the same reason: a
+    // dimension has to have a style.
+    DimensionStyle& addDimensionStyle(std::string name);
+    DimensionStyle& restoreDimensionStyle(ObjectId id, std::string name);
+    std::vector<const DimensionStyle*> dimensionStyles() const;
+    const DimensionStyle* findDimensionStyle(ObjectId id) const noexcept;
+    const DimensionStyle* findDimensionStyleNamed(const std::string& name) const noexcept;
+    // Editing a style through the facade, so every change is one undo step and
+    // the drawing knows to repaint.
+    bool editDimensionStyle(ObjectId styleId, const DimensionStyle& to);
+    ObjectId currentDimensionStyleId() const noexcept { return currentStyleId_; }
+    bool setCurrentDimensionStyle(ObjectId styleId);
+
+    // --- Dimensions ------------------------------------------------------------
+    DrawingDimension& addDimension(DimensionKind kind, DimensionAnchor first,
+                                   DimensionAnchor second, Vec2 linePositionMm);
+    DrawingDimension& restoreDimension(ObjectId id, DimensionKind kind, DimensionAnchor first,
+                                       DimensionAnchor second, LinearDirection direction,
+                                       Vec2 linePositionMm, ObjectId styleId, ObjectId layerId,
+                                       std::string textOverride);
+    std::vector<const DrawingDimension*> dimensions() const;
+    const DrawingDimension* findDimension(ObjectId id) const noexcept;
+    bool setDimensionDirection(ObjectId dimensionId, LinearDirection direction);
+    bool setDimensionLinePosition(ObjectId dimensionId, Vec2 at);
+    bool setDimensionTextOverride(ObjectId dimensionId, std::string text);
+    bool setDimensionStyleOf(ObjectId dimensionId, ObjectId styleId);
+
+    // WHAT A DIMENSION CURRENTLY READS -- resolved, never stored.
+    //
+    // THE one place an anchor becomes a coordinate. A canvas, a plot, a DXF
+    // write and a "is anything dangling" check all ask here, so none of them
+    // can disagree about what the drawing says.
+    DimensionMeasurement measure(const DrawingDimension& dimension) const;
+    // The text it shows: the override if there is one, otherwise the
+    // measurement through its style.
+    std::string dimensionText(const DrawingDimension& dimension) const;
+
+    // WHAT A DIMENSION ON THIS SELECTION WOULD MEASURE (M34).
+    //
+    // ONE rule about which snap points a pick turns into anchors, so the menu,
+    // the toolbar and a script all put the same dimension on the same pick --
+    // rather than three hand-copied readings of "a circle means its centre and
+    // its rim", which is precisely the shape of defect this project keeps
+    // finding.
+    //
+    // It refuses rather than guesses: a diameter asked for on a line has no
+    // sensible answer, and inventing one would put a number on the drawing
+    // that measures something the user did not point at.
+    struct DimensionProposal {
+        bool ok = false;
+        std::string why;
+        DimensionAnchor first;
+        DimensionAnchor second;
+        Vec2 linePositionMm{};
+    };
+    DimensionProposal proposeDimension(DimensionKind kind,
+                                       const std::vector<ObjectId>& entityIds) const;
+
+    // WHICH DIMENSIONS HAVE LOST WHAT THEY MEASURED. Answered when asked, like
+    // staleViews -- and it has to be visible, because a dangling dimension is
+    // the one failure a drawing must never hide.
+    std::vector<ObjectId> danglingDimensions() const;
 
     // --- DocumentBase --------------------------------------------------------
     DocumentRecomputeReport recompute() override;
@@ -222,6 +298,16 @@ protected:
 private:
     DrawingView* findViewForEdit(ObjectId id) noexcept;
     DrawingEntity* findEntityForEdit(ObjectId id) noexcept;
+    DrawingDimension* findDimensionForEdit(ObjectId id) noexcept;
+    DimensionStyle* findDimensionStyleForEdit(ObjectId id) noexcept;
+    // Where an anchor actually is, in SHEET millimetres, or nothing when it
+    // has lost what it pointed at.
+    std::optional<Vec2> resolveAnchor(const DimensionAnchor& anchor) const;
+    // What ByLayer means, in ONE place. Both an entity and a dimension route
+    // through here, so the canvas cannot end up drawing the two by different
+    // rules.
+    int resolvedColorOnLayer(int ownColor, ObjectId layerId) const;
+    bool layerIsVisible(ObjectId layerId) const;
     Layer* findLayerForEdit(ObjectId id) noexcept;
     // The seeded table every drawing starts with: layer 0 and CONTINUOUS.
     // Written through the restore path so a new document carries no undo
@@ -234,6 +320,9 @@ private:
     std::vector<std::unique_ptr<Linetype>> linetypes_;
     std::vector<std::unique_ptr<DrawingView>> views_;
     std::vector<std::unique_ptr<DrawingEntity>> entities_;
+    std::vector<std::unique_ptr<DimensionStyle>> dimensionStyles_;
+    std::vector<std::unique_ptr<DrawingDimension>> dimensions_;
+    ObjectId currentStyleId_{kInvalidObjectId};
     ObjectId currentLayerId_{kInvalidObjectId};
 };
 

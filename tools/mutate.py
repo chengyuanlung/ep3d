@@ -16,6 +16,12 @@ oracle turned out to be wrong for the THIRD time in this project's life:
     it was scored as a SURVIVOR. Two of them -- an assembly that contains
     itself, and a recursion chain that never grows -- both stack-overflow, and
     both looked like gaps in the tests when the tests were fine.
+  * M34: a mutation whose failure text carried a byte the console codepage
+    (cp950 on this machine) cannot encode killed the HARNESS, on `print`, two
+    thirds of the way through a run. Every mutation after it went unmeasured
+    and no summary printed at all -- so a run that HAD found four real gaps
+    reported none of them. A harness that dies mid-run reports confidence it
+    has not earned in exactly the way ADR-M11-013 names.
 
 ADR-M11-013 already wrote the rule this violates: **a mutation harness with a
 broken oracle is worse than no harness, because it reports confidence it has
@@ -161,6 +167,23 @@ def run_suites():
     return reasons
 
 
+def say(text):
+    """Print, whatever the console's codepage thinks of the bytes.
+
+    A test's failure message is arbitrary text: it can carry a diameter sign, a
+    replacement character from a decode further up, or anything else somebody
+    typed. On a cp950 console `print` raises on those and the traceback ends
+    the run -- see M34 above. The report is worth more than the exact glyph, so
+    what the console cannot encode is replaced rather than thrown.
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, 'encoding', None) or 'ascii'
+        print(text.encode(encoding, 'replace').decode(encoding, 'replace'))
+    sys.stdout.flush()
+
+
 def main(argv):
     if len(argv) != 2:
         sys.stderr.write('usage: mutate.py <mutations.json>\n')
@@ -180,8 +203,7 @@ def main(argv):
             # NOT guessed at. A pattern that matches twice would mutate
             # whichever came first, and the result would be a measurement of
             # something nobody chose.
-            print('%-62s -> PATTERN MATCHES %d TIMES, skipped' % (name, found))
-            sys.stdout.flush()
+            say('%-62s -> PATTERN MATCHES %d TIMES, skipped' % (name, found))
             continue
 
         shutil.copyfile(path, path + '.bak')
@@ -197,20 +219,19 @@ def main(argv):
             # afternoon in M22.
             os.utime(path, None)
 
-        print('%-62s -> %d red' % (name, len(reasons)))
+        say('%-62s -> %d red' % (name, len(reasons)))
         for reason in reasons[:2]:
-            print('      ', reason)
-        sys.stdout.flush()
+            say('       ' + reason)
         if not reasons:
             survivors.append(name)
 
     subprocess.run(['cmake', '--build', 'build', '--config', 'Debug'], capture_output=True)
-    print('restored')
+    say('restored')
     if survivors:
-        print('\n%d SURVIVED -- each is a test gap or an equivalent mutation, and telling '
-              'them apart is a reading job:' % len(survivors))
+        say('\n%d SURVIVED -- each is a test gap or an equivalent mutation, and telling '
+            'them apart is a reading job:' % len(survivors))
         for name in survivors:
-            print('  ', name)
+            say('   ' + name)
     return 0
 
 

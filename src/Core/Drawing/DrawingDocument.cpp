@@ -2,9 +2,11 @@
 
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Document/SourceShapeResolver.h"
+#include "Core/Drawing/ObjectSnap.h"
 #include "Core/Undo/UndoRecord.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -60,6 +62,14 @@ void DrawingDocument::seedTables() {
     currentLayerId_ = zero->id();
     registry_.registerObject(zero->id(), zero.get());
     layers_.push_back(std::move(zero));
+
+    // ...AND A DIMENSION STYLE, for the same reason: a dimension has to have
+    // one, and a drawing that made the user create one before they could put a
+    // size on anything would be a drawing nobody finishes.
+    auto iso = std::make_unique<DimensionStyle>(kDefaultDimensionStyleName);
+    currentStyleId_ = iso->id();
+    registry_.registerObject(iso->id(), iso.get());
+    dimensionStyles_.push_back(std::move(iso));
 }
 
 // =============================================================================
@@ -271,6 +281,10 @@ bool DrawingDocument::setCurrentLayer(ObjectId layerId) {
 
 void DrawingDocument::restoreCurrentLayer(ObjectId layerId) {
     if (findLayer(layerId) != nullptr) currentLayerId_ = layerId;
+}
+
+void DrawingDocument::restoreCurrentDimensionStyle(ObjectId styleId) {
+    if (findDimensionStyle(styleId) != nullptr) currentStyleId_ = styleId;
 }
 
 namespace {
@@ -944,11 +958,27 @@ bool DrawingDocument::setEntityLineweight(ObjectId entityId, int lineweight) {
     return true;
 }
 
-int DrawingDocument::resolvedColorOf(const DrawingEntity& entity) const {
-    if (entity.color() != kColorByLayer && entity.color() != kColorByBlock)
-        return entity.color();
-    const Layer* layer = findLayer(entity.layerId());
+int DrawingDocument::resolvedColorOnLayer(int ownColor, ObjectId layerId) const {
+    if (ownColor != kColorByLayer && ownColor != kColorByBlock) return ownColor;
+    const Layer* layer = findLayer(layerId);
     return layer != nullptr ? layer->color() : 7;
+}
+
+bool DrawingDocument::layerIsVisible(ObjectId layerId) const {
+    const Layer* layer = findLayer(layerId);
+    return layer == nullptr || layer->isVisible();
+}
+
+int DrawingDocument::resolvedColorOf(const DrawingEntity& entity) const {
+    return resolvedColorOnLayer(entity.color(), entity.layerId());
+}
+
+int DrawingDocument::resolvedColorOfDimension(const DrawingDimension& dimension) const {
+    return resolvedColorOnLayer(kColorByLayer, dimension.layerId());
+}
+
+bool DrawingDocument::isDimensionVisible(const DrawingDimension& dimension) const {
+    return layerIsVisible(dimension.layerId());
 }
 
 std::string DrawingDocument::resolvedLinetypeOf(const DrawingEntity& entity) const {
@@ -965,8 +995,7 @@ int DrawingDocument::resolvedLineweightOf(const DrawingEntity& entity) const {
 }
 
 bool DrawingDocument::isEntityVisible(const DrawingEntity& entity) const {
-    const Layer* layer = findLayer(entity.layerId());
-    return layer == nullptr || layer->isVisible();
+    return layerIsVisible(entity.layerId());
 }
 
 std::vector<ObjectId> DrawingDocument::entitiesNear(Vec2 point, double apertureMm) const {
@@ -1004,6 +1033,506 @@ std::vector<ObjectId> DrawingDocument::entitiesInWindow(const Box2D& window,
 }
 
 // =============================================================================
+// Dimensions (M34)
+// =============================================================================
+
+DimensionStyle& DrawingDocument::addDimensionStyle(std::string name) {
+    if (name.empty()) throw std::invalid_argument("addDimensionStyle: a style needs a name");
+    if (nameIsTaken(name, kInvalidObjectId))
+        throw std::invalid_argument("addDimensionStyle: '" + name + "' is already taken");
+    auto item = std::make_unique<DimensionStyle>(std::move(name));
+    auto& ref = *item;
+    dimensionStyles_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+
+    DimensionStyleExistenceEdit edit;
+    edit.styleId = ref.id();
+    edit.name = ref.name();
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Add style " + ref.name());
+    return ref;
+}
+
+DimensionStyle& DrawingDocument::restoreDimensionStyle(ObjectId id, std::string name) {
+    requireUnusedId(id, "restoreDimensionStyle");
+    auto item = std::make_unique<DimensionStyle>(id, std::move(name));
+    auto& ref = *item;
+    dimensionStyles_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const DimensionStyle*> DrawingDocument::dimensionStyles() const {
+    std::vector<const DimensionStyle*> all;
+    all.reserve(dimensionStyles_.size());
+    for (const std::unique_ptr<DimensionStyle>& one : dimensionStyles_) all.push_back(one.get());
+    return all;
+}
+
+const DimensionStyle* DrawingDocument::findDimensionStyle(ObjectId id) const noexcept {
+    for (const std::unique_ptr<DimensionStyle>& one : dimensionStyles_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+DimensionStyle* DrawingDocument::findDimensionStyleForEdit(ObjectId id) noexcept {
+    for (const std::unique_ptr<DimensionStyle>& one : dimensionStyles_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+const DimensionStyle* DrawingDocument::findDimensionStyleNamed(
+    const std::string& name) const noexcept {
+    for (const std::unique_ptr<DimensionStyle>& one : dimensionStyles_)
+        if (one->name() == name) return one.get();
+    return nullptr;
+}
+
+namespace {
+// The whole style into the before-half of a delta, so a restore cannot be
+// partial. Written once for the same reason SnapshotLayerInto is.
+void SnapshotStyleInto(const DimensionStyle& style, DimensionStyleEdit& edit) {
+    edit.styleId = style.id();
+    edit.beforeTextHeightMm = edit.afterTextHeightMm = style.textHeightMm();
+    edit.beforeArrowSizeMm = edit.afterArrowSizeMm = style.arrowSizeMm();
+    edit.beforeTextGapMm = edit.afterTextGapMm = style.textGapMm();
+    edit.beforeExtensionGapMm = edit.afterExtensionGapMm = style.extensionGapMm();
+    edit.beforeExtensionOvershootMm = edit.afterExtensionOvershootMm =
+        style.extensionOvershootMm();
+    edit.beforeDecimals = edit.afterDecimals = style.decimals();
+    edit.beforeSuffix = edit.afterSuffix = style.suffix();
+    edit.beforeOverallScale = edit.afterOverallScale = style.overallScale();
+}
+
+void ApplyStyleHalf(DimensionStyle& style, double textHeight, double arrow, double textGap,
+                    double extensionGap, double overshoot, int decimals,
+                    const std::string& suffix, double overallScale) {
+    style.setTextHeightMm(textHeight);
+    style.setArrowSizeMm(arrow);
+    style.setTextGapMm(textGap);
+    style.setExtensionGapMm(extensionGap);
+    style.setExtensionOvershootMm(overshoot);
+    style.setDecimals(decimals);
+    style.setSuffix(suffix);
+    style.setOverallScale(overallScale);
+}
+} // namespace
+
+bool DrawingDocument::editDimensionStyle(ObjectId styleId, const DimensionStyle& to) {
+    DimensionStyle* style = findDimensionStyleForEdit(styleId);
+    if (style == nullptr) return false;
+    DimensionStyleEdit edit;
+    SnapshotStyleInto(*style, edit);
+    edit.afterTextHeightMm = to.textHeightMm();
+    edit.afterArrowSizeMm = to.arrowSizeMm();
+    edit.afterTextGapMm = to.textGapMm();
+    edit.afterExtensionGapMm = to.extensionGapMm();
+    edit.afterExtensionOvershootMm = to.extensionOvershootMm();
+    edit.afterDecimals = to.decimals();
+    edit.afterSuffix = to.suffix();
+    edit.afterOverallScale = to.overallScale();
+    // THE NAME IS NOT TOUCHED. Renaming goes through renameObject, which
+    // checks uniqueness -- and a style editor that also renamed would be a
+    // second path to a name, which is how two objects end up sharing one.
+    ApplyStyleHalf(*style, to.textHeightMm(), to.arrowSizeMm(), to.textGapMm(),
+                   to.extensionGapMm(), to.extensionOvershootMm(), to.decimals(), to.suffix(),
+                   to.overallScale());
+    recordDelta(edit, "Style " + style->name());
+    return true;
+}
+
+bool DrawingDocument::setCurrentDimensionStyle(ObjectId styleId) {
+    if (findDimensionStyle(styleId) == nullptr) return false;
+    if (currentStyleId_ == styleId) return true;
+    CurrentDimensionStyleEdit edit;
+    edit.before = currentStyleId_;
+    edit.after = styleId;
+    currentStyleId_ = styleId;
+    recordDelta(edit, "Current style");
+    return true;
+}
+
+DrawingDimension& DrawingDocument::addDimension(DimensionKind kind, DimensionAnchor first,
+                                                DimensionAnchor second, Vec2 linePositionMm) {
+    auto item = std::make_unique<DrawingDimension>(kind, first, second, linePositionMm,
+                                                   currentStyleId_, currentLayerId_);
+    auto& ref = *item;
+    dimensions_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+
+    DimensionExistenceEdit edit;
+    edit.dimensionId = ref.id();
+    edit.kind = static_cast<int>(ref.kind());
+    edit.first = ref.first();
+    edit.second = ref.second();
+    edit.direction = static_cast<int>(ref.direction());
+    edit.lineXMm = linePositionMm.x;
+    edit.lineYMm = linePositionMm.y;
+    edit.styleId = ref.styleId();
+    edit.layerId = ref.layerId();
+    edit.textOverride = ref.textOverride();
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Dimension");
+    return ref;
+}
+
+DrawingDimension& DrawingDocument::restoreDimension(ObjectId id, DimensionKind kind,
+                                                    DimensionAnchor first,
+                                                    DimensionAnchor second,
+                                                    LinearDirection direction,
+                                                    Vec2 linePositionMm, ObjectId styleId,
+                                                    ObjectId layerId,
+                                                    std::string textOverride) {
+    requireUnusedId(id, "restoreDimension");
+    auto item = std::make_unique<DrawingDimension>(id, kind, first, second, linePositionMm,
+                                                   styleId, layerId);
+    auto& ref = *item;
+    ref.setDirection(direction);
+    ref.setTextOverride(std::move(textOverride));
+    dimensions_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const DrawingDimension*> DrawingDocument::dimensions() const {
+    std::vector<const DrawingDimension*> all;
+    all.reserve(dimensions_.size());
+    for (const std::unique_ptr<DrawingDimension>& one : dimensions_) all.push_back(one.get());
+    return all;
+}
+
+const DrawingDimension* DrawingDocument::findDimension(ObjectId id) const noexcept {
+    for (const std::unique_ptr<DrawingDimension>& one : dimensions_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+DrawingDimension* DrawingDocument::findDimensionForEdit(ObjectId id) noexcept {
+    for (const std::unique_ptr<DrawingDimension>& one : dimensions_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+namespace {
+void SnapshotDimensionInto(const DrawingDimension& dimension, DimensionEdit& edit) {
+    edit.dimensionId = dimension.id();
+    edit.beforeDirection = edit.afterDirection = static_cast<int>(dimension.direction());
+    edit.beforeXMm = edit.afterXMm = dimension.linePositionMm().x;
+    edit.beforeYMm = edit.afterYMm = dimension.linePositionMm().y;
+    edit.beforeStyleId = edit.afterStyleId = dimension.styleId();
+    edit.beforeText = edit.afterText = dimension.textOverride();
+}
+} // namespace
+
+bool DrawingDocument::setDimensionDirection(ObjectId dimensionId, LinearDirection direction) {
+    DrawingDimension* dimension = findDimensionForEdit(dimensionId);
+    if (dimension == nullptr) return false;
+    DimensionEdit edit;
+    SnapshotDimensionInto(*dimension, edit);
+    edit.afterDirection = static_cast<int>(direction);
+    dimension->setDirection(direction);
+    recordDelta(edit, "Dimension direction");
+    return true;
+}
+
+bool DrawingDocument::setDimensionLinePosition(ObjectId dimensionId, Vec2 at) {
+    DrawingDimension* dimension = findDimensionForEdit(dimensionId);
+    if (dimension == nullptr) return false;
+    DimensionEdit edit;
+    SnapshotDimensionInto(*dimension, edit);
+    edit.afterXMm = at.x;
+    edit.afterYMm = at.y;
+    dimension->setLinePositionMm(at);
+    recordDelta(edit, "Move dimension");
+    return true;
+}
+
+bool DrawingDocument::setDimensionTextOverride(ObjectId dimensionId, std::string text) {
+    DrawingDimension* dimension = findDimensionForEdit(dimensionId);
+    if (dimension == nullptr) return false;
+    DimensionEdit edit;
+    SnapshotDimensionInto(*dimension, edit);
+    edit.afterText = text;
+    dimension->setTextOverride(std::move(text));
+    recordDelta(edit, "Dimension text");
+    return true;
+}
+
+bool DrawingDocument::setDimensionStyleOf(ObjectId dimensionId, ObjectId styleId) {
+    DrawingDimension* dimension = findDimensionForEdit(dimensionId);
+    if (dimension == nullptr || findDimensionStyle(styleId) == nullptr) return false;
+    DimensionEdit edit;
+    SnapshotDimensionInto(*dimension, edit);
+    edit.afterStyleId = styleId;
+    dimension->setStyleId(styleId);
+    recordDelta(edit, "Dimension style");
+    return true;
+}
+
+std::optional<Vec2> DrawingDocument::resolveAnchor(const DimensionAnchor& anchor) const {
+    if (anchor.kind == DimensionAnchorKind::Free) return anchor.at;
+
+    if (anchor.kind == DimensionAnchorKind::Entity) {
+        const DrawingEntity* entity = findEntity(anchor.entityId);
+        if (entity == nullptr) return std::nullopt;
+        const std::vector<SnapCandidate> points = StaticSnapPointsOf(entity->shape());
+        if (anchor.snapIndex < 0 ||
+            static_cast<std::size_t>(anchor.snapIndex) >= points.size())
+            return std::nullopt;
+        return points[static_cast<std::size_t>(anchor.snapIndex)].at;
+    }
+
+    // IN A VIEW: the model point, re-found in the projection, then carried onto
+    // the paper.
+    //
+    // THIS IS THE APPROXIMATION (see DrawingDimension.h). The nearest snap
+    // point of the reprojected geometry is adopted if it is within tolerance;
+    // otherwise NOTHING is returned and the dimension dangles LOUDLY. The
+    // failure this rules out is the one that matters -- silently re-attaching
+    // to a different feature and printing a plausible wrong number.
+    const DrawingView* view = findView(anchor.viewId);
+    if (view == nullptr || view->currentState() != ComputeState::Valid) return std::nullopt;
+
+    double bestDistance = anchor.toleranceMm;
+    std::optional<Vec2> bestModelPoint;
+    const auto offer = [&](Vec2 candidate) {
+        const double distance = std::hypot(candidate.x - anchor.at.x, candidate.y - anchor.at.y);
+        if (distance <= bestDistance) {
+            bestDistance = distance;
+            bestModelPoint = candidate;
+        }
+    };
+    for (const ProjectedCurve& curve : view->projected().curves) {
+        if (const auto* line = std::get_if<ProjectedLine>(&curve.shape)) {
+            offer(line->a);
+            offer(line->b);
+            offer(Vec2{(line->a.x + line->b.x) / 2.0, (line->a.y + line->b.y) / 2.0});
+        } else if (const auto* arc = std::get_if<ProjectedArc>(&curve.shape)) {
+            // THE CENTRE IS A SNAP POINT and it is the one a diameter is put
+            // on -- a hole's centre is what a drafter points at, and it is not
+            // on the curve at all.
+            offer(arc->centre);
+            offer(Vec2{arc->centre.x + arc->radius * std::cos(arc->startAngle),
+                       arc->centre.y + arc->radius * std::sin(arc->startAngle)});
+            offer(Vec2{arc->centre.x + arc->radius * std::cos(arc->endAngle),
+                       arc->centre.y + arc->radius * std::sin(arc->endAngle)});
+        } else if (const auto* polyline = std::get_if<ProjectedPolyline>(&curve.shape)) {
+            for (const Vec2 point : polyline->points) offer(point);
+        }
+    }
+    if (!bestModelPoint.has_value()) return std::nullopt;
+
+    // MODEL MILLIMETRES TIMES THE SCALE, plus where the view sits. The same
+    // one multiplication the canvas does -- and the reason the MEASUREMENT
+    // below is taken in model space, before this.
+    const Vec2 at = viewPositionMm(anchor.viewId);
+    const double factor = view->effectiveScale(sheet_.scale()).factor();
+    return Vec2{at.x + bestModelPoint->x * factor, at.y + bestModelPoint->y * factor};
+}
+
+DrawingDocument::DimensionProposal DrawingDocument::proposeDimension(
+    DimensionKind kind, const std::vector<ObjectId>& entityIds) const {
+    DimensionProposal out;
+    const auto refuse = [&out](std::string why) {
+        out.why = std::move(why);
+        return out;
+    };
+    if (entityIds.empty()) return refuse("nothing is selected to dimension");
+    if (entityIds.size() > 2)
+        return refuse("a dimension measures one thing or two, not " +
+                      std::to_string(entityIds.size()));
+
+    std::vector<const DrawingEntity*> picked;
+    for (const ObjectId id : entityIds) {
+        const DrawingEntity* entity = findEntity(id);
+        if (entity == nullptr) return refuse("something in the selection is not drawn geometry");
+        picked.push_back(entity);
+    }
+    const auto snapsOf = [](const DrawingEntity& entity) {
+        return StaticSnapPointsOf(entity.shape());
+    };
+
+    // WHERE THE DIMENSION LINE STARTS OUT: clear of what it measures, by a
+    // fixed offset, so a new dimension is never born sitting on top of the
+    // geometry. The user drags it where they want it; this only has to be
+    // somewhere they can see it.
+    constexpr double kBornClearMm = 12.0;
+
+    switch (kind) {
+        case DimensionKind::Radius:
+        case DimensionKind::Diameter: {
+            if (picked.size() != 1)
+                return refuse("a radius or a diameter measures one round thing");
+            const bool round = std::holds_alternative<DrawCircle>(picked[0]->shape()) ||
+                               std::holds_alternative<DrawArc>(picked[0]->shape());
+            if (!round)
+                return refuse("a radius or a diameter needs a circle or an arc, and this is "
+                              "neither");
+            // Index 0 is the centre and index 1 is a point ON the curve, for a
+            // circle and for an arc alike -- which is what StaticSnapPointsOf
+            // guarantees, and why this does not go looking for them itself.
+            const std::vector<SnapCandidate> points = snapsOf(*picked[0]);
+            if (points.size() < 2) return refuse("that curve has no rim to measure to");
+            out.first = DimensionAnchor::onEntity(picked[0]->id(), 0);
+            out.second = DimensionAnchor::onEntity(picked[0]->id(), 1);
+            const Vec2 rim = points[1].at;
+            out.linePositionMm = Vec2{rim.x + kBornClearMm, rim.y + kBornClearMm};
+            break;
+        }
+        case DimensionKind::Angular: {
+            if (picked.size() != 2)
+                return refuse("an angle is between two things, so two must be selected");
+            const std::vector<SnapCandidate> a = snapsOf(*picked[0]);
+            const std::vector<SnapCandidate> b = snapsOf(*picked[1]);
+            if (a.empty() || b.empty()) return refuse("one of those has no point to measure to");
+            out.first = DimensionAnchor::onEntity(picked[0]->id(), 0);
+            out.second = DimensionAnchor::onEntity(picked[1]->id(), 0);
+            // THE VERTEX IS WHERE THE TWO LINES CROSS when they do, because
+            // that is the angle a reader means. Only when they are parallel --
+            // where there is no crossing -- does it fall back to the midpoint,
+            // and then the angle it reports is nearly nothing, which is the
+            // truth about two parallel lines.
+            const auto* first = std::get_if<DrawLine>(&picked[0]->shape());
+            const auto* second = std::get_if<DrawLine>(&picked[1]->shape());
+            std::optional<Vec2> crossing;
+            if (first != nullptr && second != nullptr)
+                crossing = LineLineIntersection(first->a, first->b, second->a, second->b, false);
+            out.linePositionMm =
+                crossing.value_or(Vec2{(a[0].at.x + b[0].at.x) / 2.0,
+                                       (a[0].at.y + b[0].at.y) / 2.0});
+            break;
+        }
+        case DimensionKind::Linear: {
+            if (picked.size() == 2) {
+                const std::vector<SnapCandidate> a = snapsOf(*picked[0]);
+                const std::vector<SnapCandidate> b = snapsOf(*picked[1]);
+                if (a.empty() || b.empty())
+                    return refuse("one of those has no point to measure from");
+                out.first = DimensionAnchor::onEntity(picked[0]->id(), 0);
+                out.second = DimensionAnchor::onEntity(picked[1]->id(), 0);
+                out.linePositionMm = Vec2{(a[0].at.x + b[0].at.x) / 2.0,
+                                          (a[0].at.y + b[0].at.y) / 2.0 - kBornClearMm};
+                break;
+            }
+            // ONE THING: its two ends. A circle's "ends" would be two
+            // quadrants, which measures a diameter through the long way round
+            // -- so a round thing is sent back to ask for the dimension that
+            // actually says what it means.
+            if (std::holds_alternative<DrawCircle>(picked[0]->shape()))
+                return refuse("a circle is measured by its diameter or its radius, not by a "
+                              "length across it");
+            const std::vector<SnapCandidate> points = snapsOf(*picked[0]);
+            std::vector<int> ends;
+            for (std::size_t i = 0; i < points.size(); ++i)
+                if (points[i].mode == SnapMode::Endpoint) ends.push_back(static_cast<int>(i));
+            if (ends.size() < 2) return refuse("that has no two ends to measure between");
+            out.first = DimensionAnchor::onEntity(picked[0]->id(), ends.front());
+            out.second = DimensionAnchor::onEntity(picked[0]->id(), ends.back());
+            const Vec2 from = points[static_cast<std::size_t>(ends.front())].at;
+            const Vec2 to = points[static_cast<std::size_t>(ends.back())].at;
+            out.linePositionMm =
+                Vec2{(from.x + to.x) / 2.0, (from.y + to.y) / 2.0 - kBornClearMm};
+            break;
+        }
+    }
+    out.ok = true;
+    return out;
+}
+
+DimensionMeasurement DrawingDocument::measure(const DrawingDimension& dimension) const {
+    DimensionMeasurement out;
+    const std::optional<Vec2> first = resolveAnchor(dimension.first());
+    const std::optional<Vec2> second = resolveAnchor(dimension.second());
+    if (!first.has_value() || !second.has_value()) {
+        out.why = "this dimension has lost what it was measuring";
+        return out;
+    }
+    out.firstMm = *first;
+    out.secondMm = *second;
+
+    // THE MEASUREMENT IS IN MODEL MILLIMETRES, always -- the size of the PART.
+    //
+    // The anchors come back in sheet millimetres because that is where they
+    // are drawn, so a dimension inside a view has to divide the scale back
+    // out. That division is here and nowhere else, which is the whole reason
+    // ProjectedGeometry keeps model units: one multiplication to draw, one
+    // division to measure, and no third place to get it wrong.
+    double factor = 1.0;
+    const ObjectId viewId = dimension.first().kind == DimensionAnchorKind::InView
+                                ? dimension.first().viewId
+                                : dimension.second().viewId;
+    if (const DrawingView* view = findView(viewId))
+        factor = view->effectiveScale(sheet_.scale()).factor();
+    if (!(factor > 0.0)) factor = 1.0;
+
+    const double dx = (second->x - first->x) / factor;
+    const double dy = (second->y - first->y) / factor;
+
+    switch (dimension.kind()) {
+        case DimensionKind::Linear:
+            switch (dimension.direction()) {
+                case LinearDirection::Aligned: out.valueMm = std::hypot(dx, dy); break;
+                case LinearDirection::Horizontal: out.valueMm = std::fabs(dx); break;
+                case LinearDirection::Vertical: out.valueMm = std::fabs(dy); break;
+            }
+            break;
+        case DimensionKind::Radius:
+            // THE TWO ANCHORS ARE THE CENTRE AND A POINT ON THE CURVE, so the
+            // radius is the distance between them. Storing a radius instead
+            // would be storing a measurement, which is the thing this whole
+            // design refuses to do.
+            out.valueMm = std::hypot(dx, dy);
+            break;
+        case DimensionKind::Diameter: out.valueMm = 2.0 * std::hypot(dx, dy); break;
+        case DimensionKind::Angular: {
+            // BETWEEN THE TWO ANCHORS, ABOUT THE DIMENSION LINE'S POSITION.
+            // The vertex is where the user dragged the arc to, which is how
+            // AutoCAD's DIMANGULAR behaves for two points.
+            const Vec2 vertex = dimension.linePositionMm();
+            const double a = std::atan2(first->y - vertex.y, first->x - vertex.x);
+            const double b = std::atan2(second->y - vertex.y, second->x - vertex.x);
+            double between = std::fabs(b - a);
+            constexpr double kTwoPiLocal = 6.283185307179586476925286766559;
+            if (between > kTwoPiLocal / 2.0) between = kTwoPiLocal - between;
+            // IN DEGREES, because that is what a drawing says. The one
+            // conversion, here.
+            out.valueMm = between * 180.0 / (kTwoPiLocal / 2.0);
+            break;
+        }
+    }
+    out.ok = true;
+    return out;
+}
+
+std::string DrawingDocument::dimensionText(const DrawingDimension& dimension) const {
+    if (!dimension.textOverride().empty()) return dimension.textOverride();
+    const DimensionMeasurement measured = measure(dimension);
+    // A DANGLING DIMENSION SHOWS NO NUMBER. Showing the last one it read would
+    // be a drawing stating a size nothing on it measures.
+    if (!measured.ok) return "<?>";
+    const DimensionStyle* style = findDimensionStyle(dimension.styleId());
+    const std::string body =
+        style != nullptr ? style->format(measured.valueMm)
+                         : std::to_string(static_cast<int>(measured.valueMm));
+    switch (dimension.kind()) {
+        // THE PREFIXES ISO 129 ASKS FOR. A radius without its R and a diameter
+        // without its symbol are two numbers a reader cannot tell apart.
+        case DimensionKind::Radius: return "R" + body;
+        case DimensionKind::Diameter: return "\xE2\x8C\x80" + body; // U+2300 DIAMETER SIGN
+        case DimensionKind::Angular: return body + "\xC2\xB0";      // U+00B0 DEGREE SIGN
+        case DimensionKind::Linear: break;
+    }
+    return body;
+}
+
+std::vector<ObjectId> DrawingDocument::danglingDimensions() const {
+    std::vector<ObjectId> lost;
+    for (const std::unique_ptr<DrawingDimension>& one : dimensions_)
+        if (!measure(*one).ok) lost.push_back(one->id());
+    return lost;
+}
+
+// =============================================================================
 // What this document owes DocumentBase
 // =============================================================================
 
@@ -1027,6 +1556,11 @@ void DrawingDocument::forEachOwnNamed(const std::function<void(const NamedSlot&)
         DrawingView* view = one.get();
         visit(NamedSlot{view->id(), view->name(),
                         [view](const std::string& n) { view->setName(n); }});
+    }
+    for (const std::unique_ptr<DimensionStyle>& one : dimensionStyles_) {
+        DimensionStyle* style = one.get();
+        visit(NamedSlot{style->id(), style->name(),
+                        [style](const std::string& n) { style->setName(n); }});
     }
 }
 
@@ -1103,6 +1637,55 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
         return true;
     }
 
+    // A DIMENSION: nothing owns it.
+    if (const DrawingDimension* dimension = findDimension(id)) {
+        if (!applyingHistory()) {
+            DimensionExistenceEdit edit;
+            edit.dimensionId = id;
+            edit.kind = static_cast<int>(dimension->kind());
+            edit.first = dimension->first();
+            edit.second = dimension->second();
+            edit.direction = static_cast<int>(dimension->direction());
+            edit.lineXMm = dimension->linePositionMm().x;
+            edit.lineYMm = dimension->linePositionMm().y;
+            edit.styleId = dimension->styleId();
+            edit.layerId = dimension->layerId();
+            edit.textOverride = dimension->textOverride();
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Erase dimension");
+        }
+        registry_.unregisterObject(id);
+        for (auto it = dimensions_.begin(); it != dimensions_.end(); ++it)
+            if ((*it)->id() == id) {
+                dimensions_.erase(it);
+                break;
+            }
+        return true;
+    }
+
+    // A DIMENSION STYLE, except the one every drawing has and any that are in
+    // use -- a dimension whose style is gone has no way to be drawn.
+    if (const DimensionStyle* style = findDimensionStyle(id)) {
+        if (!applyingHistory()) {
+            if (style->name() == kDefaultDimensionStyleName) return false;
+            if (id == currentStyleId_) return false;
+            for (const std::unique_ptr<DrawingDimension>& one : dimensions_)
+                if (one->styleId() == id) return false;
+            DimensionStyleExistenceEdit edit;
+            edit.styleId = id;
+            edit.name = style->name();
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Delete style " + style->name());
+        }
+        registry_.unregisterObject(id);
+        for (auto it = dimensionStyles_.begin(); it != dimensionStyles_.end(); ++it)
+            if ((*it)->id() == id) {
+                dimensionStyles_.erase(it);
+                break;
+            }
+        return true;
+    }
+
     // A LAYER, except the two a drawing may never be without.
     //
     // THE GUARDS PROTECT THE USER, NOT THE LOADER. A file carries its own
@@ -1126,6 +1709,8 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
             // -- would throw away work in response to a command about a
             // table entry. The count is in the caller's message, not here.
             for (const std::unique_ptr<DrawingEntity>& one : entities_)
+                if (one->layerId() == id) return false;
+            for (const std::unique_ptr<DrawingDimension>& one : dimensions_)
                 if (one->layerId() == id) return false;
         }
         if (!applyingHistory()) {
@@ -1207,6 +1792,60 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         entity->setColor(forward ? edit->afterColor : edit->beforeColor);
         entity->setLinetype(forward ? edit->afterLinetype : edit->beforeLinetype);
         entity->setLineweight(forward ? edit->afterLineweight : edit->beforeLineweight);
+        return;
+    }
+    if (const auto* edit = std::get_if<DimensionExistenceEdit>(&delta)) {
+        const bool shouldExist = forward ? edit->addedByTheEdit : !edit->addedByTheEdit;
+        const bool doesExist = findDimension(edit->dimensionId) != nullptr;
+        if (shouldExist == doesExist) return;
+        if (shouldExist)
+            restoreDimension(edit->dimensionId, static_cast<DimensionKind>(edit->kind),
+                             edit->first, edit->second,
+                             static_cast<LinearDirection>(edit->direction),
+                             Vec2{edit->lineXMm, edit->lineYMm}, edit->styleId, edit->layerId,
+                             edit->textOverride);
+        else
+            removeObject(edit->dimensionId);
+        return;
+    }
+    if (const auto* edit = std::get_if<DimensionEdit>(&delta)) {
+        DrawingDimension* dimension = findDimensionForEdit(edit->dimensionId);
+        if (dimension == nullptr) return;
+        dimension->setDirection(
+            static_cast<LinearDirection>(forward ? edit->afterDirection : edit->beforeDirection));
+        dimension->setLinePositionMm(Vec2{forward ? edit->afterXMm : edit->beforeXMm,
+                                          forward ? edit->afterYMm : edit->beforeYMm});
+        dimension->setStyleId(forward ? edit->afterStyleId : edit->beforeStyleId);
+        dimension->setTextOverride(forward ? edit->afterText : edit->beforeText);
+        return;
+    }
+    if (const auto* edit = std::get_if<DimensionStyleExistenceEdit>(&delta)) {
+        const bool shouldExist = forward ? edit->addedByTheEdit : !edit->addedByTheEdit;
+        const bool doesExist = findDimensionStyle(edit->styleId) != nullptr;
+        if (shouldExist == doesExist) return;
+        if (shouldExist)
+            restoreDimensionStyle(edit->styleId, edit->name);
+        else
+            removeObject(edit->styleId);
+        return;
+    }
+    if (const auto* edit = std::get_if<DimensionStyleEdit>(&delta)) {
+        DimensionStyle* style = findDimensionStyleForEdit(edit->styleId);
+        if (style == nullptr) return;
+        ApplyStyleHalf(*style,
+                       forward ? edit->afterTextHeightMm : edit->beforeTextHeightMm,
+                       forward ? edit->afterArrowSizeMm : edit->beforeArrowSizeMm,
+                       forward ? edit->afterTextGapMm : edit->beforeTextGapMm,
+                       forward ? edit->afterExtensionGapMm : edit->beforeExtensionGapMm,
+                       forward ? edit->afterExtensionOvershootMm
+                               : edit->beforeExtensionOvershootMm,
+                       forward ? edit->afterDecimals : edit->beforeDecimals,
+                       forward ? edit->afterSuffix : edit->beforeSuffix,
+                       forward ? edit->afterOverallScale : edit->beforeOverallScale);
+        return;
+    }
+    if (const auto* edit = std::get_if<CurrentDimensionStyleEdit>(&delta)) {
+        currentStyleId_ = forward ? edit->after : edit->before;
         return;
     }
     if (const auto* edit = std::get_if<SheetEdit>(&delta)) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Drawing/DrawingDocument.h"
+#include "Core/Drawing/ObjectSnap.h"
 
 #include <QWidget>
 
@@ -10,6 +11,7 @@
 class QPaintEvent;
 class QMouseEvent;
 class QWheelEvent;
+class QKeyEvent;
 
 namespace paramcad {
 
@@ -26,6 +28,20 @@ namespace paramcad {
 // layer a curve is on are all answered by the document; this turns them into
 // pixels. The one thing it owns is the pan and the zoom, which are
 // presentation and never reach Core (A02).
+// WHAT THE LEFT BUTTON IS CURRENTLY FOR (M33/M34).
+//
+// A drawing canvas with no tool is a picture viewer. These are the modes the
+// pointer can be in, and `None` -- select and drag -- is the one it returns to
+// after every completed pick, because a tool that stayed armed is how a user
+// ends up with nine lines they did not want.
+enum class DrawingTool { None, Line, Circle, Rectangle };
+
+// How many clicks each tool needs before it has something to make. Written
+// once, HERE, so the canvas and the window cannot disagree about whether a
+// circle is done -- the disagreement would show up as a tool that never
+// finishes, which looks exactly like a dead button.
+int ClicksNeededBy(DrawingTool tool) noexcept;
+
 class DrawingCanvasWidget : public QWidget {
     Q_OBJECT
 
@@ -47,9 +63,44 @@ public:
     // is where a shell defect lives.
     std::size_t drawnCurveCountForTesting() const noexcept { return drawnCurves_; }
     std::size_t drawnHiddenCurveCountForTesting() const noexcept { return drawnHidden_; }
+    std::size_t drawnDimensionCountForTesting() const noexcept { return drawnDimensions_; }
+    // Dimensions that painted "<?>" instead of a number. Counted separately so
+    // a self test can assert the alarm actually reached the screen, rather
+    // than trusting that the document knowing is the same as the reader
+    // seeing.
+    std::size_t danglingDrawnForTesting() const noexcept { return danglingDrawn_; }
     // The sheet's rectangle in WIDGET pixels, so a test can check the paper is
     // actually inside the window after a fit.
     QRectF sheetRectForTesting() const;
+
+    // --- Tools (M33/M34) ------------------------------------------------------
+    void setTool(DrawingTool tool);
+    DrawingTool tool() const noexcept { return tool_; }
+    // The clicks banked so far towards the current tool. Non-empty means a
+    // half-drawn thing is on screen, which is why Esc has to be able to reach
+    // it.
+    std::size_t pendingClickCountForTesting() const noexcept { return picked_.size(); }
+    // Drives a pick from a test without a mouse. Sheet millimetres, so a test
+    // says where in the drawing rather than where on somebody's monitor.
+    void pickForTesting(Vec2 sheetMm);
+    Vec2 toSheetForTesting(QPointF widgetPx) const { return toSheet(widgetPx); }
+
+signals:
+    // A tool collected everything it needs. The WINDOW makes the geometry --
+    // the canvas never touches the document, which is the same split the
+    // sketch canvas keeps (A02).
+    void toolFinished(DrawingTool tool, std::vector<Vec2> pointsMm);
+    // Something on the paper was clicked, or nothing was.
+    void objectPicked(ObjectId id);
+    // A dimension was dragged to a new place for its line, and LET GO.
+    //
+    // ON RELEASE, not on every mouse move: one gesture is one edit, and a drag
+    // that recorded a step per pixel would leave a user pressing Ctrl+Z two
+    // hundred times to undo one nudge. While the button is down the canvas
+    // paints the dimension at `dragToMm_` and the document does not know.
+    void dimensionDropped(ObjectId id, Vec2 toMm);
+
+public:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -57,12 +108,21 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
 private:
     // Sheet millimetres to widget pixels. ONE conversion, so the paper, the
     // views and the frame cannot end up on three different grids.
     QPointF toScreen(Vec2 sheetMm) const;
+    // ...and back. The INVERSE of toScreen and nothing else -- a second
+    // hand-written conversion is exactly the defect this project keeps
+    // finding, and here it would put a click a few millimetres from where the
+    // user aimed.
+    Vec2 toSheet(QPointF widgetPx) const;
+    // Where a pick actually lands: the snap point when one is near, otherwise
+    // the raw position.
+    Vec2 snapped(Vec2 rawMm) const;
     double pixelsPerMm() const noexcept { return zoom_; }
 
     DrawingDocument* document_ = nullptr;
@@ -74,6 +134,20 @@ private:
 
     std::size_t drawnCurves_ = 0;
     std::size_t drawnHidden_ = 0;
+    std::size_t drawnDimensions_ = 0;
+    std::size_t danglingDrawn_ = 0;
+
+    DrawingTool tool_ = DrawingTool::None;
+    std::vector<Vec2> picked_;
+    Vec2 cursorMm_{0.0, 0.0};
+    bool snapHit_ = false;
+    // The dimension being dragged, and where the pointer took hold of it --
+    // so it moves WITH the pointer instead of jumping its line position to
+    // wherever the click landed.
+    ObjectId draggingDimension_ = kInvalidObjectId;
+    Vec2 dragGrabbedAtMm_{0.0, 0.0};
+    Vec2 dragStartedFromMm_{0.0, 0.0};
+    Vec2 dragToMm_{0.0, 0.0};
 };
 
 } // namespace paramcad

@@ -497,6 +497,78 @@ void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
         break;
     }
 
+    case SketchIcon::LinearDimension: {
+        // A DIMENSION LINE WITH AN ARROW AT EACH END, and the two witness
+        // lines that make it a dimension rather than a double-headed arrow.
+        Stroke(p, ink.subdue, 1.1);
+        p.drawLine(QPointF(4.0, 4.0), QPointF(4.0, 14.0));
+        p.drawLine(QPointF(20.0, 4.0), QPointF(20.0, 14.0));
+        Stroke(p, ink.stroke, 1.4);
+        p.drawLine(QPointF(4.0, 12.0), QPointF(20.0, 12.0));
+        Arrow(p, QPointF(4.0, 12.0), QPointF(-1.0, 0.0), ink.accent);
+        Arrow(p, QPointF(20.0, 12.0), QPointF(1.0, 0.0), ink.accent);
+        break;
+    }
+
+    case SketchIcon::RadiusDimension: {
+        // AN ARC WITH A LEADER FROM ITS CENTRE. The centre mark is what says
+        // "radius" -- without it this is a line touching a curve.
+        Stroke(p, ink.stroke, 1.4);
+        p.setBrush(Qt::NoBrush);
+        p.drawArc(QRectF(3.0, 5.0, 18.0, 18.0), 30 * 16, 120 * 16);
+        Stroke(p, ink.subdue, 1.0);
+        p.drawLine(QPointF(10.0, 14.0), QPointF(14.0, 14.0));
+        p.drawLine(QPointF(12.0, 12.0), QPointF(12.0, 16.0));
+        Stroke(p, ink.accent, 1.3);
+        p.drawLine(QPointF(12.0, 14.0), QPointF(18.0, 8.0));
+        Arrow(p, QPointF(18.0, 8.0), QPointF(1.0, -1.0), ink.accent);
+        break;
+    }
+
+    case SketchIcon::DiameterDimension: {
+        // A FULL CIRCLE CROSSED BY A LEADER WITH TWO ARROWS -- the difference
+        // from the radius icon is that the line goes all the way THROUGH,
+        // which is the difference between the two measurements.
+        Stroke(p, ink.stroke, 1.4);
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(QPointF(12.0, 12.0), 8.0, 8.0);
+        Stroke(p, ink.accent, 1.3);
+        p.drawLine(QPointF(6.3, 17.7), QPointF(17.7, 6.3));
+        Arrow(p, QPointF(6.3, 17.7), QPointF(-1.0, 1.0), ink.accent);
+        Arrow(p, QPointF(17.7, 6.3), QPointF(1.0, -1.0), ink.accent);
+        break;
+    }
+
+    case SketchIcon::AngularDimension: {
+        // TWO ARMS AND THE ARC BETWEEN THEM. The arc is the whole icon: two
+        // arms alone are a corner, and a corner is not a measurement.
+        Stroke(p, ink.subdue, 1.2);
+        p.drawLine(QPointF(4.0, 20.0), QPointF(21.0, 20.0));
+        p.drawLine(QPointF(4.0, 20.0), QPointF(18.0, 6.0));
+        Stroke(p, ink.accent, 1.4);
+        p.setBrush(Qt::NoBrush);
+        p.drawArc(QRectF(-5.0, 11.0, 18.0, 18.0), 0 * 16, 45 * 16);
+        break;
+    }
+
+    case SketchIcon::DimensionStyleIcon: {
+        // THE LINEAR DIMENSION AGAIN, with a brush across it -- the same
+        // "this is the settings for that" pairing the sketch set uses, so a
+        // user does not have to learn a second visual idea.
+        Stroke(p, ink.subdue, 1.1);
+        p.drawLine(QPointF(4.0, 6.0), QPointF(4.0, 14.0));
+        p.drawLine(QPointF(20.0, 6.0), QPointF(20.0, 14.0));
+        Stroke(p, ink.stroke, 1.3);
+        p.drawLine(QPointF(4.0, 12.0), QPointF(20.0, 12.0));
+        Arrow(p, QPointF(4.0, 12.0), QPointF(-1.0, 0.0), ink.stroke);
+        Arrow(p, QPointF(20.0, 12.0), QPointF(1.0, 0.0), ink.stroke);
+        Stroke(p, ink.accent, 1.6);
+        p.drawLine(QPointF(9.0, 21.0), QPointF(19.0, 16.0));
+        p.setBrush(QBrush(ink.accent));
+        p.drawEllipse(QPointF(19.5, 15.5), 2.2, 2.2);
+        break;
+    }
+
     case SketchIcon::AddRelation: {
         // TWO TOOTHED WHEELS, meshing. The teeth are what make it a gear
         // rather than two circles, and the mesh is what makes it a relation
@@ -1256,6 +1328,11 @@ const char* SketchIconName(SketchIcon icon) noexcept {
     case SketchIcon::UpdateViews: return "UpdateViews";
     case SketchIcon::SheetSetup: return "SheetSetup";
     case SketchIcon::DrawingLayer: return "DrawingLayer";
+    case SketchIcon::LinearDimension: return "LinearDimension";
+    case SketchIcon::RadiusDimension: return "RadiusDimension";
+    case SketchIcon::DiameterDimension: return "DiameterDimension";
+    case SketchIcon::AngularDimension: return "AngularDimension";
+    case SketchIcon::DimensionStyleIcon: return "DimensionStyleIcon";
     case SketchIcon::HVDistance: return "HVDistance";
     case SketchIcon::PointLineDistance: return "PointLineDistance";
     case SketchIcon::Offset: return "Offset";

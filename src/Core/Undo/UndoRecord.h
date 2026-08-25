@@ -2,6 +2,7 @@
 
 #include "Core/Assembly/AssemblyStates.h"
 #include "Core/Document/ObjectId.h"
+#include "Core/Drawing/DrawingDimension.h"
 #include "Core/Drawing/DrawingEntity.h"
 #include "Core/Feature/FeatureSnapshot.h"
 #include "Core/Geometry/MathTypes.h"
@@ -556,6 +557,72 @@ struct DrawingEntityPropertyEdit {
     int afterLineweight = -1;
 };
 
+// --- Dimensions (M34) --------------------------------------------------------
+struct DimensionExistenceEdit {
+    ObjectId dimensionId = kInvalidObjectId;
+    int kind = 0;
+    DimensionAnchor first;
+    DimensionAnchor second;
+    int direction = 0;
+    double lineXMm = 0.0;
+    double lineYMm = 0.0;
+    ObjectId styleId = kInvalidObjectId;
+    ObjectId layerId = kInvalidObjectId;
+    std::string textOverride;
+    bool addedByTheEdit = false;
+};
+
+// The whole small value, before and after -- the pattern SheetEdit set, for
+// the same reason: a delta per field would be five near-identical types and
+// the day a field is added, four are right.
+struct DimensionEdit {
+    ObjectId dimensionId = kInvalidObjectId;
+    int beforeDirection = 0;
+    int afterDirection = 0;
+    double beforeXMm = 0.0;
+    double beforeYMm = 0.0;
+    double afterXMm = 0.0;
+    double afterYMm = 0.0;
+    ObjectId beforeStyleId = kInvalidObjectId;
+    ObjectId afterStyleId = kInvalidObjectId;
+    std::string beforeText;
+    std::string afterText;
+};
+
+struct DimensionStyleExistenceEdit {
+    ObjectId styleId = kInvalidObjectId;
+    std::string name;
+    bool addedByTheEdit = false;
+};
+
+// A STYLE IS ITS OWN VALUE, so the delta carries the whole of it. Editing one
+// changes how every dimension using it is drawn, and a half-restored style
+// would leave a drawing whose text is one size and whose arrows are another.
+struct DimensionStyleEdit {
+    ObjectId styleId = kInvalidObjectId;
+    double beforeTextHeightMm = 3.5;
+    double afterTextHeightMm = 3.5;
+    double beforeArrowSizeMm = 3.5;
+    double afterArrowSizeMm = 3.5;
+    double beforeTextGapMm = 0.8;
+    double afterTextGapMm = 0.8;
+    double beforeExtensionGapMm = 1.5;
+    double afterExtensionGapMm = 1.5;
+    double beforeExtensionOvershootMm = 2.0;
+    double afterExtensionOvershootMm = 2.0;
+    int beforeDecimals = 2;
+    int afterDecimals = 2;
+    std::string beforeSuffix;
+    std::string afterSuffix;
+    double beforeOverallScale = 1.0;
+    double afterOverallScale = 1.0;
+};
+
+struct CurrentDimensionStyleEdit {
+    ObjectId before = kInvalidObjectId;
+    ObjectId after = kInvalidObjectId;
+};
+
 using UndoDelta =
     std::variant<ParameterValueEdit, FeatureExistenceEdit, SuppressionEdit, RollbackEdit,
                  ParameterExistenceEdit, FrameExistenceEdit, FrameTransformEdit,
@@ -570,7 +637,9 @@ using UndoDelta =
                  RelationValueEdit, SheetEdit, LayerExistenceEdit, LayerPropertyEdit,
                  CurrentLayerEdit, LinetypeExistenceEdit, DrawingViewExistenceEdit,
                  DrawingViewPlacementEdit, DrawingEntityExistenceEdit,
-                 DrawingEntityShapeEdit, DrawingEntityPropertyEdit>;
+                 DrawingEntityShapeEdit, DrawingEntityPropertyEdit, DimensionExistenceEdit,
+                 DimensionEdit, DimensionStyleExistenceEdit, DimensionStyleEdit,
+                 CurrentDimensionStyleEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

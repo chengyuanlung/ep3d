@@ -139,8 +139,19 @@ inline QString kindTag(OutlineKind kind) {
         case OutlineKind::DrawingView: return QStringLiteral("[Vue]");
         case OutlineKind::Layer: return QStringLiteral("[Lay]");
         case OutlineKind::Linetype: return QStringLiteral("[Ltp]");
-        default: return QStringLiteral("[   ]");
+        // M33/M34. [Geo] for something drawn on the sheet, [Dim] for a size,
+        // [Sty] for the style a size is drawn in.
+        case OutlineKind::DrawingEntity: return QStringLiteral("[Geo]");
+        case OutlineKind::Dimension: return QStringLiteral("[Dim]");
+        case OutlineKind::DimensionStyle: return QStringLiteral("[Sty]");
+        // A GROUP ROW HAS NO TYPE, which is a real answer and not a gap.
+        case OutlineKind::Other: return QStringLiteral("[   ]");
     }
+    // NO `default:`. It was there, and it is why three kinds added in M33 and
+    // M34 shipped as "[   ]" without a single warning -- a table that silently
+    // accepts a case it does not know is the defect shape this project keeps
+    // finding. Without it, the next kind is a compiler error here.
+    return QStringLiteral("[   ]");
 }
 
 // Monospaced digits for numeric columns where the platform offers them

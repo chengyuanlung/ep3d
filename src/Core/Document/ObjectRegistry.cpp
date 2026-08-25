@@ -10,6 +10,8 @@
 #include "Core/Assembly/Relation.h"
 #include "Core/Drawing/DrawingTables.h"
 #include "Core/Drawing/DrawingEntity.h"
+#include "Core/Drawing/DrawingDimension.h"
+#include "Core/Drawing/DimensionStyle.h"
 #include "Core/Connector/Connector.h"
 #include "Core/Sketch/Sketch.h"
 #include <type_traits>

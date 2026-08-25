@@ -128,6 +128,79 @@ OutlineNode DrawingOutline::build(const std::set<ObjectId>& hiddenIds) const {
     }
     root.children.push_back(std::move(layers));
 
+    // --- Geometry (M33) and Dimensions (M34) --------------------------------
+    //
+    // Only when there is any. An empty group in a tree teaches a reader to
+    // skip the tree, which is the same rule the Linetypes group below follows.
+    if (!document.entities().empty()) {
+        OutlineNode drawn = Group("Geometry");
+        for (const paramcad::DrawingEntity* entity : document.entities()) {
+            OutlineNode node;
+            node.id = entity->id();
+            // NAMED BY WHAT IT IS. Drawn geometry carries no name of its own
+            // -- a line is a line -- and inventing "Line 4" would put a
+            // number in the tree that appears nowhere else in the product.
+            node.name = std::string(ShapeName(entity->shape()));
+            node.typeLabel = "Geometry";
+            node.kind = OutlineKind::DrawingEntity;
+            node.state = document.isEntityVisible(*entity) ? OutlineState::Normal
+                                                           : OutlineState::Hidden;
+            // WHICH LAYER, but only when it is not the default one. Every
+            // drawing starts on layer "0", so saying so on every row put a
+            // bare "0" in the State column of every line -- which reads as a
+            // count, or a failure, and is neither.
+            if (const Layer* layer = document.findLayer(entity->layerId()))
+                if (layer->name() != kDefaultLayerName) node.diagnostic = layer->name();
+            drawn.children.push_back(std::move(node));
+        }
+        root.children.push_back(std::move(drawn));
+    }
+
+    if (!document.dimensions().empty()) {
+        OutlineNode sizes = Group("Dimensions");
+        for (const DrawingDimension* dimension : document.dimensions()) {
+            OutlineNode node;
+            node.id = dimension->id();
+            // A DIMENSION IS NAMED BY WHAT IT SAYS. A row reading "Dimension
+            // 4" tells a reader nothing they cannot already see; a row reading
+            // "100.00" is the thing they came to the tree to check.
+            node.name = document.dimensionText(*dimension);
+            node.typeLabel = std::string(toString(dimension->kind()));
+            node.kind = OutlineKind::Dimension;
+            const DimensionMeasurement measured = document.measure(*dimension);
+            // A DANGLING DIMENSION IS MARKED FAILED, not hidden and not
+            // normal. It is the one failure a drawing must never keep quiet
+            // about, and the tree is where a reader goes when the paper looks
+            // wrong.
+            node.state = measured.ok ? OutlineState::Normal : OutlineState::Failed;
+            if (!measured.ok) node.diagnostic = measured.why;
+            else if (!dimension->textOverride().empty())
+                node.diagnostic = "overridden, measures " +
+                                  std::to_string(static_cast<long long>(measured.valueMm));
+            sizes.children.push_back(std::move(node));
+        }
+        root.children.push_back(std::move(sizes));
+    }
+
+    // --- Dimension styles ----------------------------------------------------
+    //
+    // Like Linetypes: shown only once there is more than the ISO-25 every
+    // drawing is born with.
+    if (document.dimensionStyles().size() > 1) {
+        OutlineNode styles = Group("Dimension Styles");
+        for (const paramcad::DimensionStyle* style : document.dimensionStyles()) {
+            OutlineNode node;
+            node.id = style->id();
+            node.name = style->name();
+            node.typeLabel = "Dimension Style";
+            node.kind = OutlineKind::DimensionStyle;
+            node.state = OutlineState::Normal;
+            node.diagnostic = style->id() == document.currentDimensionStyleId() ? "current" : "";
+            styles.children.push_back(std::move(node));
+        }
+        root.children.push_back(std::move(styles));
+    }
+
     // --- Linetypes -----------------------------------------------------------
     //
     // ONLY WHEN THERE IS MORE THAN THE ONE every drawing has. A group holding
@@ -153,6 +226,10 @@ OutlineNode DrawingOutline::build(const std::set<ObjectId>& hiddenIds) const {
     // assembly root follows rather than smearing it over every row.
     if (!stale.empty())
         root.state = OutlineState::Dirty;
+    // A DANGLING DIMENSION IS AS BAD AS A FAILED VIEW, so it reaches the root
+    // the same way -- a drawing whose root row looks healthy while one of its
+    // sizes reads "<?>" is the tree lying about the paper.
+    if (!document.danglingDimensions().empty()) root.state = OutlineState::Failed;
     for (const DrawingView* view : document.views())
         if (view->currentState() == ComputeState::Failed) root.state = OutlineState::Failed;
     return root;

@@ -51,6 +51,11 @@ enum class OutlineKind {
     // M32: what a DRAWING's tree is made of. Same vocabulary again, third
     // builder -- the widget, the state markers and the selection are shared.
     Drawing, DrawingView, Layer, Linetype,
+    // M33/M34: what a drawer actually put on the paper. Geometry and
+    // dimensions are two kinds, not one "annotation", because deleting a
+    // dimension takes nothing and deleting the line it measures makes it
+    // dangle -- and the row has to be able to say so.
+    DrawingEntity, Dimension, DimensionStyle,
     Other
 };
 

@@ -358,3 +358,101 @@ TEST(OcctDrawingViewTest, M32_STALE_005_RewritingTheSameContentIsNOTAChange) {
     EXPECT_TRUE(drawing.staleViews().empty())
         << "re-saving an unchanged model marked every view out of date";
 }
+
+// =============================================================================
+// M34 -- a dimension INSIDE a view
+// =============================================================================
+//
+// These live in the kernel suite because an InView anchor has nothing to
+// re-find until a real projection exists. Two mutations survived the Core
+// suite for exactly that reason: nothing there could build the state.
+
+TEST(OcctDrawingViewTest, M34_VIEW_020_ADimensionInAViewReadsTheMODELSize) {
+    // THE MEASUREMENT IS THE PART'S, not the picture's.
+    //
+    // The anchors resolve to sheet millimetres -- that is where they are drawn
+    // -- so a dimension inside a scaled view has to divide the scale back out.
+    // At 1:2 a 100 mm block is 50 mm of paper, and a dimension that read 50
+    // would be a drawing stating half the size of the thing being made.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"dim-scale.ep3d"};
+    WriteBlockPart(file.path, 100.0, 40.0, 10.0);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingScale half{1, 2};
+    ASSERT_TRUE(drawing.setSheetScale(half));
+    DrawingView& front = drawing.addView("Front", file.path, "Block", ViewDirection::Front,
+                                         Vec2{150.0, 150.0});
+    ASSERT_TRUE(drawing.recompute().success) << front.diagnostic();
+
+    // The block's two bottom corners, IN MODEL MILLIMETRES -- which is what an
+    // InView anchor stores, and why a scale change does not reproject.
+    const ProjectedExtent extent = front.projected().extent;
+    const DrawingDimension& across = drawing.addDimension(
+        DimensionKind::Linear,
+        DimensionAnchor::inView(front.id(), Vec2{extent.min.x, extent.min.y}),
+        DimensionAnchor::inView(front.id(), Vec2{extent.max.x, extent.min.y}),
+        Vec2{150.0, 120.0});
+
+    const DimensionMeasurement measured = drawing.measure(across);
+    ASSERT_TRUE(measured.ok) << measured.why;
+    EXPECT_NEAR(measured.valueMm, 100.0, 1e-6)
+        << "the dimension read the size of the PICTURE, not of the part";
+    EXPECT_EQ(drawing.dimensionText(across), "100.00");
+
+    // ...AND CHANGING THE SCALE DOES NOT CHANGE THE SIZE OF THE PART.
+    ASSERT_TRUE(drawing.setSheetScale(DrawingScale{1, 5}));
+    ASSERT_TRUE(drawing.recompute().success);
+    EXPECT_NEAR(drawing.measure(across).valueMm, 100.0, 1e-6)
+        << "replotting at a different scale changed what the part measures";
+}
+
+TEST(OcctDrawingViewTest, M34_VIEW_021_AnInViewAnchorWillNOTReattachBeyondItsTolerance) {
+    // THE APPROXIMATION, PINNED.
+    //
+    // An InView anchor re-finds the nearest projected snap point after a
+    // reprojection. The failure that must never happen is the SILENT one:
+    // adopting a different feature and printing a plausible wrong number. So
+    // the search is bounded, and past the bound the dimension dangles LOUDLY.
+    //
+    // Without this, an unbounded search always finds SOMETHING -- and a
+    // drawing that quietly re-attached its dimensions to whatever was nearest
+    // is worse than one that says it does not know.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"dim-tolerance.ep3d"};
+    WriteBlockPart(file.path, 100.0, 40.0, 10.0);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& front = drawing.addView("Front", file.path, "Block", ViewDirection::Front,
+                                         Vec2{150.0, 150.0});
+    ASSERT_TRUE(drawing.recompute().success) << front.diagnostic();
+
+    const ProjectedExtent extent = front.projected().extent;
+    // A point a long way from anything the view draws, with a tight tolerance.
+    const DrawingDimension& lost = drawing.addDimension(
+        DimensionKind::Linear,
+        DimensionAnchor::inView(front.id(), Vec2{extent.min.x, extent.min.y}, 1.0),
+        DimensionAnchor::inView(front.id(), Vec2{extent.max.x + 500.0, extent.min.y}, 1.0),
+        Vec2{150.0, 120.0});
+
+    const DimensionMeasurement measured = drawing.measure(lost);
+    EXPECT_FALSE(measured.ok)
+        << "an anchor 500 mm from any edge re-attached to one anyway, and it "
+           "measured " << measured.valueMm;
+    EXPECT_EQ(drawing.dimensionText(lost), "<?>");
+    ASSERT_EQ(drawing.danglingDimensions().size(), 1u);
+
+    // ...and one INSIDE the tolerance still finds its point, so the bound is
+    // a bound and not an off switch.
+    const DrawingDimension& found = drawing.addDimension(
+        DimensionKind::Linear,
+        DimensionAnchor::inView(front.id(), Vec2{extent.min.x, extent.min.y}, 1.0),
+        DimensionAnchor::inView(front.id(),
+                                Vec2{extent.max.x + 0.4, extent.min.y + 0.4}, 1.0),
+        Vec2{150.0, 110.0});
+    const DimensionMeasurement near = drawing.measure(found);
+    ASSERT_TRUE(near.ok) << near.why;
+    EXPECT_NEAR(near.valueMm, 100.0, 1e-6);
+}

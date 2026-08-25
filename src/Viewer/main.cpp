@@ -366,6 +366,23 @@ int main(int argc, char** argv) {
     // it now runs in CTest.
     const bool selfTest = argc > 1 && std::strcmp(argv[1], "--selftest") == 0;
 
+    // A SCREENSHOT HAS TO SHOW WHAT IS ON THE SCREEN.
+    //
+    // The self test never enters the event loop, so a label whose text changed
+    // has been marked dirty and not repainted -- and grab() then composites the
+    // stale paint UNDER the new one. Three superimposed status lines is what
+    // that looks like, and it made every status bar in the golden set
+    // unreadable while every assertion passed.
+    //
+    // Draining the posted events and forcing a repaint before the grab is the
+    // fix, in ONE place: five call sites each remembering to do it is the
+    // shape of defect this project keeps finding.
+    const auto shoot = [](QWidget& window, const QString& path) {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        window.repaint();
+        return window.grab().save(path);
+    };
+
     // --scenario <name>: drive the shell into a named state so the golden
     // screenshot set (UI spec 16) captures real application states rather than
     // mock-ups. Each name matches a UI-0xx entry in the self-validation report.
@@ -2802,7 +2819,7 @@ int main(int argc, char** argv) {
                     // The WHOLE window, not just the canvas: the toolbar is
                     // now icon-only, so whether those icons read is part of
                     // what a screenshot has to answer.
-                    if (!window.grab().save(QString::fromUtf8(screenshotPath)))
+                    if (!shoot(window, QString::fromUtf8(screenshotPath)))
                         fail("could not write the requested screenshot");
                     else
                         screenshotWritten = true;
@@ -3601,7 +3618,7 @@ int main(int argc, char** argv) {
         // state the run left it. The model toolbar is on the window in all of
         // them, which is the whole reason somebody asks for one.
         if (screenshotPath != nullptr && !screenshotWritten
-            && window.grab().save(QString::fromUtf8(screenshotPath)))
+            && shoot(window, QString::fromUtf8(screenshotPath)))
             screenshotWritten = true;
         // ONE check for one fact, and it covers both ways of getting here: the
         // save failed, or nothing ever tried. "Nobody said it failed" and "it
@@ -4352,7 +4369,7 @@ int main(int argc, char** argv) {
                     beside = dot == std::string::npos ? beside + "-assembly"
                                                       : beside.substr(0, dot) + "-assembly" +
                                                             beside.substr(dot);
-                    if (!window.grab().save(QString::fromStdString(beside)))
+                    if (!shoot(window, QString::fromStdString(beside)))
                         fail("could not write the assembly screenshot");
                 }
 
@@ -4536,8 +4553,184 @@ int main(int argc, char** argv) {
                     beside = dot == std::string::npos
                                  ? beside + "-drawing"
                                  : beside.substr(0, dot) + "-drawing" + beside.substr(dot);
-                    if (!window.grab().save(QString::fromStdString(beside)))
+                    if (!shoot(window, QString::fromStdString(beside)))
                         fail("could not write the drawing screenshot");
+                }
+
+                // --- M33/M34's GATE: geometry and dimensions on the paper ----
+                //
+                // Everything here is reachable only by starting the program.
+                // The Core suite proves a dimension MEASURES; nothing but this
+                // can prove that a user can put one on the paper, that it
+                // reaches the canvas, and that it says the same thing on the
+                // screen as it does in the document.
+                {
+                    // A RECTANGLE, DRAWN THE WAY A USER WOULD: arm the tool,
+                    // click twice. Not by calling addEntity -- the point of
+                    // this gate is the path a hand takes.
+                    window.setDrawingToolCommand(DrawingTool::Rectangle);
+                    if (window.drawingToolForTesting() != DrawingTool::Rectangle)
+                        fail("the rectangle tool did not arm");
+                    window.pickOnSheetForTesting(Vec2{40.0, 40.0});
+                    window.pickOnSheetForTesting(Vec2{140.0, 100.0});
+                    if (window.drawingEntityCountForTesting() != 4)
+                        fail("drawing a rectangle did not put four lines on the sheet");
+                    // ...AND THE TOOL DISARMED. A tool that stayed armed is
+                    // how a user ends up with nine rectangles.
+                    if (window.drawingToolForTesting() != DrawingTool::None)
+                        fail("the rectangle tool stayed armed after drawing one");
+                    // ONE GESTURE, ONE UNDO STEP -- four lines came from two
+                    // clicks, and four Ctrl+Z would contradict what the user
+                    // did.
+                    const std::size_t afterRect = window.undoDepthForTesting();
+                    window.undoCommand();
+                    if (window.drawingEntityCountForTesting() != 0)
+                        fail("undoing a rectangle left some of its lines behind");
+                    window.redoCommand();
+                    if (window.drawingEntityCountForTesting() != 4 ||
+                        window.undoDepthForTesting() != afterRect)
+                        fail("redoing a rectangle did not put it back in one step");
+
+                    // A CIRCLE, so there is something round to put a diameter
+                    // on.
+                    window.setDrawingToolCommand(DrawingTool::Circle);
+                    window.pickOnSheetForTesting(Vec2{90.0, 70.0});
+                    window.pickOnSheetForTesting(Vec2{110.0, 70.0});
+                    if (window.drawingEntityCountForTesting() != 5)
+                        fail("the circle tool drew nothing");
+
+                    // --- A DIMENSION ON THE BOTTOM EDGE ----------------------
+                    window.selectObject(window.drawingEntityIdForTesting(0));
+                    const QString dimensioned =
+                        window.addDimensionCommand(DimensionKind::Linear,
+                                                   LinearDirection::Horizontal);
+                    if (window.dimensionCountForTesting() != 1)
+                        fail(("the dimension was not created: " + dimensioned.toStdString())
+                                 .c_str());
+                    // IT SAYS THE SIZE OF THE LINE, not of the picture of it.
+                    if (!dimensioned.contains(QStringLiteral("100.00")))
+                        fail(("a 100 mm line was dimensioned and it reads: " +
+                              dimensioned.toStdString())
+                                 .c_str());
+
+                    // ...AND IT REACHED THE CANVAS. "The document holds it"
+                    // and "it is on screen" are two claims -- the M6.14 gap
+                    // this shell exists to catch.
+                    window.repaint();
+                    if (window.drawnDimensionCountForTesting() != 1)
+                        fail("the drawing holds a dimension and the canvas drew none");
+
+                    // A DIAMETER ON THE CIRCLE, which is a different rule
+                    // about which snap points a pick means -- and it goes
+                    // through the same proposal, so this proves the one rule
+                    // covers both.
+                    window.selectObject(window.drawingEntityIdForTesting(4));
+                    const QString round =
+                        window.addDimensionCommand(DimensionKind::Diameter);
+                    if (window.dimensionCountForTesting() != 2)
+                        fail(("the diameter was refused: " + round.toStdString()).c_str());
+                    if (!round.contains(QStringLiteral("40.00")))
+                        fail(("a radius-20 circle reads: " + round.toStdString()).c_str());
+
+                    // A DIAMETER ON A LINE IS REFUSED, LOUDLY. Inventing an
+                    // answer would put a number on the drawing that measures
+                    // something the user did not point at.
+                    window.selectObject(window.drawingEntityIdForTesting(0));
+                    const QString nonsense =
+                        window.addDimensionCommand(DimensionKind::Diameter);
+                    if (window.dimensionCountForTesting() != 2)
+                        fail("a diameter was invented for a straight line");
+                    if (!nonsense.contains(QStringLiteral("No dimension")))
+                        fail(("refusing a diameter on a line said nothing: " +
+                              nonsense.toStdString())
+                                 .c_str());
+
+                    // --- IT FOLLOWS THE GEOMETRY ------------------------------
+                    //
+                    // The whole point of the module. A dimension that stored
+                    // its number would keep reading 100 after the line became
+                    // 60 long, and it would look completely right.
+                    const ObjectId edge = window.drawingEntityIdForTesting(0);
+                    const ObjectId theDimension = window.dimensionIdForTesting(0);
+                    window.scaleEntityForTesting(edge, Vec2{40.0, 40.0}, 0.6);
+                    if (window.dimensionTextForTesting(theDimension) !=
+                        QStringLiteral("60.00"))
+                        fail(("the line became 60 long and the dimension reads " +
+                              window.dimensionTextForTesting(theDimension).toStdString())
+                                 .c_str());
+
+                    // --- AND IT DANGLES LOUDLY WHEN IT LOSES IT ---------------
+                    window.selectObject(edge);
+                    window.deleteSelectedDrawingObject();
+                    if (window.danglingDimensionCountForTesting() != 1)
+                        fail("the line a dimension measured was deleted and nothing dangled");
+                    if (window.dimensionTextForTesting(theDimension) !=
+                        QStringLiteral("<?>"))
+                        fail("a dangling dimension is still showing a number");
+                    window.repaint();
+                    if (window.danglingDrawnForTesting() != 1)
+                        fail("a dimension is dangling and the canvas is not saying so");
+                    // THE TREE SAYS SO TOO. A reader who notices the paper
+                    // looks wrong goes to the tree, and a healthy-looking root
+                    // over a dangling dimension is the tree lying.
+                    if (window.probeOutline().state != OutlineState::Failed)
+                        fail("a dimension is dangling and the drawing's root row looks fine");
+                    window.undoCommand();
+                    if (window.danglingDimensionCountForTesting() != 0)
+                        fail("undoing the delete did not put the dimension back on its line");
+
+                    // --- RESTYLING REACHES EVERY DIMENSION --------------------
+                    window.selectObject(kInvalidObjectId);
+                    window.editDimensionStyleCommand(5.0, 5.0, 0, QStringLiteral(" mm"));
+                    if (window.dimensionTextForTesting(theDimension) !=
+                        QStringLiteral("60 mm"))
+                        fail(("restyling did not reach the dimension, which reads " +
+                              window.dimensionTextForTesting(theDimension).toStdString())
+                                 .c_str());
+
+                    // --- AN OVERRIDE CHANGES THE TEXT, NEVER THE MEASUREMENT --
+                    window.selectObject(theDimension);
+                    const QString said = window.setDimensionTextCommand(QStringLiteral("2x TYP"));
+                    if (window.dimensionTextForTesting(theDimension) !=
+                        QStringLiteral("2x TYP"))
+                        fail("the override did not reach the drawing");
+                    if (!said.contains(QStringLiteral("still measures 60")))
+                        fail(("overriding did not say what it still measures: " +
+                              said.toStdString())
+                                 .c_str());
+                    window.setDimensionTextCommand(QString());
+
+                    // --- THE TOOLBAR CARRIES THEM -----------------------------
+                    for (const char* wanted : {"Line", "Circle", "Rect", "Dim", "Dia",
+                                               "Angle", "Style"}) {
+                        bool found = false;
+                        const int buttons = window.drawingToolbarButtonCount();
+                        for (int i = 0; i < buttons; ++i)
+                            if (window.drawingToolbarLabel(i).find(wanted) !=
+                                std::string::npos)
+                                found = true;
+                        if (!found) {
+                            std::string message = "the drawing toolbar has no ";
+                            message += wanted;
+                            message += " button";
+                            fail(message.c_str());
+                        }
+                    }
+
+                    // A PICTURE OF A DRAWING WITH SIZES ON IT. Dimension
+                    // rendering is a JUDGEMENT: geometry tests can say an
+                    // arrowhead exists and points the right way and still not
+                    // say whether the result reads as a drawing.
+                    if (screenshotPath != nullptr) {
+                        std::string beside = screenshotPath;
+                        const std::size_t dot = beside.rfind('.');
+                        beside = dot == std::string::npos
+                                     ? beside + "-dimensions"
+                                     : beside.substr(0, dot) + "-dimensions" +
+                                           beside.substr(dot);
+                        if (!shoot(window, QString::fromStdString(beside)))
+                            fail("could not write the dimensions screenshot");
+                    }
                 }
 
                 // DELETING A VIEW TAKES THE ONES PROJECTED OFF IT, and says so.

@@ -141,6 +141,26 @@ SaveResult validateSaveable(const DrawingDocument& document) {
                               std::string(ShapeName(entity->shape())) + " uses linetype '" +
                                   entity->linetype() + "', which is not in this document"};
     }
+    // v37 (M34). A style is a named table entry like a layer; a dimension
+    // names one, and a layer. Both checked here first (ADR-M3-008).
+    bool sawDefaultStyle = false;
+    for (const DimensionStyle* style : document.dimensionStyles()) {
+        if (const SaveResult bad = claim(style->id(), "dimension style"); !bad) return bad;
+        if (style->name() == kDefaultDimensionStyleName) sawDefaultStyle = true;
+    }
+    if (!sawDefaultStyle)
+        return SaveResult{SerializationError::MissingField,
+                          "a drawing has no " + std::string(kDefaultDimensionStyleName) +
+                              " dimension style, which every dimension falls back on"};
+    for (const DrawingDimension* dimension : document.dimensions()) {
+        if (const SaveResult bad = claim(dimension->id(), "dimension"); !bad) return bad;
+        if (document.findDimensionStyle(dimension->styleId()) == nullptr)
+            return SaveResult{SerializationError::UnknownDependencyId,
+                              "a dimension names a style that is not in this document"};
+        if (document.findLayer(dimension->layerId()) == nullptr)
+            return SaveResult{SerializationError::UnknownDependencyId,
+                              "a dimension is on a layer that is not in this document"};
+    }
     if (!document.sheet().scale().valid())
         return SaveResult{SerializationError::InvalidFieldType,
                           "the sheet scale is not a ratio"};
@@ -308,6 +328,66 @@ JsonValue toJson(const DrawingDocument& document) {
         entities.add(std::move(item));
     }
     root.set("entities", std::move(entities));
+
+    // v37 (M34). Styles before dimensions, because a dimension names one --
+    // the same order the tables above follow, so a file reads straight
+    // through.
+    JsonValue styles = JsonValue::makeArray();
+    for (const DimensionStyle* style : document.dimensionStyles()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(style->id())));
+        item.set("name", JsonValue::makeString(style->name()));
+        // PAPER MILLIMETRES, every one of them (see DimensionStyle.h). The
+        // measurement is model millimetres and is never in here.
+        item.set("textHeightMm", JsonValue::makeNumber(style->textHeightMm()));
+        item.set("textGapMm", JsonValue::makeNumber(style->textGapMm()));
+        item.set("arrowSizeMm", JsonValue::makeNumber(style->arrowSizeMm()));
+        item.set("extensionGapMm", JsonValue::makeNumber(style->extensionGapMm()));
+        item.set("extensionOvershootMm",
+                 JsonValue::makeNumber(style->extensionOvershootMm()));
+        item.set("decimals", JsonValue::makeNumber(static_cast<double>(style->decimals())));
+        item.set("suffix", JsonValue::makeString(style->suffix()));
+        item.set("overallScale", JsonValue::makeNumber(style->overallScale()));
+        styles.add(std::move(item));
+    }
+    root.set("dimensionStyles", std::move(styles));
+    root.set("currentDimensionStyleId",
+             JsonValue::makeString(idToString(document.currentDimensionStyleId())));
+
+    JsonValue dimensions = JsonValue::makeArray();
+    const auto anchorToJson = [](const DimensionAnchor& anchor) {
+        JsonValue out = JsonValue::makeObject();
+        out.set("kind", JsonValue::makeString(std::string(toString(anchor.kind))));
+        // AN ANCHOR IS A REFERENCE, not a coordinate -- except for Free, which
+        // is a coordinate on purpose. What is written is exactly what the
+        // resolver asks again on the next rebuild.
+        out.set("x", JsonValue::makeNumber(anchor.at.x));
+        out.set("y", JsonValue::makeNumber(anchor.at.y));
+        out.set("entityId", JsonValue::makeString(idToString(anchor.entityId)));
+        out.set("snapIndex", JsonValue::makeNumber(static_cast<double>(anchor.snapIndex)));
+        out.set("viewId", JsonValue::makeString(idToString(anchor.viewId)));
+        out.set("toleranceMm", JsonValue::makeNumber(anchor.toleranceMm));
+        return out;
+    };
+    for (const DrawingDimension* dimension : document.dimensions()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(dimension->id())));
+        item.set("kind", JsonValue::makeString(std::string(toString(dimension->kind()))));
+        item.set("direction",
+                 JsonValue::makeString(std::string(toString(dimension->direction()))));
+        item.set("first", anchorToJson(dimension->first()));
+        item.set("second", anchorToJson(dimension->second()));
+        item.set("lineXMm", JsonValue::makeNumber(dimension->linePositionMm().x));
+        item.set("lineYMm", JsonValue::makeNumber(dimension->linePositionMm().y));
+        item.set("styleId", JsonValue::makeString(idToString(dimension->styleId())));
+        item.set("layerId", JsonValue::makeString(idToString(dimension->layerId())));
+        // THE MEASUREMENT IS NOT WRITTEN. It is derived from the anchors, and
+        // a file carrying it would hold a second, stale answer about the size
+        // of the part -- which is the exact failure a drawing must not have.
+        item.set("textOverride", JsonValue::makeString(dimension->textOverride()));
+        dimensions.add(std::move(item));
+    }
+    root.set("dimensions", std::move(dimensions));
     return root;
 }
 
@@ -915,6 +995,254 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         }
     }
 
+    struct StyleData {
+        ObjectId id = kInvalidObjectId;
+        std::string name;
+        double textHeightMm = 3.5;
+        double textGapMm = 0.8;
+        double arrowSizeMm = 3.5;
+        double extensionGapMm = 1.5;
+        double extensionOvershootMm = 2.0;
+        int decimals = 2;
+        std::string suffix;
+        double overallScale = 1.0;
+    };
+    std::vector<StyleData> styleData;
+    if (const JsonValue* field = root.find("dimensionStyles")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'dimensionStyles' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "dimensionStyles[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            StyleData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            if (name->asString().empty())
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": a dimension style has no name");
+            one.name = name->asString();
+
+            const auto readOptional = [&](const char* key, double& into) -> bool {
+                const JsonValue* value = entry.find(key);
+                if (value == nullptr) return true;
+                if (value->type() != JsonType::Number) return false;
+                into = value->asNumber();
+                return true;
+            };
+            if (!readOptional("textHeightMm", one.textHeightMm) ||
+                !readOptional("textGapMm", one.textGapMm) ||
+                !readOptional("arrowSizeMm", one.arrowSizeMm) ||
+                !readOptional("extensionGapMm", one.extensionGapMm) ||
+                !readOptional("extensionOvershootMm", one.extensionOvershootMm) ||
+                !readOptional("overallScale", one.overallScale))
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": a style measurement is not a number");
+            // A ZERO TEXT HEIGHT IS TEXT NOBODY CAN READ, and it would be
+            // found at plot time -- a long way from this file.
+            if (!(one.textHeightMm > 0.0) || !(one.arrowSizeMm > 0.0) ||
+                !(one.overallScale > 0.0))
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": a style with no text height, arrow or scale "
+                                             "draws nothing anybody can read");
+            if (const JsonValue* decimals = entry.find("decimals")) {
+                if (decimals->type() != JsonType::Number)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'decimals' is not a number");
+                one.decimals = static_cast<int>(decimals->asNumber());
+                if (one.decimals < 0 || one.decimals > 9)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a decimal count past nine prints digits "
+                                                 "that are not measurements");
+            }
+            if (const JsonValue* suffix = entry.find("suffix")) {
+                if (suffix->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'suffix' is not a string");
+                one.suffix = suffix->asString();
+            }
+            styleData.push_back(std::move(one));
+        }
+    }
+
+    struct DimensionData {
+        ObjectId id = kInvalidObjectId;
+        DimensionKind kind = DimensionKind::Linear;
+        LinearDirection direction = LinearDirection::Aligned;
+        DimensionAnchor first;
+        DimensionAnchor second;
+        Vec2 linePositionMm{};
+        ObjectId styleId = kInvalidObjectId;
+        ObjectId layerId = kInvalidObjectId;
+        std::string textOverride;
+    };
+    std::vector<DimensionData> dimensionData;
+    if (const JsonValue* field = root.find("dimensions")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'dimensions' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "dimensions[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            DimensionData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+
+            const JsonValue* kind = requireField(entry, "kind", JsonType::String, context, err);
+            if (kind == nullptr) return loadFailure(err.error, err.message);
+            if (kind->asString() == "Linear") one.kind = DimensionKind::Linear;
+            else if (kind->asString() == "Radius") one.kind = DimensionKind::Radius;
+            else if (kind->asString() == "Diameter") one.kind = DimensionKind::Diameter;
+            else if (kind->asString() == "Angular") one.kind = DimensionKind::Angular;
+            else
+                return loadFailure(SerializationError::InvalidEnumValue,
+                                   context + ": unknown dimension kind '" + kind->asString() +
+                                       "'");
+            if (const JsonValue* direction = entry.find("direction")) {
+                if (direction->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'direction' is not a string");
+                if (direction->asString() == "Aligned")
+                    one.direction = LinearDirection::Aligned;
+                else if (direction->asString() == "Horizontal")
+                    one.direction = LinearDirection::Horizontal;
+                else if (direction->asString() == "Vertical")
+                    one.direction = LinearDirection::Vertical;
+                else
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       context + ": unknown direction '" +
+                                           direction->asString() + "'");
+            }
+
+            const auto readAnchor = [&](const char* key, DimensionAnchor& into) -> bool {
+                const JsonValue* at = requireField(entry, key, JsonType::Object, context, err);
+                if (at == nullptr) return false;
+                const JsonValue* kindField =
+                    requireField(*at, "kind", JsonType::String, context, err);
+                if (kindField == nullptr) return false;
+                if (kindField->asString() == "Free")
+                    into.kind = DimensionAnchorKind::Free;
+                else if (kindField->asString() == "Entity")
+                    into.kind = DimensionAnchorKind::Entity;
+                else if (kindField->asString() == "InView")
+                    into.kind = DimensionAnchorKind::InView;
+                else
+                    return false;
+                const JsonValue* x = requireField(*at, "x", JsonType::Number, context, err);
+                const JsonValue* y = requireField(*at, "y", JsonType::Number, context, err);
+                if (x == nullptr || y == nullptr) return false;
+                into.at = Vec2{x->asNumber(), y->asNumber()};
+                if (const JsonValue* entityId = at->find("entityId"))
+                    if (const auto parsed = idFromString(entityId->asString()))
+                        into.entityId = *parsed;
+                if (const JsonValue* snapIndex = at->find("snapIndex"))
+                    if (snapIndex->type() == JsonType::Number)
+                        into.snapIndex = static_cast<int>(snapIndex->asNumber());
+                if (const JsonValue* viewId = at->find("viewId"))
+                    if (const auto parsed = idFromString(viewId->asString()))
+                        into.viewId = *parsed;
+                if (const JsonValue* tolerance = at->find("toleranceMm"))
+                    if (tolerance->type() == JsonType::Number && tolerance->asNumber() > 0.0)
+                        into.toleranceMm = tolerance->asNumber();
+                return true;
+            };
+            if (!readAnchor("first", one.first) || !readAnchor("second", one.second))
+                // `readAnchor` fills `err` for a missing or mistyped field and
+                // returns false with it untouched for an unknown anchor kind,
+                // so the fallback message covers the second case rather than
+                // reporting an empty one.
+                return loadFailure(err.message.empty() ? SerializationError::InvalidEnumValue
+                                                       : err.error,
+                                   err.message.empty()
+                                       ? context + ": an anchor names a kind this format does "
+                                                   "not know"
+                                       : err.message);
+
+            const JsonValue* x = requireField(entry, "lineXMm", JsonType::Number, context, err);
+            const JsonValue* y = requireField(entry, "lineYMm", JsonType::Number, context, err);
+            if (x == nullptr || y == nullptr) return loadFailure(err.error, err.message);
+            one.linePositionMm = Vec2{x->asNumber(), y->asNumber()};
+
+            const JsonValue* styleField =
+                requireField(entry, "styleId", JsonType::String, context, err);
+            if (styleField == nullptr) return loadFailure(err.error, err.message);
+            const auto styleId = idFromString(styleField->asString());
+            if (!styleId.has_value())
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": 'styleId' is not a valid ObjectId");
+            bool styleIsHere = false;
+            for (const StyleData& candidate : styleData)
+                if (candidate.id == *styleId) styleIsHere = true;
+            if (!styleIsHere)
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   context + ": styleId " + idToString(*styleId) +
+                                       " is not a dimension style in this document");
+            one.styleId = *styleId;
+
+            const JsonValue* layerField =
+                requireField(entry, "layerId", JsonType::String, context, err);
+            if (layerField == nullptr) return loadFailure(err.error, err.message);
+            const auto layerId = idFromString(layerField->asString());
+            if (!layerId.has_value())
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": 'layerId' is not a valid ObjectId");
+            bool layerIsHere = false;
+            for (const LayerData& candidate : layerData)
+                if (candidate.id == *layerId) layerIsHere = true;
+            if (!layerIsHere)
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   context + ": layerId " + idToString(*layerId) +
+                                       " is not a layer in this document");
+            one.layerId = *layerId;
+
+            if (const JsonValue* text = entry.find("textOverride")) {
+                if (text->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'textOverride' is not a string");
+                one.textOverride = text->asString();
+            }
+            dimensionData.push_back(std::move(one));
+        }
+    }
+
+    ObjectId currentStyleId = kInvalidObjectId;
+    if (const JsonValue* field = root.find("currentDimensionStyleId")) {
+        if (field->type() != JsonType::String)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: 'currentDimensionStyleId' is not a string");
+        const auto parsed = idFromString(field->asString());
+        if (!parsed.has_value())
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: 'currentDimensionStyleId' is not a valid ObjectId");
+        bool isHere = false;
+        for (const StyleData& candidate : styleData)
+            if (candidate.id == *parsed) isHere = true;
+        if (!isHere)
+            return loadFailure(SerializationError::UnknownDependencyId,
+                               "document: the current dimension style is not in this document");
+        currentStyleId = *parsed;
+    }
+
     ObjectId currentLayerId = kInvalidObjectId;
     if (const JsonValue* field = root.find("currentLayerId")) {
         if (field->type() != JsonType::String)
@@ -947,6 +1275,12 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         for (const Linetype* existing : document->linetypes())
             document->restoreRemoveObject(existing->id());
     }
+    // ...and the seeded dimension style, for the same reason: the file carries
+    // its own ISO-25 and two of them would leave one with an id nothing points
+    // at.
+    if (!styleData.empty())
+        for (const DimensionStyle* existing : document->dimensionStyles())
+            document->restoreRemoveObject(existing->id());
     if (!frameData.empty())
         for (const ReferenceFrame* existing : document->frames())
             document->restoreRemoveObject(existing->id());
@@ -993,6 +1327,24 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     for (auto& one : entityData)
         document->restoreEntity(one.id, std::move(one.shape), one.layerId, one.color,
                                 std::move(one.linetype), one.lineweight);
+    for (auto& one : styleData) {
+        DimensionStyle& style = document->restoreDimensionStyle(one.id, std::move(one.name));
+        style.setTextHeightMm(one.textHeightMm);
+        style.setTextGapMm(one.textGapMm);
+        style.setArrowSizeMm(one.arrowSizeMm);
+        style.setExtensionGapMm(one.extensionGapMm);
+        style.setExtensionOvershootMm(one.extensionOvershootMm);
+        style.setDecimals(one.decimals);
+        style.setSuffix(std::move(one.suffix));
+        style.setOverallScale(one.overallScale);
+    }
+    // DIMENSIONS LAST, because one names a style, a layer and possibly a view.
+    for (auto& one : dimensionData)
+        document->restoreDimension(one.id, one.kind, one.first, one.second, one.direction,
+                                   one.linePositionMm, one.styleId, one.layerId,
+                                   std::move(one.textOverride));
+    if (currentStyleId != kInvalidObjectId)
+        document->restoreCurrentDimensionStyle(currentStyleId);
     if (currentLayerId != kInvalidObjectId) document->restoreCurrentLayer(currentLayerId);
 
     // A loaded document starts with an EMPTY history (ADR-M9-001).

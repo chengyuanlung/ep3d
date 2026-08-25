@@ -150,6 +150,19 @@ enum class SketchIcon {
     SheetSetup,
     DrawingLayer,
 
+    // --- Dimensions (M34) ---------------------------------------------------
+    //
+    // These four break the sheet-outline rule the group above follows, and on
+    // purpose: a dimension is not ABOUT the paper, it is about the PART. So
+    // each one draws the annotation itself -- the arrows, the arc, the leader
+    // -- which is also what makes them tell each other apart at 24 px, where
+    // four sheets with small marks inside would be one grey smudge four times.
+    LinearDimension,
+    RadiusDimension,
+    DiameterDimension,
+    AngularDimension,
+    DimensionStyleIcon,
+
     Count
 };
 
