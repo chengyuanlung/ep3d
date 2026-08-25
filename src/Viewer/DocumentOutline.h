@@ -60,6 +60,10 @@ enum class OutlineKind {
     // takes nothing, and its row has to be able to say that it is counting a
     // file that has since changed.
     BomTableNode,
+    // M36: a component and a net. A NET has no ObjectId -- it is derived --
+    // so its row carries kInvalidObjectId and cannot be selected, which is
+    // honest: there is nothing to select.
+    Component, NetNode,
     Other
 };
 

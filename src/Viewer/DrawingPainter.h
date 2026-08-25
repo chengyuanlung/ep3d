@@ -79,6 +79,20 @@ struct DrawnTally {
     // inside it could not be read. Counted separately so a self test can
     // assert the ALARM reached the screen, not just that the document knows.
     std::size_t bomUncounted = 0;
+    std::size_t wires = 0;
+    std::size_t placedSymbols = 0;
+    // Placements naming a symbol the library does not have. Counted apart so a
+    // self test can assert the ALARM reached the screen: a component drawn as
+    // nothing looks exactly like a component that was never placed.
+    std::size_t unknownSymbols = 0;
+    // Junction dots -- where three or more wires meet. Counted because their
+    // ABSENCE is what a reader would misread, not their presence.
+    std::size_t junctions = 0;
+    // WHERE the components were drawn, in SHEET millimetres. Counting them is
+    // not enough: a symbol drawn at the origin while its pins are at the
+    // placement would CONNECT in one place and DRAW in another, and the tally
+    // would be identical.
+    Box2D symbolExtentMm;
 };
 
 DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,

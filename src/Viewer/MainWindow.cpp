@@ -20,6 +20,7 @@
 #include "Core/Serialization/DrawingDocumentSerializer.h"
 #include "Viewer/DrawingOutline.h"
 #include "Viewer/DrawingCanvas.h"
+#include "Core/Electrical/SymbolLibrary.h"
 #include "Core/Export/DxfWriter.h"
 #include "Viewer/DrawingPlot.h"
 #include "Core/Document/PartDocument.h"
@@ -344,6 +345,34 @@ void MainWindow::buildMenus() {
         QStringLiteral("The border and its margins, in millimetres.\n"
                        "The binding edge is wider because that is the edge it is filed on."));
     connect(frameAction_, &QAction::triggered, this, &MainWindow::onFrameRequested);
+
+    // --- Schematic (M36) -----------------------------------------------------
+    drawingMenu_->addSeparator();
+    placeSymbolAction_ = drawingMenu_->addAction(QStringLiteral("Place &Component..."));
+    placeSymbolAction_->setToolTip(
+        QStringLiteral("An IEC symbol with PINS -- which is what makes it a component\n"
+                       "rather than a picture of one. Its tag is chosen from the symbol's "
+                       "kind: R for a resistor, K for a contactor, X for a terminal."));
+    connect(placeSymbolAction_, &QAction::triggered, this,
+            &MainWindow::onPlaceSymbolRequested);
+    drawWireAction_ = drawingMenu_->addAction(QStringLiteral("Draw &Wire"));
+    drawWireAction_->setCheckable(true);
+    drawWireAction_->setToolTip(
+        QStringLiteral("Two clicks. A wire is its own kind of object, not a line on a "
+                       "layer:\nmoving a line to another layer must not be able to change "
+                       "the circuit."));
+    connect(drawWireAction_, &QAction::triggered, this, [this](bool on) {
+        setDrawingToolCommand(on ? DrawingTool::Wire : DrawingTool::None);
+    });
+    turnSymbolAction_ = drawingMenu_->addAction(QStringLiteral("T&urn Component"));
+    turnSymbolAction_->setToolTip(QStringLiteral("A quarter turn, anticlockwise."));
+    connect(turnSymbolAction_, &QAction::triggered, this,
+            [this] { turnSelectedSymbolCommand(1.5707963267948966); });
+    numberNetsAction_ = drawingMenu_->addAction(QStringLiteral("&Number Nets"));
+    numberNetsAction_->setToolTip(
+        QStringLiteral("W1, W2, ... left to right, then bottom to top -- the order the "
+                       "sheet is read.\nA net that already has a name keeps it."));
+    connect(numberNetsAction_, &QAction::triggered, this, [this] { numberNetsCommand(); });
 
     addBomAction_ = drawingMenu_->addAction(QStringLiteral("&Parts List..."));
     addBomAction_->setToolTip(
@@ -912,6 +941,8 @@ void MainWindow::buildToolbar() {
     addDrawing(drawLineAction_, ui::SketchIcon::Line, "Line");
     addDrawing(drawCircleAction_, ui::SketchIcon::Circle, "Circle");
     addDrawing(drawRectangleAction_, ui::SketchIcon::Rectangle, "Rect");
+    addDrawing(drawWireAction_, ui::SketchIcon::Wire, "Wire");
+    addDrawing(placeSymbolAction_, ui::SketchIcon::Component, "Part");
     drawing->addSeparator();
     addDrawing(linearDimensionAction_, ui::SketchIcon::LinearDimension, "Dim");
     addDrawing(radiusDimensionAction_, ui::SketchIcon::RadiusDimension, "Radius");
@@ -3172,8 +3203,17 @@ void MainWindow::refreshCommandStates() {
         if (dimensionStyleAction_ != nullptr) dimensionStyleAction_->setEnabled(isDrawing);
         for (QAction* tool : {drawLineAction_, drawCircleAction_, drawRectangleAction_,
                               titleBlockAction_, frameAction_, plotPdfAction_,
-                              exportDxfAction_, addBomAction_})
+                              exportDxfAction_, addBomAction_, placeSymbolAction_,
+                              drawWireAction_})
             if (tool != nullptr) tool->setEnabled(isDrawing);
+        // ONLY LIVE WHEN THERE IS SOMETHING TO DO, so an enabled command never
+        // does nothing.
+        if (numberNetsAction_ != nullptr)
+            numberNetsAction_->setEnabled(isDrawing && wireCountForTesting() != 0);
+        if (turnSymbolAction_ != nullptr)
+            turnSymbolAction_->setEnabled(
+                isDrawing && asDrawing != nullptr &&
+                asDrawing->findSymbol(selectedId_) != nullptr);
         // ONLY LIVE WHEN THERE IS SOMETHING TO RE-COUNT, so an enabled command
         // never does nothing.
         if (recountBomAction_ != nullptr)
@@ -4532,6 +4572,25 @@ QString MainWindow::drawShapeCommand(DrawingTool tool, const std::vector<Vec2>& 
             what = QStringLiteral("circle");
             break;
         }
+        case DrawingTool::Wire: {
+            // A WIRE IS NOT A LINE. It is its own kind, so that moving it to
+            // another layer cannot silently change the circuit while the
+            // drawing looks identical -- see SchematicObjects.h.
+            if (std::hypot(pointsMm[1].x - pointsMm[0].x, pointsMm[1].y - pointsMm[0].y) < 1e-9)
+                return say(QStringLiteral("A wire of no length connects nothing."));
+            document_->beginTransaction("Draw wire");
+            try {
+                drawing->addWire({pointsMm[0], pointsMm[1]});
+            } catch (const std::exception& error) {
+                document_->abortTransaction();
+                return say(QStringLiteral("That wire was refused: %1")
+                               .arg(QString::fromUtf8(error.what())));
+            }
+            if (!document_->commitTransaction())
+                return say(QStringLiteral("That wire was refused."));
+            refreshAll();
+            return say(QStringLiteral("Drew a wire -- %1").arg(netlistSummaryForTesting()));
+        }
         case DrawingTool::Rectangle: {
             // FOUR LINES, not a closed polyline -- so each side can be
             // trimmed, dimensioned and put on its own layer, which is what a
@@ -4569,6 +4628,7 @@ void MainWindow::setDrawingToolCommand(DrawingTool tool) {
     drawingCanvas_->setTool(tool);
     if (drawLineAction_ != nullptr)
         drawLineAction_->setChecked(tool == DrawingTool::Line);
+    if (drawWireAction_ != nullptr) drawWireAction_->setChecked(tool == DrawingTool::Wire);
     if (drawCircleAction_ != nullptr)
         drawCircleAction_->setChecked(tool == DrawingTool::Circle);
     if (drawRectangleAction_ != nullptr)
@@ -4743,6 +4803,153 @@ Vec2 MainWindow::defaultBomPositionMm() const {
     if (drawing == nullptr) return Vec2{0.0, 0.0};
     const Vec2 at = drawing->titleBlockOriginMm();
     return Vec2{at.x, at.y + drawing->titleBlock().heightMm()};
+}
+
+QString MainWindow::nextTagFor(const QString& symbolName) const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const ElectricalSymbol* symbol = BuiltInSymbols().find(symbolName.toStdString());
+    // A SYMBOL'S PREFIX SAYS WHAT KIND OF PART IT IS (IEC 81346): R for a
+    // resistor, K for a contactor, X for a terminal. A schematic where every
+    // part is called "SYMBOL1" is one nobody can cross-reference.
+    const QString prefix =
+        symbol != nullptr ? QString::fromStdString(symbol->tagPrefix()) : QStringLiteral("U");
+    for (int number = 1; number < 10000; ++number) {
+        const QString tag = QStringLiteral("-%1%2").arg(prefix).arg(number);
+        if (drawing->findSymbolTagged(tag.toStdString()) == nullptr) return tag;
+    }
+    return {};
+}
+
+QString MainWindow::placeSymbolCommand(const QString& symbolName, Vec2 positionMm,
+                                       const QString& tag) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Components go on a drawing."));
+    if (BuiltInSymbols().find(symbolName.toStdString()) == nullptr)
+        return say(QStringLiteral("There is no symbol called %1.").arg(symbolName));
+
+    const QString wanted = tag.isEmpty() ? nextTagFor(symbolName) : tag;
+    document_->beginTransaction("Place component");
+    SymbolPlacement* made = nullptr;
+    try {
+        made = &drawing->addSymbol(wanted.toStdString(), symbolName.toStdString(), positionMm);
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That component was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction())
+        return say(QStringLiteral("That component was refused."));
+    selectedId_ = made->id();
+    refreshAll();
+    return say(QStringLiteral("Placed %1 (%2)").arg(wanted, symbolName));
+}
+
+QString MainWindow::turnSelectedSymbolCommand(double radians) {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const SymbolPlacement* symbol = drawing->findSymbol(selectedId_);
+    if (symbol == nullptr) {
+        statusLeft_->setText(QStringLiteral("Select a component first."));
+        return {};
+    }
+    if (!drawing->setSymbolRotation(symbol->id(), symbol->rotationRad() + radians)) return {};
+    refreshAll();
+    const QString said = QStringLiteral("Turned %1").arg(QString::fromStdString(symbol->tag()));
+    statusLeft_->setText(said);
+    return said;
+}
+
+QString MainWindow::numberNetsCommand() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Nets belong to a schematic."));
+    const std::size_t named = drawing->numberNets();
+    refreshAll();
+    // WHAT IT DID AND WHAT IS STILL WRONG, together. A command that reported
+    // only its success would let a user walk away from a schematic with wires
+    // that go nowhere.
+    QString said = QStringLiteral("Numbered %1 wire(s)").arg(named);
+    const std::size_t dangling = danglingNetCountForTesting();
+    if (dangling != 0)
+        said += QStringLiteral(" -- %1 net(s) go nowhere").arg(dangling);
+    for (const std::string& clash : drawing->conflictingNetNames())
+        said += QStringLiteral("\n%1 are the same wire")
+                    .arg(QString::fromStdString(clash));
+    return say(said);
+}
+
+QString MainWindow::topmostWireLabelForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const WireEntity* highest = nullptr;
+    double best = 0.0;
+    for (const WireEntity* wire : drawing->wires()) {
+        for (const Vec2 point : wire->pointsMm()) {
+            if (highest != nullptr && point.y <= best) continue;
+            highest = wire;
+            best = point.y;
+        }
+    }
+    return highest == nullptr ? QString() : QString::fromStdString(highest->label());
+}
+
+QString MainWindow::netlistSummaryForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const Netlist netlist = drawing->netlist();
+    return QStringLiteral("%1 nets, %2 dangling")
+        .arg(netlist.nets.size())
+        .arg(netlist.danglingNets().size());
+}
+
+std::size_t MainWindow::symbolCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->symbols().size();
+}
+
+std::size_t MainWindow::wireCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->wires().size();
+}
+
+std::size_t MainWindow::netCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->netlist().nets.size();
+}
+
+std::size_t MainWindow::danglingNetCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->netlist().danglingNets().size();
+}
+
+std::size_t MainWindow::drawnWiresForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnWiresForTesting();
+}
+
+std::size_t MainWindow::drawnSymbolsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnSymbolsForTesting();
+}
+
+std::size_t MainWindow::drawnUnknownSymbolsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnUnknownSymbolsForTesting();
+}
+
+std::size_t MainWindow::drawnJunctionsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnJunctionsForTesting();
+}
+
+Box2D MainWindow::drawnSymbolExtentForTesting() const {
+    return drawingCanvas_ == nullptr ? Box2D{} : drawingCanvas_->drawnSymbolExtentForTesting();
 }
 
 QString MainWindow::addBomTableCommand(const QString& name, const QString& sourcePath,
@@ -5233,6 +5440,31 @@ void MainWindow::onExportDxfRequested() {
         QMessageBox::information(this, QStringLiteral("Export DXF"), said);
 }
 
+void MainWindow::onPlaceSymbolRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    QStringList names;
+    for (const ElectricalSymbol& symbol : BuiltInSymbols().symbols())
+        names << QStringLiteral("%1  -  %2")
+                     .arg(QString::fromStdString(symbol.name()),
+                          QString::fromStdString(symbol.description()));
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(this, QStringLiteral("Place Component"),
+                                                 QStringLiteral("Symbol:"), names, 0, false,
+                                                 &ok);
+    if (!ok || chosen.isEmpty()) return;
+    const QString symbolName = chosen.section(QStringLiteral("  -  "), 0, 0);
+    // THE MIDDLE OF THE FRAME, so a placed component is somewhere the user can
+    // see it and drag from -- rather than at the origin, which on a portrait
+    // sheet is the bottom-left corner under the frame.
+    const SheetFrameGeometry frame = drawing->frame();
+    const Vec2 at = frame.ok ? Vec2{(frame.innerMinMm.x + frame.innerMaxMm.x) / 2.0,
+                                    (frame.innerMinMm.y + frame.innerMaxMm.y) / 2.0}
+                             : Vec2{drawing->sheet().widthMm() / 2.0,
+                                    drawing->sheet().heightMm() / 2.0};
+    placeSymbolCommand(symbolName, at);
+}
+
 void MainWindow::onAddBomRequested() {
     DrawingDocument* drawing = AsDrawing(document_);
     if (drawing == nullptr) return;
@@ -5444,6 +5676,27 @@ QString MainWindow::saveDocumentFile(const QString& path) {
         if (!savedAssembly)
             return QStringLiteral("Could not save: %1")
                 .arg(QString::fromStdString(savedAssembly.message));
+        documentPath_ = path;
+        setWindowTitle(QStringLiteral("EP3D - %1").arg(QFileInfo(path).fileName()));
+        return QStringLiteral("Saved to %1").arg(path);
+    }
+    // A DRAWING IS A DOCUMENT TOO, and this was missing.
+    //
+    // File > Save and Ctrl+S are not disabled for a drawing -- nor should they
+    // be -- so hitting either fell through to `part()`, which THROWS. Every
+    // drawing built since M32, with its views, dimensions, frame, title block,
+    // parts lists and schematics, could be opened and never written back.
+    //
+    // openDocumentFile has known how to read all three kinds since M27; the
+    // two halves were kept by hand and only one of them was finished. That is
+    // this project's recurring defect exactly, and the reason the abort was
+    // never seen is that the self test built drawings and never saved one.
+    if (const auto* drawing = dynamic_cast<const DrawingDocument*>(document_)) {
+        const SaveResult savedDrawing =
+            saveDrawingDocumentToFile(*drawing, path.toStdString());
+        if (!savedDrawing)
+            return QStringLiteral("Could not save: %1")
+                .arg(QString::fromStdString(savedDrawing.message));
         documentPath_ = path;
         setWindowTitle(QStringLiteral("EP3D - %1").arg(QFileInfo(path).fileName()));
         return QStringLiteral("Saved to %1").arg(path);

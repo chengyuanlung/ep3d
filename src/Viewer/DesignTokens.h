@@ -145,6 +145,8 @@ inline QString kindTag(OutlineKind kind) {
         case OutlineKind::Dimension: return QStringLiteral("[Dim]");
         case OutlineKind::DimensionStyle: return QStringLiteral("[Sty]");
         case OutlineKind::BomTableNode: return QStringLiteral("[BOM]");
+        case OutlineKind::Component: return QStringLiteral("[Cmp]");
+        case OutlineKind::NetNode: return QStringLiteral("[Net]");
         // A GROUP ROW HAS NO TYPE, which is a real answer and not a gap.
         case OutlineKind::Other: return QStringLiteral("[   ]");
     }

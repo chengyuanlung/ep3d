@@ -168,6 +168,11 @@ enum class SketchIcon {
     // describes the drawing rather than the part.
     TitleBlock,
 
+    // M36, electrical. A wire and a component -- and the component icon shows
+    // its PINS, because that is what makes it one.
+    Wire,
+    Component,
+
     Count
 };
 

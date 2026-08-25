@@ -4818,6 +4818,59 @@ int main(int argc, char** argv) {
                             fail("a refused margin took the frame with it");
                     }
 
+                    // --- A DRAWING CAN BE SAVED AND OPENED AGAIN --------------
+                    //
+                    // THIS SHIPPED BROKEN FOR FOUR MILESTONES.
+                    //
+                    // saveDocumentFile handled parts and assemblies and fell
+                    // through to `part()` for a drawing, which THROWS -- so
+                    // Ctrl+S on any drawing built since M32 aborted, and every
+                    // view, dimension, frame, title block and parts list could
+                    // be made and never written back. openDocumentFile has
+                    // read all three kinds since M27; the two halves were kept
+                    // by hand and only one was finished.
+                    //
+                    // Nothing caught it because the self test built drawings
+                    // and never saved one. It does now.
+                    {
+                        const QString path =
+                            QDir::tempPath() +
+                            QStringLiteral("/ep3d-selftest/m35-roundtrip.ep3dd");
+                        QFile::remove(path);
+                        const std::size_t views = window.drawingViewCountForTesting();
+                        const std::size_t dimensions = window.dimensionCountForTesting();
+                        const std::size_t entities = window.drawingEntityCountForTesting();
+                        const QString title =
+                            window.titleBlockValueForTesting(QStringLiteral("Title"));
+
+                        const QString saved = window.saveDocumentFile(path);
+                        if (!saved.contains(QStringLiteral("Saved")))
+                            fail(("a drawing would not save: " + saved.toStdString()).c_str());
+                        if (!QFile::exists(path)) fail("the drawing said it saved and did not");
+
+                        const QString opened = window.openDocumentFile(path);
+                        if (!opened.contains(QStringLiteral("Opened")))
+                            fail(("the saved drawing would not open: " + opened.toStdString())
+                                     .c_str());
+                        if (window.openedDocumentType() != DocumentType::Drawing)
+                            fail("a saved drawing came back as something else");
+                        // EVERYTHING THAT WAS ON IT IS STILL ON IT. Counting
+                        // is the point: a save that dropped the dimensions
+                        // would open cleanly and be a different drawing.
+                        if (window.drawingViewCountForTesting() != views)
+                            fail("the reopened drawing has lost views");
+                        if (window.dimensionCountForTesting() != dimensions)
+                            fail("the reopened drawing has lost dimensions");
+                        if (window.drawingEntityCountForTesting() != entities)
+                            fail("the reopened drawing has lost geometry");
+                        if (window.titleBlockValueForTesting(QStringLiteral("Title")) != title)
+                            fail("the reopened drawing has lost its title block");
+                        // ...AND A LOADED DOCUMENT HAS AN EMPTY UNDO HISTORY
+                        // (ADR-M9-001).
+                        if (window.undoDepthForTesting() != 0)
+                            fail("a reopened drawing arrived with an undo history");
+                    }
+
                     // --- M35.4's GATE: the plot ------------------------------
                     //
                     // "A file appeared" is not a plot. What has to be true is
@@ -5152,6 +5205,248 @@ int main(int argc, char** argv) {
                     if (window.probeOutline().state != OutlineState::Failed)
                         fail("a parts list cannot be counted and the drawing's root row "
                              "looks fine");
+                }
+
+                // --- M36's GATE: a schematic ---------------------------------
+                //
+                // A REAL CIRCUIT, drawn the way a hand would: place the parts,
+                // arm the wire tool, click. The Core suite proves the crossing
+                // rule and the terminal rule; only starting the program can
+                // prove a user can build a circuit and that it reaches the
+                // screen.
+                //
+                // The circuit: a fuse, a coil and a terminal in series, wired
+                // top to bottom -- the smallest thing that is actually a
+                // control circuit rather than two wires in a row.
+                {
+                    window.adoptDrawingForTesting("M36Schematic");
+
+                    if (!window.placeSymbolCommand(QStringLiteral("Fuse"), Vec2{100.0, 200.0})
+                             .contains(QStringLiteral("-F1")))
+                        fail("the fuse was not tagged from its symbol's kind");
+                    if (!window.placeSymbolCommand(QStringLiteral("Coil"), Vec2{100.0, 150.0})
+                             .contains(QStringLiteral("-K1")))
+                        fail("the coil was not tagged -K1");
+                    window.placeSymbolCommand(QStringLiteral("Terminal"), Vec2{100.0, 100.0});
+                    if (window.symbolCountForTesting() != 3)
+                        fail("the three components were not placed");
+
+                    // A SECOND FUSE GETS -F2, NOT -F1. Two parts with one tag
+                    // is a wiring list that sends an electrician to whichever
+                    // they find first.
+                    if (window.nextTagFor(QStringLiteral("Fuse")) != QStringLiteral("-F2"))
+                        fail(("a second fuse would be tagged " +
+                              window.nextTagFor(QStringLiteral("Fuse")).toStdString())
+                                 .c_str());
+
+                    // --- THE WIRES, THROUGH THE TOOL ------------------------
+                    window.setDrawingToolCommand(DrawingTool::Wire);
+                    if (window.drawingToolForTesting() != DrawingTool::Wire)
+                        fail("the wire tool did not arm");
+                    // Fuse pin 2 (bottom, 8 mm down) to coil A1 (top, 7.5 up).
+                    window.pickOnSheetForTesting(Vec2{100.0, 192.0});
+                    window.pickOnSheetForTesting(Vec2{100.0, 157.5});
+                    if (window.wireCountForTesting() != 1)
+                        fail("the wire tool drew nothing");
+                    if (window.drawingToolForTesting() != DrawingTool::None)
+                        fail("the wire tool stayed armed after drawing one");
+                    // Coil A2 (7.5 down) to the terminal's top pin (4 up).
+                    window.setDrawingToolCommand(DrawingTool::Wire);
+                    window.pickOnSheetForTesting(Vec2{100.0, 142.5});
+                    window.pickOnSheetForTesting(Vec2{100.0, 104.0});
+                    if (window.wireCountForTesting() != 2)
+                        fail("the second wire was not drawn");
+
+                    // --- WHAT THE CIRCUIT SAYS -------------------------------
+                    //
+                    // THREE nets, and the count is worth working through
+                    // because a first draft said four:
+                    //
+                    //   1. the fuse's top pin, alone -- the circuit's live end
+                    //   2. fuse bottom + coil A1, through the first wire
+                    //   3. coil A2 + BOTH terminal pins, through the second --
+                    //      both, because a terminal is one node (M36_SYM_003)
+                    //
+                    // Four would mean the terminal had split its own net in
+                    // two, which is exactly the mistake that makes a wiring
+                    // list claim twice the connections there are.
+                    if (window.netCountForTesting() != 3)
+                        fail(("the circuit came out as " +
+                              std::to_string(window.netCountForTesting()) + " nets")
+                                 .c_str());
+                    // ONE net goes nowhere: the fuse's top pin. The
+                    // terminal's spare pin does NOT, because it shares a net
+                    // with the coil through the terminal itself.
+                    if (window.danglingNetCountForTesting() != 1)
+                        fail(("the circuit has " +
+                              std::to_string(window.danglingNetCountForTesting()) +
+                              " nets going nowhere, and should have one")
+                                 .c_str());
+
+                    // IT REACHED THE CANVAS. "The document holds a circuit" and
+                    // "it is on screen" are two claims.
+                    window.repaintDrawingForTesting();
+                    if (window.drawnWiresForTesting() != 2)
+                        fail("the schematic holds two wires and the canvas drew none");
+                    if (window.drawnSymbolsForTesting() != 3)
+                        fail("the schematic holds three components and the canvas drew none");
+                    if (window.drawnUnknownSymbolsForTesting() != 0)
+                        fail("a known symbol was drawn as unknown");
+
+                    // --- NUMBERING -------------------------------------------
+                    const QString numbered = window.numberNetsCommand();
+                    if (!numbered.contains(QStringLiteral("Numbered 2")))
+                        fail(("numbering said: " + numbered.toStdString()).c_str());
+                    // ...AND IT SAYS WHAT IS STILL WRONG. A command reporting
+                    // only its success would let a user walk away from a
+                    // schematic with wires that go nowhere.
+                    if (!numbered.contains(QStringLiteral("go nowhere")))
+                        fail("numbering did not mention the nets that reach nothing");
+                    // W1 IS THE TOP WIRE. A schematic is read down its rungs,
+                    // and sheet Y runs upward -- so a first draft that sorted
+                    // ascending numbered the bottom rung W1 and the drawing
+                    // counted backwards. Checked here rather than read off a
+                    // screenshot, because squinting at 2 mm text does not
+                    // scale.
+                    if (window.topmostWireLabelForTesting() != QStringLiteral("W1"))
+                        fail(("the topmost wire is labelled " +
+                              window.topmostWireLabelForTesting().toStdString() +
+                              ", so the sheet was numbered from the bottom up")
+                                 .c_str());
+
+                    // Numbering again changes nothing, because every net has a
+                    // name now.
+                    if (!window.numberNetsCommand().contains(QStringLiteral("Numbered 0")))
+                        fail("numbering twice renamed the wires");
+
+                    // --- THE TREE --------------------------------------------
+                    {
+                        const OutlineNode tree = window.probeOutline();
+                        std::size_t components = 0;
+                        std::size_t nets = 0;
+                        const std::function<void(const OutlineNode&)> walk =
+                            [&](const OutlineNode& node) {
+                                if (node.kind == OutlineKind::Component) ++components;
+                                if (node.kind == OutlineKind::NetNode) ++nets;
+                                for (const OutlineNode& child : node.children) walk(child);
+                            };
+                        walk(tree);
+                        if (components != 3) fail("the tree does not show the three components");
+                        if (nets != 3) fail("the tree does not show the circuit's nets");
+                        // A wire that goes nowhere makes the DRAWING wrong, and
+                        // the root is where a reader looks first when the paper
+                        // seems right and the circuit does not work.
+                        if (tree.state != OutlineState::Failed)
+                            fail("a net goes nowhere and the drawing's root row looks fine");
+                    }
+
+                    // THE COMPONENTS WERE DRAWN WHERE THEY WERE PLACED.
+                    //
+                    // Counting them is not enough: a symbol drawn at the
+                    // origin while its pins are at the placement would CONNECT
+                    // in one place and DRAW in another, and the count would be
+                    // identical. The three parts sit in a column at x = 100,
+                    // between y = 96 and y = 208.
+                    {
+                        const Box2D extent = window.drawnSymbolExtentForTesting();
+                        if (extent.empty) fail("the components drew no geometry at all");
+                        if (std::fabs(extent.min.x - 100.0) > 12.0 ||
+                            std::fabs(extent.max.x - 100.0) > 12.0)
+                            fail(("the components were drawn around x = " +
+                                  std::to_string((extent.min.x + extent.max.x) / 2.0) +
+                                  ", and they were placed at 100")
+                                     .c_str());
+                        if (extent.min.y < 80.0 || extent.max.y > 220.0)
+                            fail(("the components were drawn from y = " +
+                                  std::to_string(extent.min.y) + " to " +
+                                  std::to_string(extent.max.y) +
+                                  ", which is not where they were placed")
+                                     .c_str());
+                    }
+
+                    // --- A COMPONENT WHOSE SYMBOL IS NOT IN THE LIBRARY ------
+                    //
+                    // Drawn as a red box with its tag, because a component
+                    // drawn as NOTHING looks exactly like one that was never
+                    // placed.
+                    {
+                        const QString refused = window.placeSymbolCommand(
+                            QStringLiteral("Thyristor"), Vec2{200.0, 150.0});
+                        if (!refused.contains(QStringLiteral("no symbol")))
+                            fail(("an unknown symbol was placed: " + refused.toStdString())
+                                     .c_str());
+                        if (window.symbolCountForTesting() != 3)
+                            fail("a component with no symbol was placed anyway");
+                    }
+
+                    // ...BUT A FILE CAN STILL CARRY ONE, and that is the case
+                    // the red box exists for: a drawing made against a bigger
+                    // library, opened here. A component drawn as NOTHING looks
+                    // exactly like one that was never placed, so the reader
+                    // would never know a part had gone missing.
+                    {
+                        const QString path =
+                            QDir::tempPath() +
+                            QStringLiteral("/ep3d-selftest/m36-foreign.ep3dd");
+                        if (!window.saveDocumentFile(path).contains(QStringLiteral("Saved")))
+                            fail("the schematic would not save");
+                        QFile file(path);
+                        if (!file.open(QIODevice::ReadOnly)) fail("the schematic cannot be read");
+                        QByteArray bytes = file.readAll();
+                        file.close();
+                        // Rename the coil's symbol to one this build has never
+                        // heard of -- exactly what a newer library would leave
+                        // behind.
+                        bytes.replace("\"symbol\": \"Coil\"",
+                                      "\"symbol\": \"Thyristor\"");
+                        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                            fail("the schematic cannot be rewritten");
+                        file.write(bytes);
+                        file.close();
+
+                        const QString opened = window.openDocumentFile(path);
+                        if (!opened.contains(QStringLiteral("Opened")))
+                            fail(("the edited schematic would not open: " +
+                                  opened.toStdString())
+                                     .c_str());
+                        window.repaintDrawingForTesting();
+                        if (window.drawnUnknownSymbolsForTesting() != 1)
+                            fail("a component naming a symbol this build does not have was "
+                                 "drawn as nothing");
+                        if (window.drawnSymbolsForTesting() != 3)
+                            fail("the unknown component was dropped instead of marked");
+                        // ...and the TREE says which one, because a red box on
+                        // the paper with nothing in the tree is a reader
+                        // hunting for what is wrong.
+                        {
+                            const OutlineNode tree = window.probeOutline();
+                            bool sawFailed = false;
+                            const std::function<void(const OutlineNode&)> walk =
+                                [&](const OutlineNode& node) {
+                                    if (node.kind == OutlineKind::Component &&
+                                        node.state == OutlineState::Failed)
+                                        sawFailed = true;
+                                    for (const OutlineNode& child : node.children) walk(child);
+                                };
+                            walk(tree);
+                            if (!sawFailed)
+                                fail("a component with no symbol is not marked in the tree");
+                        }
+                    }
+
+                    // A PICTURE OF A SCHEMATIC. Whether a circuit READS -- the
+                    // junction dots, the wire numbers, the tags beside the
+                    // parts -- is a judgement, and no assertion makes it.
+                    if (screenshotPath != nullptr) {
+                        std::string beside = screenshotPath;
+                        const std::size_t dot = beside.rfind('.');
+                        beside = dot == std::string::npos
+                                     ? beside + "-schematic"
+                                     : beside.substr(0, dot) + "-schematic" +
+                                           beside.substr(dot);
+                        if (!shoot(window, QString::fromStdString(beside)))
+                            fail("could not write the schematic screenshot");
+                    }
                 }
 
                 // AN EMPTY SHEET IS NOT HANDED OVER AS A FINISHED PLOT

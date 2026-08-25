@@ -492,6 +492,50 @@ struct BomEdit {
     std::vector<int> afterColumns;
 };
 
+// --- Schematic objects (M36) -------------------------------------------------
+struct SymbolExistenceEdit {
+    ObjectId symbolId = kInvalidObjectId;
+    std::string tag;
+    std::string symbolName;
+    double xMm = 0.0;
+    double yMm = 0.0;
+    double rotationRad = 0.0;
+    bool mirrored = false;
+    ObjectId layerId = kInvalidObjectId;
+    bool addedByTheEdit = false;
+};
+
+// The whole small value, before and after -- the pattern SheetEdit set.
+struct SymbolPlacementEdit {
+    ObjectId symbolId = kInvalidObjectId;
+    double beforeXMm = 0.0;
+    double beforeYMm = 0.0;
+    double afterXMm = 0.0;
+    double afterYMm = 0.0;
+    double beforeRotationRad = 0.0;
+    double afterRotationRad = 0.0;
+    bool beforeMirrored = false;
+    bool afterMirrored = false;
+    std::string beforeTag;
+    std::string afterTag;
+};
+
+struct WireExistenceEdit {
+    ObjectId wireId = kInvalidObjectId;
+    std::vector<double> pointsXY; // flattened, because a delta holds plain values
+    std::string label;
+    ObjectId layerId = kInvalidObjectId;
+    bool addedByTheEdit = false;
+};
+
+struct WireEdit {
+    ObjectId wireId = kInvalidObjectId;
+    std::vector<double> beforePointsXY;
+    std::vector<double> afterPointsXY;
+    std::string beforeLabel;
+    std::string afterLabel;
+};
+
 struct SheetFrameEdit {
     double beforeBindingMm = 20.0;
     double afterBindingMm = 20.0;
@@ -709,7 +753,8 @@ using UndoDelta =
                  DrawingEntityShapeEdit, DrawingEntityPropertyEdit, DimensionExistenceEdit,
                  DimensionEdit, DimensionStyleExistenceEdit, DimensionStyleEdit,
                  CurrentDimensionStyleEdit, TitleBlockEdit, SheetFrameEdit,
-                 BomExistenceEdit, BomEdit>;
+                 BomExistenceEdit, BomEdit, SymbolExistenceEdit, SymbolPlacementEdit,
+                 WireExistenceEdit, WireEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

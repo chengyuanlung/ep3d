@@ -1351,6 +1351,289 @@ std::vector<TitleBlockFieldRecord> RecordOf(const TitleBlock& block) {
 } // namespace
 
 // =============================================================================
+// Schematic (M36)
+// =============================================================================
+
+namespace {
+
+std::vector<double> FlattenPoints(const std::vector<Vec2>& points) {
+    std::vector<double> out;
+    out.reserve(points.size() * 2);
+    for (const Vec2 point : points) {
+        out.push_back(point.x);
+        out.push_back(point.y);
+    }
+    return out;
+}
+
+std::vector<Vec2> UnflattenPoints(const std::vector<double>& values) {
+    std::vector<Vec2> out;
+    out.reserve(values.size() / 2);
+    for (std::size_t i = 0; i + 1 < values.size(); i += 2)
+        out.push_back(Vec2{values[i], values[i + 1]});
+    return out;
+}
+
+} // namespace
+
+SymbolPlacement& DrawingDocument::addSymbol(std::string tag, std::string symbolName,
+                                            Vec2 positionMm) {
+    if (tag.empty()) throw std::invalid_argument("addSymbol: a component needs a tag");
+    // TWO PARTS CANNOT SHARE A TAG. The tag is what every cross-reference and
+    // wiring list points at, and two -K1s on one schematic is a wiring list
+    // that sends an electrician to whichever one they find first.
+    if (nameIsTaken(tag, kInvalidObjectId))
+        throw std::invalid_argument("addSymbol: this drawing already has something called " +
+                                    tag);
+    if (symbolName.empty())
+        throw std::invalid_argument("addSymbol: a component needs a symbol to be drawn as");
+
+    auto item = std::make_unique<SymbolPlacement>(std::move(tag), std::move(symbolName),
+                                                  positionMm, currentLayerId_);
+    auto& ref = *item;
+    SymbolExistenceEdit edit;
+    edit.symbolId = ref.id();
+    edit.tag = ref.tag();
+    edit.symbolName = ref.symbolName();
+    edit.xMm = positionMm.x;
+    edit.yMm = positionMm.y;
+    edit.layerId = ref.layerId();
+    edit.addedByTheEdit = true;
+    symbols_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    recordDelta(edit, "Place " + ref.tag());
+    return ref;
+}
+
+SymbolPlacement& DrawingDocument::restoreSymbol(ObjectId id, std::string tag,
+                                                std::string symbolName, Vec2 positionMm,
+                                                double rotationRad, bool mirrored,
+                                                ObjectId layerId) {
+    requireUnusedId(id, "restoreSymbol");
+    auto item = std::make_unique<SymbolPlacement>(id, std::move(tag), std::move(symbolName),
+                                                  positionMm, rotationRad, mirrored, layerId);
+    auto& ref = *item;
+    symbols_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const SymbolPlacement*> DrawingDocument::symbols() const {
+    std::vector<const SymbolPlacement*> out;
+    out.reserve(symbols_.size());
+    for (const auto& one : symbols_) out.push_back(one.get());
+    return out;
+}
+
+const SymbolPlacement* DrawingDocument::findSymbol(ObjectId id) const noexcept {
+    for (const auto& one : symbols_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+const SymbolPlacement* DrawingDocument::findSymbolTagged(const std::string& tag) const noexcept {
+    for (const auto& one : symbols_)
+        if (one->tag() == tag) return one.get();
+    return nullptr;
+}
+
+SymbolPlacement* DrawingDocument::findSymbolForEdit(ObjectId id) noexcept {
+    for (auto& one : symbols_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+namespace {
+
+void SnapshotSymbolInto(const SymbolPlacement& symbol, SymbolPlacementEdit& edit) {
+    edit.symbolId = symbol.id();
+    edit.beforeXMm = edit.afterXMm = symbol.positionMm().x;
+    edit.beforeYMm = edit.afterYMm = symbol.positionMm().y;
+    edit.beforeRotationRad = edit.afterRotationRad = symbol.rotationRad();
+    edit.beforeMirrored = edit.afterMirrored = symbol.isMirrored();
+    edit.beforeTag = edit.afterTag = symbol.tag();
+}
+
+} // namespace
+
+bool DrawingDocument::setSymbolPosition(ObjectId symbolId, Vec2 at) {
+    SymbolPlacement* symbol = findSymbolForEdit(symbolId);
+    if (symbol == nullptr) return false;
+    SymbolPlacementEdit edit;
+    SnapshotSymbolInto(*symbol, edit);
+    edit.afterXMm = at.x;
+    edit.afterYMm = at.y;
+    symbol->setPositionMm(at);
+    recordDelta(edit, "Move " + symbol->tag());
+    return true;
+}
+
+bool DrawingDocument::setSymbolRotation(ObjectId symbolId, double radians) {
+    SymbolPlacement* symbol = findSymbolForEdit(symbolId);
+    if (symbol == nullptr) return false;
+    SymbolPlacementEdit edit;
+    SnapshotSymbolInto(*symbol, edit);
+    edit.afterRotationRad = radians;
+    symbol->setRotationRad(radians);
+    recordDelta(edit, "Turn " + symbol->tag());
+    return true;
+}
+
+bool DrawingDocument::setSymbolMirrored(ObjectId symbolId, bool mirrored) {
+    SymbolPlacement* symbol = findSymbolForEdit(symbolId);
+    if (symbol == nullptr || symbol->isMirrored() == mirrored) return false;
+    SymbolPlacementEdit edit;
+    SnapshotSymbolInto(*symbol, edit);
+    edit.afterMirrored = mirrored;
+    symbol->setMirrored(mirrored);
+    recordDelta(edit, "Flip " + symbol->tag());
+    return true;
+}
+
+WireEntity& DrawingDocument::addWire(std::vector<Vec2> pointsMm) {
+    // A WIRE NEEDS TWO POINTS. One is a click somebody did not finish, and it
+    // would sit on the sheet connecting nothing while looking like nothing.
+    if (pointsMm.size() < 2)
+        throw std::invalid_argument("addWire: a wire needs at least two points");
+    auto item = std::make_unique<WireEntity>(pointsMm, currentLayerId_);
+    auto& ref = *item;
+    WireExistenceEdit edit;
+    edit.wireId = ref.id();
+    edit.pointsXY = FlattenPoints(pointsMm);
+    edit.layerId = ref.layerId();
+    edit.addedByTheEdit = true;
+    wires_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    recordDelta(edit, "Draw wire");
+    return ref;
+}
+
+WireEntity& DrawingDocument::restoreWire(ObjectId id, std::vector<Vec2> pointsMm,
+                                         ObjectId layerId, std::string label) {
+    requireUnusedId(id, "restoreWire");
+    auto item = std::make_unique<WireEntity>(id, std::move(pointsMm), layerId,
+                                             std::move(label));
+    auto& ref = *item;
+    wires_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const WireEntity*> DrawingDocument::wires() const {
+    std::vector<const WireEntity*> out;
+    out.reserve(wires_.size());
+    for (const auto& one : wires_) out.push_back(one.get());
+    return out;
+}
+
+const WireEntity* DrawingDocument::findWire(ObjectId id) const noexcept {
+    for (const auto& one : wires_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+WireEntity* DrawingDocument::findWireForEdit(ObjectId id) noexcept {
+    for (auto& one : wires_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+bool DrawingDocument::setWirePoints(ObjectId wireId, std::vector<Vec2> pointsMm) {
+    WireEntity* wire = findWireForEdit(wireId);
+    if (wire == nullptr || pointsMm.size() < 2) return false;
+    WireEdit edit;
+    edit.wireId = wireId;
+    edit.beforePointsXY = FlattenPoints(wire->pointsMm());
+    edit.beforeLabel = edit.afterLabel = wire->label();
+    wire->setPointsMm(std::move(pointsMm));
+    edit.afterPointsXY = FlattenPoints(wire->pointsMm());
+    recordDelta(edit, "Move wire");
+    return true;
+}
+
+bool DrawingDocument::setWireLabel(ObjectId wireId, std::string label) {
+    WireEntity* wire = findWireForEdit(wireId);
+    if (wire == nullptr) return false;
+    WireEdit edit;
+    edit.wireId = wireId;
+    edit.beforePointsXY = edit.afterPointsXY = FlattenPoints(wire->pointsMm());
+    edit.beforeLabel = wire->label();
+    edit.afterLabel = label;
+    wire->setLabel(std::move(label));
+    recordDelta(edit, "Label wire");
+    return true;
+}
+
+Netlist DrawingDocument::netlist() const {
+    std::vector<WireRun> runs;
+    for (const auto& wire : wires_)
+        if (wire->isDrawable()) runs.push_back(wire->asRun());
+    std::vector<PlacedSymbol> placed;
+    for (const auto& symbol : symbols_) placed.push_back(symbol->asPlaced());
+
+    Netlist built = BuildNetlist(runs, placed, BuiltInSymbols());
+
+    // THE NAME COMES OFF THE WIRES. A net is derived and has nowhere to keep
+    // one, so numbering writes it onto the wires and this reads it back.
+    //
+    // WHEN TWO WIRES IN ONE NET DISAGREE, the FIRST is taken and the
+    // disagreement is reported separately (conflictingNetNames) -- picking
+    // silently would hide that the schematic says two things about one wire,
+    // and refusing to name the net at all would lose the name a user typed.
+    for (Net& net : built.nets) {
+        for (const ObjectId id : net.wires) {
+            const WireEntity* wire = findWire(id);
+            if (wire == nullptr || wire->label().empty()) continue;
+            if (net.name.empty()) net.name = wire->label();
+        }
+    }
+    return built;
+}
+
+std::vector<std::string> DrawingDocument::conflictingNetNames() const {
+    std::vector<std::string> clashes;
+    for (const Net& net : netlist().nets) {
+        std::string first;
+        for (const ObjectId id : net.wires) {
+            const WireEntity* wire = findWire(id);
+            if (wire == nullptr || wire->label().empty()) continue;
+            if (first.empty()) {
+                first = wire->label();
+                continue;
+            }
+            if (wire->label() == first) continue;
+            // Said as the pair, because "there is a conflict" is not something
+            // a user can act on and "L1 and L2 are the same wire" is.
+            clashes.push_back(first + " and " + wire->label());
+            break;
+        }
+    }
+    return clashes;
+}
+
+std::size_t DrawingDocument::numberNets(const std::string& prefix) {
+    Netlist built = netlist();
+    NumberNets(built, prefix);
+
+    // ONE UNDO STEP FOR THE WHOLE SHEET. Numbering is one thing the user did,
+    // and undoing it a wire at a time would stop somewhere no schematic was
+    // ever in.
+    const bool ownsStep = !isTransactionOpen() && !applyingHistory();
+    if (ownsStep) beginTransaction("Number nets");
+    std::size_t named = 0;
+    for (const Net& net : built.nets) {
+        if (net.name.empty()) continue;
+        for (const ObjectId id : net.wires) {
+            const WireEntity* wire = findWire(id);
+            if (wire == nullptr || wire->label() == net.name) continue;
+            if (setWireLabel(id, net.name)) ++named;
+        }
+    }
+    if (ownsStep) commitTransaction();
+    return named;
+}
+
+// =============================================================================
 // The parts list (M35.6)
 // =============================================================================
 
@@ -1949,6 +2232,14 @@ void DrawingDocument::forEachOwnNamed(const std::function<void(const NamedSlot&)
         visit(NamedSlot{style->id(), style->name(),
                         [style](const std::string& n) { style->setName(n); }});
     }
+    // A COMPONENT'S TAG IS ITS NAME, so it goes through the same walk: two
+    // parts sharing a tag is a wiring list that sends an electrician to
+    // whichever one they find first.
+    for (const std::unique_ptr<SymbolPlacement>& one : symbols_) {
+        SymbolPlacement* symbol = one.get();
+        visit(NamedSlot{symbol->id(), symbol->tag(),
+                        [symbol](const std::string& n) { symbol->setTag(n); }});
+    }
     for (const std::unique_ptr<BomTable>& one : bomTables_) {
         BomTable* table = one.get();
         visit(NamedSlot{table->id(), table->name(),
@@ -1960,6 +2251,53 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
     ObjectRegistry::ObjectRef* found = registry_.find(id);
     if (found == nullptr) return false;
     const ObjectRegistry::ObjectRef handle = *found;
+
+    // A COMPONENT: nothing owns it. What DOES change is the netlist, and that
+    // is derived, so it simply reports one fewer part -- there is nothing to
+    // cascade because there was nothing stored.
+    if (const SymbolPlacement* symbol = findSymbol(id)) {
+        if (!applyingHistory()) {
+            SymbolExistenceEdit edit;
+            edit.symbolId = id;
+            edit.tag = symbol->tag();
+            edit.symbolName = symbol->symbolName();
+            edit.xMm = symbol->positionMm().x;
+            edit.yMm = symbol->positionMm().y;
+            edit.rotationRad = symbol->rotationRad();
+            edit.mirrored = symbol->isMirrored();
+            edit.layerId = symbol->layerId();
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Delete " + symbol->tag());
+        }
+        for (auto it = symbols_.begin(); it != symbols_.end(); ++it) {
+            if ((*it)->id() != id) continue;
+            registry_.unregisterObject(id);
+            symbols_.erase(it);
+            return true;
+        }
+        return false;
+    }
+
+    // A WIRE: the same, and the net it was part of simply becomes two, or one
+    // fewer -- which is exactly what deleting a wire means.
+    if (const WireEntity* wire = findWire(id)) {
+        if (!applyingHistory()) {
+            WireExistenceEdit edit;
+            edit.wireId = id;
+            edit.pointsXY = FlattenPoints(wire->pointsMm());
+            edit.label = wire->label();
+            edit.layerId = wire->layerId();
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Delete wire");
+        }
+        for (auto it = wires_.begin(); it != wires_.end(); ++it) {
+            if ((*it)->id() != id) continue;
+            registry_.unregisterObject(id);
+            wires_.erase(it);
+            return true;
+        }
+        return false;
+    }
 
     // A PARTS LIST: nothing reads it, and its rows were never stored, so
     // there is nothing to cascade -- deleting one takes only itself.
@@ -2262,6 +2600,61 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         currentStyleId_ = forward ? edit->after : edit->before;
         return;
     }
+    if (const auto* edit = std::get_if<SymbolExistenceEdit>(&delta)) {
+        const bool wanted = forward == edit->addedByTheEdit;
+        if (wanted) {
+            if (findSymbol(edit->symbolId) == nullptr)
+                restoreSymbol(edit->symbolId, edit->tag, edit->symbolName,
+                              Vec2{edit->xMm, edit->yMm}, edit->rotationRad, edit->mirrored,
+                              edit->layerId);
+        } else {
+            for (auto it = symbols_.begin(); it != symbols_.end(); ++it) {
+                if ((*it)->id() != edit->symbolId) continue;
+                registry_.unregisterObject(edit->symbolId);
+                symbols_.erase(it);
+                break;
+            }
+        }
+        return;
+    }
+
+    if (const auto* edit = std::get_if<SymbolPlacementEdit>(&delta)) {
+        SymbolPlacement* symbol = findSymbolForEdit(edit->symbolId);
+        if (symbol == nullptr) return;
+        symbol->setPositionMm(forward ? Vec2{edit->afterXMm, edit->afterYMm}
+                                      : Vec2{edit->beforeXMm, edit->beforeYMm});
+        symbol->setRotationRad(forward ? edit->afterRotationRad : edit->beforeRotationRad);
+        symbol->setMirrored(forward ? edit->afterMirrored : edit->beforeMirrored);
+        symbol->setTag(forward ? edit->afterTag : edit->beforeTag);
+        return;
+    }
+
+    if (const auto* edit = std::get_if<WireExistenceEdit>(&delta)) {
+        const bool wanted = forward == edit->addedByTheEdit;
+        if (wanted) {
+            if (findWire(edit->wireId) == nullptr)
+                restoreWire(edit->wireId, UnflattenPoints(edit->pointsXY), edit->layerId,
+                            edit->label);
+        } else {
+            for (auto it = wires_.begin(); it != wires_.end(); ++it) {
+                if ((*it)->id() != edit->wireId) continue;
+                registry_.unregisterObject(edit->wireId);
+                wires_.erase(it);
+                break;
+            }
+        }
+        return;
+    }
+
+    if (const auto* edit = std::get_if<WireEdit>(&delta)) {
+        WireEntity* wire = findWireForEdit(edit->wireId);
+        if (wire == nullptr) return;
+        wire->setPointsMm(UnflattenPoints(forward ? edit->afterPointsXY
+                                                  : edit->beforePointsXY));
+        wire->setLabel(forward ? edit->afterLabel : edit->beforeLabel);
+        return;
+    }
+
     if (const auto* edit = std::get_if<BomExistenceEdit>(&delta)) {
         const bool wanted = forward == edit->addedByTheEdit;
         if (wanted) {

@@ -35,7 +35,7 @@ namespace paramcad {
 // pointer can be in, and `None` -- select and drag -- is the one it returns to
 // after every completed pick, because a tool that stayed armed is how a user
 // ends up with nine lines they did not want.
-enum class DrawingTool { None, Line, Circle, Rectangle };
+enum class DrawingTool { None, Line, Circle, Rectangle, Wire };
 
 // How many clicks each tool needs before it has something to make. Written
 // once, HERE, so the canvas and the window cannot disagree about whether a
@@ -74,6 +74,11 @@ public:
     std::size_t drawnTitleBlockRowsForTesting() const noexcept { return drawnTitleRows_; }
     std::size_t drawnBomRowsForTesting() const noexcept { return drawnBomRows_; }
     std::size_t drawnUncountedBomsForTesting() const noexcept { return drawnUncounted_; }
+    std::size_t drawnWiresForTesting() const noexcept { return drawnWires_; }
+    std::size_t drawnSymbolsForTesting() const noexcept { return drawnSymbols_; }
+    std::size_t drawnUnknownSymbolsForTesting() const noexcept { return drawnUnknown_; }
+    std::size_t drawnJunctionsForTesting() const noexcept { return drawnJunctions_; }
+    Box2D drawnSymbolExtentForTesting() const noexcept { return drawnSymbolExtent_; }
     // The sheet's rectangle in WIDGET pixels, so a test can check the paper is
     // actually inside the window after a fit.
     QRectF sheetRectForTesting() const;
@@ -148,6 +153,11 @@ private:
     std::size_t drawnTitleRows_ = 0;
     std::size_t drawnBomRows_ = 0;
     std::size_t drawnUncounted_ = 0;
+    std::size_t drawnWires_ = 0;
+    std::size_t drawnSymbols_ = 0;
+    std::size_t drawnUnknown_ = 0;
+    std::size_t drawnJunctions_ = 0;
+    Box2D drawnSymbolExtent_;
 
     DrawingTool tool_ = DrawingTool::None;
     std::vector<Vec2> picked_;

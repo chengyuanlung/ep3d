@@ -585,6 +585,36 @@ void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
         break;
     }
 
+    case SketchIcon::Wire: {
+        // A RUN WITH A JUNCTION DOT ON IT. The dot is the whole icon: a line
+        // with a corner is a polyline, and a line with a DOT is a connection.
+        Stroke(p, ink.stroke, 1.4);
+        p.drawLine(QPointF(3.0, 18.0), QPointF(12.0, 18.0));
+        p.drawLine(QPointF(12.0, 18.0), QPointF(12.0, 6.0));
+        p.drawLine(QPointF(12.0, 12.0), QPointF(21.0, 12.0));
+        p.setBrush(QBrush(ink.accent));
+        p.setPen(Qt::NoPen);
+        p.drawEllipse(QPointF(12.0, 12.0), 2.0, 2.0);
+        break;
+    }
+
+    case SketchIcon::Component: {
+        // THE IEC RESISTOR BOX, with its two pins showing. The pins are drawn
+        // because a body without them is a rectangle -- which is exactly the
+        // difference the library refuses to ship.
+        Stroke(p, ink.stroke, 1.4);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(7.0, 9.0, 10.0, 6.0));
+        Stroke(p, ink.accent, 1.4);
+        p.drawLine(QPointF(2.0, 12.0), QPointF(7.0, 12.0));
+        p.drawLine(QPointF(17.0, 12.0), QPointF(22.0, 12.0));
+        p.setBrush(QBrush(ink.accent));
+        p.setPen(Qt::NoPen);
+        p.drawEllipse(QPointF(2.5, 12.0), 1.4, 1.4);
+        p.drawEllipse(QPointF(21.5, 12.0), 1.4, 1.4);
+        break;
+    }
+
     case SketchIcon::AddRelation: {
         // TWO TOOTHED WHEELS, meshing. The teeth are what make it a gear
         // rather than two circles, and the mesh is what makes it a relation
@@ -1350,6 +1380,8 @@ const char* SketchIconName(SketchIcon icon) noexcept {
     case SketchIcon::AngularDimension: return "AngularDimension";
     case SketchIcon::DimensionStyleIcon: return "DimensionStyleIcon";
     case SketchIcon::TitleBlock: return "TitleBlock";
+    case SketchIcon::Wire: return "Wire";
+    case SketchIcon::Component: return "Component";
     case SketchIcon::HVDistance: return "HVDistance";
     case SketchIcon::PointLineDistance: return "PointLineDistance";
     case SketchIcon::Offset: return "Offset";

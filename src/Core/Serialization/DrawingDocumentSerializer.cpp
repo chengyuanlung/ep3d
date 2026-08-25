@@ -188,6 +188,32 @@ SaveResult validateSaveable(const DrawingDocument& document) {
             seenLabels.push_back(field.label);
         }
     }
+    // v40 (M36). A component must be identifiable and drawable, and a wire
+    // must be a wire -- checked here because the loader checks the same
+    // (ADR-M3-008).
+    for (const SymbolPlacement* symbol : document.symbols()) {
+        if (const SaveResult bad = claim(symbol->id(), "component"); !bad) return bad;
+        if (symbol->tag().empty())
+            return SaveResult{SerializationError::MissingField,
+                              "a component has no tag, so nothing on this drawing can refer "
+                              "to it"};
+        if (symbol->symbolName().empty())
+            return SaveResult{SerializationError::MissingField,
+                              "a component names no symbol, so there is nothing to draw"};
+        if (document.findLayer(symbol->layerId()) == nullptr)
+            return SaveResult{SerializationError::UnknownDependencyId,
+                              "a component is on a layer that is not in this document"};
+    }
+    for (const WireEntity* wire : document.wires()) {
+        if (const SaveResult bad = claim(wire->id(), "wire"); !bad) return bad;
+        if (wire->pointsMm().size() < 2)
+            return SaveResult{SerializationError::InvalidFieldType,
+                              "a wire has fewer than two points, so it connects nothing"};
+        if (document.findLayer(wire->layerId()) == nullptr)
+            return SaveResult{SerializationError::UnknownDependencyId,
+                              "a wire is on a layer that is not in this document"};
+    }
+
     // v39 (M35.6). A parts list is a view of an assembly: it must name one,
     // and its columns must be a real, distinct set -- checked HERE because the
     // loader checks the same, and a document that saves cleanly and then
@@ -506,6 +532,47 @@ JsonValue toJson(const DrawingDocument& document) {
         tables.add(std::move(item));
     }
     root.set("bomTables", std::move(tables));
+
+    // v40 (M36). A component stores a SENTENCE -- which symbol, where, which
+    // way round -- and not the geometry (ADR-M22-003): copying the shapes in
+    // would mean a corrected symbol never reaches the drawings already made.
+    JsonValue components = JsonValue::makeArray();
+    for (const SymbolPlacement* symbol : document.symbols()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(symbol->id())));
+        item.set("tag", JsonValue::makeString(symbol->tag()));
+        item.set("symbol", JsonValue::makeString(symbol->symbolName()));
+        item.set("xMm", JsonValue::makeNumber(symbol->positionMm().x));
+        item.set("yMm", JsonValue::makeNumber(symbol->positionMm().y));
+        item.set("rotationRad", JsonValue::makeNumber(symbol->rotationRad()));
+        item.set("mirrored", JsonValue::makeBool(symbol->isMirrored()));
+        item.set("layerId", JsonValue::makeString(idToString(symbol->layerId())));
+        components.add(std::move(item));
+    }
+    root.set("components", std::move(components));
+
+    // THE NETLIST IS NOT WRITTEN. It is derived from these wires and those
+    // components every time it is asked for, and a file carrying it would
+    // hold a circuit the drawing no longer shows -- and what gets built is the
+    // netlist. The wire LABELS are written, because a name is something a user
+    // typed and the nets have nowhere else to keep one.
+    JsonValue wires = JsonValue::makeArray();
+    for (const WireEntity* wire : document.wires()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(wire->id())));
+        item.set("label", JsonValue::makeString(wire->label()));
+        item.set("layerId", JsonValue::makeString(idToString(wire->layerId())));
+        JsonValue points = JsonValue::makeArray();
+        for (const Vec2 point : wire->pointsMm()) {
+            JsonValue at = JsonValue::makeObject();
+            at.set("x", JsonValue::makeNumber(point.x));
+            at.set("y", JsonValue::makeNumber(point.y));
+            points.add(std::move(at));
+        }
+        item.set("points", std::move(points));
+        wires.add(std::move(item));
+    }
+    root.set("wires", std::move(wires));
     return root;
 }
 
@@ -1343,6 +1410,168 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         }
     }
 
+    struct ComponentData {
+        ObjectId id = kInvalidObjectId;
+        std::string tag;
+        std::string symbolName;
+        Vec2 positionMm{};
+        double rotationRad = 0.0;
+        bool mirrored = false;
+        ObjectId layerId = kInvalidObjectId;
+    };
+    std::vector<ComponentData> componentData;
+    if (const JsonValue* field = root.find("components")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'components' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "components[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            ComponentData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+
+            const JsonValue* tag = requireField(entry, "tag", JsonType::String, context, err);
+            if (tag == nullptr) return loadFailure(err.error, err.message);
+            if (tag->asString().empty())
+                return loadFailure(SerializationError::MissingField,
+                                   context + ": a component has no tag, so nothing on this "
+                                             "drawing can refer to it");
+            one.tag = tag->asString();
+            // TWO COMPONENTS CANNOT SHARE A TAG. A wiring list pointing at two
+            // parts with one name sends an electrician to whichever they find.
+            for (const ComponentData& already : componentData)
+                if (already.tag == one.tag)
+                    return loadFailure(SerializationError::DuplicateId,
+                                       context + ": two components are both called '" +
+                                           one.tag + "'");
+
+            const JsonValue* symbol =
+                requireField(entry, "symbol", JsonType::String, context, err);
+            if (symbol == nullptr) return loadFailure(err.error, err.message);
+            if (symbol->asString().empty())
+                return loadFailure(SerializationError::MissingField,
+                                   context + ": a component names no symbol, so there is "
+                                             "nothing to draw");
+            one.symbolName = symbol->asString();
+
+            const JsonValue* x = requireField(entry, "xMm", JsonType::Number, context, err);
+            const JsonValue* y = requireField(entry, "yMm", JsonType::Number, context, err);
+            if (x == nullptr || y == nullptr) return loadFailure(err.error, err.message);
+            one.positionMm = Vec2{x->asNumber(), y->asNumber()};
+
+            if (const JsonValue* rotation = entry.find("rotationRad")) {
+                if (rotation->type() != JsonType::Number)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'rotationRad' is not a number");
+                one.rotationRad = rotation->asNumber();
+            }
+            if (const JsonValue* mirrored = entry.find("mirrored")) {
+                if (mirrored->type() != JsonType::Bool)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'mirrored' is not a boolean");
+                one.mirrored = mirrored->asBool();
+            }
+            const JsonValue* layer =
+                requireField(entry, "layerId", JsonType::String, context, err);
+            if (layer == nullptr) return loadFailure(err.error, err.message);
+            const auto layerId = idFromString(layer->asString());
+            if (!layerId.has_value())
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": 'layerId' is not a valid ObjectId");
+            bool layerIsHere = false;
+            for (const LayerData& candidate : layerData)
+                if (candidate.id == *layerId) layerIsHere = true;
+            if (!layerIsHere)
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   context + ": layerId " + idToString(*layerId) +
+                                       " is not a layer in this document");
+            one.layerId = *layerId;
+            componentData.push_back(std::move(one));
+        }
+    }
+
+    struct WireData {
+        ObjectId id = kInvalidObjectId;
+        std::vector<Vec2> pointsMm;
+        std::string label;
+        ObjectId layerId = kInvalidObjectId;
+    };
+    std::vector<WireData> wireData;
+    if (const JsonValue* field = root.find("wires")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'wires' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "wires[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            WireData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+
+            const JsonValue* points =
+                requireField(entry, "points", JsonType::Array, context, err);
+            if (points == nullptr) return loadFailure(err.error, err.message);
+            // A WIRE WITH FEWER THAN TWO POINTS CONNECTS NOTHING, and would sit
+            // on the sheet looking like nothing.
+            if (points->items().size() < 2)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": a wire has fewer than two points, so it "
+                                             "connects nothing");
+            for (const JsonValue& point : points->items()) {
+                if (point.type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a wire point is not an object");
+                const JsonValue* px =
+                    requireField(point, "x", JsonType::Number, context, err);
+                const JsonValue* py =
+                    requireField(point, "y", JsonType::Number, context, err);
+                if (px == nullptr || py == nullptr) return loadFailure(err.error, err.message);
+                one.pointsMm.push_back(Vec2{px->asNumber(), py->asNumber()});
+            }
+            if (const JsonValue* label = entry.find("label")) {
+                if (label->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'label' is not a string");
+                one.label = label->asString();
+            }
+            const JsonValue* layer =
+                requireField(entry, "layerId", JsonType::String, context, err);
+            if (layer == nullptr) return loadFailure(err.error, err.message);
+            const auto layerId = idFromString(layer->asString());
+            if (!layerId.has_value())
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": 'layerId' is not a valid ObjectId");
+            bool layerIsHere = false;
+            for (const LayerData& candidate : layerData)
+                if (candidate.id == *layerId) layerIsHere = true;
+            if (!layerIsHere)
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   context + ": layerId " + idToString(*layerId) +
+                                       " is not a layer in this document");
+            one.layerId = *layerId;
+            wireData.push_back(std::move(one));
+        }
+    }
+
     struct BomData {
         ObjectId id = kInvalidObjectId;
         std::string name;
@@ -1714,6 +1943,12 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    std::move(one.textOverride));
     if (currentStyleId != kInvalidObjectId)
         document->restoreCurrentDimensionStyle(currentStyleId);
+    for (auto& one : componentData)
+        document->restoreSymbol(one.id, std::move(one.tag), std::move(one.symbolName),
+                                one.positionMm, one.rotationRad, one.mirrored, one.layerId);
+    for (auto& one : wireData)
+        document->restoreWire(one.id, std::move(one.pointsMm), one.layerId,
+                              std::move(one.label));
     for (auto& one : bomData)
         document->restoreBomTable(one.id, std::move(one.name), std::move(one.sourcePath),
                                   one.positionMm, one.depth, std::move(one.columns),

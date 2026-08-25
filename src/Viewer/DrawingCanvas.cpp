@@ -90,6 +90,10 @@ int ClicksNeededBy(DrawingTool tool) noexcept {
         case DrawingTool::Line: return 2;
         case DrawingTool::Circle: return 2;   // centre, then a point on the rim
         case DrawingTool::Rectangle: return 2;  // two opposite corners
+        // A WIRE IS TWO CLICKS for now: from, to. Multi-segment runs are drawn
+        // as several wires, which the netlist joins end to end -- so a corner
+        // costs a click and nothing else.
+        case DrawingTool::Wire: return 2;
     }
     return 0;
 }
@@ -176,6 +180,11 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     drawnTitleRows_ = 0;
     drawnBomRows_ = 0;
     drawnUncounted_ = 0;
+    drawnWires_ = 0;
+    drawnSymbols_ = 0;
+    drawnUnknown_ = 0;
+    drawnJunctions_ = 0;
+    drawnSymbolExtent_ = Box2D{};
     if (document_ == nullptr) return;
 
     DrawingPaintOptions options;
@@ -192,6 +201,11 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     drawnTitleRows_ = tally.titleBlockRows;
     drawnBomRows_ = tally.bomRows;
     drawnUncounted_ = tally.bomUncounted;
+    drawnWires_ = tally.wires;
+    drawnSymbols_ = tally.placedSymbols;
+    drawnUnknown_ = tally.unknownSymbols;
+    drawnJunctions_ = tally.junctions;
+    drawnSymbolExtent_ = tally.symbolExtentMm;
 
     // --- WHAT THE TOOL IS ABOUT TO MAKE --------------------------------------
     //
@@ -210,6 +224,8 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
             painter.drawEllipse(QRectF(from.x() - r, from.y() - r, 2.0 * r, 2.0 * r));
         } else if (tool_ == DrawingTool::Rectangle) {
             painter.drawRect(QRectF(from, to).normalized());
+        } else if (tool_ == DrawingTool::Wire) {
+            painter.drawLine(from, to);
         }
     }
     // THE SNAP MARKER, so a user can see WHERE the click will land before

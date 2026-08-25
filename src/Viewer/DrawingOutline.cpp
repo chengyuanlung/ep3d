@@ -1,5 +1,7 @@
 #include "Viewer/DrawingOutline.h"
 
+#include "Core/Electrical/SymbolLibrary.h"
+
 #include <cstdio>
 #include <string>
 
@@ -182,6 +184,54 @@ OutlineNode DrawingOutline::build(const std::set<ObjectId>& hiddenIds) const {
         root.children.push_back(std::move(sizes));
     }
 
+    // --- Components and nets (M36) --------------------------------------------
+    if (!document.symbols().empty()) {
+        OutlineNode parts = Group("Components");
+        for (const SymbolPlacement* placed : document.symbols()) {
+            OutlineNode node;
+            node.id = placed->id();
+            node.name = placed->tag();
+            node.typeLabel = placed->symbolName();
+            node.kind = OutlineKind::Component;
+            // A COMPONENT WHOSE SYMBOL IS NOT IN THE LIBRARY IS FAILED, not
+            // hidden: on paper it is a red box, and the tree has to agree or a
+            // reader chasing it finds nothing.
+            const bool known =
+                BuiltInSymbols().find(placed->symbolName()) != nullptr;
+            node.state = known ? OutlineState::Normal : OutlineState::Failed;
+            if (!known) node.diagnostic = "no symbol called " + placed->symbolName();
+            parts.children.push_back(std::move(node));
+        }
+        root.children.push_back(std::move(parts));
+    }
+
+    if (!document.wires().empty()) {
+        const Netlist netlist = document.netlist();
+        OutlineNode nets = Group("Nets");
+        for (const Net& net : netlist.nets) {
+            if (net.wires.empty() && net.pins.empty()) continue;
+            OutlineNode node;
+            // NO ObjectId: a net is DERIVED and there is nothing to select.
+            // Giving it one would be inventing an identity that survives
+            // nothing -- move a wire and the net it belonged to may not exist.
+            node.id = kInvalidObjectId;
+            node.name = net.name.empty() ? std::string("(unnamed)") : net.name;
+            node.typeLabel = "Net";
+            node.kind = OutlineKind::NetNode;
+            // A NET THAT GOES NOWHERE IS THE COMMONEST SCHEMATIC MISTAKE and
+            // the hardest to see, because a wire to nothing looks like a wire.
+            node.state = net.isDangling() ? OutlineState::Failed : OutlineState::Normal;
+            if (net.isDangling())
+                node.diagnostic = net.pins.empty()
+                                      ? "this wire reaches no component at all"
+                                      : "this wire reaches only " + net.pins.front().tag;
+            else
+                node.diagnostic = std::to_string(net.pins.size()) + " connections";
+            nets.children.push_back(std::move(node));
+        }
+        root.children.push_back(std::move(nets));
+    }
+
     // --- Parts lists (M35.6) --------------------------------------------------
     if (!document.bomTables().empty()) {
         const std::vector<ObjectId> staleLists = document.staleBomTables();
@@ -273,6 +323,13 @@ OutlineNode DrawingOutline::build(const std::set<ObjectId>& hiddenIds) const {
     // first when the paper seems wrong.
     for (const paramcad::BomTable* table : document.bomTables())
         if (!document.countBom(*table).ok) root.state = OutlineState::Failed;
+    // A WIRE THAT GOES NOWHERE, or two wires disagreeing about a name, makes
+    // the DRAWING wrong -- and the root is where a reader looks first when the
+    // paper seems right and the circuit does not work.
+    if (!document.wires().empty()) {
+        if (!document.netlist().danglingNets().empty()) root.state = OutlineState::Failed;
+        if (!document.conflictingNetNames().empty()) root.state = OutlineState::Failed;
+    }
     for (const DrawingView* view : document.views())
         if (view->currentState() == ComputeState::Failed) root.state = OutlineState::Failed;
     return root;

@@ -1,5 +1,7 @@
 #include "Viewer/DrawingPainter.h"
 
+#include "Core/Electrical/SymbolLibrary.h"
+
 #include <QFont>
 #include <QFontMetricsF>
 #include <QPainter>
@@ -167,6 +169,153 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
                 QPointF(split.x() + 1.0 * page.pixelsPerMm, baseline),
                 QString::fromStdString(block.valueOf(field, document.sheet())));
             ++tally.titleBlockRows;
+        }
+    }
+
+    // --- THE SCHEMATIC (M36) --------------------------------------------------
+    //
+    // WIRES FIRST, then symbols on top: a symbol's body should hide the wire
+    // that runs under it, not the other way round.
+    {
+        QPen wirePen(ScreenColorOf(4, ink)); // cyan by convention, over ByLayer
+        wirePen.setWidthF(std::max(0.8, 0.35 * page.pixelsPerMm));
+        QFont labelFont = painter.font();
+        labelFont.setPixelSize(std::max(5, static_cast<int>(2.0 * page.pixelsPerMm)));
+        const QFontMetricsF labelMetrics(labelFont);
+
+        for (const WireEntity* wire : document.wires()) {
+            if (!wire->isDrawable()) continue;
+            painter.setPen(wirePen);
+            painter.setBrush(Qt::NoBrush);
+            QPainterPath path;
+            for (std::size_t i = 0; i < wire->pointsMm().size(); ++i) {
+                const QPointF at = page.toScreen(wire->pointsMm()[i]);
+                if (i == 0)
+                    path.moveTo(at);
+                else
+                    path.lineTo(at);
+            }
+            painter.drawPath(path);
+            ++tally.wires;
+
+            // THE WIRE NUMBER, along the run. A schematic whose wires are
+            // numbered only in a list is one an electrician has to hold beside
+            // the drawing to use.
+            if (!wire->label().empty()) {
+                const Vec2 a = wire->pointsMm().front();
+                const Vec2 b = wire->pointsMm()[1];
+                const QPointF at = page.toScreen(Vec2{(a.x + b.x) / 2.0, (a.y + b.y) / 2.0});
+                painter.setFont(labelFont);
+                painter.setPen(QPen(ScreenColorOf(4, ink)));
+                painter.drawText(at + QPointF(2.0, -2.0),
+                                 QString::fromStdString(wire->label()));
+            }
+        }
+
+        // --- JUNCTION DOTS ---------------------------------------------------
+        //
+        // WHERE THREE OR MORE WIRE ENDS MEET. Their ABSENCE is what misleads:
+        // a reader who sees no dot reads a crossing, and the netlist would
+        // disagree with the drawing about the circuit. Two ends meeting need
+        // no dot -- that is just a corner.
+        {
+            std::vector<Vec2> ends;
+            for (const WireEntity* wire : document.wires()) {
+                if (!wire->isDrawable()) continue;
+                ends.push_back(wire->pointsMm().front());
+                ends.push_back(wire->pointsMm().back());
+            }
+            std::vector<Vec2> drawn;
+            for (const Vec2 point : ends) {
+                std::size_t meeting = 0;
+                for (const Vec2 other : ends)
+                    if (std::hypot(other.x - point.x, other.y - point.y) <= kNetToleranceMm)
+                        ++meeting;
+                if (meeting < 3) continue;
+                bool already = false;
+                for (const Vec2 done : drawn)
+                    if (std::hypot(done.x - point.x, done.y - point.y) <= kNetToleranceMm)
+                        already = true;
+                if (already) continue;
+                drawn.push_back(point);
+                const double radius = std::max(1.2, 0.7 * page.pixelsPerMm);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QBrush(ScreenColorOf(4, ink)));
+                painter.drawEllipse(page.toScreen(point), radius, radius);
+                ++tally.junctions;
+            }
+            painter.setBrush(Qt::NoBrush);
+        }
+
+        // --- THE COMPONENTS ---------------------------------------------------
+        const SymbolLibrary& library = BuiltInSymbols();
+        for (const SymbolPlacement* placed : document.symbols()) {
+            const ElectricalSymbol* symbol = library.find(placed->symbolName());
+            const QPointF at = page.toScreen(placed->positionMm());
+            if (symbol == nullptr) {
+                // A COMPONENT DRAWN AS NOTHING LOOKS EXACTLY LIKE ONE THAT WAS
+                // NEVER PLACED. So an unknown symbol is a red box with its tag
+                // and the name it wanted -- enough for a user to go and find
+                // the library it came from.
+                const QColor alarm(200, 40, 40);
+                painter.setPen(QPen(alarm, 1.2));
+                painter.setBrush(Qt::NoBrush);
+                const double size = 5.0 * page.pixelsPerMm;
+                painter.drawRect(QRectF(at.x() - size / 2.0, at.y() - size / 2.0, size, size));
+                painter.setFont(labelFont);
+                painter.drawText(at + QPointF(size / 2.0 + 2.0, 0.0),
+                                 QString::fromStdString(placed->tag() + " ? " +
+                                                        placed->symbolName()));
+                ++tally.unknownSymbols;
+                ++tally.placedSymbols;
+                continue;
+            }
+
+            const Matrix2D transform = SymbolPlacementTransform(
+                placed->positionMm(), placed->rotationRad(), placed->isMirrored());
+            const int aci = document.resolvedColorOnLayerForTesting(placed->layerId());
+            QPen pen(ScreenColorOf(aci, ink));
+            pen.setWidthF(std::max(0.8, 0.35 * page.pixelsPerMm));
+            painter.setPen(pen);
+            painter.setBrush(Qt::NoBrush);
+
+            // THROUGH THE SAME TRANSFORM THE PINS USE. A symbol whose geometry
+            // and pins were placed by two different calculations would draw a
+            // resistor here and connect it there.
+            for (const DrawShape& shape : symbol->shapes()) {
+                const DrawShape moved = TransformShape(shape, transform);
+                // RECORDED IN SHEET MILLIMETRES, from the shape that is about
+                // to be drawn -- so what this reports is where the ink went,
+                // not where the placement says it should have.
+                tally.symbolExtentMm.grow(BoundsOf(moved));
+                if (const auto* line = std::get_if<DrawLine>(&moved)) {
+                    painter.drawLine(page.toScreen(line->a), page.toScreen(line->b));
+                } else if (const auto* circle = std::get_if<DrawCircle>(&moved)) {
+                    const double r = circle->radius * page.pixelsPerMm;
+                    const QPointF centre = page.toScreen(circle->centre);
+                    painter.drawEllipse(QRectF(centre.x() - r, centre.y() - r, 2.0 * r,
+                                               2.0 * r));
+                } else if (const auto* arc = std::get_if<DrawArc>(&moved)) {
+                    const double r = arc->radius * page.pixelsPerMm;
+                    const QPointF centre = page.toScreen(arc->centre);
+                    const double startDeg = -arc->startAngle * 180.0 / kPi;
+                    double sweep = arc->endAngle - arc->startAngle;
+                    while (sweep <= 0.0) sweep += kTwoPi;
+                    painter.drawArc(QRectF(centre.x() - r, centre.y() - r, 2.0 * r, 2.0 * r),
+                                    static_cast<int>(startDeg * 16.0),
+                                    static_cast<int>(-sweep * 180.0 / kPi * 16.0));
+                }
+            }
+
+            // THE TAG, beside the part. A schematic where the components are
+            // unlabelled is one nobody can cross-reference to a wiring list.
+            painter.setFont(labelFont);
+            const Box2D box = symbol->bounds();
+            const QPointF tagAt =
+                page.toScreen(transform.apply(Vec2{box.max.x, box.max.y}));
+            painter.drawText(tagAt + QPointF(2.0, -2.0),
+                             QString::fromStdString(placed->tag()));
+            ++tally.placedSymbols;
         }
     }
 

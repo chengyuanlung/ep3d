@@ -2,6 +2,7 @@
 
 #include "Core/Document/DocumentBase.h"
 #include "Core/Drawing/BomTable.h"
+#include "Core/Electrical/SchematicObjects.h"
 #include "Core/Drawing/DimensionStyle.h"
 #include "Core/Drawing/DrawingDimension.h"
 #include "Core/Drawing/DrawingEntity.h"
@@ -222,7 +223,55 @@ public:
     // carries no colour of its own yet, which is why it always resolves
     // ByLayer.
     int resolvedColorOfDimension(const DrawingDimension& dimension) const;
+    // A component's colour is its layer's, resolved by the SAME rule an entity
+    // and a dimension use -- a third copy of "ByLayer means ask the layer" is
+    // exactly what resolvedColorOnLayer exists to prevent.
+    int resolvedColorOnLayerForTesting(ObjectId layerId) const {
+        return resolvedColorOnLayer(kColorByLayer, layerId);
+    }
     bool isDimensionVisible(const DrawingDimension& dimension) const;
+
+    // --- Schematic (M36) ------------------------------------------------------
+    //
+    // A SCHEMATIC IS A DRAWING. Same paper, frame, title block, layers and plot
+    // path; what makes it electrical is symbols with PINS and wires that
+    // connect them (see SymbolLibrary.h for why this is not a fourth document
+    // type).
+    SymbolPlacement& addSymbol(std::string tag, std::string symbolName, Vec2 positionMm);
+    SymbolPlacement& restoreSymbol(ObjectId id, std::string tag, std::string symbolName,
+                                   Vec2 positionMm, double rotationRad, bool mirrored,
+                                   ObjectId layerId);
+    std::vector<const SymbolPlacement*> symbols() const;
+    const SymbolPlacement* findSymbol(ObjectId id) const noexcept;
+    const SymbolPlacement* findSymbolTagged(const std::string& tag) const noexcept;
+    bool setSymbolPosition(ObjectId symbolId, Vec2 at);
+    bool setSymbolRotation(ObjectId symbolId, double radians);
+    bool setSymbolMirrored(ObjectId symbolId, bool mirrored);
+
+    WireEntity& addWire(std::vector<Vec2> pointsMm);
+    WireEntity& restoreWire(ObjectId id, std::vector<Vec2> pointsMm, ObjectId layerId,
+                            std::string label);
+    std::vector<const WireEntity*> wires() const;
+    const WireEntity* findWire(ObjectId id) const noexcept;
+    bool setWirePoints(ObjectId wireId, std::vector<Vec2> pointsMm);
+    bool setWireLabel(ObjectId wireId, std::string label);
+
+    // WHAT IS CONNECTED TO WHAT, right now. DERIVED, every time -- a stored
+    // netlist is a schematic stating a circuit the drawing no longer shows,
+    // and what gets built is the netlist.
+    //
+    // A net's NAME comes off the wires that make it up (see WireEntity). Two
+    // wires in one net carrying different labels is a contradiction, and it is
+    // REPORTED rather than resolved: picking one would rename a wire somebody
+    // has already crimped a ferrule for, and picking silently would hide that
+    // the schematic says two things.
+    Netlist netlist() const;
+    // Nets whose wires disagree about the name, as the names involved.
+    std::vector<std::string> conflictingNetNames() const;
+    // Assigns W1, W2, ... to every UNLABELLED net, writing the name onto its
+    // wires. One undo step for the whole sheet, because it is one thing the
+    // user did.
+    std::size_t numberNets(const std::string& prefix = "W");
 
     // --- The parts list (M35.6) ----------------------------------------------
     //
@@ -388,6 +437,8 @@ private:
     DrawingEntity* findEntityForEdit(ObjectId id) noexcept;
     DrawingDimension* findDimensionForEdit(ObjectId id) noexcept;
     BomTable* findBomTableForEdit(ObjectId id) noexcept;
+    SymbolPlacement* findSymbolForEdit(ObjectId id) noexcept;
+    WireEntity* findWireForEdit(ObjectId id) noexcept;
     DimensionStyle* findDimensionStyleForEdit(ObjectId id) noexcept;
     // Where an anchor actually is, in SHEET millimetres, or nothing when it
     // has lost what it pointed at.
@@ -413,6 +464,8 @@ private:
     std::vector<std::unique_ptr<DrawingDimension>> dimensions_;
     ObjectId currentStyleId_{kInvalidObjectId};
     std::vector<std::unique_ptr<BomTable>> bomTables_;
+    std::vector<std::unique_ptr<SymbolPlacement>> symbols_;
+    std::vector<std::unique_ptr<WireEntity>> wires_;
     TitleBlock titleBlock_;
     FrameMargins frameMargins_;
     double zoneTargetMm_ = 100.0;

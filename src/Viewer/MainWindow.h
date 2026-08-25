@@ -310,6 +310,30 @@ public:
     std::size_t drawnUncountedBomsForTesting() const;
     int bomTotalQuantityForTesting() const;
     ObjectId selectedBomTable() const;
+
+    // --- Schematic (M36) ------------------------------------------------------
+    QString placeSymbolCommand(const QString& symbolName, Vec2 positionMm,
+                               const QString& tag = QString());
+    QString numberNetsCommand();
+    QString turnSelectedSymbolCommand(double radians);
+    // WHAT THE CIRCUIT SAYS, in words -- how many nets, how many go nowhere,
+    // and whether any two wires disagree about a name.
+    QString netlistSummaryForTesting() const;
+    // The label on the wire whose highest point is highest up the sheet -- the
+    // one a reader meets first, and so the one numbering must call W1.
+    QString topmostWireLabelForTesting() const;
+    std::size_t symbolCountForTesting() const;
+    std::size_t wireCountForTesting() const;
+    std::size_t netCountForTesting() const;
+    std::size_t danglingNetCountForTesting() const;
+    std::size_t drawnWiresForTesting() const;
+    std::size_t drawnSymbolsForTesting() const;
+    std::size_t drawnUnknownSymbolsForTesting() const;
+    std::size_t drawnJunctionsForTesting() const;
+    Box2D drawnSymbolExtentForTesting() const;
+    // The tag a new component of this kind would get: the symbol's prefix plus
+    // the next free number. ONE answer, so the menu and a script agree.
+    QString nextTagFor(const QString& symbolName) const;
     // What the block PRINTS for a row -- asked of the same reader the painter
     // uses, so a test that reads this is reading what is on the paper.
     QString titleBlockValueForTesting(const QString& label) const;
@@ -805,6 +829,7 @@ private slots:
     void onPlotPdfRequested();
     void onExportDxfRequested();
     void onAddBomRequested();
+    void onPlaceSymbolRequested();
     void onDeleteDrawingObjectRequested();
     void onCaptureNamedPositionRequested();
     void onApplyNamedPositionRequested();
@@ -1063,6 +1088,10 @@ private:
     QAction* exportDxfAction_ = nullptr;
     QAction* addBomAction_ = nullptr;
     QAction* recountBomAction_ = nullptr;
+    QAction* placeSymbolAction_ = nullptr;
+    QAction* drawWireAction_ = nullptr;
+    QAction* numberNetsAction_ = nullptr;
+    QAction* turnSymbolAction_ = nullptr;
     // The Assembly menu's actions, enabled only when the document is one.
     QAction* insertInstanceAction_ = nullptr;
     QAction* groundInstanceAction_ = nullptr;
