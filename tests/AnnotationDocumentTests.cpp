@@ -260,4 +260,60 @@ TEST(AnnotationDocumentTest, M41_DOC_008_AFileNamingASymbolThisBuildDoesNotKNOWI
         << "an unknown surface symbol was read as one of the three";
 }
 
+TEST(AnnotationDocumentTest, M41_DOC_009_OnlyDATUMSCountTowardsTheLetters) {
+    // A drawing is not datums alone. Count every symbol and the letters run
+    // ahead: place a finish symbol between two datums and the second becomes C
+    // while the first is still A -- with no B on the sheet at all, and every
+    // frame naming it reading a letter nobody can find.
+    DrawingDocument document{"Plate"};
+    const ObjectId first =
+        document.addAnnotation(DatumFeatureSpec{}, Somewhere(Vec2{10.0, 10.0}),
+                               Vec2{10.0, 20.0}).id();
+
+    SurfaceFinishSpec finish;
+    finish.raMicrometres = 1.6;
+    document.addAnnotation(finish, Somewhere(Vec2{30.0, 10.0}), Vec2{30.0, 20.0});
+
+    const ObjectId second =
+        document.addAnnotation(DatumFeatureSpec{}, Somewhere(Vec2{50.0, 10.0}),
+                               Vec2{50.0, 20.0}).id();
+
+    EXPECT_EQ(document.datumLetterOf(first), "A");
+    EXPECT_EQ(document.datumLetterOf(second), "B")
+        << "a symbol that is not a datum took a letter out of the sequence";
+}
+
+TEST(AnnotationDocumentTest, M41_DOC_010_ASymbolThatLostWhatItPointsAtSaysSo) {
+    // A DANGLING LEADER IS THE FAILURE THIS ANCHOR EXISTS TO CATCH. Reported
+    // as attached, the symbol goes on being drawn beside a place where its
+    // face used to be -- which is a drawing that says the wrong surface has to
+    // be ground, and looks exactly like one that does not.
+    DrawingDocument document{"Plate"};
+    const ObjectId line =
+        document.addEntity(DrawLine{Vec2{0.0, 0.0}, Vec2{100.0, 0.0}}).id();
+
+    DimensionAnchor onTheLine;
+    onTheLine.kind = DimensionAnchorKind::Entity;
+    onTheLine.entityId = line;
+    onTheLine.snapIndex = 0;
+
+    SurfaceFinishSpec finish;
+    finish.raMicrometres = 0.8;
+    const ObjectId symbol =
+        document.addAnnotation(finish, onTheLine, Vec2{20.0, 30.0}).id();
+    EXPECT_TRUE(document.annotationLeaderTipMm(symbol).has_value())
+        << "a symbol on a line that is right there could not find it";
+
+    ASSERT_TRUE(document.removeObject(line));
+    EXPECT_FALSE(document.annotationLeaderTipMm(symbol).has_value())
+        << "the symbol still claims to be attached to a line that has gone";
+
+    // ...and it is still THERE, because deleting the drafter's words is not
+    // this program's decision to make. What changes is that the drawing can
+    // now say so.
+    EXPECT_NE(document.findAnnotation(symbol), nullptr);
+    EXPECT_FALSE(document.annotationText(symbol).empty())
+        << "a dangling symbol lost the specification it was carrying";
+}
+
 } // namespace

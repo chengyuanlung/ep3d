@@ -274,6 +274,16 @@ SaveResult validateSaveable(const DrawingDocument& document) {
     // same one the painter asks before drawing. Written out here as its own
     // list of rules it would be a third reading of ISO 1101, and the day one
     // of the three was corrected the other two would still be wrong.
+    //
+    // AND THIS HALF IS CURRENTLY UNREACHABLE, which is recorded here rather
+    // than left for the next reader to work out: addAnnotation refuses an
+    // undrawable body, setAnnotationBody refuses one, deleting a datum that
+    // frames still name is refused, and undo restores in reverse order so a
+    // frame never comes back before its datum. A mutation deleting the check
+    // below therefore survives. It stays because the rule it states is the
+    // LOADER'S, and a saver that does not state the loader's rule is how
+    // ADR-M3-008's worst case -- a file that writes cleanly and will not
+    // reopen -- arrives the next time one of those four doors is widened.
     for (const Annotation* annotation : document.annotations()) {
         if (const SaveResult bad = claim(annotation->id(), "symbol"); !bad) return bad;
         const std::string why = document.whyAnnotationRefused(annotation->id());

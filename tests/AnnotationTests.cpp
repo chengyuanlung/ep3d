@@ -163,14 +163,16 @@ TEST(AnnotationTest, M41_GDT_005_TheFrameIsWrittenWithTheLettersItsDatumsCARRY) 
     spec.datums = {DatumReference{11, MaterialCondition::RegardlessOfFeatureSize},
                    DatumReference{12, MaterialCondition::Maximum}};
 
-    const std::string text = FrameText(spec, {"A", "B"});
-    EXPECT_NE(text.find(kDia + "0.25"), std::string::npos) << text;
-    EXPECT_NE(text.find("| A"), std::string::npos) << text;
-    EXPECT_NE(text.find("| B" + kMmc), std::string::npos)
-        << "the secondary datum's material condition was dropped: " << text;
-    // ...and RFS is written by writing NOTHING, which is why the primary datum
-    // has no modifier after it.
-    EXPECT_EQ(text.find("| A" + kMmc), std::string::npos) << text;
+    // THE WHOLE STRING, not fragments of it.
+    //
+    // Checking for "| A" and for the absence of "| A" with a modifier passes
+    // just as happily when RFS starts writing itself as "S" -- the primary
+    // datum then reads "| AS" and both fragment checks are still true. What is
+    // being asserted here is a specification a machinist reads, so what the
+    // test compares is the line, character for character.
+    EXPECT_EQ(FrameText(spec, {"A", "B"}),
+              SymbolOfCharacteristic(GeometricCharacteristic::Position) + " " + kDia +
+                  "0.25" + kMmc + " | A | B" + kMmc);
 
     // A CALLER WHO RESOLVED THE WRONG NUMBER OF LETTERS GETS NOTHING, rather
     // than a frame whose letters belong to some other datum.
