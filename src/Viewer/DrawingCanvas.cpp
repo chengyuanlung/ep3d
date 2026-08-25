@@ -174,6 +174,8 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     danglingDrawn_ = 0;
     drawnFrameLines_ = 0;
     drawnTitleRows_ = 0;
+    drawnBomRows_ = 0;
+    drawnUncounted_ = 0;
     if (document_ == nullptr) return;
 
     DrawingPaintOptions options;
@@ -188,6 +190,8 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     danglingDrawn_ = tally.dangling;
     drawnFrameLines_ = tally.frameLines;
     drawnTitleRows_ = tally.titleBlockRows;
+    drawnBomRows_ = tally.bomRows;
+    drawnUncounted_ = tally.bomUncounted;
 
     // --- WHAT THE TOOL IS ABOUT TO MAKE --------------------------------------
     //

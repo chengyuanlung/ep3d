@@ -56,6 +56,10 @@ enum class OutlineKind {
     // dimension takes nothing and deleting the line it measures makes it
     // dangle -- and the row has to be able to say so.
     DrawingEntity, Dimension, DimensionStyle,
+    // M35.6: a parts list. Its own kind, not a DrawingEntity -- deleting one
+    // takes nothing, and its row has to be able to say that it is counting a
+    // file that has since changed.
+    BomTableNode,
     Other
 };
 

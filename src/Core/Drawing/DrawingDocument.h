@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Document/DocumentBase.h"
+#include "Core/Drawing/BomTable.h"
 #include "Core/Drawing/DimensionStyle.h"
 #include "Core/Drawing/DrawingDimension.h"
 #include "Core/Drawing/DrawingEntity.h"
@@ -223,6 +224,36 @@ public:
     int resolvedColorOfDimension(const DrawingDimension& dimension) const;
     bool isDimensionVisible(const DrawingDimension& dimension) const;
 
+    // --- The parts list (M35.6) ----------------------------------------------
+    //
+    // A BOM IS A VIEW OF AN ASSEMBLY, in the way a projected view is a view of
+    // a body: it names a file (ADR-M22-003) and its ROWS ARE COUNTED ON
+    // DEMAND. A list that kept its own quantities is a drawing stating a bill
+    // of materials the assembly no longer has -- and the wrong number is the
+    // one that gets ordered.
+    BomTable& addBomTable(std::string name, std::string sourcePath, Vec2 positionMm);
+    BomTable& restoreBomTable(ObjectId id, std::string name, std::string sourcePath,
+                              Vec2 positionMm, BomDepth depth, std::vector<BomColumn> columns,
+                              double rowHeightMm, bool growsUpward, long long sourceStamp);
+    std::vector<const BomTable*> bomTables() const;
+    const BomTable* findBomTable(ObjectId id) const noexcept;
+    bool setBomPosition(ObjectId tableId, Vec2 at);
+    bool setBomDepth(ObjectId tableId, BomDepth depth);
+    bool setBomColumns(ObjectId tableId, std::vector<BomColumn> columns);
+    bool setBomRowHeightMm(ObjectId tableId, double rowHeightMm);
+    bool setBomGrowsUpward(ObjectId tableId, bool upward);
+
+    // WHAT THE LIST SAYS RIGHT NOW. Read from the file every time it is asked
+    // for -- THE one counter, so the canvas, a plot and a DXF write cannot
+    // disagree about how many bolts there are.
+    BomContents countBom(const BomTable& table) const;
+    // Which lists are counting a file that has changed since. The same
+    // question a view answers, through the same content hash (M32.4).
+    std::vector<ObjectId> staleBomTables() const;
+    // Re-reads the stamp, so a counted list stops being stale. Not undoable:
+    // it changes nothing a user did.
+    bool markBomCounted(ObjectId tableId);
+
     // --- The frame and the title block (M35) ---------------------------------
     //
     // BOTH ARE DERIVED FROM THE SHEET WHERE THEY CAN BE. The frame is two
@@ -356,6 +387,7 @@ private:
     DrawingView* findViewForEdit(ObjectId id) noexcept;
     DrawingEntity* findEntityForEdit(ObjectId id) noexcept;
     DrawingDimension* findDimensionForEdit(ObjectId id) noexcept;
+    BomTable* findBomTableForEdit(ObjectId id) noexcept;
     DimensionStyle* findDimensionStyleForEdit(ObjectId id) noexcept;
     // Where an anchor actually is, in SHEET millimetres, or nothing when it
     // has lost what it pointed at.
@@ -380,6 +412,7 @@ private:
     std::vector<std::unique_ptr<DimensionStyle>> dimensionStyles_;
     std::vector<std::unique_ptr<DrawingDimension>> dimensions_;
     ObjectId currentStyleId_{kInvalidObjectId};
+    std::vector<std::unique_ptr<BomTable>> bomTables_;
     TitleBlock titleBlock_;
     FrameMargins frameMargins_;
     double zoneTargetMm_ = 100.0;

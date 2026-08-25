@@ -2,7 +2,11 @@
 
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Document/SourceShapeResolver.h"
+#include "Core/Document/SourceShapeResolver.h"
 #include "Core/Drawing/ObjectSnap.h"
+#include "Core/Serialization/AssemblyDocumentSerializer.h"
+
+#include <fstream>
 #include "Core/Undo/UndoRecord.h"
 
 #include <algorithm>
@@ -1346,6 +1350,198 @@ std::vector<TitleBlockFieldRecord> RecordOf(const TitleBlock& block) {
 
 } // namespace
 
+// =============================================================================
+// The parts list (M35.6)
+// =============================================================================
+
+namespace {
+
+std::vector<int> ColumnsAsInts(const std::vector<BomColumn>& columns) {
+    std::vector<int> out;
+    out.reserve(columns.size());
+    for (const BomColumn column : columns) out.push_back(static_cast<int>(column));
+    return out;
+}
+
+std::vector<BomColumn> ColumnsFromInts(const std::vector<int>& values) {
+    std::vector<BomColumn> out;
+    out.reserve(values.size());
+    for (const int value : values) out.push_back(static_cast<BomColumn>(value));
+    return out;
+}
+
+void SnapshotBomInto(const BomTable& table, BomEdit& edit) {
+    edit.tableId = table.id();
+    edit.beforeXMm = edit.afterXMm = table.positionMm().x;
+    edit.beforeYMm = edit.afterYMm = table.positionMm().y;
+    edit.beforeDepth = edit.afterDepth = static_cast<int>(table.depth());
+    edit.beforeRowHeightMm = edit.afterRowHeightMm = table.rowHeightMm();
+    edit.beforeGrowsUpward = edit.afterGrowsUpward = table.growsUpward();
+    edit.beforeColumns = edit.afterColumns = ColumnsAsInts(table.columns());
+}
+
+} // namespace
+
+BomTable& DrawingDocument::addBomTable(std::string name, std::string sourcePath,
+                                       Vec2 positionMm) {
+    if (name.empty()) throw std::invalid_argument("addBomTable: a parts list needs a name");
+    if (nameIsTaken(name, kInvalidObjectId))
+        throw std::invalid_argument("addBomTable: this drawing already has something called " +
+                                    name);
+    // A LIST THAT NAMES NO FILE HAS NOTHING TO COUNT, and would sit on the
+    // paper as an empty box nobody could explain.
+    if (sourcePath.empty())
+        throw std::invalid_argument("addBomTable: a parts list needs an assembly to count");
+
+    auto item = std::make_unique<BomTable>(std::move(name), sourcePath, positionMm);
+    auto& ref = *item;
+    ref.setSourceStamp(SourceFileStamp(sourcePath));
+    BomExistenceEdit edit;
+    edit.tableId = ref.id();
+    edit.name = ref.name();
+    edit.sourcePath = ref.sourcePath();
+    edit.xMm = positionMm.x;
+    edit.yMm = positionMm.y;
+    edit.addedByTheEdit = true;
+    bomTables_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    recordDelta(edit, "Add parts list " + ref.name());
+    return ref;
+}
+
+BomTable& DrawingDocument::restoreBomTable(ObjectId id, std::string name,
+                                           std::string sourcePath, Vec2 positionMm,
+                                           BomDepth depth, std::vector<BomColumn> columns,
+                                           double rowHeightMm, bool growsUpward,
+                                           long long sourceStamp) {
+    requireUnusedId(id, "restoreBomTable");
+    auto item = std::make_unique<BomTable>(id, std::move(name), std::move(sourcePath),
+                                           positionMm);
+    auto& ref = *item;
+    ref.setDepth(depth);
+    if (!columns.empty()) ref.setColumns(std::move(columns));
+    ref.setRowHeightMm(rowHeightMm);
+    ref.setGrowsUpward(growsUpward);
+    ref.setSourceStamp(sourceStamp);
+    bomTables_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const BomTable*> DrawingDocument::bomTables() const {
+    std::vector<const BomTable*> out;
+    out.reserve(bomTables_.size());
+    for (const auto& table : bomTables_) out.push_back(table.get());
+    return out;
+}
+
+const BomTable* DrawingDocument::findBomTable(ObjectId id) const noexcept {
+    for (const auto& table : bomTables_)
+        if (table->id() == id) return table.get();
+    return nullptr;
+}
+
+BomTable* DrawingDocument::findBomTableForEdit(ObjectId id) noexcept {
+    for (auto& table : bomTables_)
+        if (table->id() == id) return table.get();
+    return nullptr;
+}
+
+bool DrawingDocument::setBomPosition(ObjectId tableId, Vec2 at) {
+    BomTable* table = findBomTableForEdit(tableId);
+    if (table == nullptr) return false;
+    BomEdit edit;
+    SnapshotBomInto(*table, edit);
+    edit.afterXMm = at.x;
+    edit.afterYMm = at.y;
+    table->setPositionMm(at);
+    recordDelta(edit, "Move " + table->name());
+    return true;
+}
+
+bool DrawingDocument::setBomDepth(ObjectId tableId, BomDepth depth) {
+    BomTable* table = findBomTableForEdit(tableId);
+    if (table == nullptr || table->depth() == depth) return false;
+    BomEdit edit;
+    SnapshotBomInto(*table, edit);
+    edit.afterDepth = static_cast<int>(depth);
+    table->setDepth(depth);
+    recordDelta(edit, "Parts list depth");
+    return true;
+}
+
+bool DrawingDocument::setBomColumns(ObjectId tableId, std::vector<BomColumn> columns) {
+    BomTable* table = findBomTableForEdit(tableId);
+    if (table == nullptr) return false;
+    BomEdit edit;
+    SnapshotBomInto(*table, edit);
+    if (!table->setColumns(std::move(columns))) return false;
+    edit.afterColumns = ColumnsAsInts(table->columns());
+    recordDelta(edit, "Parts list columns");
+    return true;
+}
+
+bool DrawingDocument::setBomRowHeightMm(ObjectId tableId, double rowHeightMm) {
+    BomTable* table = findBomTableForEdit(tableId);
+    if (table == nullptr) return false;
+    BomEdit edit;
+    SnapshotBomInto(*table, edit);
+    if (!table->setRowHeightMm(rowHeightMm)) return false;
+    edit.afterRowHeightMm = table->rowHeightMm();
+    recordDelta(edit, "Parts list rows");
+    return true;
+}
+
+bool DrawingDocument::setBomGrowsUpward(ObjectId tableId, bool upward) {
+    BomTable* table = findBomTableForEdit(tableId);
+    if (table == nullptr || table->growsUpward() == upward) return false;
+    BomEdit edit;
+    SnapshotBomInto(*table, edit);
+    edit.afterGrowsUpward = upward;
+    table->setGrowsUpward(upward);
+    recordDelta(edit, "Parts list direction");
+    return true;
+}
+
+BomContents DrawingDocument::countBom(const BomTable& table) const {
+    BomContents out;
+    std::ifstream file(table.sourcePath(), std::ios::binary);
+    if (!file) {
+        // SAID, not returned empty. An empty parts list and one whose file has
+        // gone look identical on paper, and only one of them is a drawing
+        // somebody can build from.
+        out.why = "the assembly this list counts is not where the drawing says it is";
+        return out;
+    }
+    const AssemblyLoadResult loaded = loadAssemblyDocument(file);
+    if (!loaded) {
+        out.why = std::string("the assembly this list counts could not be read: ") +
+                  loaded.message;
+        return out;
+    }
+    return CountAssembly(*loaded.document, table.depth());
+}
+
+std::vector<ObjectId> DrawingDocument::staleBomTables() const {
+    std::vector<ObjectId> stale;
+    for (const auto& table : bomTables_) {
+        // THE CONTENT, not the modification time (M32.4): two saves inside one
+        // filesystem tick are indistinguishable by mtime, and a parts list
+        // that quietly stopped noticing changes is the failure this whole
+        // design exists to prevent.
+        if (SourceFileStamp(table->sourcePath()) != table->sourceStamp())
+            stale.push_back(table->id());
+    }
+    return stale;
+}
+
+bool DrawingDocument::markBomCounted(ObjectId tableId) {
+    BomTable* table = findBomTableForEdit(tableId);
+    if (table == nullptr) return false;
+    table->setSourceStamp(SourceFileStamp(table->sourcePath()));
+    return true;
+}
+
 double DrawingDocument::viewScaleFactor(ObjectId viewId) const noexcept {
     const DrawingView* view = findView(viewId);
     if (view == nullptr) return 1.0;
@@ -1753,12 +1949,39 @@ void DrawingDocument::forEachOwnNamed(const std::function<void(const NamedSlot&)
         visit(NamedSlot{style->id(), style->name(),
                         [style](const std::string& n) { style->setName(n); }});
     }
+    for (const std::unique_ptr<BomTable>& one : bomTables_) {
+        BomTable* table = one.get();
+        visit(NamedSlot{table->id(), table->name(),
+                        [table](const std::string& n) { table->setName(n); }});
+    }
 }
 
 bool DrawingDocument::removeOwnObject(ObjectId id) {
     ObjectRegistry::ObjectRef* found = registry_.find(id);
     if (found == nullptr) return false;
     const ObjectRegistry::ObjectRef handle = *found;
+
+    // A PARTS LIST: nothing reads it, and its rows were never stored, so
+    // there is nothing to cascade -- deleting one takes only itself.
+    if (const BomTable* table = findBomTable(id)) {
+        if (!applyingHistory()) {
+            BomExistenceEdit edit;
+            edit.tableId = id;
+            edit.name = table->name();
+            edit.sourcePath = table->sourcePath();
+            edit.xMm = table->positionMm().x;
+            edit.yMm = table->positionMm().y;
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Delete " + table->name());
+        }
+        for (auto it = bomTables_.begin(); it != bomTables_.end(); ++it) {
+            if ((*it)->id() != id) continue;
+            registry_.unregisterObject(id);
+            bomTables_.erase(it);
+            return true;
+        }
+        return false;
+    }
 
     // A VIEW: nothing owns it and nothing else reads it yet. Annotation that
     // measures it arrives in M34, and that is when this grows a cascade.
@@ -2039,6 +2262,36 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         currentStyleId_ = forward ? edit->after : edit->before;
         return;
     }
+    if (const auto* edit = std::get_if<BomExistenceEdit>(&delta)) {
+        const bool wanted = forward == edit->addedByTheEdit;
+        if (wanted) {
+            if (findBomTable(edit->tableId) == nullptr)
+                restoreBomTable(edit->tableId, edit->name, edit->sourcePath,
+                                Vec2{edit->xMm, edit->yMm}, BomDepth::TopLevel, {}, 8.0, true,
+                                SourceFileStamp(edit->sourcePath));
+        } else {
+            for (auto it = bomTables_.begin(); it != bomTables_.end(); ++it) {
+                if ((*it)->id() != edit->tableId) continue;
+                registry_.unregisterObject(edit->tableId);
+                bomTables_.erase(it);
+                break;
+            }
+        }
+        return;
+    }
+
+    if (const auto* edit = std::get_if<BomEdit>(&delta)) {
+        BomTable* table = findBomTableForEdit(edit->tableId);
+        if (table == nullptr) return;
+        table->setPositionMm(forward ? Vec2{edit->afterXMm, edit->afterYMm}
+                                     : Vec2{edit->beforeXMm, edit->beforeYMm});
+        table->setDepth(static_cast<BomDepth>(forward ? edit->afterDepth : edit->beforeDepth));
+        table->setRowHeightMm(forward ? edit->afterRowHeightMm : edit->beforeRowHeightMm);
+        table->setGrowsUpward(forward ? edit->afterGrowsUpward : edit->beforeGrowsUpward);
+        table->setColumns(ColumnsFromInts(forward ? edit->afterColumns : edit->beforeColumns));
+        return;
+    }
+
     if (const auto* edit = std::get_if<TitleBlockEdit>(&delta)) {
         // THE WHOLE BLOCK, REPLACED. Rebuilt from the record rather than
         // patched field by field, so there is no state in which half of it is

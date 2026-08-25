@@ -281,6 +281,35 @@ public:
     // that opened cleanly and is subtly not the drawing is worse than one that
     // failed -- nobody re-checks a file that opened.
     QString exportDxfCommand(const QString& path);
+
+    // --- The parts list (M35.6) ----------------------------------------------
+    QString addBomTableCommand(const QString& name, const QString& sourcePath, Vec2 positionMm,
+                               BomDepth depth = BomDepth::TopLevel);
+    // WHERE A NEW PARTS LIST GOES: on top of the title block, growing up the
+    // sheet. THE one answer, so the menu and a test place it the same -- a
+    // test that picked its own position would be checking a placement no user
+    // ever gets, and would not have noticed this one landing ON the block.
+    Vec2 defaultBomPositionMm() const;
+    QString setBomDepthCommand(BomDepth depth);
+    // Re-reads the assembly's stamp, so a list stops being marked stale. What
+    // it SHOWS was never stale -- the rows are counted every time it is drawn;
+    // the mark is about whether anybody has looked since.
+    QString recountBomCommand();
+    std::size_t bomTableCountForTesting() const;
+    std::size_t staleBomCountForTesting() const;
+    // FORCES THE SHEET TO BE PAINTED AGAIN.
+    //
+    // window.repaint() is not enough on its own: a QWidget repaints its
+    // children only when something has marked them dirty, and the canvas is
+    // marked dirty by DOCUMENT changes -- nothing watches the filesystem. So a
+    // parts list whose assembly changed on disk keeps its last painted rows
+    // until something else redraws, which is exactly why a list carries a
+    // STALE flag rather than pretending to be live.
+    void repaintDrawingForTesting();
+    std::size_t drawnBomRowsForTesting() const;
+    std::size_t drawnUncountedBomsForTesting() const;
+    int bomTotalQuantityForTesting() const;
+    ObjectId selectedBomTable() const;
     // What the block PRINTS for a row -- asked of the same reader the painter
     // uses, so a test that reads this is reading what is on the paper.
     QString titleBlockValueForTesting(const QString& label) const;
@@ -775,6 +804,7 @@ private slots:
     void onFrameRequested();
     void onPlotPdfRequested();
     void onExportDxfRequested();
+    void onAddBomRequested();
     void onDeleteDrawingObjectRequested();
     void onCaptureNamedPositionRequested();
     void onApplyNamedPositionRequested();
@@ -1031,6 +1061,8 @@ private:
     QAction* frameAction_ = nullptr;
     QAction* plotPdfAction_ = nullptr;
     QAction* exportDxfAction_ = nullptr;
+    QAction* addBomAction_ = nullptr;
+    QAction* recountBomAction_ = nullptr;
     // The Assembly menu's actions, enabled only when the document is one.
     QAction* insertInstanceAction_ = nullptr;
     QAction* groundInstanceAction_ = nullptr;

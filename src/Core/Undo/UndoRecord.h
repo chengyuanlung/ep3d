@@ -462,6 +462,36 @@ struct TitleBlockEdit {
     bool afterVisible = true;
 };
 
+// --- The parts list (M35.6) --------------------------------------------------
+//
+// The whole small value, before and after -- the pattern SheetEdit set. The
+// ROWS are not in here and never will be: they are counted from the assembly
+// on demand, so there is nothing about them to undo.
+struct BomExistenceEdit {
+    ObjectId tableId = kInvalidObjectId;
+    std::string name;
+    std::string sourcePath;
+    double xMm = 0.0;
+    double yMm = 0.0;
+    bool addedByTheEdit = false;
+};
+
+struct BomEdit {
+    ObjectId tableId = kInvalidObjectId;
+    double beforeXMm = 0.0;
+    double beforeYMm = 0.0;
+    double afterXMm = 0.0;
+    double afterYMm = 0.0;
+    int beforeDepth = 0;
+    int afterDepth = 0;
+    double beforeRowHeightMm = 8.0;
+    double afterRowHeightMm = 8.0;
+    bool beforeGrowsUpward = true;
+    bool afterGrowsUpward = true;
+    std::vector<int> beforeColumns;
+    std::vector<int> afterColumns;
+};
+
 struct SheetFrameEdit {
     double beforeBindingMm = 20.0;
     double afterBindingMm = 20.0;
@@ -678,7 +708,8 @@ using UndoDelta =
                  DrawingViewPlacementEdit, DrawingEntityExistenceEdit,
                  DrawingEntityShapeEdit, DrawingEntityPropertyEdit, DimensionExistenceEdit,
                  DimensionEdit, DimensionStyleExistenceEdit, DimensionStyleEdit,
-                 CurrentDimensionStyleEdit, TitleBlockEdit, SheetFrameEdit>;
+                 CurrentDimensionStyleEdit, TitleBlockEdit, SheetFrameEdit,
+                 BomExistenceEdit, BomEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

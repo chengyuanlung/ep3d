@@ -182,6 +182,38 @@ OutlineNode DrawingOutline::build(const std::set<ObjectId>& hiddenIds) const {
         root.children.push_back(std::move(sizes));
     }
 
+    // --- Parts lists (M35.6) --------------------------------------------------
+    if (!document.bomTables().empty()) {
+        const std::vector<ObjectId> staleLists = document.staleBomTables();
+        OutlineNode lists = Group("Parts Lists");
+        for (const paramcad::BomTable* table : document.bomTables()) {
+            OutlineNode node;
+            node.id = table->id();
+            node.name = table->name();
+            node.typeLabel = "Parts List";
+            node.kind = OutlineKind::BomTableNode;
+            const BomContents counted = document.countBom(*table);
+            bool isStale = false;
+            for (const ObjectId one : staleLists)
+                if (one == table->id()) isStale = true;
+            // A LIST THAT CANNOT BE COUNTED IS FAILED; one counting a file
+            // that has changed is DIRTY. Two different things a reader has to
+            // do something different about, so they are two different marks.
+            node.state = !counted.ok ? OutlineState::Failed
+                         : isStale   ? OutlineState::Dirty
+                                     : OutlineState::Normal;
+            if (!counted.ok)
+                node.diagnostic = counted.why;
+            else if (isStale)
+                node.diagnostic = "the assembly has changed since this was counted";
+            else
+                node.diagnostic = std::to_string(counted.rows.size()) + " lines, " +
+                                  std::to_string(counted.totalQuantity()) + " parts";
+            lists.children.push_back(std::move(node));
+        }
+        root.children.push_back(std::move(lists));
+    }
+
     // --- Dimension styles ----------------------------------------------------
     //
     // Like Linetypes: shown only once there is more than the ISO-25 every
@@ -230,6 +262,17 @@ OutlineNode DrawingOutline::build(const std::set<ObjectId>& hiddenIds) const {
     // the same way -- a drawing whose root row looks healthy while one of its
     // sizes reads "<?>" is the tree lying about the paper.
     if (!document.danglingDimensions().empty()) root.state = OutlineState::Failed;
+    // A parts list counting an assembly that has changed makes the DRAWING out
+    // of date, the same way a stale view does.
+    if (!document.staleBomTables().empty() && root.state == OutlineState::Normal)
+        root.state = OutlineState::Dirty;
+    // ...and one that cannot be counted at all makes it FAILED, like a view
+    // that would not project and a dimension that has lost what it measured.
+    // Marking the ROW and not the root is the tree looking healthy over a
+    // drawing nobody can build from -- and the root is where a reader looks
+    // first when the paper seems wrong.
+    for (const paramcad::BomTable* table : document.bomTables())
+        if (!document.countBom(*table).ok) root.state = OutlineState::Failed;
     for (const DrawingView* view : document.views())
         if (view->currentState() == ComputeState::Failed) root.state = OutlineState::Failed;
     return root;

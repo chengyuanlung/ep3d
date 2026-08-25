@@ -72,6 +72,8 @@ public:
     std::size_t danglingDrawnForTesting() const noexcept { return danglingDrawn_; }
     std::size_t drawnFrameLinesForTesting() const noexcept { return drawnFrameLines_; }
     std::size_t drawnTitleBlockRowsForTesting() const noexcept { return drawnTitleRows_; }
+    std::size_t drawnBomRowsForTesting() const noexcept { return drawnBomRows_; }
+    std::size_t drawnUncountedBomsForTesting() const noexcept { return drawnUncounted_; }
     // The sheet's rectangle in WIDGET pixels, so a test can check the paper is
     // actually inside the window after a fit.
     QRectF sheetRectForTesting() const;
@@ -144,6 +146,8 @@ private:
     std::size_t danglingDrawn_ = 0;
     std::size_t drawnFrameLines_ = 0;
     std::size_t drawnTitleRows_ = 0;
+    std::size_t drawnBomRows_ = 0;
+    std::size_t drawnUncounted_ = 0;
 
     DrawingTool tool_ = DrawingTool::None;
     std::vector<Vec2> picked_;

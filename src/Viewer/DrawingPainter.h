@@ -74,6 +74,11 @@ struct DrawnTally {
     std::size_t dangling = 0;
     std::size_t frameLines = 0;
     std::size_t titleBlockRows = 0;
+    std::size_t bomRows = 0;
+    // Lists that could not be counted -- the file has gone, or a sub-assembly
+    // inside it could not be read. Counted separately so a self test can
+    // assert the ALARM reached the screen, not just that the document knows.
+    std::size_t bomUncounted = 0;
 };
 
 DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,

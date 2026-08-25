@@ -24,6 +24,7 @@ class Layer;
 class Linetype;
 class DrawingEntity;
 class DrawingDimension;
+class BomTable;
 class DimensionStyle;
 class IRecomputable;
 
@@ -52,7 +53,7 @@ public:
                                    ReferenceFrame*, Connector*, Mate*, NamedPosition*,
                                    ExplodeView*, Relation*, Layer*, Linetype*,
                                    DrawingEntity*, DrawingDimension*, DimensionStyle*,
-                                   IRecomputable*>;
+                                   BomTable*, IRecomputable*>;
 
     // The same handle with const pointees, for callers that only INSPECT.
     //
@@ -74,7 +75,8 @@ public:
                      const Sketch*, const ReferenceFrame*, const Connector*, const Mate*,
                      const NamedPosition*, const ExplodeView*, const Relation*,
                      const Layer*, const Linetype*, const DrawingEntity*,
-                     const DrawingDimension*, const DimensionStyle*, const IRecomputable*>;
+                     const DrawingDimension*, const DimensionStyle*, const BomTable*,
+                     const IRecomputable*>;
 
     // Rejects kInvalidObjectId, duplicate ids, null handles, and handles
     // whose ->id() differs from the registered id (returns false).

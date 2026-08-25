@@ -23,6 +23,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/DrawingDimension.cpp
     src/Core/Drawing/SheetFrame.cpp
     src/Core/Drawing/TitleBlock.cpp
+    src/Core/Drawing/BomTable.cpp
     src/Core/Export/DxfWriter.cpp
     src/Core/Drawing/DrawingView.cpp
     src/Core/Drawing/DrawingDocument.cpp
@@ -546,6 +547,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/AssemblyOutlineTests.cpp
         tests/DrawingAlignmentTests.cpp
         tests/DrawingDimensionTests.cpp
+        tests/BomTableTests.cpp
         tests/SheetFrameTests.cpp
         tests/DrawingEntityTests.cpp
         tests/DrawingDocumentTests.cpp

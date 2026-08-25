@@ -170,6 +170,96 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
         }
     }
 
+    // --- THE PARTS LISTS (M35.6) ---------------------------------------------
+    //
+    // COUNTED HERE, EVERY PAINT. The rows were never stored, so there is
+    // nothing to keep in step -- and a drawing whose parts list said one thing
+    // while the assembly said another is exactly what that buys.
+    for (const BomTable* table : document.bomTables()) {
+        const BomContents contents = document.countBom(*table);
+        const Vec2 origin = table->positionMm();
+        const double rowMm = table->rowHeightMm();
+        const double widthMm = table->widthMm();
+        const double direction = table->growsUpward() ? 1.0 : -1.0;
+
+        QFont rowFont = painter.font();
+        rowFont.setPixelSize(std::max(5, static_cast<int>(2.5 * page.pixelsPerMm)));
+        painter.setFont(rowFont);
+        const QFontMetricsF rowMetrics(rowFont);
+
+        if (!contents.ok) {
+            // A LIST THAT COULD NOT BE COUNTED SAYS SO, in red, where the list
+            // would have been. An empty box and a list of nothing look the
+            // same on paper, and only one of them is a drawing somebody can
+            // build from.
+            painter.setPen(QPen(QColor(200, 40, 40), std::max(0.6, 0.5 * page.pixelsPerMm)));
+            painter.setBrush(Qt::NoBrush);
+            const QRectF box(page.toScreen(origin),
+                             page.toScreen(Vec2{origin.x + widthMm,
+                                                origin.y + direction * rowMm}));
+            painter.drawRect(box.normalized());
+            painter.drawText(QPointF(box.normalized().left() + 2.0,
+                                     box.normalized().center().y() + rowMetrics.ascent() / 2.0),
+                             QString::fromStdString(table->name() + ": " + contents.why));
+            ++tally.bomUncounted;
+            continue;
+        }
+
+        // THE HEADING IS A ROW TOO, so the box is one taller than the parts.
+        const std::size_t rowCount = contents.rows.size() + 1;
+        painter.setPen(QPen(ink, std::max(0.6, 0.5 * page.pixelsPerMm)));
+        painter.setBrush(Qt::NoBrush);
+        const QRectF box(page.toScreen(origin),
+                         page.toScreen(Vec2{origin.x + widthMm,
+                                            origin.y + direction * rowMm *
+                                                           static_cast<double>(rowCount)}));
+        painter.drawRect(box.normalized());
+
+        for (std::size_t i = 0; i < rowCount; ++i) {
+            const bool heading = (i == 0);
+            // ASKED OF THE TABLE, not worked out here -- see
+            // BomTable::rowBottomMm.
+            const double bottom = table->rowBottomMm(i);
+            const QPointF left = page.toScreen(Vec2{origin.x, bottom});
+            // A RULE UNDER EVERY ROW EXCEPT THE ONE THAT IS THE TABLE'S OWN
+            // BORDER -- drawing it twice doubles that edge's weight.
+            //
+            // WHICH row that is DEPENDS ON THE DIRECTION: growing upward, the
+            // heading is at the bottom and its lower edge is the border;
+            // growing downward, the last row's is. The first draft skipped the
+            // last row either way, so an upward table -- which is the default,
+            // and the one in every screenshot -- lost the rule between its
+            // heading and its first part. Found by looking at it.
+            if (!table->rowBottomIsBorder(i, rowCount)) {
+                painter.setPen(QPen(ink, std::max(0.4, 0.25 * page.pixelsPerMm)));
+                painter.drawLine(left, page.toScreen(Vec2{origin.x + widthMm, bottom}));
+            }
+            const double baseline = left.y() -
+                                    (rowMm * page.pixelsPerMm - rowMetrics.ascent()) / 2.0 -
+                                    rowMetrics.descent();
+
+            double atMm = origin.x;
+            for (const BomColumn column : table->columns()) {
+                const double columnMm = table->columnWidthMm(column);
+                if (atMm > origin.x) {
+                    painter.setPen(QPen(ink, std::max(0.4, 0.25 * page.pixelsPerMm)));
+                    painter.drawLine(page.toScreen(Vec2{atMm, bottom}),
+                                     page.toScreen(Vec2{atMm, bottom + direction * rowMm}));
+                }
+                const std::string text =
+                    heading ? std::string(HeadingOf(column))
+                            : contents.rows[i - 1].cell(column);
+                painter.setPen(QPen(ink));
+                painter.drawText(QPointF(page.toScreen(Vec2{atMm, bottom}).x() +
+                                             1.0 * page.pixelsPerMm,
+                                         baseline),
+                                 QString::fromStdString(text));
+                atMm += columnMm;
+            }
+            if (!heading) ++tally.bomRows;
+        }
+    }
+
     // --- WHAT THE USER DREW (M33) --------------------------------------------
     //
     // BEFORE THE VIEWS, so a projected edge is never hidden by a centreline

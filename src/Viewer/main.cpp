@@ -5046,6 +5046,114 @@ int main(int argc, char** argv) {
                 if (window.drawingViewCountForTesting() != 0)
                     fail("a projected view outlived its parent");
 
+                // --- M35.6's GATE: the parts list ---------------------------
+                //
+                // The Core suite proves a list COUNTS, that identical parts
+                // are one row, and that the numbers are never stored. Only
+                // starting the program can prove a user can put one on the
+                // paper and that its rows reach the screen.
+                //
+                // It runs here, near the end, because it replaces the document
+                // twice -- once for the assembly it counts and once for the
+                // drawing that counts it.
+                {
+                    const QString boltFile =
+                        QDir::tempPath() + QStringLiteral("/ep3d-selftest/m35-bolt.ep3d");
+                    const QString rigFile =
+                        QDir::tempPath() + QStringLiteral("/ep3d-selftest/m35-rig.ep3da");
+                    {
+                        const QString script =
+                            QDir::tempPath() + QStringLiteral("/ep3d-selftest/m35-bolt.ep3ds");
+                        QFile out(script);
+                        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                            fail("could not write M35's bolt script");
+                        out.write(("sketch S\ntool rect\nclick 0 0\nclick 6 6\n"
+                                   "pad Bolt 20 as BoltT\nsolve\nsave " +
+                                   boltFile.toStdString() + "\n")
+                                      .c_str());
+                        out.close();
+                        window.newDocumentCommand();
+                        const QString made = window.runScriptFile(script);
+                        if (made.contains(QStringLiteral("stopped")))
+                            fail(("M35's bolt did not build: " + made.toStdString()).c_str());
+                    }
+
+                    // FOUR OF ONE BOLT, so the quantity column has something
+                    // to say that a row count could not.
+                    window.adoptAssemblyForTesting("M35Rig");
+                    for (int i = 0; i < 4; ++i)
+                        window.insertInstanceCommand(boltFile, QStringLiteral("Bolt"));
+                    if (window.instanceCountForTesting() != 4)
+                        fail("M35's rig did not take its four bolts");
+                    if (!window.saveDocumentFile(rigFile).contains(QStringLiteral("Saved")))
+                        fail("M35's rig would not save");
+
+                    window.adoptDrawingForTesting("M35Parts");
+                    // WHERE THE MENU WOULD PUT IT. A test that picked its own
+                    // position would be checking a placement no user ever
+                    // gets -- and the first draft did, which is how it came to
+                    // sit across the title block in the golden screenshot.
+                    const QString added = window.addBomTableCommand(
+                        QStringLiteral("Parts"), rigFile, window.defaultBomPositionMm());
+                    // ONE LINE, FOUR PARTS. A list that gave each instance its
+                    // own row would say four lines, and somebody would order
+                    // four lines of one bolt.
+                    if (!added.contains(QStringLiteral("1 lines")) ||
+                        !added.contains(QStringLiteral("4 parts")))
+                        fail(("the parts list counted wrongly: " + added.toStdString())
+                                 .c_str());
+                    if (window.bomTableCountForTesting() != 1)
+                        fail("the parts list was not created");
+
+                    // IT REACHED THE CANVAS. "The document can count it" and
+                    // "the rows are on screen" are two claims, and the gap
+                    // between them is the M6.14 defect class.
+                    window.repaintDrawingForTesting();
+                    if (window.drawnBomRowsForTesting() != 1)
+                        fail("the parts list counted one line and the canvas drew none");
+                    if (window.drawnUncountedBomsForTesting() != 0)
+                        fail("a countable parts list was drawn as uncountable");
+                    if (window.staleBomCountForTesting() != 0)
+                        fail("a freshly made parts list is already stale");
+
+                    // A PICTURE OF A DRAWING WITH A PARTS LIST ON IT.
+                    // Whether a table READS -- whether the columns are wide
+                    // enough, whether the heading is where a reader expects --
+                    // is a judgement, and no assertion makes it.
+                    if (screenshotPath != nullptr) {
+                        std::string beside = screenshotPath;
+                        const std::size_t dot = beside.rfind('.');
+                        beside = dot == std::string::npos
+                                     ? beside + "-parts"
+                                     : beside.substr(0, dot) + "-parts" + beside.substr(dot);
+                        if (!shoot(window, QString::fromStdString(beside)))
+                            fail("could not write the parts list screenshot");
+                    }
+
+                    // A LIST WHOSE ASSEMBLY HAS GONE SAYS SO, ON THE PAPER.
+                    // An empty box and a list of nothing look the same, and
+                    // only one of them is a drawing anybody can build from.
+                    if (!QFile::remove(rigFile)) fail("could not take M35's rig away");
+                    if (QFile::exists(rigFile)) fail("the rig file is still there after removal");
+                    // THE DOCUMENT FIRST, then the screen: if the document can
+                    // still count it, the problem is the file and not the
+                    // paint, and saying which saves an afternoon.
+                    if (window.bomTotalQuantityForTesting() != 0)
+                        fail(("the assembly is gone and the document still counts " +
+                              std::to_string(window.bomTotalQuantityForTesting()) + " parts")
+                                 .c_str());
+                    window.repaintDrawingForTesting();
+                    if (window.drawnUncountedBomsForTesting() != 1)
+                        fail("the assembly went away and the parts list still drew rows");
+                    if (window.drawnBomRowsForTesting() != 0)
+                        fail("a parts list with no assembly still drew its old rows");
+                    // ...and the TREE says so too, on the root, because a
+                    // reader who notices the paper looks wrong goes there.
+                    if (window.probeOutline().state != OutlineState::Failed)
+                        fail("a parts list cannot be counted and the drawing's root row "
+                             "looks fine");
+                }
+
                 // AN EMPTY SHEET IS NOT HANDED OVER AS A FINISHED PLOT
                 // (M35-20). A blank page a program said it wrote is the worst
                 // of both: nobody looks at it until it matters.

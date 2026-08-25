@@ -345,6 +345,20 @@ void MainWindow::buildMenus() {
                        "The binding edge is wider because that is the edge it is filed on."));
     connect(frameAction_, &QAction::triggered, this, &MainWindow::onFrameRequested);
 
+    addBomAction_ = drawingMenu_->addAction(QStringLiteral("&Parts List..."));
+    addBomAction_->setToolTip(
+        QStringLiteral("Counts an assembly, and keeps counting it.\n"
+                       "The quantities are read from the assembly every time the list is "
+                       "drawn -- there is no stored copy to go out of date."));
+    connect(addBomAction_, &QAction::triggered, this, &MainWindow::onAddBomRequested);
+    recountBomAction_ = drawingMenu_->addAction(QStringLiteral("Re-&count Parts Lists"));
+    recountBomAction_->setToolTip(
+        QStringLiteral("Marks every list as looked at. What they SHOW was never out of "
+                       "date; this clears the flag that says the assembly has changed "
+                       "since anybody checked."));
+    connect(recountBomAction_, &QAction::triggered, this,
+            [this] { recountBomCommand(); });
+
     exportDxfAction_ = drawingMenu_->addAction(QStringLiteral("&Export DXF..."));
     exportDxfAction_->setToolTip(
         QStringLiteral("R12, which every CAD program reads.\n"
@@ -3158,8 +3172,12 @@ void MainWindow::refreshCommandStates() {
         if (dimensionStyleAction_ != nullptr) dimensionStyleAction_->setEnabled(isDrawing);
         for (QAction* tool : {drawLineAction_, drawCircleAction_, drawRectangleAction_,
                               titleBlockAction_, frameAction_, plotPdfAction_,
-                              exportDxfAction_})
+                              exportDxfAction_, addBomAction_})
             if (tool != nullptr) tool->setEnabled(isDrawing);
+        // ONLY LIVE WHEN THERE IS SOMETHING TO RE-COUNT, so an enabled command
+        // never does nothing.
+        if (recountBomAction_ != nullptr)
+            recountBomAction_->setEnabled(isDrawing && staleBomCountForTesting() != 0);
         const bool haveInstance = selectedInstance() != kInvalidObjectId;
         if (assemblyMenu_ != nullptr) assemblyMenu_->setEnabled(isAssembly);
         if (insertInstanceAction_ != nullptr) insertInstanceAction_->setEnabled(isAssembly);
@@ -4714,6 +4732,120 @@ QString MainWindow::exportDxfCommand(const QString& path) {
     return say(said);
 }
 
+ObjectId MainWindow::selectedBomTable() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return kInvalidObjectId;
+    return drawing->findBomTable(selectedId_) != nullptr ? selectedId_ : kInvalidObjectId;
+}
+
+Vec2 MainWindow::defaultBomPositionMm() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return Vec2{0.0, 0.0};
+    const Vec2 at = drawing->titleBlockOriginMm();
+    return Vec2{at.x, at.y + drawing->titleBlock().heightMm()};
+}
+
+QString MainWindow::addBomTableCommand(const QString& name, const QString& sourcePath,
+                                       Vec2 positionMm, BomDepth depth) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Only a drawing has a parts list."));
+
+    document_->beginTransaction("Add parts list");
+    BomTable* made = nullptr;
+    try {
+        made = &drawing->addBomTable(name.toStdString(), sourcePath.toStdString(), positionMm);
+        if (depth != BomDepth::TopLevel) drawing->setBomDepth(made->id(), depth);
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That parts list was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction())
+        return say(QStringLiteral("That parts list was refused."));
+
+    // WHAT IT COUNTED, said out loud -- a list that came up empty because the
+    // assembly could not be read looks exactly like one for an assembly with
+    // nothing in it.
+    const BomContents counted = drawing->countBom(*made);
+    selectedId_ = made->id();
+    refreshAll();
+    if (!counted.ok)
+        return say(QStringLiteral("Added %1, but it cannot be counted: %2")
+                       .arg(name, QString::fromStdString(counted.why)));
+    return say(QStringLiteral("Added %1: %2 lines, %3 parts")
+                   .arg(name)
+                   .arg(counted.rows.size())
+                   .arg(counted.totalQuantity()));
+}
+
+QString MainWindow::setBomDepthCommand(BomDepth depth) {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const ObjectId id = selectedBomTable();
+    if (id == kInvalidObjectId) {
+        statusLeft_->setText(QStringLiteral("Select a parts list first."));
+        return {};
+    }
+    if (!drawing->setBomDepth(id, depth)) return {};
+    refreshAll();
+    const QString said =
+        depth == BomDepth::Exploded
+            ? QStringLiteral("Every part, however deep")
+            : QStringLiteral("What this assembly is made of, sub-assemblies as one line each");
+    statusLeft_->setText(said);
+    return said;
+}
+
+QString MainWindow::recountBomCommand() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    std::size_t counted = 0;
+    for (const ObjectId id : drawing->staleBomTables())
+        if (drawing->markBomCounted(id)) ++counted;
+    refreshAll();
+    const QString said = counted == 0
+                             ? QStringLiteral("Every parts list is up to date")
+                             : QStringLiteral("Re-counted %1 parts list(s)").arg(counted);
+    statusLeft_->setText(said);
+    return said;
+}
+
+std::size_t MainWindow::bomTableCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->bomTables().size();
+}
+
+std::size_t MainWindow::staleBomCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->staleBomTables().size();
+}
+
+void MainWindow::repaintDrawingForTesting() {
+    if (drawingCanvas_ != nullptr) drawingCanvas_->repaint();
+}
+
+std::size_t MainWindow::drawnBomRowsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnBomRowsForTesting();
+}
+
+std::size_t MainWindow::drawnUncountedBomsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnUncountedBomsForTesting();
+}
+
+int MainWindow::bomTotalQuantityForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return 0;
+    int total = 0;
+    for (const BomTable* table : drawing->bomTables())
+        total += drawing->countBom(*table).totalQuantity();
+    return total;
+}
+
 QString MainWindow::titleBlockValueForTesting(const QString& label) const {
     const DrawingDocument* drawing = AsDrawing(document_);
     if (drawing == nullptr) return {};
@@ -5099,6 +5231,30 @@ void MainWindow::onExportDxfRequested() {
     // they have to be told before they send the file on.
     if (said.contains(QLatin1Char('\n')))
         QMessageBox::information(this, QStringLiteral("Export DXF"), said);
+}
+
+void MainWindow::onAddBomRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Parts List: which assembly?"), QString(),
+        QStringLiteral("EP3D assembly (*.ep3da)"));
+    if (path.isEmpty()) return;
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, QStringLiteral("Parts List"),
+                                               QStringLiteral("Name:"), QLineEdit::Normal,
+                                               QStringLiteral("Parts"), &ok);
+    if (!ok || name.isEmpty()) return;
+    const QStringList depths{QStringLiteral("What this assembly is made of"),
+                             QStringLiteral("Every part, however deep")};
+    const QString chosen =
+        QInputDialog::getItem(this, QStringLiteral("Parts List"), QStringLiteral("Show:"),
+                              depths, 0, false, &ok);
+    if (!ok) return;
+    // THE LIST SITS ON THE TITLE BLOCK and grows up from it, which is where a
+    // reader looks and where it can get longer without running off the sheet.
+    addBomTableCommand(name, path, defaultBomPositionMm(),
+                       chosen == depths[1] ? BomDepth::Exploded : BomDepth::TopLevel);
 }
 
 void MainWindow::onAddDrawingLayerRequested() {

@@ -188,6 +188,30 @@ SaveResult validateSaveable(const DrawingDocument& document) {
             seenLabels.push_back(field.label);
         }
     }
+    // v39 (M35.6). A parts list is a view of an assembly: it must name one,
+    // and its columns must be a real, distinct set -- checked HERE because the
+    // loader checks the same, and a document that saves cleanly and then
+    // refuses to load is the named worst case (ADR-M3-008).
+    for (const BomTable* table : document.bomTables()) {
+        if (const SaveResult bad = claim(table->id(), "parts list"); !bad) return bad;
+        if (table->sourcePath().empty())
+            return SaveResult{SerializationError::MissingField,
+                              "a parts list names no assembly, so there is nothing for it "
+                              "to count"};
+        // NO CHECK HERE FOR AN EMPTY OR REPEATED COLUMN SET.
+        //
+        // Both were written, and both were dead: the constructor seeds four
+        // columns, setColumns refuses an empty or repeating set, and
+        // restoreBomTable routes through setColumns -- so no in-memory table
+        // can reach either state. Mutations deleting them survived, which is
+        // what dead defensive code looks like from the outside.
+        //
+        // The reachable version of the rule is the LOADER's, because a
+        // hand-edited file can carry both. It is checked there, and tested.
+        if (!(table->rowHeightMm() > 0.0))
+            return SaveResult{SerializationError::InvalidFieldType,
+                              "a parts list with no row height draws nothing anybody can read"};
+    }
     if (!document.frameMargins().fitsOn(document.sheet().widthMm(),
                                         document.sheet().heightMm()))
         return SaveResult{SerializationError::InvalidFieldType,
@@ -454,6 +478,34 @@ JsonValue toJson(const DrawingDocument& document) {
     }
     titleBlock.set("fields", std::move(rows));
     root.set("titleBlock", std::move(titleBlock));
+
+    // v39 (M35.6). WHICH FILE, WHICH COLUMNS, HOW DEEP -- and the stamp, so
+    // staleness survives a reopen.
+    //
+    // THE ROWS ARE NOT WRITTEN. They are counted from the assembly whenever
+    // the list is drawn, and a file carrying them would hold a bill of
+    // materials the assembly no longer has -- the wrong number being the one
+    // somebody orders from.
+    JsonValue tables = JsonValue::makeArray();
+    for (const BomTable* table : document.bomTables()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(table->id())));
+        item.set("name", JsonValue::makeString(table->name()));
+        item.set("sourcePath", JsonValue::makeString(table->sourcePath()));
+        item.set("xMm", JsonValue::makeNumber(table->positionMm().x));
+        item.set("yMm", JsonValue::makeNumber(table->positionMm().y));
+        item.set("depth", JsonValue::makeString(std::string(toString(table->depth()))));
+        item.set("rowHeightMm", JsonValue::makeNumber(table->rowHeightMm()));
+        item.set("growsUpward", JsonValue::makeBool(table->growsUpward()));
+        item.set("sourceStamp",
+                 JsonValue::makeString(std::to_string(table->sourceStamp())));
+        JsonValue columns = JsonValue::makeArray();
+        for (const BomColumn column : table->columns())
+            columns.add(JsonValue::makeString(std::string(toString(column))));
+        item.set("columns", std::move(columns));
+        tables.add(std::move(item));
+    }
+    root.set("bomTables", std::move(tables));
     return root;
 }
 
@@ -1291,6 +1343,129 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         }
     }
 
+    struct BomData {
+        ObjectId id = kInvalidObjectId;
+        std::string name;
+        std::string sourcePath;
+        Vec2 positionMm{};
+        BomDepth depth = BomDepth::TopLevel;
+        std::vector<BomColumn> columns;
+        double rowHeightMm = 8.0;
+        bool growsUpward = true;
+        long long sourceStamp = 0;
+    };
+    std::vector<BomData> bomData;
+    if (const JsonValue* field = root.find("bomTables")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'bomTables' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "bomTables[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            BomData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            if (name->asString().empty())
+                return loadFailure(SerializationError::MissingField,
+                                   context + ": a parts list has no name");
+            one.name = name->asString();
+
+            const JsonValue* source =
+                requireField(entry, "sourcePath", JsonType::String, context, err);
+            if (source == nullptr) return loadFailure(err.error, err.message);
+            if (source->asString().empty())
+                return loadFailure(SerializationError::MissingField,
+                                   context + ": a parts list names no assembly, so there is "
+                                             "nothing for it to count");
+            one.sourcePath = source->asString();
+
+            const JsonValue* x = requireField(entry, "xMm", JsonType::Number, context, err);
+            const JsonValue* y = requireField(entry, "yMm", JsonType::Number, context, err);
+            if (x == nullptr || y == nullptr) return loadFailure(err.error, err.message);
+            one.positionMm = Vec2{x->asNumber(), y->asNumber()};
+
+            if (const JsonValue* depth = entry.find("depth")) {
+                if (depth->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'depth' is not a string");
+                // REFUSED, not defaulted: "every part however deep" and "what
+                // this is made of" are different lists, and quietly picking one
+                // gives a reader a bill of materials for something else.
+                if (!ParseBomDepth(depth->asString(), one.depth))
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       context + ": unknown parts list depth '" +
+                                           depth->asString() + "'");
+            }
+            if (const JsonValue* height = entry.find("rowHeightMm")) {
+                if (height->type() != JsonType::Number)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'rowHeightMm' is not a number");
+                one.rowHeightMm = height->asNumber();
+                if (!(one.rowHeightMm > 0.0))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a parts list with no row height draws "
+                                                 "nothing anybody can read");
+            }
+            if (const JsonValue* upward = entry.find("growsUpward")) {
+                if (upward->type() != JsonType::Bool)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'growsUpward' is not a boolean");
+                one.growsUpward = upward->asBool();
+            }
+            if (const JsonValue* stamp = entry.find("sourceStamp")) {
+                if (stamp->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'sourceStamp' is not a string");
+                try {
+                    one.sourceStamp = std::stoll(stamp->asString());
+                } catch (const std::exception&) {
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'sourceStamp' is not a number");
+                }
+            }
+
+            const JsonValue* columns =
+                requireField(entry, "columns", JsonType::Array, context, err);
+            if (columns == nullptr) return loadFailure(err.error, err.message);
+            if (columns->items().empty())
+                return loadFailure(SerializationError::MissingField,
+                                   context + ": a parts list with no columns is a rectangle");
+            for (const JsonValue& column : columns->items()) {
+                if (column.type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a column is not a string");
+                BomColumn which = BomColumn::Item;
+                // REFUSED. A column this build does not know would otherwise
+                // silently become the item number, and a parts list whose
+                // quantity column turned into a row number is one somebody
+                // orders from.
+                if (!ParseBomColumn(column.asString(), which))
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       context + ": unknown parts list column '" +
+                                           column.asString() + "'");
+                for (const BomColumn already : one.columns)
+                    if (already == which)
+                        return loadFailure(SerializationError::DuplicateId,
+                                           context + ": the column '" + column.asString() +
+                                               "' is shown twice");
+                one.columns.push_back(which);
+            }
+            bomData.push_back(std::move(one));
+        }
+    }
+
     FrameMargins margins;
     double zoneTargetMm = 100.0;
     bool frameVisible = true;
@@ -1539,6 +1714,10 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    std::move(one.textOverride));
     if (currentStyleId != kInvalidObjectId)
         document->restoreCurrentDimensionStyle(currentStyleId);
+    for (auto& one : bomData)
+        document->restoreBomTable(one.id, std::move(one.name), std::move(one.sourcePath),
+                                  one.positionMm, one.depth, std::move(one.columns),
+                                  one.rowHeightMm, one.growsUpward, one.sourceStamp);
     document->restoreFrame(margins, zoneTargetMm, frameVisible);
     // A FILE WITHOUT A TITLE BLOCK KEEPS THE SEEDED ONE, rather than being
     // given an empty box -- an older file predates the block, and a drawing
