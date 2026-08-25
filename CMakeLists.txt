@@ -16,6 +16,9 @@ add_library(ParametricCADCore
     src/Core/Drawing/Sheet.cpp
     src/Core/Drawing/ProjectedGeometry.cpp
     src/Core/Drawing/DrawingTables.cpp
+    src/Core/Drawing/Geometry2D.cpp
+    src/Core/Drawing/DrawingEntity.cpp
+    src/Core/Drawing/ObjectSnap.cpp
     src/Core/Drawing/DrawingView.cpp
     src/Core/Drawing/DrawingDocument.cpp
     src/Core/Assembly/Mate.cpp
@@ -535,6 +538,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/DocumentOutlineTests.cpp
         tests/AssemblyOutlineTests.cpp
         tests/DrawingAlignmentTests.cpp
+        tests/DrawingEntityTests.cpp
         tests/DrawingDocumentTests.cpp
         tests/NamedObjectTests.cpp
         tests/RelationTests.cpp

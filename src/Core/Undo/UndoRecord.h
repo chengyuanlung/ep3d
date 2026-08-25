@@ -2,6 +2,7 @@
 
 #include "Core/Assembly/AssemblyStates.h"
 #include "Core/Document/ObjectId.h"
+#include "Core/Drawing/DrawingEntity.h"
 #include "Core/Feature/FeatureSnapshot.h"
 #include "Core/Geometry/MathTypes.h"
 #include "Core/Sketch/SketchConstraint.h"
@@ -515,6 +516,46 @@ struct DrawingViewPlacementEdit {
     double afterAlignmentOffsetMm = 0.0;
 };
 
+// --- Authored drawing geometry (M33) -----------------------------------------
+//
+// THE SHAPE ITSELF, not a description of the change.
+//
+// A drawn line has no parameters and no constraints: its coordinates ARE the
+// object. So an edit to one is a before-and-after of the whole shape, exactly
+// as SketchEntityGeometryEdit is for the same reason -- and a delta that
+// carried "moved by (3, 4)" would have to be re-derived on every undo, which
+// is where a rounding difference turns a there-and-back into a drift.
+//
+// `DrawShape` is a variant of small structs, so copying one is cheap. That is
+// the same thing that made the whole-value SheetEdit safe.
+struct DrawingEntityExistenceEdit {
+    ObjectId entityId = kInvalidObjectId;
+    DrawShape shape;
+    ObjectId layerId = kInvalidObjectId;
+    int color = 256;
+    std::string linetype;
+    int lineweight = -1;
+    bool addedByTheEdit = false;
+};
+
+struct DrawingEntityShapeEdit {
+    ObjectId entityId = kInvalidObjectId;
+    DrawShape before;
+    DrawShape after;
+};
+
+struct DrawingEntityPropertyEdit {
+    ObjectId entityId = kInvalidObjectId;
+    ObjectId beforeLayerId = kInvalidObjectId;
+    ObjectId afterLayerId = kInvalidObjectId;
+    int beforeColor = 256;
+    int afterColor = 256;
+    std::string beforeLinetype;
+    std::string afterLinetype;
+    int beforeLineweight = -1;
+    int afterLineweight = -1;
+};
+
 using UndoDelta =
     std::variant<ParameterValueEdit, FeatureExistenceEdit, SuppressionEdit, RollbackEdit,
                  ParameterExistenceEdit, FrameExistenceEdit, FrameTransformEdit,
@@ -528,7 +569,8 @@ using UndoDelta =
                  ExplodeStepsEdit, ExplodePreviewEdit, RelationExistenceEdit,
                  RelationValueEdit, SheetEdit, LayerExistenceEdit, LayerPropertyEdit,
                  CurrentLayerEdit, LinetypeExistenceEdit, DrawingViewExistenceEdit,
-                 DrawingViewPlacementEdit>;
+                 DrawingViewPlacementEdit, DrawingEntityExistenceEdit,
+                 DrawingEntityShapeEdit, DrawingEntityPropertyEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

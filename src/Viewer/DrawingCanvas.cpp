@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <variant>
 
 namespace paramcad {
 
@@ -113,6 +114,93 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     painter.fillRect(sheet, paper);
     painter.setPen(QPen(QColor(0, 0, 0, 60), 1.0));
     painter.drawRect(sheet);
+
+    // --- WHAT THE USER DREW (M33) --------------------------------------------
+    //
+    // BEFORE THE VIEWS, so a projected edge is never hidden by a centreline
+    // drawn over it. What a user drew is annotation ON the drawing, and the
+    // drawing is what it annotates.
+    //
+    // Colour and linetype come through the DOCUMENT's resolver, never read off
+    // the entity: ByLayer is the default, and an entity that carried its own
+    // colour would make changing a layer's colour change nothing -- which is
+    // the whole reason layers exist.
+    for (const DrawingEntity* entity : document_->entities()) {
+        if (!document_->isEntityVisible(*entity)) continue;
+        const int aci = document_->resolvedColorOf(*entity);
+        QPen pen(ScreenColorOf(aci, ink));
+        // LINEWEIGHT IS IN HUNDREDTHS OF A MILLIMETRE, which is DXF's unit --
+        // turned into pixels here, at the zoom, so a 0.5 mm line looks like a
+        // 0.5 mm line at every magnification.
+        const int weight = document_->resolvedLineweightOf(*entity);
+        pen.setWidthF(weight > 0 ? std::max(0.8, (weight / 100.0) * zoom_) : 1.2);
+        const std::string linetype = document_->resolvedLinetypeOf(*entity);
+        const Linetype* pattern = document_->findLinetypeNamed(linetype);
+        if (pattern != nullptr && !pattern->isContinuous()) {
+            // THE PATTERN'S OWN LENGTHS, scaled to pixels. Qt wants them as
+            // multiples of the pen width, so the conversion is here and the
+            // table keeps the drawing units DXF stores.
+            QList<qreal> dashes;
+            for (const double segment : pattern->pattern())
+                dashes << std::max(0.1, std::fabs(segment) * zoom_ / std::max(0.1, pen.widthF()));
+            if (dashes.size() % 2 == 1) dashes << dashes.first();
+            pen.setDashPattern(dashes);
+        }
+        painter.setPen(pen);
+
+        if (const auto* text = std::get_if<DrawText>(&entity->shape())) {
+            painter.save();
+            const QPointF at = toScreen(text->at);
+            painter.translate(at);
+            painter.rotate(-text->rotation * 180.0 / (kTwoPi / 2.0));
+            QFont font = painter.font();
+            // THE HEIGHT IS A CAP HEIGHT IN MILLIMETRES, which is how a
+            // drawing specifies text (ISO 3098) -- not a point size.
+            font.setPixelSize(std::max(1, static_cast<int>(text->heightMm * zoom_)));
+            painter.setFont(font);
+            painter.drawText(QPointF(0.0, 0.0), QString::fromStdString(text->text));
+            painter.restore();
+            ++drawnCurves_;
+            continue;
+        }
+        if (const auto* line = std::get_if<DrawLine>(&entity->shape())) {
+            painter.drawLine(toScreen(line->a), toScreen(line->b));
+        } else if (const auto* circle = std::get_if<DrawCircle>(&entity->shape())) {
+            const QPointF centre = toScreen(circle->centre);
+            const double r = circle->radius * zoom_;
+            painter.drawEllipse(QRectF(centre.x() - r, centre.y() - r, 2.0 * r, 2.0 * r));
+        } else if (const auto* arc = std::get_if<DrawArc>(&entity->shape())) {
+            const QPointF centre = toScreen(arc->centre);
+            const double r = arc->radius * zoom_;
+            const double startDeg = -arc->startAngle * 180.0 / (kTwoPi / 2.0);
+            double sweep = arc->endAngle - arc->startAngle;
+            while (sweep <= 0.0) sweep += kTwoPi;
+            painter.drawArc(QRectF(centre.x() - r, centre.y() - r, 2.0 * r, 2.0 * r),
+                            static_cast<int>(startDeg * 16.0),
+                            static_cast<int>(-sweep * 180.0 / (kTwoPi / 2.0) * 16.0));
+        } else if (const auto* point = std::get_if<DrawPoint>(&entity->shape())) {
+            // A POINT IS DRAWN AS A CROSS at a FIXED PIXEL SIZE. A point has
+            // no size in the model, so scaling its marker with the zoom would
+            // make it vanish or swallow the drawing.
+            const QPointF at = toScreen(point->at);
+            painter.drawLine(at + QPointF(-3, 0), at + QPointF(3, 0));
+            painter.drawLine(at + QPointF(0, -3), at + QPointF(0, 3));
+        } else {
+            // Ellipses and polylines, through the entity's own flattening --
+            // the one place a bulge becomes geometry.
+            const std::vector<Vec2> points = entity->flatten(0.05 / std::max(0.05, zoom_));
+            QPainterPath path;
+            for (std::size_t i = 0; i < points.size(); ++i) {
+                const QPointF at = toScreen(points[i]);
+                if (i == 0)
+                    path.moveTo(at);
+                else
+                    path.lineTo(at);
+            }
+            painter.drawPath(path);
+        }
+        ++drawnCurves_;
+    }
 
     // --- THE VIEWS -----------------------------------------------------------
     for (const DrawingView* view : document_->views()) {

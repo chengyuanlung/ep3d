@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Document/DocumentBase.h"
+#include "Core/Drawing/DrawingEntity.h"
 #include "Core/Drawing/DrawingTables.h"
 #include "Core/Drawing/DrawingView.h"
 #include "Core/Drawing/Sheet.h"
@@ -163,6 +164,53 @@ public:
     // prints -- said here rather than discovered at plot time.
     std::string whyViewCannotSitAt(Vec2 positionMm) const;
 
+    // --- Authored geometry (M33) ---------------------------------------------
+    //
+    // What a user DRAWS on the sheet, as against what a view projects. The
+    // distinction this document was built around in M32.1, now with the other
+    // half in it.
+    //
+    // NEW GEOMETRY LANDS ON THE CURRENT LAYER, always. A caller that named a
+    // layer per entity would be a caller that could put something on a frozen
+    // one, and the user would have drawn a line that appears not to have been
+    // drawn.
+    DrawingEntity& addEntity(DrawShape shape);
+    DrawingEntity& restoreEntity(ObjectId id, DrawShape shape, ObjectId layerId, int color,
+                                 std::string linetype, int lineweight);
+    std::vector<const DrawingEntity*> entities() const;
+    const DrawingEntity* findEntity(ObjectId id) const noexcept;
+
+    // MOVE, COPY, ROTATE, SCALE, MIRROR -- all one operation, because they
+    // are. EasyCad had five commands over one `ApplyTransform`, and so does
+    // this: what differs is the matrix the shell builds, not what happens to
+    // the geometry.
+    bool transformEntities(const std::vector<ObjectId>& ids, const Matrix2D& transform);
+    // ...and the copying half, which is the same transform applied to clones.
+    std::vector<ObjectId> copyEntities(const std::vector<ObjectId>& ids,
+                                       const Matrix2D& transform);
+
+    bool setEntityLayer(ObjectId entityId, ObjectId layerId);
+    bool setEntityColor(ObjectId entityId, int color);
+    bool setEntityLinetype(ObjectId entityId, std::string linetype);
+    bool setEntityLineweight(ObjectId entityId, int lineweight);
+
+    // WHAT IS UNDER THE CURSOR, nearest first, within `apertureMm`. Entities
+    // on invisible or locked layers are NOT offered: a lock that still let
+    // things be picked would be a lock in name only.
+    std::vector<ObjectId> entitiesNear(Vec2 point, double apertureMm) const;
+    // Window (fully inside) or crossing (touching) -- two different rules,
+    // and a package with only one of them surprises everybody who has met the
+    // other.
+    std::vector<ObjectId> entitiesInWindow(const Box2D& window, bool crossing) const;
+
+    // The layer an entity is drawn with, resolved through ByLayer. ONE reader,
+    // so the canvas, a plot and a DXF write cannot disagree about what colour
+    // something is.
+    int resolvedColorOf(const DrawingEntity& entity) const;
+    std::string resolvedLinetypeOf(const DrawingEntity& entity) const;
+    int resolvedLineweightOf(const DrawingEntity& entity) const;
+    bool isEntityVisible(const DrawingEntity& entity) const;
+
     // --- DocumentBase --------------------------------------------------------
     DocumentRecomputeReport recompute() override;
     bool removeOwnObject(ObjectId id) override;
@@ -173,6 +221,7 @@ protected:
 
 private:
     DrawingView* findViewForEdit(ObjectId id) noexcept;
+    DrawingEntity* findEntityForEdit(ObjectId id) noexcept;
     Layer* findLayerForEdit(ObjectId id) noexcept;
     // The seeded table every drawing starts with: layer 0 and CONTINUOUS.
     // Written through the restore path so a new document carries no undo
@@ -184,6 +233,7 @@ private:
     std::vector<std::unique_ptr<Layer>> layers_;
     std::vector<std::unique_ptr<Linetype>> linetypes_;
     std::vector<std::unique_ptr<DrawingView>> views_;
+    std::vector<std::unique_ptr<DrawingEntity>> entities_;
     ObjectId currentLayerId_{kInvalidObjectId};
 };
 

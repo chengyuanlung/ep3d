@@ -127,6 +127,20 @@ SaveResult validateSaveable(const DrawingDocument& document) {
             return SaveResult{SerializationError::InvalidFieldType,
                               "view '" + view->name() + "' has a scale that is not a ratio"};
     }
+    // v36 (M33). An entity names a layer and a linetype, and the loader checks
+    // both -- so this checks them first (ADR-M3-008).
+    for (const DrawingEntity* entity : document.entities()) {
+        if (const SaveResult bad = claim(entity->id(), "entity"); !bad) return bad;
+        if (document.findLayer(entity->layerId()) == nullptr)
+            return SaveResult{SerializationError::UnknownDependencyId,
+                              std::string(ShapeName(entity->shape())) +
+                                  " is on a layer that is not in this document"};
+        if (entity->linetype() != "BYLAYER" && entity->linetype() != "BYBLOCK" &&
+            document.findLinetypeNamed(entity->linetype()) == nullptr)
+            return SaveResult{SerializationError::UnknownDependencyId,
+                              std::string(ShapeName(entity->shape())) + " uses linetype '" +
+                                  entity->linetype() + "', which is not in this document"};
+    }
     if (!document.sheet().scale().valid())
         return SaveResult{SerializationError::InvalidFieldType,
                           "the sheet scale is not a ratio"};
@@ -226,6 +240,74 @@ JsonValue toJson(const DrawingDocument& document) {
         views.add(std::move(entry));
     }
     root.set("views", std::move(views));
+
+    // v36 (M33). THE AUTHORED half of the sheet: what a user drew, as against
+    // what a view projected. Projected curves are NOT written -- they are
+    // derived, and a file carrying them would be a file with a second, stale
+    // answer about what the model looks like.
+    JsonValue entities = JsonValue::makeArray();
+    for (const DrawingEntity* entity : document.entities()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(entity->id())));
+        item.set("layerId", JsonValue::makeString(idToString(entity->layerId())));
+        item.set("color", JsonValue::makeNumber(static_cast<double>(entity->color())));
+        item.set("linetype", JsonValue::makeString(entity->linetype()));
+        item.set("lineweight",
+                 JsonValue::makeNumber(static_cast<double>(entity->lineweight())));
+        item.set("kind", JsonValue::makeString(std::string(ShapeName(entity->shape()))));
+
+        const auto point = [](Vec2 at) {
+            JsonValue out = JsonValue::makeObject();
+            out.set("x", JsonValue::makeNumber(at.x));
+            out.set("y", JsonValue::makeNumber(at.y));
+            return out;
+        };
+        std::visit(
+            [&](const auto& shape) {
+                using T = std::decay_t<decltype(shape)>;
+                if constexpr (std::is_same_v<T, DrawPoint>) {
+                    item.set("at", point(shape.at));
+                } else if constexpr (std::is_same_v<T, DrawLine>) {
+                    item.set("a", point(shape.a));
+                    item.set("b", point(shape.b));
+                } else if constexpr (std::is_same_v<T, DrawCircle>) {
+                    item.set("centre", point(shape.centre));
+                    item.set("radius", JsonValue::makeNumber(shape.radius));
+                } else if constexpr (std::is_same_v<T, DrawArc>) {
+                    item.set("centre", point(shape.centre));
+                    item.set("radius", JsonValue::makeNumber(shape.radius));
+                    // RADIANS, counter-clockwise, start to end -- the one
+                    // convention the whole drawing layer uses. Degrees would
+                    // be a second unit in a file that has none.
+                    item.set("startAngle", JsonValue::makeNumber(shape.startAngle));
+                    item.set("endAngle", JsonValue::makeNumber(shape.endAngle));
+                } else if constexpr (std::is_same_v<T, DrawEllipse>) {
+                    item.set("centre", point(shape.centre));
+                    item.set("majorRadius", JsonValue::makeNumber(shape.majorRadius));
+                    item.set("minorRadius", JsonValue::makeNumber(shape.minorRadius));
+                    item.set("rotation", JsonValue::makeNumber(shape.rotation));
+                } else if constexpr (std::is_same_v<T, DrawPolyline>) {
+                    JsonValue vertices = JsonValue::makeArray();
+                    for (const DrawVertex& vertex : shape.vertices) {
+                        JsonValue one = point(vertex.at);
+                        // THE BULGE, as DXF stores it. Converting to an angle
+                        // here would make a round trip lossy at every vertex.
+                        one.set("bulge", JsonValue::makeNumber(vertex.bulge));
+                        vertices.add(std::move(one));
+                    }
+                    item.set("vertices", std::move(vertices));
+                    item.set("closed", JsonValue::makeBool(shape.closed));
+                } else {
+                    item.set("at", point(shape.at));
+                    item.set("text", JsonValue::makeString(shape.text));
+                    item.set("heightMm", JsonValue::makeNumber(shape.heightMm));
+                    item.set("rotation", JsonValue::makeNumber(shape.rotation));
+                }
+            },
+            entity->shape());
+        entities.add(std::move(item));
+    }
+    root.set("entities", std::move(entities));
     return root;
 }
 
@@ -647,6 +729,192 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         }
     }
 
+    struct EntityData {
+        ObjectId id = kInvalidObjectId;
+        DrawShape shape;
+        ObjectId layerId = kInvalidObjectId;
+        int color = kColorByLayer;
+        std::string linetype = "BYLAYER";
+        int lineweight = kLineweightByLayer;
+    };
+    std::vector<EntityData> entityData;
+    if (const JsonValue* field = root.find("entities")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'entities' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "entities[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            EntityData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+
+            const JsonValue* layerField =
+                requireField(entry, "layerId", JsonType::String, context, err);
+            if (layerField == nullptr) return loadFailure(err.error, err.message);
+            const auto layerId = idFromString(layerField->asString());
+            if (!layerId.has_value())
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": 'layerId' is not a valid ObjectId");
+            bool layerIsHere = false;
+            for (const LayerData& candidate : layerData)
+                if (candidate.id == *layerId) layerIsHere = true;
+            if (!layerIsHere)
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   context + ": layerId " + idToString(*layerId) +
+                                       " is not a layer in this document");
+            one.layerId = *layerId;
+
+            if (const JsonValue* color = entry.find("color")) {
+                if (color->type() != JsonType::Number)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'color' is not a number");
+                one.color = static_cast<int>(color->asNumber());
+            }
+            if (const JsonValue* linetype = entry.find("linetype")) {
+                if (linetype->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'linetype' is not a string");
+                const std::string& name = linetype->asString();
+                if (name != "BYLAYER" && name != "BYBLOCK") {
+                    bool isHere = false;
+                    for (const LinetypeData& candidate : linetypeData)
+                        if (candidate.name == name) isHere = true;
+                    if (!isHere)
+                        return loadFailure(SerializationError::UnknownDependencyId,
+                                           context + ": linetype '" + name +
+                                               "' is not in this document");
+                }
+                one.linetype = name;
+            }
+            if (const JsonValue* lineweight = entry.find("lineweight")) {
+                if (lineweight->type() != JsonType::Number)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'lineweight' is not a number");
+                one.lineweight = static_cast<int>(lineweight->asNumber());
+            }
+
+            const JsonValue* kind = requireField(entry, "kind", JsonType::String, context, err);
+            if (kind == nullptr) return loadFailure(err.error, err.message);
+
+            const auto readPoint = [&](const char* key, Vec2& into) -> bool {
+                const JsonValue* at = requireField(entry, key, JsonType::Object, context, err);
+                if (at == nullptr) return false;
+                const JsonValue* x = requireField(*at, "x", JsonType::Number, context, err);
+                const JsonValue* y = requireField(*at, "y", JsonType::Number, context, err);
+                if (x == nullptr || y == nullptr) return false;
+                into = Vec2{x->asNumber(), y->asNumber()};
+                return true;
+            };
+            const auto readNumber = [&](const char* key, double& into) -> bool {
+                const JsonValue* value = requireField(entry, key, JsonType::Number, context, err);
+                if (value == nullptr) return false;
+                into = value->asNumber();
+                return true;
+            };
+
+            const std::string& shapeKind = kind->asString();
+            if (shapeKind == "Point") {
+                DrawPoint shape;
+                if (!readPoint("at", shape.at)) return loadFailure(err.error, err.message);
+                one.shape = shape;
+            } else if (shapeKind == "Line") {
+                DrawLine shape;
+                if (!readPoint("a", shape.a) || !readPoint("b", shape.b))
+                    return loadFailure(err.error, err.message);
+                one.shape = shape;
+            } else if (shapeKind == "Circle") {
+                DrawCircle shape;
+                if (!readPoint("centre", shape.centre) || !readNumber("radius", shape.radius))
+                    return loadFailure(err.error, err.message);
+                if (!(shape.radius > 0.0))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a circle has no radius");
+                one.shape = shape;
+            } else if (shapeKind == "Arc") {
+                DrawArc shape;
+                if (!readPoint("centre", shape.centre) || !readNumber("radius", shape.radius) ||
+                    !readNumber("startAngle", shape.startAngle) ||
+                    !readNumber("endAngle", shape.endAngle))
+                    return loadFailure(err.error, err.message);
+                if (!(shape.radius > 0.0))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": an arc has no radius");
+                one.shape = shape;
+            } else if (shapeKind == "Ellipse") {
+                DrawEllipse shape;
+                if (!readPoint("centre", shape.centre) ||
+                    !readNumber("majorRadius", shape.majorRadius) ||
+                    !readNumber("minorRadius", shape.minorRadius) ||
+                    !readNumber("rotation", shape.rotation))
+                    return loadFailure(err.error, err.message);
+                // THE MAJOR AXIS IS THE LONGER ONE, by definition. A file that
+                // says otherwise would draw an ellipse turned ninety degrees
+                // from the one it describes.
+                if (!(shape.majorRadius >= shape.minorRadius) || !(shape.minorRadius > 0.0))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": an ellipse's major axis is not its longer "
+                                                 "one");
+                one.shape = shape;
+            } else if (shapeKind == "Polyline") {
+                DrawPolyline shape;
+                const JsonValue* vertices =
+                    requireField(entry, "vertices", JsonType::Array, context, err);
+                if (vertices == nullptr) return loadFailure(err.error, err.message);
+                for (const JsonValue& vertex : vertices->items()) {
+                    if (vertex.type() != JsonType::Object)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": a vertex is not an object");
+                    const JsonValue* x = requireField(vertex, "x", JsonType::Number, context, err);
+                    const JsonValue* y = requireField(vertex, "y", JsonType::Number, context, err);
+                    if (x == nullptr || y == nullptr) return loadFailure(err.error, err.message);
+                    double bulge = 0.0;
+                    if (const JsonValue* value = vertex.find("bulge")) {
+                        if (value->type() != JsonType::Number)
+                            return loadFailure(SerializationError::InvalidFieldType,
+                                               context + ": a bulge is not a number");
+                        bulge = value->asNumber();
+                    }
+                    shape.vertices.push_back(
+                        DrawVertex{Vec2{x->asNumber(), y->asNumber()}, bulge});
+                }
+                if (const JsonValue* closed = entry.find("closed")) {
+                    if (closed->type() != JsonType::Bool)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'closed' is not a boolean");
+                    shape.closed = closed->asBool();
+                }
+                one.shape = shape;
+            } else if (shapeKind == "Text") {
+                DrawText shape;
+                const JsonValue* text =
+                    requireField(entry, "text", JsonType::String, context, err);
+                if (text == nullptr) return loadFailure(err.error, err.message);
+                shape.text = text->asString();
+                if (!readPoint("at", shape.at) || !readNumber("heightMm", shape.heightMm) ||
+                    !readNumber("rotation", shape.rotation))
+                    return loadFailure(err.error, err.message);
+                if (!(shape.heightMm > 0.0))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": text with no height cannot be read");
+                one.shape = shape;
+            } else {
+                return loadFailure(SerializationError::InvalidEnumValue,
+                                   context + ": unknown entity kind '" + shapeKind + "'");
+            }
+            entityData.push_back(std::move(one));
+        }
+    }
+
     ObjectId currentLayerId = kInvalidObjectId;
     if (const JsonValue* field = root.find("currentLayerId")) {
         if (field->type() != JsonType::String)
@@ -721,6 +989,10 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                               one.positionMm, one.scale, one.ownScale, one.showHidden,
                               one.showTangent, one.parentViewId, one.alignmentOffsetMm);
     }
+    // ENTITIES AFTER THE TABLES, because each names a layer.
+    for (auto& one : entityData)
+        document->restoreEntity(one.id, std::move(one.shape), one.layerId, one.color,
+                                std::move(one.linetype), one.lineweight);
     if (currentLayerId != kInvalidObjectId) document->restoreCurrentLayer(currentLayerId);
 
     // A loaded document starts with an EMPTY history (ADR-M9-001).

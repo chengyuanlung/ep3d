@@ -4,6 +4,7 @@
 #include "Core/Document/SourceShapeResolver.h"
 #include "Core/Undo/UndoRecord.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -775,6 +776,234 @@ bool DrawingDocument::clearViewScale(ObjectId viewId) {
 }
 
 // =============================================================================
+// Authored geometry (M33)
+// =============================================================================
+
+namespace {
+// The whole property set, before and after, filled the same way -- so four
+// setters cannot each forget a different field.
+void SnapshotEntityInto(const DrawingEntity& entity, DrawingEntityPropertyEdit& edit) {
+    edit.entityId = entity.id();
+    edit.beforeLayerId = entity.layerId();
+    edit.afterLayerId = entity.layerId();
+    edit.beforeColor = entity.color();
+    edit.afterColor = entity.color();
+    edit.beforeLinetype = entity.linetype();
+    edit.afterLinetype = entity.linetype();
+    edit.beforeLineweight = entity.lineweight();
+    edit.afterLineweight = entity.lineweight();
+}
+} // namespace
+
+DrawingEntity& DrawingDocument::addEntity(DrawShape shape) {
+    // THE CURRENT LAYER, always -- see the header. `setCurrentLayer` already
+    // refuses a frozen or locked one, so this cannot land somewhere the user
+    // would not see it.
+    auto item = std::make_unique<DrawingEntity>(std::move(shape), currentLayerId_);
+    auto& ref = *item;
+    entities_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+
+    DrawingEntityExistenceEdit edit;
+    edit.entityId = ref.id();
+    edit.shape = ref.shape();
+    edit.layerId = ref.layerId();
+    edit.color = ref.color();
+    edit.linetype = ref.linetype();
+    edit.lineweight = ref.lineweight();
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Draw " + std::string(ShapeName(ref.shape())));
+    return ref;
+}
+
+DrawingEntity& DrawingDocument::restoreEntity(ObjectId id, DrawShape shape, ObjectId layerId,
+                                              int color, std::string linetype, int lineweight) {
+    requireUnusedId(id, "restoreEntity");
+    auto item = std::make_unique<DrawingEntity>(id, std::move(shape), layerId, color,
+                                                std::move(linetype), lineweight);
+    auto& ref = *item;
+    entities_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const DrawingEntity*> DrawingDocument::entities() const {
+    std::vector<const DrawingEntity*> all;
+    all.reserve(entities_.size());
+    for (const std::unique_ptr<DrawingEntity>& one : entities_) all.push_back(one.get());
+    return all;
+}
+
+const DrawingEntity* DrawingDocument::findEntity(ObjectId id) const noexcept {
+    for (const std::unique_ptr<DrawingEntity>& one : entities_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+DrawingEntity* DrawingDocument::findEntityForEdit(ObjectId id) noexcept {
+    for (const std::unique_ptr<DrawingEntity>& one : entities_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+bool DrawingDocument::transformEntities(const std::vector<ObjectId>& ids,
+                                        const Matrix2D& transform) {
+    // ONE UNDO STEP FOR THE WHOLE SELECTION. Moving forty lines is one thing
+    // the user did, and undoing it a line at a time would stop somewhere no
+    // drawing was ever in.
+    const bool ownsStep = !isTransactionOpen() && !applyingHistory();
+    if (ownsStep) beginTransaction("Transform");
+    bool any = false;
+    for (const ObjectId id : ids) {
+        DrawingEntity* entity = findEntityForEdit(id);
+        if (entity == nullptr) continue;
+        // A LOCKED LAYER MEANS LOCKED. Silently moving something on one is the
+        // failure a lock exists to prevent.
+        const Layer* layer = findLayer(entity->layerId());
+        if (layer != nullptr && layer->isLocked()) continue;
+        DrawingEntityShapeEdit edit;
+        edit.entityId = id;
+        edit.before = entity->shape();
+        entity->applyTransform(transform);
+        edit.after = entity->shape();
+        recordDelta(edit, "Transform");
+        any = true;
+    }
+    if (ownsStep) commitTransaction();
+    return any;
+}
+
+std::vector<ObjectId> DrawingDocument::copyEntities(const std::vector<ObjectId>& ids,
+                                                    const Matrix2D& transform) {
+    std::vector<ObjectId> made;
+    const bool ownsStep = !isTransactionOpen() && !applyingHistory();
+    if (ownsStep) beginTransaction("Copy");
+    for (const ObjectId id : ids) {
+        const DrawingEntity* source = findEntity(id);
+        if (source == nullptr) continue;
+        // THE COPY KEEPS THE ORIGINAL'S LAYER AND OVERRIDES, not the current
+        // layer's. A copy that landed somewhere else would be a copy that
+        // looks different from what was copied.
+        DrawingEntity& copy = addEntity(TransformShape(source->shape(), transform));
+        setEntityLayer(copy.id(), source->layerId());
+        setEntityColor(copy.id(), source->color());
+        setEntityLinetype(copy.id(), source->linetype());
+        setEntityLineweight(copy.id(), source->lineweight());
+        made.push_back(copy.id());
+    }
+    if (ownsStep) commitTransaction();
+    return made;
+}
+
+bool DrawingDocument::setEntityLayer(ObjectId entityId, ObjectId layerId) {
+    DrawingEntity* entity = findEntityForEdit(entityId);
+    if (entity == nullptr || findLayer(layerId) == nullptr) return false;
+    DrawingEntityPropertyEdit edit;
+    SnapshotEntityInto(*entity, edit);
+    edit.afterLayerId = layerId;
+    entity->setLayerId(layerId);
+    recordDelta(edit, "Layer");
+    return true;
+}
+
+bool DrawingDocument::setEntityColor(ObjectId entityId, int color) {
+    DrawingEntity* entity = findEntityForEdit(entityId);
+    if (entity == nullptr) return false;
+    DrawingEntityPropertyEdit edit;
+    SnapshotEntityInto(*entity, edit);
+    edit.afterColor = color;
+    entity->setColor(color);
+    recordDelta(edit, "Colour");
+    return true;
+}
+
+bool DrawingDocument::setEntityLinetype(ObjectId entityId, std::string linetype) {
+    DrawingEntity* entity = findEntityForEdit(entityId);
+    if (entity == nullptr) return false;
+    // BYLAYER IS ALWAYS ALLOWED; anything else has to be in the table, or the
+    // entity names a linetype no DXF reader can resolve.
+    if (linetype != "BYLAYER" && linetype != "BYBLOCK" &&
+        findLinetypeNamed(linetype) == nullptr)
+        return false;
+    DrawingEntityPropertyEdit edit;
+    SnapshotEntityInto(*entity, edit);
+    edit.afterLinetype = linetype;
+    entity->setLinetype(std::move(linetype));
+    recordDelta(edit, "Linetype");
+    return true;
+}
+
+bool DrawingDocument::setEntityLineweight(ObjectId entityId, int lineweight) {
+    DrawingEntity* entity = findEntityForEdit(entityId);
+    if (entity == nullptr) return false;
+    DrawingEntityPropertyEdit edit;
+    SnapshotEntityInto(*entity, edit);
+    edit.afterLineweight = lineweight;
+    entity->setLineweight(lineweight);
+    recordDelta(edit, "Lineweight");
+    return true;
+}
+
+int DrawingDocument::resolvedColorOf(const DrawingEntity& entity) const {
+    if (entity.color() != kColorByLayer && entity.color() != kColorByBlock)
+        return entity.color();
+    const Layer* layer = findLayer(entity.layerId());
+    return layer != nullptr ? layer->color() : 7;
+}
+
+std::string DrawingDocument::resolvedLinetypeOf(const DrawingEntity& entity) const {
+    if (entity.linetype() != "BYLAYER" && entity.linetype() != "BYBLOCK")
+        return entity.linetype();
+    const Layer* layer = findLayer(entity.layerId());
+    return layer != nullptr ? layer->linetype() : std::string(kContinuousLinetypeName);
+}
+
+int DrawingDocument::resolvedLineweightOf(const DrawingEntity& entity) const {
+    if (entity.lineweight() >= 0) return entity.lineweight();
+    const Layer* layer = findLayer(entity.layerId());
+    return layer != nullptr ? layer->lineweight() : kLineweightDefault;
+}
+
+bool DrawingDocument::isEntityVisible(const DrawingEntity& entity) const {
+    const Layer* layer = findLayer(entity.layerId());
+    return layer == nullptr || layer->isVisible();
+}
+
+std::vector<ObjectId> DrawingDocument::entitiesNear(Vec2 point, double apertureMm) const {
+    // NEAREST FIRST, so a caller taking the front gets what the user aimed at.
+    std::vector<std::pair<double, ObjectId>> hits;
+    for (const std::unique_ptr<DrawingEntity>& one : entities_) {
+        const Layer* layer = findLayer(one->layerId());
+        // NOT PICKABLE: invisible, or locked. A lock that still let things be
+        // picked would be a lock in name only.
+        if (layer != nullptr && (!layer->isVisible() || layer->isLocked())) continue;
+        const double distance = one->distanceTo(point);
+        if (distance <= apertureMm) hits.emplace_back(distance, one->id());
+    }
+    std::sort(hits.begin(), hits.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<ObjectId> ids;
+    ids.reserve(hits.size());
+    for (const auto& hit : hits) ids.push_back(hit.second);
+    return ids;
+}
+
+std::vector<ObjectId> DrawingDocument::entitiesInWindow(const Box2D& window,
+                                                        bool crossing) const {
+    std::vector<ObjectId> ids;
+    for (const std::unique_ptr<DrawingEntity>& one : entities_) {
+        const Layer* layer = findLayer(one->layerId());
+        if (layer != nullptr && (!layer->isVisible() || layer->isLocked())) continue;
+        const Box2D box = one->bounds();
+        // WINDOW is fully inside; CROSSING is merely touching. Two different
+        // rules, and AutoCAD picks between them by which way the box was
+        // dragged -- which is the shell's business, not this one's.
+        if (crossing ? box.touches(window) : box.insideOf(window)) ids.push_back(one->id());
+    }
+    return ids;
+}
+
+// =============================================================================
 // What this document owes DocumentBase
 // =============================================================================
 
@@ -851,6 +1080,29 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
         return true;
     }
 
+    // AN ENTITY: nothing owns it and nothing else reads it. Annotation that
+    // measures one arrives in M34, and that is when this grows a cascade.
+    if (const DrawingEntity* entity = findEntity(id)) {
+        if (!applyingHistory()) {
+            DrawingEntityExistenceEdit edit;
+            edit.entityId = id;
+            edit.shape = entity->shape();
+            edit.layerId = entity->layerId();
+            edit.color = entity->color();
+            edit.linetype = entity->linetype();
+            edit.lineweight = entity->lineweight();
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Erase " + std::string(ShapeName(entity->shape())));
+        }
+        registry_.unregisterObject(id);
+        for (auto it = entities_.begin(); it != entities_.end(); ++it)
+            if ((*it)->id() == id) {
+                entities_.erase(it);
+                break;
+            }
+        return true;
+    }
+
     // A LAYER, except the two a drawing may never be without.
     //
     // THE GUARDS PROTECT THE USER, NOT THE LOADER. A file carries its own
@@ -869,6 +1121,12 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
             // geometry with nowhere to land, and silently moving the current
             // layer elsewhere is a change the user did not ask for.
             if (id == currentLayerId_) return false;
+            // A LAYER WITH GEOMETRY ON IT CANNOT GO EITHER. AutoCAD refuses
+            // this too, and the alternative -- deleting the geometry with it
+            // -- would throw away work in response to a command about a
+            // table entry. The count is in the caller's message, not here.
+            for (const std::unique_ptr<DrawingEntity>& one : entities_)
+                if (one->layerId() == id) return false;
         }
         if (!applyingHistory()) {
             LayerExistenceEdit edit;
@@ -926,6 +1184,31 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
 }
 
 void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
+    if (const auto* edit = std::get_if<DrawingEntityExistenceEdit>(&delta)) {
+        const bool shouldExist = forward ? edit->addedByTheEdit : !edit->addedByTheEdit;
+        const bool doesExist = findEntity(edit->entityId) != nullptr;
+        if (shouldExist == doesExist) return;
+        if (shouldExist)
+            restoreEntity(edit->entityId, edit->shape, edit->layerId, edit->color,
+                          edit->linetype, edit->lineweight);
+        else
+            removeObject(edit->entityId);
+        return;
+    }
+    if (const auto* edit = std::get_if<DrawingEntityShapeEdit>(&delta)) {
+        if (DrawingEntity* entity = findEntityForEdit(edit->entityId))
+            entity->setShape(forward ? edit->after : edit->before);
+        return;
+    }
+    if (const auto* edit = std::get_if<DrawingEntityPropertyEdit>(&delta)) {
+        DrawingEntity* entity = findEntityForEdit(edit->entityId);
+        if (entity == nullptr) return;
+        entity->setLayerId(forward ? edit->afterLayerId : edit->beforeLayerId);
+        entity->setColor(forward ? edit->afterColor : edit->beforeColor);
+        entity->setLinetype(forward ? edit->afterLinetype : edit->beforeLinetype);
+        entity->setLineweight(forward ? edit->afterLineweight : edit->beforeLineweight);
+        return;
+    }
     if (const auto* edit = std::get_if<SheetEdit>(&delta)) {
         const int size = forward ? edit->afterSize : edit->beforeSize;
         const int orientation = forward ? edit->afterOrientation : edit->beforeOrientation;
