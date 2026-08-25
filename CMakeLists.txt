@@ -12,6 +12,10 @@ add_library(ParametricCADCore
     src/Core/Document/CadDocument.cpp
     src/Core/Document/ObjectRegistry.cpp
     src/Core/Assembly/AssemblyDocument.cpp
+    src/Core/Drawing/Sheet.cpp
+    src/Core/Drawing/DrawingTables.cpp
+    src/Core/Drawing/DrawingView.cpp
+    src/Core/Drawing/DrawingDocument.cpp
     src/Core/Assembly/Mate.cpp
     src/Core/Assembly/Relation.cpp
     src/Core/Assembly/MateFreedom.cpp
@@ -55,6 +59,7 @@ add_library(ParametricCADCore
     src/Core/Serialization/JsonValue.cpp
     src/Core/Serialization/DocumentJson.cpp
     src/Core/Serialization/AssemblyDocumentSerializer.cpp
+    src/Core/Serialization/DrawingDocumentSerializer.cpp
     src/Core/Serialization/PartDocumentSerializer.cpp
     src/Core/Import/ImportedGeometry.cpp
     src/Core/Import/SketchImporter.cpp
@@ -524,6 +529,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/M4ReviewFindingTests.cpp
         tests/DocumentOutlineTests.cpp
         tests/AssemblyOutlineTests.cpp
+        tests/DrawingDocumentTests.cpp
         tests/NamedObjectTests.cpp
         tests/RelationTests.cpp
         tests/SerializationV5Tests.cpp

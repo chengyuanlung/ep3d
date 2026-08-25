@@ -72,6 +72,7 @@ std::optional<DocumentType> documentTypeOfFile(const std::string& path) {
     if (type == nullptr || type->type() != JsonType::String) return std::nullopt;
     if (type->asString() == "Assembly") return DocumentType::Assembly;
     if (type->asString() == "Part") return DocumentType::Part;
+    if (type->asString() == "Drawing") return DocumentType::Drawing;
     return std::nullopt;
 }
 

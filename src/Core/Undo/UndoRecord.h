@@ -398,6 +398,111 @@ struct RelationValueEdit {
     bool afterReversed = false;
 };
 
+// --- Drawing (M32) -----------------------------------------------------------
+//
+// THE WHOLE SMALL VALUE, BEFORE AND AFTER.
+//
+// A sheet, a layer's properties and a view's placement are each a handful of
+// fields that a user changes one dialog at a time. A delta per FIELD would be
+// six near-identical types whose only difference is which member they carry --
+// and the day a field is added, five of them are right and the new one is
+// missing from somebody's switch. Carrying the whole value makes a partial
+// restore impossible to write.
+//
+// This is only safe because these values are SMALL and OWN nothing. A delta
+// that carried a body this way would be a copy of the geometry.
+
+struct SheetEdit {
+    // SheetSize and SheetOrientation as their underlying values, to keep this
+    // header free of the drawing headers -- the same reason MateExistenceEdit
+    // carries an int for its type.
+    int beforeSize = 0;
+    int afterSize = 0;
+    int beforeOrientation = 0;
+    int afterOrientation = 0;
+    int beforeScaleNumerator = 1;
+    int beforeScaleDenominator = 1;
+    int afterScaleNumerator = 1;
+    int afterScaleDenominator = 1;
+    double beforeWidthMm = 0.0;
+    double beforeHeightMm = 0.0;
+    double afterWidthMm = 0.0;
+    double afterHeightMm = 0.0;
+};
+
+struct LayerExistenceEdit {
+    ObjectId layerId = kInvalidObjectId;
+    std::string name;
+    int color = 7;
+    std::string linetype;
+    bool on = true;
+    bool frozen = false;
+    bool locked = false;
+    int lineweight = -3;
+    bool addedByTheEdit = false;
+};
+
+struct LayerPropertyEdit {
+    ObjectId layerId = kInvalidObjectId;
+    int beforeColor = 7;
+    int afterColor = 7;
+    std::string beforeLinetype;
+    std::string afterLinetype;
+    bool beforeOn = true;
+    bool afterOn = true;
+    bool beforeFrozen = false;
+    bool afterFrozen = false;
+    bool beforeLocked = false;
+    bool afterLocked = false;
+    int beforeLineweight = -3;
+    int afterLineweight = -3;
+};
+
+struct CurrentLayerEdit {
+    ObjectId before = kInvalidObjectId;
+    ObjectId after = kInvalidObjectId;
+};
+
+struct LinetypeExistenceEdit {
+    ObjectId linetypeId = kInvalidObjectId;
+    std::string name;
+    std::string description;
+    std::vector<double> pattern;
+    bool addedByTheEdit = false;
+};
+
+struct DrawingViewExistenceEdit {
+    ObjectId viewId = kInvalidObjectId;
+    std::string name;
+    std::string sourcePath;
+    std::string bodyName;
+    int direction = 0;
+    double positionXMm = 0.0;
+    double positionYMm = 0.0;
+    int scaleNumerator = 1;
+    int scaleDenominator = 1;
+    bool ownScale = false;
+    bool addedByTheEdit = false;
+};
+
+// Where a view sits, which way it looks and what it is drawn at -- the whole
+// placement, for the reason stated above.
+struct DrawingViewPlacementEdit {
+    ObjectId viewId = kInvalidObjectId;
+    double beforeXMm = 0.0;
+    double beforeYMm = 0.0;
+    double afterXMm = 0.0;
+    double afterYMm = 0.0;
+    int beforeDirection = 0;
+    int afterDirection = 0;
+    int beforeScaleNumerator = 1;
+    int beforeScaleDenominator = 1;
+    int afterScaleNumerator = 1;
+    int afterScaleDenominator = 1;
+    bool beforeOwnScale = false;
+    bool afterOwnScale = false;
+};
+
 using UndoDelta =
     std::variant<ParameterValueEdit, FeatureExistenceEdit, SuppressionEdit, RollbackEdit,
                  ParameterExistenceEdit, FrameExistenceEdit, FrameTransformEdit,
@@ -409,7 +514,9 @@ using UndoDelta =
                  MateValueEdit, InstanceGroundEdit, MateLimitEdit, MateDrivenEdit,
                  NamedPositionExistenceEdit, ExplodeViewExistenceEdit,
                  ExplodeStepsEdit, ExplodePreviewEdit, RelationExistenceEdit,
-                 RelationValueEdit>;
+                 RelationValueEdit, SheetEdit, LayerExistenceEdit, LayerPropertyEdit,
+                 CurrentLayerEdit, LinetypeExistenceEdit, DrawingViewExistenceEdit,
+                 DrawingViewPlacementEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

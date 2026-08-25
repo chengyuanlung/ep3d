@@ -8,6 +8,7 @@
 #include "Core/Assembly/AssemblyStates.h"
 #include "Core/Assembly/Mate.h"
 #include "Core/Assembly/Relation.h"
+#include "Core/Drawing/DrawingTables.h"
 #include "Core/Connector/Connector.h"
 #include "Core/Sketch/Sketch.h"
 #include <type_traits>

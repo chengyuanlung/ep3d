@@ -20,6 +20,8 @@ class Mate;
 class NamedPosition;
 class ExplodeView;
 class Relation;
+class Layer;
+class Linetype;
 class IRecomputable;
 
 // Document-local ObjectId -> object lookup (ADR-010). Stores type-safe
@@ -45,7 +47,8 @@ public:
     // under IRecomputable, because it is one.
     using ObjectRef = std::variant<Parameter*, Body*, Feature*, Material*, Sketch*,
                                    ReferenceFrame*, Connector*, Mate*, NamedPosition*,
-                                   ExplodeView*, Relation*, IRecomputable*>;
+                                   ExplodeView*, Relation*, Layer*, Linetype*,
+                                   IRecomputable*>;
 
     // The same handle with const pointees, for callers that only INSPECT.
     //
@@ -66,7 +69,7 @@ public:
         std::variant<const Parameter*, const Body*, const Feature*, const Material*,
                      const Sketch*, const ReferenceFrame*, const Connector*, const Mate*,
                      const NamedPosition*, const ExplodeView*, const Relation*,
-                     const IRecomputable*>;
+                     const Layer*, const Linetype*, const IRecomputable*>;
 
     // Rejects kInvalidObjectId, duplicate ids, null handles, and handles
     // whose ->id() differs from the registered id (returns false).

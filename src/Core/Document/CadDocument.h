@@ -5,7 +5,11 @@
 
 namespace paramcad {
 
-enum class DocumentType { Part, Assembly };
+// M32 adds the third. Kept an enum rather than a string because every reader
+// of it is a switch, and a switch over a closed set is a compiler error when a
+// case is forgotten -- which is how the drawing type got added to every one of
+// them in a single pass.
+enum class DocumentType { Part, Assembly, Drawing };
 
 class CadDocument {
 public:
