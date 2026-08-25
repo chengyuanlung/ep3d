@@ -20,6 +20,7 @@
 #include "Core/Serialization/DrawingDocumentSerializer.h"
 #include "Viewer/DrawingOutline.h"
 #include "Viewer/DrawingCanvas.h"
+#include "Core/Drawing/Tolerance.h"
 #include "Core/Electrical/SymbolLibrary.h"
 #include "Core/Export/DxfWriter.h"
 #include "Viewer/DrawingPlot.h"
@@ -471,6 +472,21 @@ void MainWindow::buildMenus() {
     connect(angularDimensionAction_, &QAction::triggered, this, [this] {
         onAddDimensionRequested(DimensionKind::Angular, LinearDirection::Aligned);
     });
+
+    toleranceAction_ = drawingMenu_->addAction(QStringLiteral("T&olerance..."));
+    toleranceAction_->setToolTip(
+        QStringLiteral("How close the size has to be held.\n"
+                       "A FIT keeps its code and works its numbers out from the size, so "
+                       "changing the model changes the deviations."));
+    connect(toleranceAction_, &QAction::triggered, this, &MainWindow::onToleranceRequested);
+    generalToleranceAction_ =
+        drawingMenu_->addAction(QStringLiteral("&General Tolerances..."));
+    generalToleranceAction_->setToolTip(
+        QStringLiteral("What every UNMARKED size means (ISO 2768-1).\n"
+                       "A property of the sheet, printed once -- a drawing that stated it "
+                       "per dimension could hold two classes at the same time."));
+    connect(generalToleranceAction_, &QAction::triggered, this,
+            &MainWindow::onGeneralToleranceRequested);
 
     dimensionTextAction_ = drawingMenu_->addAction(QStringLiteral("Dimension &Text..."));
     dimensionTextAction_->setToolTip(
@@ -3200,6 +3216,10 @@ void MainWindow::refreshCommandStates() {
             angularDimensionAction_->setEnabled(canDimension(DimensionKind::Angular));
         if (dimensionTextAction_ != nullptr)
             dimensionTextAction_->setEnabled(selectedDimension() != kInvalidObjectId);
+        if (toleranceAction_ != nullptr)
+            toleranceAction_->setEnabled(selectedDimension() != kInvalidObjectId);
+        if (generalToleranceAction_ != nullptr)
+            generalToleranceAction_->setEnabled(isDrawing);
         if (dimensionStyleAction_ != nullptr) dimensionStyleAction_->setEnabled(isDrawing);
         for (QAction* tool : {drawLineAction_, drawCircleAction_, drawRectangleAction_,
                               titleBlockAction_, frameAction_, plotPdfAction_,
@@ -5069,6 +5089,66 @@ std::size_t MainWindow::drawnTitleBlockRowsForTesting() const {
     return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnTitleBlockRowsForTesting();
 }
 
+QString MainWindow::setDimensionToleranceCommand(ToleranceKind kind, double upperMm,
+                                                 double lowerMm, const QString& fitCode) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Tolerances belong to a drawing."));
+    const ObjectId id = selectedDimension();
+    if (id == kInvalidObjectId) return say(QStringLiteral("Select a dimension first."));
+
+    DimensionTolerance tolerance;
+    tolerance.kind = kind;
+    tolerance.upperMm = upperMm;
+    tolerance.lowerMm = lowerMm;
+    tolerance.fitCode = fitCode.toStdString();
+    if (!drawing->setDimensionTolerance(id, tolerance)) {
+        // SAID, and said WHY. A fit this build cannot compute is the one
+        // refusal a user will meet, and "refused" alone would send them
+        // hunting through their own typing.
+        if (kind == ToleranceKind::Fit)
+            return say(QStringLiteral("This build cannot work out %1 at that size, so the "
+                                      "drawing will not claim it.")
+                           .arg(fitCode));
+        return say(QStringLiteral("That tolerance was refused."));
+    }
+    refreshAll();
+    return say(QStringLiteral("Now reads %1").arg(dimensionTextForTesting(id)));
+}
+
+QString MainWindow::setGeneralToleranceCommand(GeneralToleranceClass klass) {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    if (!drawing->setGeneralToleranceClass(klass)) return {};
+    refreshAll();
+    const QString said =
+        klass == GeneralToleranceClass::None
+            ? QStringLiteral("No general tolerance stated -- every unmarked size is now "
+                             "undefined")
+            : QStringLiteral("Unmarked sizes are now %1")
+                  .arg(QString::fromStdString(drawing->generalToleranceNote()));
+    statusLeft_->setText(said);
+    return said;
+}
+
+QString MainWindow::dimensionToleranceTextForTesting(ObjectId id) const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const DrawingDimension* dimension = drawing->findDimension(id);
+    if (dimension == nullptr) return {};
+    return QString::fromStdString(drawing->dimensionToleranceText(*dimension));
+}
+
+QString MainWindow::generalToleranceNoteForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? QString()
+                              : QString::fromStdString(drawing->generalToleranceNote());
+}
+
 QString MainWindow::addDimensionStyleCommand(const QString& name) {
     const auto say = [this](const QString& message) {
         statusLeft_->setText(message);
@@ -5487,6 +5567,73 @@ void MainWindow::onAddBomRequested() {
     // reader looks and where it can get longer without running off the sheet.
     addBomTableCommand(name, path, defaultBomPositionMm(),
                        chosen == depths[1] ? BomDepth::Exploded : BomDepth::TopLevel);
+}
+
+void MainWindow::onToleranceRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || selectedDimension() == kInvalidObjectId) return;
+    const QStringList kinds{QStringLiteral("None"),
+                            QStringLiteral("Symmetric   25 \xC2\xB1" "0.1"),
+                            QStringLiteral("Deviation   25 +0.2/-0.1"),
+                            QStringLiteral("Limits      25.1/24.9"),
+                            QStringLiteral("Basic       boxed"),
+                            QStringLiteral("Fit         H7, g6")};
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(this, QStringLiteral("Tolerance"),
+                                                 QStringLiteral("Kind:"), kinds, 0, false, &ok);
+    if (!ok) return;
+    const QString which = chosen.section(QLatin1Char(' '), 0, 0);
+
+    if (which == QStringLiteral("None"))
+        return void(setDimensionToleranceCommand(ToleranceKind::None, 0.0, 0.0));
+    if (which == QStringLiteral("Basic"))
+        return void(setDimensionToleranceCommand(ToleranceKind::Basic, 0.0, 0.0));
+    if (which == QStringLiteral("Fit")) {
+        const QString code = QInputDialog::getText(
+            this, QStringLiteral("Tolerance"),
+            QStringLiteral("Fit (H7 for a hole, g6 h6 f7 k6 n6 p6 for a shaft):"),
+            QLineEdit::Normal, QStringLiteral("H7"), &ok);
+        if (!ok || code.isEmpty()) return;
+        setDimensionToleranceCommand(ToleranceKind::Fit, 0.0, 0.0, code);
+        return;
+    }
+    const double upper = QInputDialog::getDouble(
+        this, QStringLiteral("Tolerance"),
+        which == QStringLiteral("Symmetric") ? QStringLiteral("\xC2\xB1 (mm):")
+                                             : QStringLiteral("Upper (mm):"),
+        0.1, -1000.0, 1000.0, 4, &ok);
+    if (!ok) return;
+    if (which == QStringLiteral("Symmetric")) {
+        setDimensionToleranceCommand(ToleranceKind::Symmetric, std::fabs(upper),
+                                     -std::fabs(upper));
+        return;
+    }
+    const double lower = QInputDialog::getDouble(this, QStringLiteral("Tolerance"),
+                                                 QStringLiteral("Lower (mm):"), -0.1,
+                                                 -1000.0, 1000.0, 4, &ok);
+    if (!ok) return;
+    setDimensionToleranceCommand(which == QStringLiteral("Limits") ? ToleranceKind::Limits
+                                                                   : ToleranceKind::Deviation,
+                                 std::max(upper, lower), std::min(upper, lower));
+}
+
+void MainWindow::onGeneralToleranceRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const QStringList classes{QStringLiteral("None"), QStringLiteral("Fine (f)"),
+                              QStringLiteral("Medium (m)"), QStringLiteral("Coarse (c)"),
+                              QStringLiteral("Very coarse (v)")};
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(
+        this, QStringLiteral("General Tolerances"),
+        QStringLiteral("What unmarked sizes mean (ISO 2768-1):"), classes, 0, false, &ok);
+    if (!ok) return;
+    GeneralToleranceClass klass = GeneralToleranceClass::None;
+    if (chosen.startsWith(QStringLiteral("Fine"))) klass = GeneralToleranceClass::Fine;
+    else if (chosen.startsWith(QStringLiteral("Medium"))) klass = GeneralToleranceClass::Medium;
+    else if (chosen.startsWith(QStringLiteral("Coarse"))) klass = GeneralToleranceClass::Coarse;
+    else if (chosen.startsWith(QStringLiteral("Very"))) klass = GeneralToleranceClass::VeryCoarse;
+    setGeneralToleranceCommand(klass);
 }
 
 void MainWindow::onAddDrawingLayerRequested() {

@@ -246,6 +246,19 @@ SaveResult validateSaveable(const DrawingDocument& document) {
     if (!(document.frameZoneTargetMm() > 0.0))
         return SaveResult{SerializationError::InvalidFieldType,
                           "a zone size of zero divides the border into nothing"};
+    // v41 (M37). A fit the build cannot compute must not be saved as if it
+    // were fine: the file would open on another machine, print a size with no
+    // tolerance where a fit was asked for, and look finished.
+    for (const DrawingDimension* dimension : document.dimensions()) {
+        if (dimension->tolerance().kind != ToleranceKind::Fit) continue;
+        if (dimension->tolerance().fitCode.empty())
+            return SaveResult{SerializationError::MissingField,
+                              "a dimension is marked as a fit and names no fit code"};
+        if (!document.dimensionFit(*dimension).has_value())
+            return SaveResult{SerializationError::InvalidFieldType,
+                              "a dimension names the fit '" + dimension->tolerance().fitCode +
+                                  "', which this build cannot compute at that size"};
+    }
     if (!document.sheet().scale().valid())
         return SaveResult{SerializationError::InvalidFieldType,
                           "the sheet scale is not a ratio"};
@@ -470,9 +483,32 @@ JsonValue toJson(const DrawingDocument& document) {
         // a file carrying it would hold a second, stale answer about the size
         // of the part -- which is the exact failure a drawing must not have.
         item.set("textOverride", JsonValue::makeString(dimension->textOverride()));
+        // v41: the tolerance. A FIT WRITES ITS CODE AND NOT ITS NUMBERS --
+        // storing the deviations would put a second answer in the file, and
+        // the day the table is corrected every drawing already made would keep
+        // the old numbers and look right.
+        const DimensionTolerance& tolerance = dimension->tolerance();
+        if (tolerance.kind != ToleranceKind::None) {
+            JsonValue held = JsonValue::makeObject();
+            held.set("kind", JsonValue::makeString(std::string(toString(tolerance.kind))));
+            if (tolerance.kind == ToleranceKind::Fit)
+                held.set("fit", JsonValue::makeString(tolerance.fitCode));
+            if (tolerance.statesNumbers()) {
+                held.set("upperMm", JsonValue::makeNumber(tolerance.upperMm));
+                held.set("lowerMm", JsonValue::makeNumber(tolerance.lowerMm));
+            }
+            if (tolerance.decimals >= 0)
+                held.set("decimals",
+                         JsonValue::makeNumber(static_cast<double>(tolerance.decimals)));
+            item.set("tolerance", std::move(held));
+        }
         dimensions.add(std::move(item));
     }
     root.set("dimensions", std::move(dimensions));
+    // WHAT UNMARKED SIZES MEAN, once, for the whole sheet -- like the
+    // projection angle, and for the same reason.
+    root.set("generalTolerance",
+             JsonValue::makeString(std::string(toString(document.generalToleranceClass()))));
 
     // v38 (M35). ONLY WHAT A USER DECIDED.
     //
@@ -1271,6 +1307,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         ObjectId styleId = kInvalidObjectId;
         ObjectId layerId = kInvalidObjectId;
         std::string textOverride;
+        DimensionTolerance tolerance;
     };
     std::vector<DimensionData> dimensionData;
     if (const JsonValue* field = root.find("dimensions")) {
@@ -1400,6 +1437,60 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                        " is not a layer in this document");
             one.layerId = *layerId;
 
+            if (const JsonValue* held = entry.find("tolerance")) {
+                if (held->type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'tolerance' is not an object");
+                const JsonValue* kind =
+                    requireField(*held, "kind", JsonType::String, context, err);
+                if (kind == nullptr) return loadFailure(err.error, err.message);
+                // REFUSED, not defaulted to None. A tolerance kind this build
+                // does not know, read from a newer file, would turn a
+                // toleranced size into an untoleranced one -- silently, on a
+                // feature somebody toleranced on purpose.
+                if (!ParseToleranceKind(kind->asString(), one.tolerance.kind))
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       context + ": unknown tolerance kind '" +
+                                           kind->asString() + "'");
+                if (const JsonValue* fit = held->find("fit")) {
+                    if (fit->type() != JsonType::String)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'fit' is not a string");
+                    one.tolerance.fitCode = fit->asString();
+                }
+                if (one.tolerance.kind == ToleranceKind::Fit &&
+                    one.tolerance.fitCode.empty())
+                    return loadFailure(SerializationError::MissingField,
+                                       context + ": a dimension is marked as a fit and "
+                                                 "names no fit code");
+                const auto readNumber = [&](const char* key, double& into) -> bool {
+                    const JsonValue* value = held->find(key);
+                    if (value == nullptr) return true;
+                    if (value->type() != JsonType::Number) return false;
+                    into = value->asNumber();
+                    return true;
+                };
+                if (!readNumber("upperMm", one.tolerance.upperMm) ||
+                    !readNumber("lowerMm", one.tolerance.lowerMm))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a tolerance deviation is not a number");
+                if (one.tolerance.statesNumbers() &&
+                    one.tolerance.upperMm < one.tolerance.lowerMm)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a tolerance whose upper is below its "
+                                                 "lower describes a size nothing can be "
+                                                 "made to");
+                if (const JsonValue* decimals = held->find("decimals")) {
+                    if (decimals->type() != JsonType::Number)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'decimals' is not a number");
+                    one.tolerance.decimals = static_cast<int>(decimals->asNumber());
+                    if (one.tolerance.decimals < 0 || one.tolerance.decimals > 9)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": a decimal count past nine prints "
+                                                     "digits that are not measurements");
+                }
+            }
             if (const JsonValue* text = entry.find("textOverride")) {
                 if (text->type() != JsonType::String)
                     return loadFailure(SerializationError::InvalidFieldType,
@@ -1823,6 +1914,17 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         }
     }
 
+    GeneralToleranceClass generalTolerance = GeneralToleranceClass::None;
+    if (const JsonValue* field = root.find("generalTolerance")) {
+        if (field->type() != JsonType::String)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: 'generalTolerance' is not a string");
+        if (!ParseGeneralToleranceClass(field->asString(), generalTolerance))
+            return loadFailure(SerializationError::InvalidEnumValue,
+                               "document: unknown general tolerance class '" +
+                                   field->asString() + "'");
+    }
+
     ObjectId currentStyleId = kInvalidObjectId;
     if (const JsonValue* field = root.find("currentDimensionStyleId")) {
         if (field->type() != JsonType::String)
@@ -1937,10 +2039,13 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         style.setOverallScale(one.overallScale);
     }
     // DIMENSIONS LAST, because one names a style, a layer and possibly a view.
-    for (auto& one : dimensionData)
-        document->restoreDimension(one.id, one.kind, one.first, one.second, one.direction,
-                                   one.linePositionMm, one.styleId, one.layerId,
-                                   std::move(one.textOverride));
+    for (auto& one : dimensionData) {
+        DrawingDimension& made = document->restoreDimension(
+            one.id, one.kind, one.first, one.second, one.direction, one.linePositionMm,
+            one.styleId, one.layerId, std::move(one.textOverride));
+        made.setTolerance(std::move(one.tolerance));
+    }
+    document->restoreGeneralToleranceClass(generalTolerance);
     if (currentStyleId != kInvalidObjectId)
         document->restoreCurrentDimensionStyle(currentStyleId);
     for (auto& one : componentData)

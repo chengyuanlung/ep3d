@@ -702,6 +702,30 @@ struct DimensionEdit {
     std::string afterText;
 };
 
+// The whole small value, before and after -- the pattern SheetEdit set.
+struct DimensionToleranceEdit {
+    ObjectId dimensionId = kInvalidObjectId;
+    int beforeKind = 0;
+    int afterKind = 0;
+    double beforeUpperMm = 0.0;
+    double afterUpperMm = 0.0;
+    double beforeLowerMm = 0.0;
+    double afterLowerMm = 0.0;
+    std::string beforeFitCode;
+    std::string afterFitCode;
+    int beforeDecimals = -1;
+    int afterDecimals = -1;
+};
+
+// WHAT UNMARKED SIZES MEAN, which is the SHEET's business and not any one
+// dimension's -- exactly like the projection angle, and for the same reason: a
+// drawing whose dimensions answered to two different general classes is one no
+// reader can use.
+struct GeneralToleranceEdit {
+    int before = 0;
+    int after = 0;
+};
+
 struct DimensionStyleExistenceEdit {
     ObjectId styleId = kInvalidObjectId;
     std::string name;
@@ -754,7 +778,8 @@ using UndoDelta =
                  DimensionEdit, DimensionStyleExistenceEdit, DimensionStyleEdit,
                  CurrentDimensionStyleEdit, TitleBlockEdit, SheetFrameEdit,
                  BomExistenceEdit, BomEdit, SymbolExistenceEdit, SymbolPlacementEdit,
-                 WireExistenceEdit, WireEdit>;
+                 WireExistenceEdit, WireEdit, DimensionToleranceEdit,
+                 GeneralToleranceEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

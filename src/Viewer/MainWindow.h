@@ -258,6 +258,15 @@ public:
     // hands the dimension back to what it measures.
     QString setDimensionTextCommand(const QString& text);
     QString addDimensionStyleCommand(const QString& name);
+
+    // --- Tolerances (M37) ----------------------------------------------------
+    QString setDimensionToleranceCommand(ToleranceKind kind, double upperMm, double lowerMm,
+                                         const QString& fitCode = QString());
+    QString setGeneralToleranceCommand(GeneralToleranceClass klass);
+    // What the selected dimension PRINTS, tolerance and all -- asked of the
+    // same reader the canvas paints from.
+    QString dimensionToleranceTextForTesting(ObjectId id) const;
+    QString generalToleranceNoteForTesting() const;
     // --- Drawing geometry (M33's tools, reachable at last) --------------------
     //
     // The canvas collects the clicks and hands them over; the WINDOW makes the
@@ -824,6 +833,8 @@ private slots:
     void onAddDimensionRequested(DimensionKind kind, LinearDirection direction);
     void onDimensionTextRequested();
     void onDimensionStyleRequested();
+    void onToleranceRequested();
+    void onGeneralToleranceRequested();
     void onTitleBlockRequested();
     void onFrameRequested();
     void onPlotPdfRequested();
@@ -1079,6 +1090,8 @@ private:
     QAction* angularDimensionAction_ = nullptr;
     QAction* dimensionTextAction_ = nullptr;
     QAction* dimensionStyleAction_ = nullptr;
+    QAction* toleranceAction_ = nullptr;
+    QAction* generalToleranceAction_ = nullptr;
     QAction* drawLineAction_ = nullptr;
     QAction* drawCircleAction_ = nullptr;
     QAction* drawRectangleAction_ = nullptr;

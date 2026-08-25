@@ -4701,6 +4701,70 @@ int main(int argc, char** argv) {
                                  .c_str());
                     window.setDimensionTextCommand(QString());
 
+                    // --- M37's GATE: tolerances ------------------------------
+                    //
+                    // The Core suite proves the ISO tables and that a fit
+                    // derives its numbers. Only starting the program can prove
+                    // a user can put one on a dimension and that it reaches
+                    // the paper.
+                    {
+                        const ObjectId sized = window.dimensionIdForTesting(0);
+                        // A SYMMETRIC TOLERANCE, and the size still reads the
+                        // size: a tolerance that replaced the number would be
+                        // a drawing that had stopped stating what it measures.
+                        const QString applied = window.setDimensionToleranceCommand(
+                            ToleranceKind::Symmetric, 0.1, -0.1);
+                        if (!applied.contains(QStringLiteral("60")))
+                            fail(("the tolerance replaced the size: " +
+                                  applied.toStdString())
+                                     .c_str());
+                        if (window.dimensionToleranceTextForTesting(sized).isEmpty())
+                            fail("the tolerance did not reach the dimension");
+
+                        // A FIT DERIVES ITS NUMBERS FROM THE SIZE. The line is
+                        // 60 long, so H7 is +0.030/0 -- and if it were still
+                        // reading the 100 it was before the scale, it would
+                        // say +0.035.
+                        window.setDimensionToleranceCommand(ToleranceKind::Fit, 0.0, 0.0,
+                                                            QStringLiteral("H7"));
+                        const QString fit =
+                            window.dimensionToleranceTextForTesting(sized);
+                        if (!fit.contains(QStringLiteral("H7")))
+                            fail(("the fit did not reach the dimension: " +
+                                  fit.toStdString())
+                                     .c_str());
+                        // THE VALUE, not the digit count. 0.03 and 0.030 are
+                        // the same number, and asserting the second would be
+                        // testing the formatting rather than the fit.
+                        if (!fit.contains(QStringLiteral("0.03")))
+                            fail(("H7 at 60 mm came out as " + fit.toStdString() +
+                                  ", and the published value is 0.030")
+                                     .c_str());
+
+                        // A FIT THIS BUILD CANNOT WORK OUT IS REFUSED, and
+                        // says which one -- "refused" alone would send a user
+                        // hunting through their own typing.
+                        const QString refused = window.setDimensionToleranceCommand(
+                            ToleranceKind::Fit, 0.0, 0.0, QStringLiteral("J7"));
+                        if (!refused.contains(QStringLiteral("J7")))
+                            fail(("refusing an unknown fit said: " + refused.toStdString())
+                                     .c_str());
+                        if (!window.dimensionToleranceTextForTesting(sized).contains(
+                                QStringLiteral("H7")))
+                            fail("a refused fit replaced the one that was there");
+
+                        // THE SHEET'S GENERAL CLASS, printed once.
+                        window.setGeneralToleranceCommand(GeneralToleranceClass::Medium);
+                        if (window.generalToleranceNoteForTesting() !=
+                            QStringLiteral("ISO 2768-m"))
+                            fail("the general tolerance note is not what the sheet says");
+
+                        // IT ALL REACHED THE CANVAS.
+                        window.repaintDrawingForTesting();
+                        if (window.drawnDimensionCountForTesting() == 0)
+                            fail("the toleranced dimensions stopped being drawn");
+                    }
+
                     // --- THE TOOLBAR CARRIES THEM -----------------------------
                     for (const char* wanted : {"Line", "Circle", "Rect", "Dim", "Dia",
                                                "Angle", "Style", "Title"}) {

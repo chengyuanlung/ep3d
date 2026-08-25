@@ -409,6 +409,27 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
         }
     }
 
+    // --- THE GENERAL TOLERANCE NOTE (M37) ------------------------------------
+    //
+    // WHAT EVERY UNMARKED SIZE MEANS, printed ONCE, above the title block. A
+    // drawing that stated it per dimension would let two dimensions answer to
+    // two different classes; a drawing that stated it nowhere leaves every
+    // unmarked size undefined rather than loose.
+    if (!document.generalToleranceNote().empty() && document.titleBlock().isVisible()) {
+        const Vec2 origin = document.titleBlockOriginMm();
+        QFont noteFont = painter.font();
+        noteFont.setPixelSize(std::max(5, static_cast<int>(3.0 * page.pixelsPerMm)));
+        painter.setFont(noteFont);
+        painter.setPen(QPen(ink));
+        const QFontMetricsF noteMetrics(noteFont);
+        painter.drawText(page.toScreen(Vec2{origin.x, origin.y + document.titleBlock()
+                                                                     .heightMm() +
+                                                          2.0}) +
+                             QPointF(0.0, -noteMetrics.descent()),
+                         QStringLiteral("General tolerances %1")
+                             .arg(QString::fromStdString(document.generalToleranceNote())));
+    }
+
     // --- WHAT THE USER DREW (M33) --------------------------------------------
     //
     // BEFORE THE VIEWS, so a projected edge is never hidden by a centreline
@@ -649,6 +670,20 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             painter.fillPath(head, colour);
         };
 
+        // THE TOLERANCE, SET SMALLER, and whether the size is boxed. Asked of
+        // the document rather than worked out here: dimensionText is built
+        // FROM dimensionToleranceText, so the canvas cannot end up printing a
+        // tolerance the plot and the DXF do not.
+        const QString toleranceText =
+            QString::fromStdString(document.dimensionToleranceText(*dimension));
+        const bool boxed = document.dimensionIsBasic(*dimension);
+        // The tolerance is drawn at 70% of the size's height, which is what
+        // ISO 129-1 asks for -- big enough to read, small enough that the size
+        // is still the thing the eye lands on.
+        QFont toleranceFont = font;
+        toleranceFont.setPixelSize(std::max(
+            4, static_cast<int>(style->scaledTextHeightMm() * 0.7 * page.pixelsPerMm)));
+
         // The text, centred on `at` and rotated with the dimension line, sat
         // ABOVE it by the text gap -- which is where ISO 129-1 puts it, and
         // why the gap is a style field rather than a constant in here.
@@ -662,10 +697,42 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             while (degrees <= -90.0) degrees += 180.0;
             while (degrees > 90.0) degrees -= 180.0;
             painter.rotate(degrees);
+            // THE SIZE ALONE, without the tolerance -- which is drawn beside
+            // it in smaller type below. A dimension that ran them together in
+            // one size would set the tolerance as loud as the size, and the
+            // size is what a reader is looking for.
+            QString sizeOnly = text;
+            if (!toleranceText.isEmpty() && sizeOnly.endsWith(toleranceText))
+                sizeOnly = sizeOnly.left(sizeOnly.size() - toleranceText.size()).trimmed();
+
             const QFontMetricsF metrics(painter.font());
-            const double width = metrics.horizontalAdvance(text);
+            const double width = metrics.horizontalAdvance(sizeOnly);
             painter.setPen(pen);
-            painter.drawText(QPointF(-width / 2.0, -textGapPx), text);
+            painter.drawText(QPointF(-width / 2.0, -textGapPx), sizeOnly);
+
+            // A BASIC DIMENSION IS BOXED. The box IS the specification -- it
+            // says the size is theoretically exact and its tolerance lives in
+            // a geometric control somewhere else, and without it the number
+            // reads as an ordinary untoleranced size.
+            if (boxed) {
+                const double pad = 0.8 * page.pixelsPerMm;
+                painter.setBrush(Qt::NoBrush);
+                painter.drawRect(QRectF(-width / 2.0 - pad,
+                                        -textGapPx - metrics.ascent() - pad / 2.0,
+                                        width + 2.0 * pad,
+                                        metrics.ascent() + metrics.descent() + pad));
+            }
+
+            if (!toleranceText.isEmpty()) {
+                painter.setFont(toleranceFont);
+                const QFontMetricsF small(toleranceFont);
+                // AFTER the size, on the same line, at the same baseline --
+                // which is where a single-line tolerance goes. Stacked
+                // deviations are a separate treatment and not this one.
+                painter.drawText(QPointF(width / 2.0 + 1.0 * page.pixelsPerMm, -textGapPx),
+                                 toleranceText);
+                painter.setFont(font);
+            }
             painter.restore();
         };
 

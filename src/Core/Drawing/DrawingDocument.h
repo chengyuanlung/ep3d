@@ -98,6 +98,9 @@ public:
     // layer somewhere the user did not put it.
     void restoreCurrentLayer(ObjectId layerId);
     void restoreCurrentDimensionStyle(ObjectId styleId);
+    void restoreGeneralToleranceClass(GeneralToleranceClass klass) noexcept {
+        generalTolerance_ = klass;
+    }
 
     bool setLayerColor(ObjectId layerId, int color);
     bool setLayerLinetype(ObjectId layerId, std::string linetype);
@@ -369,6 +372,29 @@ public:
     bool setDimensionTextOverride(ObjectId dimensionId, std::string text);
     bool setDimensionStyleOf(ObjectId dimensionId, ObjectId styleId);
 
+    // --- Tolerances (M37) ----------------------------------------------------
+    bool setDimensionTolerance(ObjectId dimensionId, DimensionTolerance tolerance);
+    // WHAT UNMARKED SIZES MEAN. A property of the SHEET, like the projection
+    // angle -- see GeneralToleranceEdit.
+    GeneralToleranceClass generalToleranceClass() const noexcept { return generalTolerance_; }
+    bool setGeneralToleranceClass(GeneralToleranceClass klass);
+    // The note the drawing prints beside its title block, or empty when no
+    // class is stated -- and empty is a real answer, not a missing one.
+    std::string generalToleranceNote() const;
+
+    // THE TOLERANCE PART OF WHAT A DIMENSION READS, alone -- so the canvas can
+    // set it in smaller type without a second opinion about what it says.
+    //
+    // dimensionText() is BUILT FROM THIS, which is what stops the two
+    // disagreeing: there is one rule and one place it lives.
+    std::string dimensionToleranceText(const DrawingDimension& dimension) const;
+    // Whether the dimension text is drawn in a box (a Basic dimension).
+    bool dimensionIsBasic(const DrawingDimension& dimension) const noexcept;
+    // Nothing when the fit is one this build cannot compute -- and the
+    // dimension then says so on the paper rather than printing a size with no
+    // tolerance where a fit was asked for.
+    std::optional<Deviations> dimensionFit(const DrawingDimension& dimension) const;
+
     // WHAT A DIMENSION CURRENTLY READS -- resolved, never stored.
     //
     // THE one place an anchor becomes a coordinate. A canvas, a plot, a DXF
@@ -467,6 +493,7 @@ private:
     std::vector<std::unique_ptr<SymbolPlacement>> symbols_;
     std::vector<std::unique_ptr<WireEntity>> wires_;
     TitleBlock titleBlock_;
+    GeneralToleranceClass generalTolerance_ = GeneralToleranceClass::None;
     FrameMargins frameMargins_;
     double zoneTargetMm_ = 100.0;
     bool frameVisible_ = true;

@@ -2174,6 +2174,134 @@ DimensionMeasurement DrawingDocument::measure(const DrawingDimension& dimension)
     return out;
 }
 
+bool DrawingDocument::setDimensionTolerance(ObjectId dimensionId,
+                                            DimensionTolerance tolerance) {
+    DrawingDimension* found = findDimensionForEdit(dimensionId);
+    if (found == nullptr) return false;
+    // A FIT THIS BUILD CANNOT COMPUTE IS REFUSED HERE, not accepted and shown
+    // blank. The user asked for a fit; letting it through would leave a
+    // drawing that looks toleranced and specifies nothing.
+    if (tolerance.kind == ToleranceKind::Fit) {
+        const DimensionMeasurement measured = measure(*found);
+        if (!measured.ok) return false;
+        if (!FitDeviation(measured.valueMm, tolerance.fitCode).has_value()) return false;
+    }
+    DimensionToleranceEdit edit;
+    edit.dimensionId = dimensionId;
+    edit.beforeKind = static_cast<int>(found->tolerance().kind);
+    edit.beforeUpperMm = found->tolerance().upperMm;
+    edit.beforeLowerMm = found->tolerance().lowerMm;
+    edit.beforeFitCode = found->tolerance().fitCode;
+    edit.beforeDecimals = found->tolerance().decimals;
+    edit.afterKind = static_cast<int>(tolerance.kind);
+    edit.afterUpperMm = tolerance.upperMm;
+    edit.afterLowerMm = tolerance.lowerMm;
+    edit.afterFitCode = tolerance.fitCode;
+    edit.afterDecimals = tolerance.decimals;
+    found->setTolerance(std::move(tolerance));
+    recordDelta(edit, "Tolerance");
+    return true;
+}
+
+bool DrawingDocument::setGeneralToleranceClass(GeneralToleranceClass klass) {
+    if (generalTolerance_ == klass) return false;
+    GeneralToleranceEdit edit;
+    edit.before = static_cast<int>(generalTolerance_);
+    edit.after = static_cast<int>(klass);
+    generalTolerance_ = klass;
+    recordDelta(edit, "General tolerance");
+    return true;
+}
+
+std::string DrawingDocument::generalToleranceNote() const {
+    return GeneralToleranceNote(generalTolerance_);
+}
+
+std::optional<Deviations> DrawingDocument::dimensionFit(
+    const DrawingDimension& dimension) const {
+    if (dimension.tolerance().kind != ToleranceKind::Fit) return std::nullopt;
+    const DimensionMeasurement measured = measure(dimension);
+    if (!measured.ok) return std::nullopt;
+    // DERIVED FROM THE SIZE THE DIMENSION CURRENTLY READS. That is the whole
+    // reason a fit stores its code: change the model, the size changes, and
+    // the deviations follow -- an H7 on a 25 bore that became a 30 bore is
+    // still an H7, and its numbers are not the ones it had yesterday.
+    return FitDeviation(measured.valueMm, dimension.tolerance().fitCode);
+}
+
+bool DrawingDocument::dimensionIsBasic(const DrawingDimension& dimension) const noexcept {
+    return dimension.tolerance().kind == ToleranceKind::Basic;
+}
+
+std::string DrawingDocument::dimensionToleranceText(const DrawingDimension& dimension) const {
+    const DimensionTolerance& tolerance = dimension.tolerance();
+    if (tolerance.kind == ToleranceKind::None || tolerance.kind == ToleranceKind::Basic)
+        return {};
+
+    const DimensionStyle* style = findDimensionStyle(dimension.styleId());
+
+    // HOW MANY DECIMALS THE TOLERANCE NEEDS.
+    //
+    // One more than the size is the starting point: a tolerance shown to fewer
+    // decimals than the size it qualifies rounds away the thing it exists to
+    // state.
+    //
+    // BUT IT MUST NEVER ROUND TO ZERO. On a sheet whose style shows whole
+    // millimetres, one more decimal is one decimal, and an H7 at 60 mm prints
+    // as "0.0/0.0" -- a drawing that states a fit and shows no tolerance,
+    // which is worse than one that shows none at all because it looks
+    // finished. So the count grows until the deviation actually appears.
+    //
+    // Found by the self test, on a sheet a previous check had restyled to zero
+    // decimals.
+    const auto decimalsFor = [&](double largest) {
+        if (tolerance.decimals >= 0) return tolerance.decimals;
+        int decimals = style != nullptr ? style->decimals() + 1 : 3;
+        // Four is the cap: ISO tables are in micrometres, which is three
+        // decimals of a millimetre, and a fifth digit would be printing noise.
+        while (decimals < 4 && largest > 0.0 &&
+               largest < 0.5 * std::pow(10.0, -decimals))
+            ++decimals;
+        return decimals;
+    };
+
+    const auto printerFor = [&](double a, double b) {
+        DimensionStyle printer{"tolerance"};
+        printer.setDecimals(decimalsFor(std::max(std::fabs(a), std::fabs(b))));
+        return printer;
+    };
+
+    if (tolerance.kind == ToleranceKind::Fit) {
+        const std::optional<Deviations> fit = dimensionFit(dimension);
+        // A FIT THIS BUILD CANNOT COMPUTE SAYS SO, loudly, where its numbers
+        // would have been. Printing the code alone would look finished.
+        if (!fit.has_value()) return tolerance.fitCode + " <?>";
+        const DimensionStyle printer = printerFor(fit->upperMm, fit->lowerMm);
+        return tolerance.fitCode + " " + printer.format(fit->upperMm) + "/" +
+               printer.format(fit->lowerMm);
+    }
+    if (tolerance.kind == ToleranceKind::Symmetric) {
+        const DimensionStyle printer = printerFor(tolerance.upperMm, tolerance.upperMm);
+        return "\xC2\xB1" + printer.format(std::fabs(tolerance.upperMm));
+    }
+    if (tolerance.kind == ToleranceKind::Deviation) {
+        const DimensionStyle printer = printerFor(tolerance.upperMm, tolerance.lowerMm);
+        const std::string upper = (tolerance.upperMm >= 0.0 ? "+" : "") +
+                                  printer.format(tolerance.upperMm);
+        const std::string lower = (tolerance.lowerMm >= 0.0 ? "+" : "") +
+                                  printer.format(tolerance.lowerMm);
+        return upper + "/" + lower;
+    }
+    // Limits: the two SIZES rather than the two deviations. The decimals come
+    // from the DEVIATIONS even though the sizes are printed -- otherwise a
+    // 60 mm size with a 0.03 band prints 60.0/60.0 and says nothing.
+    const DimensionMeasurement measured = measure(dimension);
+    if (!measured.ok) return {};
+    const DimensionStyle printer = printerFor(tolerance.upperMm, tolerance.lowerMm);
+    return printer.format(measured.valueMm + tolerance.upperMm) + "/" +
+           printer.format(measured.valueMm + tolerance.lowerMm);
+}
+
 std::string DrawingDocument::dimensionText(const DrawingDimension& dimension) const {
     if (!dimension.textOverride().empty()) return dimension.textOverride();
     const DimensionMeasurement measured = measure(dimension);
@@ -2184,15 +2312,33 @@ std::string DrawingDocument::dimensionText(const DrawingDimension& dimension) co
     const std::string body =
         style != nullptr ? style->format(measured.valueMm)
                          : std::to_string(static_cast<int>(measured.valueMm));
+    std::string text = body;
     switch (dimension.kind()) {
         // THE PREFIXES ISO 129 ASKS FOR. A radius without its R and a diameter
         // without its symbol are two numbers a reader cannot tell apart.
-        case DimensionKind::Radius: return "R" + body;
-        case DimensionKind::Diameter: return "\xE2\x8C\x80" + body; // U+2300 DIAMETER SIGN
-        case DimensionKind::Angular: return body + "\xC2\xB0";      // U+00B0 DEGREE SIGN
+        case DimensionKind::Radius: text = "R" + body; break;
+        case DimensionKind::Diameter:
+            text = "\xE2\x8C\x80" + body; // U+2300 DIAMETER SIGN
+            break;
+        case DimensionKind::Angular:
+            text = body + "\xC2\xB0"; // U+00B0 DEGREE SIGN
+            break;
         case DimensionKind::Linear: break;
     }
-    return body;
+
+    // --- AND THE TOLERANCE (M37) --------------------------------------------
+    //
+    // BUILT FROM dimensionToleranceText, not repeated here. The canvas sets
+    // the tolerance in smaller type and so needs the two halves separately;
+    // defining the whole as base-plus-part is what stops the two from ever
+    // saying different things.
+    const std::string tolerance = dimensionToleranceText(dimension);
+    if (tolerance.empty()) return text;
+    // LIMITS REPLACE THE SIZE rather than following it: a drawing showing
+    // "25.00 25.10/24.90" states the same size twice, and the pair IS the
+    // dimension.
+    if (dimension.tolerance().kind == ToleranceKind::Limits) return tolerance;
+    return text + " " + tolerance;
 }
 
 std::vector<ObjectId> DrawingDocument::danglingDimensions() const {
@@ -2600,6 +2746,26 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         currentStyleId_ = forward ? edit->after : edit->before;
         return;
     }
+    if (const auto* edit = std::get_if<DimensionToleranceEdit>(&delta)) {
+        DrawingDimension* found = findDimensionForEdit(edit->dimensionId);
+        if (found == nullptr) return;
+        DimensionTolerance tolerance;
+        tolerance.kind =
+            static_cast<ToleranceKind>(forward ? edit->afterKind : edit->beforeKind);
+        tolerance.upperMm = forward ? edit->afterUpperMm : edit->beforeUpperMm;
+        tolerance.lowerMm = forward ? edit->afterLowerMm : edit->beforeLowerMm;
+        tolerance.fitCode = forward ? edit->afterFitCode : edit->beforeFitCode;
+        tolerance.decimals = forward ? edit->afterDecimals : edit->beforeDecimals;
+        found->setTolerance(std::move(tolerance));
+        return;
+    }
+
+    if (const auto* edit = std::get_if<GeneralToleranceEdit>(&delta)) {
+        generalTolerance_ =
+            static_cast<GeneralToleranceClass>(forward ? edit->after : edit->before);
+        return;
+    }
+
     if (const auto* edit = std::get_if<SymbolExistenceEdit>(&delta)) {
         const bool wanted = forward == edit->addedByTheEdit;
         if (wanted) {

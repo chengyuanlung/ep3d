@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Document/ObjectId.h"
+#include "Core/Drawing/Tolerance.h"
 #include "Core/Drawing/Geometry2D.h"
 
 #include <string>
@@ -136,6 +137,15 @@ public:
     // the measurement", which is the case that must stay the default: a
     // drawing full of typed-in numbers is a drawing that stops tracking its
     // model, and that is the failure this whole block exists to prevent.
+    // WHAT THIS SIZE IS ALLOWED TO BE (M37).
+    //
+    // A dimension without one is incomplete on anything that has to fit: "25"
+    // on a bore says the size and nothing about how close, so the machinist
+    // telephones. A FIT keeps its code and derives its numbers, so correcting
+    // the table corrects every drawing already made.
+    const DimensionTolerance& tolerance() const noexcept { return tolerance_; }
+    void setTolerance(DimensionTolerance tolerance) { tolerance_ = std::move(tolerance); }
+
     const std::string& textOverride() const noexcept { return textOverride_; }
     void setTextOverride(std::string text) { textOverride_ = std::move(text); }
 
@@ -149,6 +159,7 @@ private:
     ObjectId styleId_ = kInvalidObjectId;
     ObjectId layerId_ = kInvalidObjectId;
     std::string textOverride_;
+    DimensionTolerance tolerance_;
 };
 
 // WHAT A DIMENSION CURRENTLY READS.
