@@ -215,6 +215,22 @@ public:
     double paperHeightMm(const DrawingScale& sheetScale) const noexcept;
 
     ComputeState currentState() const noexcept { return state_; }
+
+    // A PROJECTION PUT THERE BY A TEST, so the rules that read one can be
+    // tested without a kernel (M43).
+    //
+    // What reads a projection is not only the painter: an in-view anchor
+    // searches it, and the rules that search decides by -- the kind of point,
+    // and refusing an ambiguous choice -- are the whole of M43. Those rules
+    // need two candidates placed exactly where the decision is hard, and real
+    // geometry cannot be asked for that.
+    //
+    // No production path calls this. The recompute below is the only thing
+    // that fills a projection in a running program.
+    void setProjectionForTesting(ProjectedDrawing drawing) {
+        projected_ = std::move(drawing);
+        state_ = ComputeState::Valid;
+    }
     const std::string& diagnostic() const noexcept { return diagnostic_; }
 
     // --- IRecomputable -------------------------------------------------------

@@ -54,6 +54,27 @@ enum class DimensionAnchorKind { Free, Entity, InView };
 
 std::string_view toString(DimensionAnchorKind kind) noexcept;
 
+// WHAT KIND OF POINT an in-view anchor was put on (M43).
+//
+// The reason this exists: "the nearest snap point within tolerance" does not
+// know that a hole's CENTRE and a corner of the plate are different KINDS of
+// thing. Move the part a little and a diameter dimension can re-attach to a
+// corner -- which measures a real distance between two real points, prints a
+// plausible number, and is not the dimension anybody put there.
+//
+// Narrowing by role first means a centre only ever re-finds a centre. It is
+// not a full topological name and is not claimed as one; what it does is take
+// away the two ways an anchor could silently land on something else -- the
+// other being ambiguity, which is refused rather than guessed at.
+enum class ViewPointRole {
+    Corner,   // the end of a straight edge
+    Middle,   // the midpoint of a straight edge
+    Centre,   // the centre of a circle or arc -- not on the curve at all
+    CurveEnd, // where an arc starts or stops
+};
+std::string_view toString(ViewPointRole role) noexcept;
+bool ParseViewPointRole(std::string_view text, ViewPointRole& into) noexcept;
+
 struct DimensionAnchor {
     DimensionAnchorKind kind = DimensionAnchorKind::Free;
     // Free: the point, in SHEET millimetres.
@@ -65,6 +86,10 @@ struct DimensionAnchor {
     int snapIndex = 0;
     // InView: which view.
     ObjectId viewId = kInvalidObjectId;
+    // InView: WHAT KIND of point this was, so it can only ever re-find that
+    // kind. Ignored by the other two kinds of anchor, which name their point
+    // exactly rather than looking for it.
+    ViewPointRole role = ViewPointRole::Corner;
     // InView: how far the point may have moved and still be the same point.
     // Generous by default -- a dimension that dangles on a 1 mm change is a
     // dimension nobody keeps.
@@ -72,7 +97,12 @@ struct DimensionAnchor {
 
     static DimensionAnchor free(Vec2 sheetMm);
     static DimensionAnchor onEntity(ObjectId entityId, int snapIndex);
-    static DimensionAnchor inView(ObjectId viewId, Vec2 modelMm, double toleranceMm = 5.0);
+    // THE ROLE IS NOT DEFAULTED. Every caller has to say what kind of point it
+    // is anchoring, because a default would be "corner" and a diameter
+    // dimension quietly anchored to a corner is precisely the failure the role
+    // was added to stop.
+    static DimensionAnchor inView(ObjectId viewId, Vec2 modelMm, ViewPointRole role,
+                                  double toleranceMm = 5.0);
 };
 
 // WHICH MEASUREMENT. Not a style -- a different QUESTION about the geometry.

@@ -13,6 +13,29 @@ std::string_view toString(DimensionAnchorKind kind) noexcept {
     return "Free";
 }
 
+std::string_view toString(ViewPointRole role) noexcept {
+    switch (role) {
+        case ViewPointRole::Corner: return "corner";
+        case ViewPointRole::Middle: return "middle";
+        case ViewPointRole::Centre: return "centre";
+        case ViewPointRole::CurveEnd: return "curve-end";
+    }
+    return "corner";
+}
+
+bool ParseViewPointRole(std::string_view text, ViewPointRole& into) noexcept {
+    // READ FROM THE SAME LIST IT IS WRITTEN FROM. A role this build does not
+    // know must NOT become "corner": a centre read as a corner is exactly the
+    // silent re-attachment this whole mechanism exists to stop.
+    for (const ViewPointRole role : {ViewPointRole::Corner, ViewPointRole::Middle,
+                                     ViewPointRole::Centre, ViewPointRole::CurveEnd})
+        if (text == toString(role)) {
+            into = role;
+            return true;
+        }
+    return false;
+}
+
 std::string_view toString(DimensionKind kind) noexcept {
     switch (kind) {
         case DimensionKind::Linear: return "Linear";
@@ -47,11 +70,13 @@ DimensionAnchor DimensionAnchor::onEntity(ObjectId entityId, int snapIndex) {
     return anchor;
 }
 
-DimensionAnchor DimensionAnchor::inView(ObjectId viewId, Vec2 modelMm, double toleranceMm) {
+DimensionAnchor DimensionAnchor::inView(ObjectId viewId, Vec2 modelMm, ViewPointRole role,
+                                        double toleranceMm) {
     DimensionAnchor anchor;
     anchor.kind = DimensionAnchorKind::InView;
     anchor.viewId = viewId;
     anchor.at = modelMm;
+    anchor.role = role;
     anchor.toleranceMm = toleranceMm > 0.0 ? toleranceMm : 5.0;
     return anchor;
 }

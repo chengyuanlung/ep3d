@@ -396,8 +396,10 @@ TEST(OcctDrawingViewTest, M34_VIEW_020_ADimensionInAViewReadsTheMODELSize) {
     const ProjectedExtent extent = front.projected().extent;
     const DrawingDimension& across = drawing.addDimension(
         DimensionKind::Linear,
-        DimensionAnchor::inView(front.id(), Vec2{extent.min.x, extent.min.y}),
-        DimensionAnchor::inView(front.id(), Vec2{extent.max.x, extent.min.y}),
+        DimensionAnchor::inView(front.id(), Vec2{extent.min.x, extent.min.y},
+                                ViewPointRole::Corner),
+        DimensionAnchor::inView(front.id(), Vec2{extent.max.x, extent.min.y},
+                                ViewPointRole::Corner),
         Vec2{150.0, 120.0});
 
     const DimensionMeasurement measured = drawing.measure(across);
@@ -438,8 +440,10 @@ TEST(OcctDrawingViewTest, M34_VIEW_021_AnInViewAnchorWillNOTReattachBeyondItsTol
     // A point a long way from anything the view draws, with a tight tolerance.
     const DrawingDimension& lost = drawing.addDimension(
         DimensionKind::Linear,
-        DimensionAnchor::inView(front.id(), Vec2{extent.min.x, extent.min.y}, 1.0),
-        DimensionAnchor::inView(front.id(), Vec2{extent.max.x + 500.0, extent.min.y}, 1.0),
+        DimensionAnchor::inView(front.id(), Vec2{extent.min.x, extent.min.y},
+                                ViewPointRole::Corner, 1.0),
+        DimensionAnchor::inView(front.id(), Vec2{extent.max.x + 500.0, extent.min.y},
+                                ViewPointRole::Corner, 1.0),
         Vec2{150.0, 120.0});
 
     const DimensionMeasurement measured = drawing.measure(lost);
@@ -453,9 +457,11 @@ TEST(OcctDrawingViewTest, M34_VIEW_021_AnInViewAnchorWillNOTReattachBeyondItsTol
     // a bound and not an off switch.
     const DrawingDimension& found = drawing.addDimension(
         DimensionKind::Linear,
-        DimensionAnchor::inView(front.id(), Vec2{extent.min.x, extent.min.y}, 1.0),
+        DimensionAnchor::inView(front.id(), Vec2{extent.min.x, extent.min.y},
+                                ViewPointRole::Corner, 1.0),
         DimensionAnchor::inView(front.id(),
-                                Vec2{extent.max.x + 0.4, extent.min.y + 0.4}, 1.0),
+                                Vec2{extent.max.x + 0.4, extent.min.y + 0.4},
+                                ViewPointRole::Corner, 1.0),
         Vec2{150.0, 110.0});
     const DimensionMeasurement near = drawing.measure(found);
     ASSERT_TRUE(near.ok) << near.why;

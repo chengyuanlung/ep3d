@@ -95,7 +95,7 @@ TEST(SerializationV13Test, M17_SER_001_TheSchemaVersionIsStamped) {
     // so a bump lands here and nowhere else -- and it has to land somewhere, or
     // a format change that forgot to bump would write files an older loader
     // silently mis-reads.
-    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 44"), std::string::npos);
+    EXPECT_NE(SaveToString(source.document).find("\"schemaVersion\": 45"), std::string::npos);
 }
 
 TEST(SerializationV13Test, M17_SER_002_BothKindsAreWrittenUnderTheirOwnNames) {

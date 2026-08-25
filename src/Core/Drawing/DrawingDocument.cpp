@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -1764,42 +1765,83 @@ std::optional<Vec2> DrawingDocument::resolveAnchor(const DimensionAnchor& anchor
     // IN A VIEW: the model point, re-found in the projection, then carried onto
     // the paper.
     //
-    // THIS IS THE APPROXIMATION (see DrawingDimension.h). The nearest snap
-    // point of the reprojected geometry is adopted if it is within tolerance;
-    // otherwise NOTHING is returned and the dimension dangles LOUDLY. The
-    // failure this rules out is the one that matters -- silently re-attaching
-    // to a different feature and printing a plausible wrong number.
+    // THIS IS STILL NOT A TOPOLOGICAL NAME, and is not claimed as one -- a
+    // projected curve does not yet carry which model edge it came from. What
+    // it is, since M43, is a search that can no longer land somewhere else
+    // quietly. Two rules do that:
+    //
+    //   THE ROLE HAS TO MATCH. A hole's centre only ever re-finds a centre.
+    //   Without this, a diameter dimension whose bore moved a little could
+    //   re-attach to a corner of the plate -- measuring a real distance
+    //   between two real points and printing a plausible number that is not
+    //   the dimension anybody put there.
+    //
+    //   AMBIGUITY IS REFUSED. If a second point of the same kind is nearer
+    //   than twice the distance the first one moved, there is no way to tell
+    //   which was meant, and the dimension dangles LOUDLY instead of picking.
+    //   A point that did not move at all is never ambiguous, which is the
+    //   ordinary case and stays free.
     const DrawingView* view = findView(anchor.viewId);
     if (view == nullptr || view->currentState() != ComputeState::Valid) return std::nullopt;
 
-    double bestDistance = anchor.toleranceMm;
+    // BOTH START AT INFINITY, not at the tolerance.
+    //
+    // Started at the tolerance, "no rival at all" and "a rival exactly at the
+    // edge of reach" are the same number -- and the ambiguity test below then
+    // refuses a perfectly ordinary lone candidate that moved a little. Which
+    // it did, the first time this ran.
+    double bestDistance = std::numeric_limits<double>::infinity();
+    double runnerUp = std::numeric_limits<double>::infinity();
     std::optional<Vec2> bestModelPoint;
-    const auto offer = [&](Vec2 candidate) {
+    const auto offer = [&](Vec2 candidate, ViewPointRole role) {
+        if (role != anchor.role) return;
         const double distance = std::hypot(candidate.x - anchor.at.x, candidate.y - anchor.at.y);
-        if (distance <= bestDistance) {
+        if (distance > anchor.toleranceMm) return;
+        // A POINT IS NOT ITS OWN RIVAL. Every edge that meets at a corner
+        // offers that corner, so the same position arrives two or three times
+        // -- and counted as competition it makes every corner in the drawing
+        // ambiguous with itself. Which is exactly what happened the first time
+        // this ran: a lone corner 0.57 mm away was refused because its own
+        // twin was also 0.57 mm away.
+        if (bestModelPoint.has_value() &&
+            std::hypot(candidate.x - bestModelPoint->x, candidate.y - bestModelPoint->y) <
+                1e-9)
+            return;
+        if (distance < bestDistance) {
+            runnerUp = bestDistance;
             bestDistance = distance;
             bestModelPoint = candidate;
+        } else if (distance < runnerUp) {
+            runnerUp = distance;
         }
     };
     for (const ProjectedCurve& curve : view->projected().curves) {
         if (const auto* line = std::get_if<ProjectedLine>(&curve.shape)) {
-            offer(line->a);
-            offer(line->b);
-            offer(Vec2{(line->a.x + line->b.x) / 2.0, (line->a.y + line->b.y) / 2.0});
+            offer(line->a, ViewPointRole::Corner);
+            offer(line->b, ViewPointRole::Corner);
+            offer(Vec2{(line->a.x + line->b.x) / 2.0, (line->a.y + line->b.y) / 2.0},
+                  ViewPointRole::Middle);
         } else if (const auto* arc = std::get_if<ProjectedArc>(&curve.shape)) {
             // THE CENTRE IS A SNAP POINT and it is the one a diameter is put
             // on -- a hole's centre is what a drafter points at, and it is not
             // on the curve at all.
-            offer(arc->centre);
+            offer(arc->centre, ViewPointRole::Centre);
             offer(Vec2{arc->centre.x + arc->radius * std::cos(arc->startAngle),
-                       arc->centre.y + arc->radius * std::sin(arc->startAngle)});
+                       arc->centre.y + arc->radius * std::sin(arc->startAngle)},
+                  ViewPointRole::CurveEnd);
             offer(Vec2{arc->centre.x + arc->radius * std::cos(arc->endAngle),
-                       arc->centre.y + arc->radius * std::sin(arc->endAngle)});
+                       arc->centre.y + arc->radius * std::sin(arc->endAngle)},
+                  ViewPointRole::CurveEnd);
         } else if (const auto* polyline = std::get_if<ProjectedPolyline>(&curve.shape)) {
-            for (const Vec2 point : polyline->points) offer(point);
+            for (const Vec2 point : polyline->points) offer(point, ViewPointRole::Corner);
         }
     }
     if (!bestModelPoint.has_value()) return std::nullopt;
+    // TWICE THE DISTANCE IT MOVED. An anchor whose point is exactly where it
+    // was left has bestDistance 0, so nothing else can be ambiguous with it;
+    // one whose point moved 2 mm needs its nearest rival to be at least 4 mm
+    // away before the answer is clear.
+    if (runnerUp < 2.0 * bestDistance) return std::nullopt;
 
     // MODEL MILLIMETRES TIMES THE SCALE, plus where the view sits -- through
     // viewPointToSheetMm, which is now the only place that multiplication

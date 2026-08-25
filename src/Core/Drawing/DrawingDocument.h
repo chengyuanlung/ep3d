@@ -205,6 +205,10 @@ public:
     std::vector<ObjectId> staleViews() const;
     std::vector<const DrawingView*> views() const;
     const DrawingView* findView(ObjectId id) const noexcept;
+    // The view itself, for a test that has to put a projection into it. There
+    // is no other way to place two candidate points exactly where an anchor's
+    // rules have to decide between them (see DrawingView::setProjectionForTesting).
+    DrawingView* viewForTesting(ObjectId id) noexcept { return findViewForEdit(id); }
     const DrawingView* findViewNamed(const std::string& name) const noexcept;
 
     bool setViewPosition(ObjectId viewId, Vec2 positionMm);

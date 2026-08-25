@@ -36,6 +36,10 @@ JsonValue WriteDimensionAnchor(const DimensionAnchor& anchor) {
     out.set("snapIndex", JsonValue::makeNumber(static_cast<double>(anchor.snapIndex)));
     out.set("viewId", JsonValue::makeString(idToString(anchor.viewId)));
     out.set("toleranceMm", JsonValue::makeNumber(anchor.toleranceMm));
+    // v45 (M43). WHAT KIND of point an in-view anchor was put on. Written for
+    // every anchor and read for every anchor, because there is one codec --
+    // which is the whole reason lifting it out of two lambdas was worth doing.
+    out.set("role", JsonValue::makeString(std::string(toString(anchor.role))));
     return out;
 }
 
@@ -70,6 +74,17 @@ bool ReadDimensionAnchor(const JsonValue& entry, const char* key, const std::str
     if (const JsonValue* tolerance = at->find("toleranceMm"))
         if (tolerance->type() == JsonType::Number && tolerance->asNumber() > 0.0)
             into.toleranceMm = tolerance->asNumber();
+    // OPTIONAL, because a file written before v45 has none -- and an anchor
+    // from such a file keeps the Corner it was constructed with, which is what
+    // those files meant when every anchor took the nearest point of any kind.
+    //
+    // A role that IS written and is not one this build knows is REFUSED, not
+    // defaulted: a centre read as a corner is the silent re-attachment this
+    // whole mechanism exists to stop.
+    if (const JsonValue* role = at->find("role")) {
+        if (role->type() != JsonType::String) return false;
+        if (!ParseViewPointRole(role->asString(), into.role)) return false;
+    }
     return true;
 }
 
