@@ -168,7 +168,9 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             painter.setPen(QPen(ink));
             painter.drawText(
                 QPointF(split.x() + 1.0 * page.pixelsPerMm, baseline),
-                QString::fromStdString(block.valueOf(field, document.sheet())));
+                QString::fromStdString(block.valueOf(field, document.sheet(),
+                                                     document.currentSheetNumber(),
+                                                     document.sheetCount())));
             ++tally.titleBlockRows;
         }
     }
@@ -326,6 +328,7 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
     // nothing to keep in step -- and a drawing whose parts list said one thing
     // while the assembly said another is exactly what that buys.
     for (const BomTable* table : document.bomTables()) {
+        if (!document.isOnCurrentSheet(table->sheetId())) continue;
         const BomContents contents = document.countBom(*table);
         const Vec2 origin = table->positionMm();
         const double rowMm = table->rowHeightMm();
@@ -442,6 +445,7 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
     // colour would make changing a layer's colour change nothing -- which is
     // the whole reason layers exist.
     for (const DrawingEntity* entity : document.entities()) {
+        if (!document.isOnCurrentSheet(entity->sheetId())) continue;
         if (!document.isEntityVisible(*entity)) continue;
         const int aci = document.resolvedColorOf(*entity);
         QPen pen(ScreenColorOf(aci, ink));
@@ -524,6 +528,7 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
     // frame SAYS is asked for, letters and all, so the box on the paper cannot
     // carry a letter the datum does not.
     for (const Annotation* annotation : document.annotations()) {
+        if (!document.isOnCurrentSheet(annotation->sheetId())) continue;
         const QString said = QString::fromStdString(document.annotationText(annotation->id()));
         const std::optional<Vec2> tip = document.annotationLeaderTipMm(annotation->id());
         const Vec2 at = annotation->positionMm();
@@ -630,6 +635,7 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
     // describes. Two readings is precisely the shape of defect this project
     // keeps closing.
     for (const HoleTable* table : document.holeTables()) {
+        if (!document.isOnCurrentSheet(table->sheetId())) continue;
         const HoleTableContents holes = document.holesOf(*table);
         if (!holes.ok) {
             // THE ALARM HAS TO REACH THE SCREEN. An empty table is what a part
@@ -692,6 +698,9 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
 
     // --- THE VIEWS -----------------------------------------------------------
     for (const DrawingView* view : document.views()) {
+        // ANOTHER PAGE OF THE SAME DRAWING. Not hidden, not deleted --
+        // just not this sheet, which is the whole of what a page means.
+        if (!document.isOnCurrentSheet(view->sheetId())) continue;
         if (view->currentState() != ComputeState::Valid) continue;
         // MODEL MILLIMETRES TO SHEET MILLIMETRES, through the document -- the
         // curves never carry the scale (see ProjectedGeometry.h), and
@@ -868,6 +877,7 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
     // and a DXF write must not be able to disagree about what the drawing
     // says.
     for (const DrawingDimension* dimension : document.dimensions()) {
+        if (!document.isOnCurrentSheet(dimension->sheetId())) continue;
         const DimensionStyle* style = document.findDimensionStyle(dimension->styleId());
         if (style == nullptr) continue;
         const DimensionMeasurement measured = document.measure(*dimension);

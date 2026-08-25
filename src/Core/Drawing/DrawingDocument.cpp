@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -58,6 +59,16 @@ void DrawingDocument::seedTables() {
     // CONSTRUCTION, NOT AN EDIT (ADR-M9-001). A freshly opened drawing must
     // have nothing to undo -- otherwise "Undo" on a new file deletes the layer
     // everything is about to be drawn on.
+    //
+    // THE FIRST PAGE IS SEEDED THE SAME WAY (M44). A drawing always has one:
+    // every accessor that asks for "the current page" would otherwise have a
+    // no-page case, and a case that cannot happen is a case nobody maintains.
+    auto first = std::make_unique<SheetPage>(std::string("Sheet1"),
+                                             Sheet{SheetSize::A3, SheetOrientation::Landscape});
+    currentPageId_ = first->id();
+    registry_.registerObject(first->id(), first.get());
+    pages_.push_back(std::move(first));
+
     auto continuous = std::make_unique<Linetype>(kContinuousLinetypeName,
                                                  "Solid line", std::vector<double>{});
     registry_.registerObject(continuous->id(), continuous.get());
@@ -86,10 +97,213 @@ namespace {
 // the same shape of delta and undo cannot half-restore one of them.
 } // namespace
 
+const SheetPage& DrawingDocument::currentPage() const noexcept {
+    for (const std::unique_ptr<SheetPage>& page : pages_)
+        if (page->id() == currentPageId_) return *page;
+    // NEVER EMPTY: a drawing is constructed with one page and the last cannot
+    // be deleted, so this is the first page rather than a special case.
+    return *pages_.front();
+}
+
+SheetPage& DrawingDocument::currentPageForEdit() noexcept {
+    for (const std::unique_ptr<SheetPage>& page : pages_)
+        if (page->id() == currentPageId_) return *page;
+    return *pages_.front();
+}
+
+SheetPage& DrawingDocument::addSheetPage(std::string name) {
+    if (name.empty()) throw std::invalid_argument("addSheetPage: a page needs a name");
+    for (const std::unique_ptr<SheetPage>& page : pages_)
+        if (page->name() == name)
+            throw std::invalid_argument("addSheetPage: this drawing already has a page "
+                                        "called " + name);
+    // THE SAME PAPER AS THE PAGE IT WAS ADDED FROM. A drawing set is nearly
+    // always one size throughout, and a second page that came up A4 when the
+    // first is A2 is a surprise nobody asked for.
+    auto item = std::make_unique<SheetPage>(std::move(name), currentPage().paper());
+    auto& ref = *item;
+    ref.setFrameMargins(currentPage().frameMargins());
+    ref.setFrameZoneTargetMm(currentPage().frameZoneTargetMm());
+    ref.setFrameVisible(currentPage().isFrameVisible());
+    pages_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+
+    SheetPageExistenceEdit edit;
+    edit.pageId = ref.id();
+    edit.name = ref.name();
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Add sheet " + ref.name());
+    return ref;
+}
+
+void DrawingDocument::clearSheetPagesForRestore() {
+    for (const std::unique_ptr<SheetPage>& page : pages_) registry_.unregisterObject(page->id());
+    pages_.clear();
+    currentPageId_ = kInvalidObjectId;
+}
+
+SheetPage& DrawingDocument::restoreSheetPage(ObjectId id, std::string name, Sheet paper,
+                                             FrameMargins margins, double zoneTargetMm,
+                                             bool frameVisible) {
+    auto item = std::make_unique<SheetPage>(id, std::move(name), std::move(paper));
+    auto& ref = *item;
+    ref.setFrameMargins(margins);
+    ref.setFrameZoneTargetMm(zoneTargetMm);
+    ref.setFrameVisible(frameVisible);
+    pages_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const SheetPage*> DrawingDocument::sheetPages() const {
+    std::vector<const SheetPage*> out;
+    out.reserve(pages_.size());
+    for (const std::unique_ptr<SheetPage>& page : pages_) out.push_back(page.get());
+    return out;
+}
+
+const SheetPage* DrawingDocument::findSheetPage(ObjectId id) const noexcept {
+    for (const std::unique_ptr<SheetPage>& page : pages_)
+        if (page->id() == id) return page.get();
+    return nullptr;
+}
+
+ObjectId DrawingDocument::currentSheetId() const noexcept { return currentPageId_; }
+
+bool DrawingDocument::setCurrentSheet(ObjectId sheetId) {
+    if (findSheetPage(sheetId) == nullptr) return false;
+    currentPageId_ = sheetId;
+    return true;
+}
+
+std::string DrawingDocument::sheetNumberOf(ObjectId sheetId) const {
+    // "2 / 3", from WHERE THE PAGE SITS. Stored, it is the first thing to go
+    // stale when a page is inserted -- and it goes stale in the one place on a
+    // drawing a reader trusts absolutely.
+    for (std::size_t i = 0; i < pages_.size(); ++i)
+        if (pages_[i]->id() == sheetId)
+            return std::to_string(i + 1) + " / " + std::to_string(pages_.size());
+    return {};
+}
+
+int DrawingDocument::currentSheetNumber() const noexcept {
+    for (std::size_t i = 0; i < pages_.size(); ++i)
+        if (pages_[i]->id() == currentPageId_) return static_cast<int>(i) + 1;
+    return 1;
+}
+
+int DrawingDocument::sheetCount() const noexcept { return static_cast<int>(pages_.size()); }
+
+std::size_t DrawingDocument::objectsOnSheet(ObjectId sheetId) const {
+    std::size_t count = 0;
+    const auto tally = [&](ObjectId on) {
+        // kInvalidObjectId means the FIRST page: every object made before this
+        // drawing had more than one page belongs there.
+        const ObjectId where = on == kInvalidObjectId ? pages_.front()->id() : on;
+        if (where == sheetId) ++count;
+    };
+    for (const std::unique_ptr<DrawingView>& one : views_) tally(one->sheetId());
+    for (const std::unique_ptr<DrawingEntity>& one : entities_) tally(one->sheetId());
+    for (const std::unique_ptr<DrawingDimension>& one : dimensions_) tally(one->sheetId());
+    for (const std::unique_ptr<Annotation>& one : annotations_) tally(one->sheetId());
+    for (const std::unique_ptr<BomTable>& one : bomTables_) tally(one->sheetId());
+    for (const std::unique_ptr<HoleTable>& one : holeTables_) tally(one->sheetId());
+    return count;
+}
+
+bool DrawingDocument::removeSheetPage(ObjectId sheetId) {
+    // A DRAWING WITH NO PAPER IS NOT A DRAWING.
+    if (pages_.size() <= 1) return false;
+    if (findSheetPage(sheetId) == nullptr) return false;
+    // ...AND A PAGE WITH THINGS ON IT TAKES THEM WITH IT. Refused instead,
+    // for the reason M41's datums are: cascading throws away work nobody
+    // asked to lose, and the count tells the user exactly what to move.
+    if (objectsOnSheet(sheetId) > 0) return false;
+
+    for (auto it = pages_.begin(); it != pages_.end(); ++it) {
+        if ((*it)->id() != sheetId) continue;
+        SheetPageExistenceEdit edit;
+        edit.pageId = sheetId;
+        edit.name = (*it)->name();
+        edit.addedByTheEdit = false;
+        registry_.unregisterObject(sheetId);
+        pages_.erase(it);
+        if (currentPageId_ == sheetId) currentPageId_ = pages_.front()->id();
+        recordDelta(edit, "Delete sheet");
+        return true;
+    }
+    return false;
+}
+
+bool DrawingDocument::isOnCurrentSheet(ObjectId sheetId) const noexcept {
+    // kInvalidObjectId is the FIRST page: everything made before a drawing had
+    // more than one page belongs there, and so does everything a caller adds
+    // without saying otherwise.
+    const ObjectId where = sheetId == kInvalidObjectId ? pages_.front()->id() : sheetId;
+    return where == currentPageId_;
+}
+
+ObjectId DrawingDocument::sheetOfObject(ObjectId objectId) const {
+    const auto resolve = [&](ObjectId on) {
+        return on == kInvalidObjectId ? pages_.front()->id() : on;
+    };
+    for (const std::unique_ptr<DrawingView>& one : views_)
+        if (one->id() == objectId) return resolve(one->sheetId());
+    for (const std::unique_ptr<DrawingEntity>& one : entities_)
+        if (one->id() == objectId) return resolve(one->sheetId());
+    for (const std::unique_ptr<DrawingDimension>& one : dimensions_)
+        if (one->id() == objectId) return resolve(one->sheetId());
+    for (const std::unique_ptr<Annotation>& one : annotations_)
+        if (one->id() == objectId) return resolve(one->sheetId());
+    for (const std::unique_ptr<BomTable>& one : bomTables_)
+        if (one->id() == objectId) return resolve(one->sheetId());
+    for (const std::unique_ptr<HoleTable>& one : holeTables_)
+        if (one->id() == objectId) return resolve(one->sheetId());
+    return kInvalidObjectId;
+}
+
+bool DrawingDocument::setObjectSheet(ObjectId objectId, ObjectId sheetId) {
+    if (findSheetPage(sheetId) == nullptr) return false;
+    const auto put = [&](auto& list) {
+        for (const auto& one : list)
+            if (one->id() == objectId) {
+                one->setSheetId(sheetId);
+                return true;
+            }
+        return false;
+    };
+    return put(views_) || put(entities_) || put(dimensions_) || put(annotations_) ||
+           put(bomTables_) || put(holeTables_);
+}
+
+std::string DrawingDocument::whyDrawingRefused() const {
+    // ONE RULE, asked by the saver and by the loader. An object on a page that
+    // is not here draws nowhere and cannot be found: it is not on any tab, and
+    // deleting the page it named is what put it there.
+    const auto check = [&](ObjectId on, const char* what) -> std::string {
+        if (on == kInvalidObjectId) return {};
+        if (findSheetPage(on) != nullptr) return {};
+        return std::string(what) + " is on a sheet that is not in this drawing";
+    };
+    for (const std::unique_ptr<DrawingView>& one : views_)
+        if (std::string why = check(one->sheetId(), "a view"); !why.empty()) return why;
+    for (const std::unique_ptr<DrawingEntity>& one : entities_)
+        if (std::string why = check(one->sheetId(), "a line"); !why.empty()) return why;
+    for (const std::unique_ptr<DrawingDimension>& one : dimensions_)
+        if (std::string why = check(one->sheetId(), "a dimension"); !why.empty()) return why;
+    for (const std::unique_ptr<Annotation>& one : annotations_)
+        if (std::string why = check(one->sheetId(), "a symbol"); !why.empty()) return why;
+    for (const std::unique_ptr<BomTable>& one : bomTables_)
+        if (std::string why = check(one->sheetId(), "a parts list"); !why.empty()) return why;
+    for (const std::unique_ptr<HoleTable>& one : holeTables_)
+        if (std::string why = check(one->sheetId(), "a hole table"); !why.empty()) return why;
+    return {};
+}
+
 bool DrawingDocument::setSheetSize(SheetSize size) {
-    const SheetSnapshot before = SnapshotOf(sheet_);
-    sheet_.setSize(size);
-    const SheetSnapshot after = SnapshotOf(sheet_);
+    const SheetSnapshot before = SnapshotOf(paperForEdit());
+    paperForEdit().setSize(size);
+    const SheetSnapshot after = SnapshotOf(paperForEdit());
     SheetEdit edit;
     edit.beforeSize = before.size;
     edit.afterSize = after.size;
@@ -110,9 +324,9 @@ bool DrawingDocument::setSheetSize(SheetSize size) {
 }
 
 bool DrawingDocument::setSheetOrientation(SheetOrientation orientation) {
-    const SheetSnapshot before = SnapshotOf(sheet_);
-    sheet_.setOrientation(orientation);
-    const SheetSnapshot after = SnapshotOf(sheet_);
+    const SheetSnapshot before = SnapshotOf(paperForEdit());
+    paperForEdit().setOrientation(orientation);
+    const SheetSnapshot after = SnapshotOf(paperForEdit());
     SheetEdit edit;
     edit.beforeSize = before.size;
     edit.afterSize = after.size;
@@ -134,9 +348,9 @@ bool DrawingDocument::setSheetOrientation(SheetOrientation orientation) {
 
 bool DrawingDocument::setSheetScale(const DrawingScale& scale) {
     if (!scale.valid()) return false;
-    const SheetSnapshot before = SnapshotOf(sheet_);
-    sheet_.setScale(scale);
-    const SheetSnapshot after = SnapshotOf(sheet_);
+    const SheetSnapshot before = SnapshotOf(paperForEdit());
+    paperForEdit().setScale(scale);
+    const SheetSnapshot after = SnapshotOf(paperForEdit());
     SheetEdit edit;
     edit.beforeSize = before.size;
     edit.afterSize = after.size;
@@ -162,9 +376,9 @@ bool DrawingDocument::setSheetScale(const DrawingScale& scale) {
 }
 
 bool DrawingDocument::setSheetCustomSize(double widthMm, double heightMm) {
-    const SheetSnapshot before = SnapshotOf(sheet_);
-    if (!sheet_.setCustomSize(widthMm, heightMm)) return false;
-    const SheetSnapshot after = SnapshotOf(sheet_);
+    const SheetSnapshot before = SnapshotOf(paperForEdit());
+    if (!paperForEdit().setCustomSize(widthMm, heightMm)) return false;
+    const SheetSnapshot after = SnapshotOf(paperForEdit());
     SheetEdit edit;
     edit.beforeSize = before.size;
     edit.afterSize = after.size;
@@ -190,11 +404,11 @@ void DrawingDocument::restoreSheet(SheetSize size, SheetOrientation orientation,
     // ORDER MATTERS: setCustomSize sets the size to Custom as a side effect,
     // so it runs FIRST and the explicit size wins afterwards. Written down
     // because the other order silently turns every A3 sheet into a custom one.
-    if (size == SheetSize::Custom) sheet_.setCustomSize(customWidthMm, customHeightMm);
-    sheet_.setSize(size);
-    sheet_.setOrientation(orientation);
-    sheet_.setScale(scale);
-    sheet_.setProjectionAngle(angle);
+    if (size == SheetSize::Custom) paperForEdit().setCustomSize(customWidthMm, customHeightMm);
+    paperForEdit().setSize(size);
+    paperForEdit().setOrientation(orientation);
+    paperForEdit().setScale(scale);
+    paperForEdit().setProjectionAngle(angle);
 }
 
 // =============================================================================
@@ -443,7 +657,7 @@ const Linetype* DrawingDocument::findLinetypeNamed(const std::string& name) cons
 std::string DrawingDocument::whyViewCannotSitAt(Vec2 positionMm) const {
     if (positionMm.x < 0.0 || positionMm.y < 0.0)
         return "a view cannot sit off the left or bottom edge of the sheet";
-    if (positionMm.x > sheet_.widthMm() || positionMm.y > sheet_.heightMm())
+    if (positionMm.x > sheet().widthMm() || positionMm.y > sheet().heightMm())
         return "a view cannot sit off the right or top edge of the sheet";
     return {};
 }
@@ -465,6 +679,7 @@ DrawingView& DrawingDocument::addView(std::string name, std::string sourcePath,
     auto item = std::make_unique<DrawingView>(std::move(name), std::move(sourcePath),
                                               std::move(bodyName), direction, positionMm);
     auto& ref = *item;
+    ref.setSheetId(currentPageId_);
     views_.push_back(std::move(item));
     // ONE CALL, NOT TWO. `addRecomputableNode` registers the object AND makes
     // the graph node; registering first makes the second registration fail,
@@ -525,6 +740,7 @@ DrawingView& DrawingDocument::addProjectedView(std::string name, ObjectId parent
     auto& ref = *item;
     ref.setParentViewId(parentViewId);
     ref.setAlignmentOffsetMm(offsetMm);
+    ref.setSheetId(currentPageId_);
     views_.push_back(std::move(item));
     addRecomputableNode(ref);
     // THE ONE EDGE A CHILD VIEW HAS: its parent. It is not a geometric
@@ -602,7 +818,7 @@ Vec2 DrawingDocument::viewPositionMm(ObjectId viewId) const {
         // exactly the reason the angle lives on the SHEET: a drawing is in one
         // convention or the other, never both.
         const double sign =
-            rule.sign * (sheet_.projectionAngle() == ProjectionAngle::First ? -1.0 : 1.0);
+            rule.sign * (sheet().projectionAngle() == ProjectionAngle::First ? -1.0 : 1.0);
         if (rule.alignment == ViewAlignment::Horizontal)
             place.x += sign * walk->alignmentOffsetMm();
         else if (rule.alignment == ViewAlignment::Vertical)
@@ -626,10 +842,10 @@ std::vector<ObjectId> DrawingDocument::staleViews() const {
 }
 
 bool DrawingDocument::setSheetProjectionAngle(ProjectionAngle angle) {
-    if (sheet_.projectionAngle() == angle) return true;
-    const SheetSnapshot before = SnapshotOf(sheet_);
-    sheet_.setProjectionAngle(angle);
-    const SheetSnapshot after = SnapshotOf(sheet_);
+    if (paperForEdit().projectionAngle() == angle) return true;
+    const SheetSnapshot before = SnapshotOf(paperForEdit());
+    paperForEdit().setProjectionAngle(angle);
+    const SheetSnapshot after = SnapshotOf(paperForEdit());
     SheetEdit edit;
     edit.beforeSize = before.size;
     edit.afterSize = after.size;
@@ -782,6 +998,7 @@ DrawingView& DrawingDocument::addSectionView(std::string name, ObjectId parentVi
     cut.toMm = toMm;
     cut.arrowSide = arrowSide >= 0 ? 1 : -1;
     ref.setSectionCut(cut);
+    ref.setSheetId(currentPageId_);
     views_.push_back(std::move(item));
     addRecomputableNode(ref);
     // THE PLACEMENT EDGE, as a projected view has: a section is positioned
@@ -1025,6 +1242,7 @@ DrawingEntity& DrawingDocument::addEntity(DrawShape shape) {
     // would not see it.
     auto item = std::make_unique<DrawingEntity>(std::move(shape), currentLayerId_);
     auto& ref = *item;
+    ref.setSheetId(currentPageId_);
     entities_.push_back(std::move(item));
     registry_.registerObject(ref.id(), &ref);
 
@@ -1428,6 +1646,7 @@ Annotation& DrawingDocument::addAnnotation(AnnotationBody body, DimensionAnchor 
     auto item = std::make_unique<Annotation>(std::move(body), anchor, positionMm,
                                              currentLayerId_);
     auto& ref = *item;
+    ref.setSheetId(currentPageId_);
     annotations_.push_back(std::move(item));
     registry_.registerObject(ref.id(), &ref);
 
@@ -1637,6 +1856,7 @@ DrawingDimension& DrawingDocument::addDimension(DimensionKind kind, DimensionAnc
     auto item = std::make_unique<DrawingDimension>(kind, first, second, linePositionMm,
                                                    currentStyleId_, currentLayerId_);
     auto& ref = *item;
+    ref.setSheetId(currentPageId_);
     dimensions_.push_back(std::move(item));
     registry_.registerObject(ref.id(), &ref);
 
@@ -2211,6 +2431,7 @@ HoleTable& DrawingDocument::addHoleTable(std::string name, ObjectId viewId, Vec2
     edit.datumXMm = datumMm.x;
     edit.datumYMm = datumMm.y;
     edit.addedByTheEdit = true;
+    ref.setSheetId(currentPageId_);
     holeTables_.push_back(std::move(item));
     registry_.registerObject(ref.id(), &ref);
     recordDelta(edit, "Add hole table " + ref.name());
@@ -2329,6 +2550,7 @@ BomTable& DrawingDocument::addBomTable(std::string name, std::string sourcePath,
     edit.xMm = positionMm.x;
     edit.yMm = positionMm.y;
     edit.addedByTheEdit = true;
+    ref.setSheetId(currentPageId_);
     bomTables_.push_back(std::move(item));
     registry_.registerObject(ref.id(), &ref);
     recordDelta(edit, "Add parts list " + ref.name());
@@ -2482,7 +2704,7 @@ double DrawingDocument::viewScaleFactor(ObjectId viewId) const noexcept {
     // this project keeps closing, one size down.
     //
     // What an impossible scale actually does is pinned by M35_DXF_013.
-    return view->effectiveScale(sheet_.scale()).factor();
+    return view->effectiveScale(sheet().scale()).factor();
 }
 
 Vec2 DrawingDocument::viewPointToSheetMm(ObjectId viewId, Vec2 modelMm) const noexcept {
@@ -2507,7 +2729,7 @@ Vec2 DrawingDocument::viewPointToSheetMm(ObjectId viewId, Vec2 modelMm) const no
 SheetFrameGeometry DrawingDocument::frame() const noexcept {
     // COMPUTED, EVERY TIME. There is nothing to keep in step because there is
     // nothing kept.
-    return FrameOf(sheet_, frameMargins_, zoneTargetMm_);
+    return FrameOf(sheet(), frameMargins(), frameZoneTargetMm());
 }
 
 Vec2 DrawingDocument::titleBlockOriginMm() const noexcept {
@@ -2516,78 +2738,78 @@ Vec2 DrawingDocument::titleBlockOriginMm() const noexcept {
     // title block that vanished because the margins were wrong would take the
     // drawing's identity with it.
     const Vec2 corner = border.ok ? border.innerMaxMm
-                                  : Vec2{sheet_.widthMm(), 0.0};
+                                  : Vec2{sheet().widthMm(), 0.0};
     const double bottom = border.ok ? border.innerMinMm.y : 0.0;
-    return Vec2{corner.x - titleBlock_.widthMm(), bottom};
+    return Vec2{corner.x - titleBlock().widthMm(), bottom};
 }
 
 bool DrawingDocument::setTitleBlockField(const std::string& label, std::string value) {
     TitleBlockEdit edit;
-    edit.before = RecordOf(titleBlock_);
-    edit.beforeWidthMm = edit.afterWidthMm = titleBlock_.widthMm();
-    edit.beforeRowHeightMm = edit.afterRowHeightMm = titleBlock_.rowHeightMm();
-    edit.beforeVisible = edit.afterVisible = titleBlock_.isVisible();
+    edit.before = RecordOf(blockForEdit());
+    edit.beforeWidthMm = edit.afterWidthMm = blockForEdit().widthMm();
+    edit.beforeRowHeightMm = edit.afterRowHeightMm = blockForEdit().rowHeightMm();
+    edit.beforeVisible = edit.afterVisible = blockForEdit().isVisible();
     // REFUSED FOR A DERIVED FIELD, by the block itself -- and nothing is
     // recorded, so the undo history does not fill with edits that changed
     // nothing.
-    if (!titleBlock_.setField(label, std::move(value))) return false;
-    edit.after = RecordOf(titleBlock_);
+    if (!blockForEdit().setField(label, std::move(value))) return false;
+    edit.after = RecordOf(blockForEdit());
     recordDelta(edit, "Title block");
     return true;
 }
 
 bool DrawingDocument::addTitleBlockField(std::string label, TitleBlockSource source) {
     TitleBlockEdit edit;
-    edit.before = RecordOf(titleBlock_);
-    edit.beforeWidthMm = edit.afterWidthMm = titleBlock_.widthMm();
-    edit.beforeRowHeightMm = edit.afterRowHeightMm = titleBlock_.rowHeightMm();
-    edit.beforeVisible = edit.afterVisible = titleBlock_.isVisible();
-    if (!titleBlock_.addField(std::move(label), source)) return false;
-    edit.after = RecordOf(titleBlock_);
+    edit.before = RecordOf(blockForEdit());
+    edit.beforeWidthMm = edit.afterWidthMm = blockForEdit().widthMm();
+    edit.beforeRowHeightMm = edit.afterRowHeightMm = blockForEdit().rowHeightMm();
+    edit.beforeVisible = edit.afterVisible = blockForEdit().isVisible();
+    if (!blockForEdit().addField(std::move(label), source)) return false;
+    edit.after = RecordOf(blockForEdit());
     recordDelta(edit, "Title block");
     return true;
 }
 
 bool DrawingDocument::removeTitleBlockField(const std::string& label) {
     TitleBlockEdit edit;
-    edit.before = RecordOf(titleBlock_);
-    edit.beforeWidthMm = edit.afterWidthMm = titleBlock_.widthMm();
-    edit.beforeRowHeightMm = edit.afterRowHeightMm = titleBlock_.rowHeightMm();
-    edit.beforeVisible = edit.afterVisible = titleBlock_.isVisible();
-    if (!titleBlock_.removeField(label)) return false;
-    edit.after = RecordOf(titleBlock_);
+    edit.before = RecordOf(blockForEdit());
+    edit.beforeWidthMm = edit.afterWidthMm = blockForEdit().widthMm();
+    edit.beforeRowHeightMm = edit.afterRowHeightMm = blockForEdit().rowHeightMm();
+    edit.beforeVisible = edit.afterVisible = blockForEdit().isVisible();
+    if (!blockForEdit().removeField(label)) return false;
+    edit.after = RecordOf(blockForEdit());
     recordDelta(edit, "Title block");
     return true;
 }
 
 bool DrawingDocument::setTitleBlockSize(double widthMm, double rowHeightMm) {
     TitleBlockEdit edit;
-    edit.before = edit.after = RecordOf(titleBlock_);
-    edit.beforeWidthMm = titleBlock_.widthMm();
-    edit.beforeRowHeightMm = titleBlock_.rowHeightMm();
-    edit.beforeVisible = edit.afterVisible = titleBlock_.isVisible();
+    edit.before = edit.after = RecordOf(blockForEdit());
+    edit.beforeWidthMm = blockForEdit().widthMm();
+    edit.beforeRowHeightMm = blockForEdit().rowHeightMm();
+    edit.beforeVisible = edit.afterVisible = blockForEdit().isVisible();
     // BOTH OR NEITHER. A block that took the new width and kept the old row
     // height would draw a box whose lines do not meet, and the half that
     // failed would be the half nobody looked at.
-    if (!titleBlock_.setWidthMm(widthMm)) return false;
-    if (!titleBlock_.setRowHeightMm(rowHeightMm)) {
-        titleBlock_.setWidthMm(edit.beforeWidthMm);
+    if (!blockForEdit().setWidthMm(widthMm)) return false;
+    if (!blockForEdit().setRowHeightMm(rowHeightMm)) {
+        blockForEdit().setWidthMm(edit.beforeWidthMm);
         return false;
     }
-    edit.afterWidthMm = titleBlock_.widthMm();
-    edit.afterRowHeightMm = titleBlock_.rowHeightMm();
+    edit.afterWidthMm = blockForEdit().widthMm();
+    edit.afterRowHeightMm = blockForEdit().rowHeightMm();
     recordDelta(edit, "Title block size");
     return true;
 }
 
 bool DrawingDocument::setTitleBlockVisible(bool visible) {
-    if (titleBlock_.isVisible() == visible) return false;
+    if (blockForEdit().isVisible() == visible) return false;
     TitleBlockEdit edit;
-    edit.before = edit.after = RecordOf(titleBlock_);
-    edit.beforeWidthMm = edit.afterWidthMm = titleBlock_.widthMm();
-    edit.beforeRowHeightMm = edit.afterRowHeightMm = titleBlock_.rowHeightMm();
-    edit.beforeVisible = titleBlock_.isVisible();
-    titleBlock_.setVisible(visible);
+    edit.before = edit.after = RecordOf(blockForEdit());
+    edit.beforeWidthMm = edit.afterWidthMm = blockForEdit().widthMm();
+    edit.beforeRowHeightMm = edit.afterRowHeightMm = blockForEdit().rowHeightMm();
+    edit.beforeVisible = blockForEdit().isVisible();
+    blockForEdit().setVisible(visible);
     edit.afterVisible = visible;
     recordDelta(edit, "Title block");
     return true;
@@ -2597,15 +2819,15 @@ bool DrawingDocument::setFrameMargins(const FrameMargins& margins) {
     // REFUSED WHEN THEY DO NOT FIT, here rather than at draw time. A margin
     // wider than the paper leaves no inside, and finding that out when the
     // frame silently stops drawing is finding it out too late.
-    if (!margins.fitsOn(sheet_.widthMm(), sheet_.heightMm())) return false;
+    if (!margins.fitsOn(paperForEdit().widthMm(), paperForEdit().heightMm())) return false;
     SheetFrameEdit edit;
-    edit.beforeBindingMm = frameMargins_.bindingMm;
-    edit.beforeOtherMm = frameMargins_.otherMm;
+    edit.beforeBindingMm = currentPageForEdit().marginsForEdit().bindingMm;
+    edit.beforeOtherMm = currentPageForEdit().marginsForEdit().otherMm;
     edit.afterBindingMm = margins.bindingMm;
     edit.afterOtherMm = margins.otherMm;
-    edit.beforeZoneTargetMm = edit.afterZoneTargetMm = zoneTargetMm_;
-    edit.beforeVisible = edit.afterVisible = frameVisible_;
-    frameMargins_ = margins;
+    edit.beforeZoneTargetMm = edit.afterZoneTargetMm = currentPageForEdit().zoneForEdit();
+    edit.beforeVisible = edit.afterVisible = currentPageForEdit().frameShownForEdit();
+    currentPageForEdit().marginsForEdit() = margins;
     recordDelta(edit, "Frame");
     return true;
 }
@@ -2613,36 +2835,36 @@ bool DrawingDocument::setFrameMargins(const FrameMargins& margins) {
 bool DrawingDocument::setFrameZoneTargetMm(double zoneTargetMm) {
     if (!(zoneTargetMm > 0.0)) return false;
     SheetFrameEdit edit;
-    edit.beforeBindingMm = edit.afterBindingMm = frameMargins_.bindingMm;
-    edit.beforeOtherMm = edit.afterOtherMm = frameMargins_.otherMm;
-    edit.beforeZoneTargetMm = zoneTargetMm_;
+    edit.beforeBindingMm = edit.afterBindingMm = currentPageForEdit().marginsForEdit().bindingMm;
+    edit.beforeOtherMm = edit.afterOtherMm = currentPageForEdit().marginsForEdit().otherMm;
+    edit.beforeZoneTargetMm = currentPageForEdit().zoneForEdit();
     edit.afterZoneTargetMm = zoneTargetMm;
-    edit.beforeVisible = edit.afterVisible = frameVisible_;
-    zoneTargetMm_ = zoneTargetMm;
+    edit.beforeVisible = edit.afterVisible = currentPageForEdit().frameShownForEdit();
+    currentPageForEdit().zoneForEdit() = zoneTargetMm;
     recordDelta(edit, "Frame zones");
     return true;
 }
 
 bool DrawingDocument::setFrameVisible(bool visible) {
-    if (frameVisible_ == visible) return false;
+    if (currentPageForEdit().frameShownForEdit() == visible) return false;
     SheetFrameEdit edit;
-    edit.beforeBindingMm = edit.afterBindingMm = frameMargins_.bindingMm;
-    edit.beforeOtherMm = edit.afterOtherMm = frameMargins_.otherMm;
-    edit.beforeZoneTargetMm = edit.afterZoneTargetMm = zoneTargetMm_;
-    edit.beforeVisible = frameVisible_;
+    edit.beforeBindingMm = edit.afterBindingMm = currentPageForEdit().marginsForEdit().bindingMm;
+    edit.beforeOtherMm = edit.afterOtherMm = currentPageForEdit().marginsForEdit().otherMm;
+    edit.beforeZoneTargetMm = edit.afterZoneTargetMm = currentPageForEdit().zoneForEdit();
+    edit.beforeVisible = currentPageForEdit().frameShownForEdit();
     edit.afterVisible = visible;
-    frameVisible_ = visible;
+    currentPageForEdit().frameShownForEdit() = visible;
     recordDelta(edit, "Frame");
     return true;
 }
 
-void DrawingDocument::restoreTitleBlock(TitleBlock block) { titleBlock_ = std::move(block); }
+void DrawingDocument::restoreTitleBlock(TitleBlock block) { blockForEdit() = std::move(block); }
 
 void DrawingDocument::restoreFrame(const FrameMargins& margins, double zoneTargetMm,
                                    bool visible) {
-    frameMargins_ = margins;
-    if (zoneTargetMm > 0.0) zoneTargetMm_ = zoneTargetMm;
-    frameVisible_ = visible;
+    currentPageForEdit().marginsForEdit() = margins;
+    if (zoneTargetMm > 0.0) currentPageForEdit().zoneForEdit() = zoneTargetMm;
+    currentPageForEdit().frameShownForEdit() = visible;
 }
 
 DrawingDocument::DimensionProposal DrawingDocument::proposeDimension(
@@ -3629,28 +3851,28 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         // addField/removeField cannot express "these exact rows", because the
         // guards keep Title and Drawing No. and would leave them behind. See
         // TitleBlock::restoreFields.
-        titleBlock_.restoreFields(std::move(fields));
-        titleBlock_.restoreSize(forward ? edit->afterWidthMm : edit->beforeWidthMm,
+        blockForEdit().restoreFields(std::move(fields));
+        blockForEdit().restoreSize(forward ? edit->afterWidthMm : edit->beforeWidthMm,
                                 forward ? edit->afterRowHeightMm : edit->beforeRowHeightMm);
-        titleBlock_.setVisible(forward ? edit->afterVisible : edit->beforeVisible);
+        blockForEdit().setVisible(forward ? edit->afterVisible : edit->beforeVisible);
         return;
     }
 
     if (const auto* edit = std::get_if<SheetFrameEdit>(&delta)) {
-        frameMargins_.bindingMm = forward ? edit->afterBindingMm : edit->beforeBindingMm;
-        frameMargins_.otherMm = forward ? edit->afterOtherMm : edit->beforeOtherMm;
-        zoneTargetMm_ = forward ? edit->afterZoneTargetMm : edit->beforeZoneTargetMm;
-        frameVisible_ = forward ? edit->afterVisible : edit->beforeVisible;
+        currentPageForEdit().marginsForEdit().bindingMm = forward ? edit->afterBindingMm : edit->beforeBindingMm;
+        currentPageForEdit().marginsForEdit().otherMm = forward ? edit->afterOtherMm : edit->beforeOtherMm;
+        currentPageForEdit().zoneForEdit() = forward ? edit->afterZoneTargetMm : edit->beforeZoneTargetMm;
+        currentPageForEdit().frameShownForEdit() = forward ? edit->afterVisible : edit->beforeVisible;
         return;
     }
 
     if (const auto* edit = std::get_if<SheetEdit>(&delta)) {
         const int size = forward ? edit->afterSize : edit->beforeSize;
         const int orientation = forward ? edit->afterOrientation : edit->beforeOrientation;
-        sheet_.setOrientation(static_cast<SheetOrientation>(orientation));
-        sheet_.setProjectionAngle(
+        paperForEdit().setOrientation(static_cast<SheetOrientation>(orientation));
+        paperForEdit().setProjectionAngle(
             static_cast<ProjectionAngle>(forward ? edit->afterAngle : edit->beforeAngle));
-        sheet_.setScale(DrawingScale{
+        paperForEdit().setScale(DrawingScale{
             forward ? edit->afterScaleNumerator : edit->beforeScaleNumerator,
             forward ? edit->afterScaleDenominator : edit->beforeScaleDenominator});
         // A CUSTOM SHEET carries its own millimetres, and setSize alone cannot
@@ -3660,11 +3882,11 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         // what the delta holds is what the user typed. The first draft swapped
         // them for a landscape sheet and M32_UNDO_002 came back 250 x 500.
         if (static_cast<SheetSize>(size) == SheetSize::Custom)
-            sheet_.setCustomSize(forward ? edit->afterWidthMm : edit->beforeWidthMm,
+            paperForEdit().setCustomSize(forward ? edit->afterWidthMm : edit->beforeWidthMm,
                                  forward ? edit->afterHeightMm : edit->beforeHeightMm);
         // AFTER setCustomSize, which forces the size to Custom as a side
         // effect -- the same ordering restoreSheet has to observe.
-        sheet_.setSize(static_cast<SheetSize>(size));
+        paperForEdit().setSize(static_cast<SheetSize>(size));
         return;
     }
     if (const auto* edit = std::get_if<LayerExistenceEdit>(&delta)) {

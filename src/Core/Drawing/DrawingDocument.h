@@ -15,6 +15,7 @@
 #include "Core/Drawing/DrawingView.h"
 #include "Core/Drawing/Hatch.h"
 #include "Core/Drawing/Sheet.h"
+#include "Core/Drawing/SheetPage.h"
 
 #include <memory>
 #include <optional>
@@ -63,7 +64,70 @@ public:
     DocumentType type() const noexcept override { return DocumentType::Drawing; }
 
     // --- The paper -----------------------------------------------------------
-    const Sheet& sheet() const noexcept { return sheet_; }
+    // THE CURRENT PAGE'S PAPER. Every reader that existed before M44 asks this
+    // and keeps working, because a one-page drawing has exactly one answer.
+    const Sheet& sheet() const noexcept { return currentPage().paper(); }
+
+    // --- THE PAGES (M44) -----------------------------------------------------
+    //
+    // A drawing file is a SET of pages: the general arrangement, then the
+    // details. Each has its own paper, frame and title block, because that is
+    // what ISO 5457 and 7200 describe -- a page, not a document.
+    //
+    // Up to here the title block's Sheet row could only say 1 / 1, and that is
+    // the kind of half-truth a drawing carries into a workshop: a reader who
+    // sees 1 / 1 believes there is no second page.
+    SheetPage& addSheetPage(std::string name);
+    // THE LOADER'S RAW PATH, like every other restore here: no undo record and
+    // no validation, because the loader has done both.
+    //
+    // A drawing is CONSTRUCTED with one page, so a file that carries its own
+    // has to take that one away first. Doing it the other way -- constructing
+    // with none -- would give every accessor a no-page case, and a case that
+    // cannot happen is a case nobody maintains.
+    void clearSheetPagesForRestore();
+    void restoreCurrentSheet(ObjectId sheetId) noexcept { currentPageId_ = sheetId; }
+    SheetPage& restoreSheetPage(ObjectId id, std::string name, Sheet paper,
+                                FrameMargins margins, double zoneTargetMm,
+                                bool frameVisible);
+    std::vector<const SheetPage*> sheetPages() const;
+    const SheetPage* findSheetPage(ObjectId id) const noexcept;
+    ObjectId currentSheetId() const noexcept;
+    bool setCurrentSheet(ObjectId sheetId);
+    // REFUSED while anything is on it, and refused for the last page -- a
+    // drawing with no paper is not a drawing, and silently taking the objects
+    // with it throws away work nobody asked to lose (the rule M41's datums
+    // settled).
+    bool removeSheetPage(ObjectId sheetId);
+    std::size_t objectsOnSheet(ObjectId sheetId) const;
+
+    // "2 / 3", DERIVED from where the page sits in the file. A stored copy is
+    // the first thing to go stale when a page is inserted, and it is stale in
+    // the one place a reader trusts absolutely.
+    std::string sheetNumberOf(ObjectId sheetId) const;
+    // The same two numbers as digits, for the title block's Sheet row -- which
+    // is where a reader learns there IS a second page.
+    int currentSheetNumber() const noexcept;
+    int sheetCount() const noexcept;
+
+    // WHICH PAGE AN OBJECT IS ON, and moving it to another. ONE switchboard:
+    // eight kinds of object sit on paper, and eight copies of this walk would
+    // be eight chances for one of them to be forgotten.
+    // Is an object with this sheetId on the page being looked at? The one
+    // question the painter asks about every object it is handed.
+    bool isOnCurrentSheet(ObjectId sheetId) const noexcept;
+    ObjectId sheetOfObject(ObjectId objectId) const;
+    bool setObjectSheet(ObjectId objectId, ObjectId sheetId);
+
+    // WHY THIS DRAWING CANNOT BE WRITTEN, or empty when it can.
+    //
+    // Today it is one rule -- every object has to be on a page that exists --
+    // and it is asked by the saver AND the loader, so what one refuses the
+    // other refuses (ADR-M3-008). Ownership would have made the rule
+    // unnecessary; a page holding its own objects cannot disagree with them.
+    // This is the boundary check that buys most of the same safety without
+    // rewriting forty methods that walk the document's lists.
+    std::string whyDrawingRefused() const;
     // Through the facade, so every change is one undo step and the views that
     // sit on the paper are told it moved.
     bool setSheetSize(SheetSize size);
@@ -453,9 +517,11 @@ public:
     // old border and the old size printed in the corner -- and it would look
     // completely plausible.
     const TitleBlock& titleBlock() const noexcept { return titleBlock_; }
-    const FrameMargins& frameMargins() const noexcept { return frameMargins_; }
-    double frameZoneTargetMm() const noexcept { return zoneTargetMm_; }
-    bool isFrameVisible() const noexcept { return frameVisible_; }
+    const FrameMargins& frameMargins() const noexcept {
+        return currentPage().frameMargins();
+    }
+    double frameZoneTargetMm() const noexcept { return currentPage().frameZoneTargetMm(); }
+    bool isFrameVisible() const noexcept { return currentPage().isFrameVisible(); }
 
     // WHERE THE FRAME IS, right now, on this paper. Asked for, never stored.
     SheetFrameGeometry frame() const noexcept;
@@ -618,7 +684,18 @@ private:
     // layer everything is on.
     void seedTables();
 
-    Sheet sheet_;
+    // THE PAGES. Never empty: a drawing is constructed with one, and the last
+    // one cannot be deleted.
+    std::vector<std::unique_ptr<SheetPage>> pages_;
+    ObjectId currentPageId_ = kInvalidObjectId;
+
+    // The current page, as the five old members were. Const and mutable, so a
+    // reader stays const and only the editors ask for the other one.
+    const SheetPage& currentPage() const noexcept;
+    SheetPage& currentPageForEdit() noexcept;
+    Sheet& paperForEdit() noexcept { return currentPageForEdit().paperForEdit(); }
+    TitleBlock& blockForEdit() noexcept { return titleBlock_; }
+    TitleBlock titleBlock_;
     std::vector<std::unique_ptr<Layer>> layers_;
     std::vector<std::unique_ptr<Linetype>> linetypes_;
     std::vector<std::unique_ptr<DrawingView>> views_;
@@ -631,11 +708,11 @@ private:
     std::vector<std::unique_ptr<Annotation>> annotations_;
     std::vector<std::unique_ptr<SymbolPlacement>> symbols_;
     std::vector<std::unique_ptr<WireEntity>> wires_;
-    TitleBlock titleBlock_;
+
     GeneralToleranceClass generalTolerance_ = GeneralToleranceClass::None;
-    FrameMargins frameMargins_;
-    double zoneTargetMm_ = 100.0;
-    bool frameVisible_ = true;
+
+
+
     ObjectId currentLayerId_{kInvalidObjectId};
 };
 

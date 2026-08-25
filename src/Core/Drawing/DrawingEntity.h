@@ -111,6 +111,13 @@ public:
     void setShape(DrawShape shape) { shape_ = std::move(shape); }
 
     ObjectId layerId() const noexcept { return layerId_; }
+
+    // WHICH PAGE THIS SITS ON (M44). kInvalidObjectId means the drawing's
+    // first page, which is what every object made before there was more than
+    // one page belongs to.
+    ObjectId sheetId() const noexcept { return sheetId_; }
+    void setSheetId(ObjectId sheetId) noexcept { sheetId_ = sheetId; }
+
     void setLayerId(ObjectId layerId) noexcept { layerId_ = layerId; }
 
     int color() const noexcept { return color_; }
@@ -137,6 +144,8 @@ public:
 private:
     ObjectId id_;
     DrawShape shape_;
+    // M44. Set when the object is added, from whichever page was current.
+    ObjectId sheetId_ = kInvalidObjectId;
     ObjectId layerId_{kInvalidObjectId};
     int color_ = kColorByLayer;
     std::string linetype_{"BYLAYER"};

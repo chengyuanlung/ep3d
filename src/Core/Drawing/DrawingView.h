@@ -216,6 +216,13 @@ public:
 
     ComputeState currentState() const noexcept { return state_; }
 
+    // WHICH PAGE THIS SITS ON (M44). kInvalidObjectId means the drawing's
+    // first page, which is what every object made before there was more than
+    // one page belongs to.
+    ObjectId sheetId() const noexcept { return sheetId_; }
+    void setSheetId(ObjectId sheetId) noexcept { sheetId_ = sheetId; }
+
+
     // A PROJECTION PUT THERE BY A TEST, so the rules that read one can be
     // tested without a kernel (M43).
     //
@@ -252,6 +259,8 @@ private:
     bool showTangent_{false};
     ProjectedDrawing projected_;
     SectionCut section_;
+    // M44. Set when the object is added, from whichever page was current.
+    ObjectId sheetId_ = kInvalidObjectId;
     ComputeState state_{ComputeState::Dirty};
     std::string diagnostic_;
 };

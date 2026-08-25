@@ -79,6 +79,23 @@ inline bool operator!=(const DrawingScale& a, const DrawingScale& b) noexcept {
 // can read back is a title block that prints a lie.
 bool ParseDrawingScale(std::string_view text, DrawingScale& into) noexcept;
 
+// A PAGE OF A DRAWING (M44).
+//
+// Up to here a drawing file was one sheet, and the title block's "Sheet" row
+// said 1 / 1 because it could not say anything else. A real drawing set is
+// several pages in one file -- the general arrangement, then the details --
+// and every page has its OWN paper size, frame and title block, because that
+// is what ISO 5457 and 7200 describe: a page, not a document.
+//
+// WHAT A PAGE IS NOT is a container of objects. The views, dimensions and
+// symbols stay in the document's own lists and each says which page it is on.
+// Ownership would make "which page is this on" impossible to get wrong, and
+// that is the better shape -- but it would rewrite every one of forty methods
+// that walk those lists, and the boundary check below buys most of the same
+// safety: at save and at load, every object's page has to be a page that is
+// here, checked in one place by one rule.
+class SheetPage;
+
 class Sheet {
 public:
     Sheet() = default;

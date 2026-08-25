@@ -110,6 +110,13 @@ public:
     Vec2 positionMm() const noexcept { return positionMm_; }
     void setPositionMm(Vec2 at) noexcept { positionMm_ = at; }
 
+    // WHICH PAGE THIS SITS ON (M44). kInvalidObjectId means the drawing's
+    // first page, which is what every object made before there was more than
+    // one page belongs to.
+    ObjectId sheetId() const noexcept { return sheetId_; }
+    void setSheetId(ObjectId sheetId) noexcept { sheetId_ = sheetId; }
+
+
     BomDepth depth() const noexcept { return depth_; }
     void setDepth(BomDepth depth) noexcept { depth_ = depth; }
 
@@ -160,6 +167,8 @@ public:
 private:
     ObjectId id_;
     std::string name_;
+    // M44. Set when the object is added, from whichever page was current.
+    ObjectId sheetId_ = kInvalidObjectId;
     std::string sourcePath_;
     Vec2 positionMm_{};
     BomDepth depth_ = BomDepth::TopLevel;

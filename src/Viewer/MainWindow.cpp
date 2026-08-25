@@ -492,6 +492,25 @@ void MainWindow::buildMenus() {
                        "never describe holes the part no longer has."));
     connect(holeTableAction_, &QAction::triggered, this, &MainWindow::onHoleTableRequested);
 
+    QMenu* sheetMenu = drawingMenu_->addMenu(QStringLiteral("S&heets"));
+    addSheetAction_ = sheetMenu->addAction(QStringLiteral("&Add Sheet..."));
+    addSheetAction_->setToolTip(
+        QStringLiteral("Another page in this drawing file.\n"
+                       "It starts as a copy of this page's paper, and the title block's "
+                       "Sheet row starts telling the truth about how many there are."));
+    connect(addSheetAction_, &QAction::triggered, this, &MainWindow::onAddSheetRequested);
+    nextSheetAction_ = sheetMenu->addAction(QStringLiteral("&Next Sheet"));
+    nextSheetAction_->setToolTip(
+        QStringLiteral("The next page. What is on the others is not hidden or deleted -- "
+                       "it is on another sheet, which is the whole of what a page means."));
+    connect(nextSheetAction_, &QAction::triggered, this, &MainWindow::onNextSheetRequested);
+    deleteSheetAction_ = sheetMenu->addAction(QStringLiteral("&Delete Sheet"));
+    deleteSheetAction_->setToolTip(
+        QStringLiteral("Refused while anything is on it, and refused for the last page.\n"
+                       "Moving the work off first is a decision, and it is yours."));
+    connect(deleteSheetAction_, &QAction::triggered, this,
+            &MainWindow::onDeleteSheetRequested);
+
     QMenu* symbolMenu = drawingMenu_->addMenu(QStringLiteral("S&ymbols"));
     datumAction_ = symbolMenu->addAction(QStringLiteral("&Datum"));
     datumAction_->setToolTip(
@@ -5630,10 +5649,115 @@ void MainWindow::onSurfaceFinishRequested() {
     addSymbolCommand(spec, at, Vec2{at.x + 10.0, at.y + 10.0});
 }
 
+QString MainWindow::addSheetCommand(const QString& name) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Sheets belong to a drawing."));
+    SheetPage* made = nullptr;
+    try {
+        made = &drawing->addSheetPage(name.toStdString());
+    } catch (const std::exception& error) {
+        return say(QStringLiteral("That sheet was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    // MOVED TO IT, because adding a page and then drawing on the old one is
+    // not what anybody means by "add a sheet".
+    drawing->setCurrentSheet(made->id());
+    refreshAll();
+    return say(QStringLiteral("Sheet %1").arg(
+        QString::fromStdString(drawing->sheetNumberOf(made->id()))));
+}
+
+QString MainWindow::goToSheetCommand(ObjectId sheetId) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Sheets belong to a drawing."));
+    if (!drawing->setCurrentSheet(sheetId))
+        return say(QStringLiteral("That sheet is not in this drawing."));
+    // THE SELECTION GOES WITH THE PAGE. A selected object on a sheet nobody is
+    // looking at is one the next keystroke edits invisibly.
+    selectedId_ = kInvalidObjectId;
+    refreshAll();
+    const SheetPage* page = drawing->findSheetPage(sheetId);
+    return say(QStringLiteral("Sheet %1 -- %2")
+                   .arg(QString::fromStdString(drawing->sheetNumberOf(sheetId)),
+                        page == nullptr ? QString()
+                                        : QString::fromStdString(page->name())));
+}
+
+QString MainWindow::deleteSheetCommand(ObjectId sheetId) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Sheets belong to a drawing."));
+    if (drawing->sheetPages().size() <= 1)
+        return say(QStringLiteral("A drawing has to have a sheet."));
+    const std::size_t on = drawing->objectsOnSheet(sheetId);
+    if (on > 0)
+        // WHAT IS ON IT, COUNTED. "Cannot delete" with no number leaves the
+        // user hunting; the count is the whole of what they need to know.
+        return say(QStringLiteral("That sheet still has %1 object(s) on it -- move them "
+                                  "first.")
+                       .arg(on));
+    if (!drawing->removeSheetPage(sheetId))
+        return say(QStringLiteral("That sheet could not be deleted."));
+    selectedId_ = kInvalidObjectId;
+    refreshAll();
+    return say(QStringLiteral("Sheet deleted -- %1 left").arg(drawing->sheetCount()));
+}
+
+void MainWindow::onAddSheetRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, QStringLiteral("Add Sheet"), QStringLiteral("Name:"), QLineEdit::Normal,
+        QStringLiteral("Sheet%1").arg(drawing->sheetCount() + 1), &ok);
+    if (!ok) return;
+    addSheetCommand(name);
+}
+
+void MainWindow::onNextSheetRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const std::vector<const SheetPage*> pages = drawing->sheetPages();
+    if (pages.size() <= 1) {
+        statusLeft_->setText(QStringLiteral("This drawing has one sheet."));
+        return;
+    }
+    for (std::size_t i = 0; i < pages.size(); ++i)
+        if (pages[i]->id() == drawing->currentSheetId()) {
+            goToSheetCommand(pages[(i + 1) % pages.size()]->id());
+            return;
+        }
+}
+
+void MainWindow::onDeleteSheetRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    deleteSheetCommand(drawing->currentSheetId());
+}
+
 QString MainWindow::sectionLetterForTesting(ObjectId viewId) const {
     const DrawingDocument* drawing = AsDrawing(document_);
     return drawing == nullptr ? QString()
                               : QString::fromStdString(drawing->sectionLetterOf(viewId));
+}
+
+std::vector<const SheetPage*> MainWindow::sheetPagesForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? std::vector<const SheetPage*>{} : drawing->sheetPages();
 }
 
 std::vector<const BomTable*> MainWindow::bomTablesForTesting() const {

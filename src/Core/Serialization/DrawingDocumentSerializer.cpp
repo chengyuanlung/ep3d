@@ -46,6 +46,32 @@ JsonValue WriteDimensionAnchor(const DimensionAnchor& anchor) {
 // The other half of the same codec. Returns false with `err` filled for a
 // missing or mistyped field, and false with `err` untouched for an anchor kind
 // this build does not know -- which the caller turns into its own message.
+// THE PAPER, ITS FRAME AND ITS TITLE BLOCK (M44).
+//
+// Lifted out of the three places they were written inline, for the reason the
+// anchor codec was: a drawing has SEVERAL pages now, and three copies of "how
+// a page is written" is three chances for one to learn a field the others do
+// not.
+JsonValue WriteSheet(const Sheet& sheet) {
+    JsonValue paper = JsonValue::makeObject();
+    paper.set("size", JsonValue::makeString(std::string(toString(sheet.size()))));
+    paper.set("orientation",
+              JsonValue::makeString(std::string(toString(sheet.orientation()))));
+    paper.set("scale", JsonValue::makeString(sheet.scale().toString()));
+    // WHICH SIDE THE PROJECTED VIEWS GO. On the sheet, because a drawing is in
+    // one convention or the other and never both -- which is what the
+    // projection symbol in a title block promises.
+    paper.set("projectionAngle",
+              JsonValue::makeString(std::string(toString(sheet.projectionAngle()))));
+    if (sheet.size() == SheetSize::Custom) {
+        // AS TYPED. A custom sheet ignores orientation (see Sheet::widthMm),
+        // so these two numbers ARE its width and height in both directions.
+        paper.set("widthMm", JsonValue::makeNumber(sheet.customWidthMm()));
+        paper.set("heightMm", JsonValue::makeNumber(sheet.customHeightMm()));
+    }
+    return paper;
+}
+
 bool ReadDimensionAnchor(const JsonValue& entry, const char* key, const std::string& context,
                          docjson::FieldError& err, DimensionAnchor& into) {
     const JsonValue* at = requireField(entry, key, JsonType::Object, context, err);
@@ -107,6 +133,83 @@ std::optional<SheetOrientation> sheetOrientationFromString(std::string_view text
     if (text == "Landscape") return SheetOrientation::Landscape;
     return std::nullopt;
 }
+
+// THE OTHER HALF OF WriteSheet, and the ONE reader (M44).
+//
+// A drawing from before M44 has its paper at the top level; one written since
+// has a paper per page. Same fields, same rules -- so the same function, or
+// the day one of them learns about a new sheet size the other silently makes
+// it A4.
+bool ReadSheet(const JsonValue& paper, const std::string& context, docjson::FieldError& err,
+               Sheet& into) {
+    const JsonValue* size = requireField(paper, "size", JsonType::String, context, err);
+    if (size == nullptr) return false;
+    const auto parsedSize = sheetSizeFromString(size->asString());
+    if (!parsedSize.has_value()) {
+        err = docjson::fieldError(SerializationError::InvalidEnumValue,
+                                  context + ": unknown sheet size '" + size->asString() + "'");
+        return false;
+    }
+
+    const JsonValue* orientation =
+        requireField(paper, "orientation", JsonType::String, context, err);
+    if (orientation == nullptr) return false;
+    const auto parsedOrientation = sheetOrientationFromString(orientation->asString());
+    if (!parsedOrientation.has_value()) {
+        err = docjson::fieldError(SerializationError::InvalidEnumValue,
+                                  context + ": unknown orientation '" +
+                                      orientation->asString() + "'");
+        return false;
+    }
+
+    const JsonValue* scale = requireField(paper, "scale", JsonType::String, context, err);
+    if (scale == nullptr) return false;
+    DrawingScale parsedScale;
+    if (!ParseDrawingScale(scale->asString(), parsedScale)) {
+        err = docjson::fieldError(SerializationError::InvalidFieldType,
+                                  context + ": '" + scale->asString() +
+                                      "' is not a scale like 1:2");
+        return false;
+    }
+
+    ProjectionAngle angle = ProjectionAngle::First;
+    if (const JsonValue* value = paper.find("projectionAngle")) {
+        if (value->type() != JsonType::String) {
+            err = docjson::fieldError(SerializationError::InvalidFieldType,
+                                      context + ": field 'projectionAngle' is not a string");
+            return false;
+        }
+        if (value->asString() == "First") {
+            angle = ProjectionAngle::First;
+        } else if (value->asString() == "Third") {
+            angle = ProjectionAngle::Third;
+        } else {
+            err = docjson::fieldError(SerializationError::InvalidEnumValue,
+                                      context + ": unknown projection angle '" +
+                                          value->asString() + "'");
+            return false;
+        }
+    }
+
+    Sheet built{*parsedSize, *parsedOrientation};
+    if (*parsedSize == SheetSize::Custom) {
+        const JsonValue* width = requireField(paper, "widthMm", JsonType::Number, context, err);
+        if (width == nullptr) return false;
+        const JsonValue* height =
+            requireField(paper, "heightMm", JsonType::Number, context, err);
+        if (height == nullptr) return false;
+        if (!built.setCustomSize(width->asNumber(), height->asNumber())) {
+            err = docjson::fieldError(SerializationError::InvalidFieldType,
+                                      context + ": a custom sheet has no area");
+            return false;
+        }
+    }
+    built.setScale(parsedScale);
+    built.setProjectionAngle(angle);
+    into = built;
+    return true;
+}
+
 
 std::optional<ViewDirection> viewDirectionFromString(std::string_view text) {
     if (text == "Front") return ViewDirection::Front;
@@ -284,6 +387,13 @@ SaveResult validateSaveable(const DrawingDocument& document) {
                               "a wire is on a layer that is not in this document"};
     }
 
+    // v46 (M44). EVERY OBJECT HAS TO BE ON A PAGE THAT IS HERE, and the check
+    // is the DOCUMENT'S OWN -- the same call the loader makes. An object on a
+    // page that has gone is on no tab at all: it cannot be found, moved or
+    // deleted, and nothing on the screen says it exists.
+    if (const std::string why = document.whyDrawingRefused(); !why.empty())
+        return SaveResult{SerializationError::UnknownDependencyId, why};
+
     // v44 (M41). EVERY SYMBOL HAS TO BE ONE THAT CAN BE DRAWN, and the check
     // is the DOCUMENT'S OWN -- the same call the loader makes below, and the
     // same one the painter asks before drawing. Written out here as its own
@@ -394,24 +504,6 @@ JsonValue toJson(const DrawingDocument& document) {
 
     // THE PAPER. A scale is written as the ratio the user typed ("1:2"), not
     // as a quotient -- 0.5 cannot be read back into a title block.
-    const Sheet& sheet = document.sheet();
-    JsonValue paper = JsonValue::makeObject();
-    paper.set("size", JsonValue::makeString(std::string(toString(sheet.size()))));
-    paper.set("orientation",
-              JsonValue::makeString(std::string(toString(sheet.orientation()))));
-    paper.set("scale", JsonValue::makeString(sheet.scale().toString()));
-    // WHICH SIDE THE PROJECTED VIEWS GO. On the sheet, because a drawing is in
-    // one convention or the other and never both -- which is what the
-    // projection symbol in a title block promises.
-    paper.set("projectionAngle",
-              JsonValue::makeString(std::string(toString(sheet.projectionAngle()))));
-    if (sheet.size() == SheetSize::Custom) {
-        // AS TYPED. A custom sheet ignores orientation (see Sheet::widthMm),
-        // so these two numbers ARE its width and height in both directions.
-        paper.set("widthMm", JsonValue::makeNumber(sheet.customWidthMm()));
-        paper.set("heightMm", JsonValue::makeNumber(sheet.customHeightMm()));
-    }
-    root.set("sheet", std::move(paper));
 
     // LINETYPES BEFORE LAYERS, because a layer names one. The order is the
     // loader's order too, so a file can be read straight through.
@@ -453,6 +545,11 @@ JsonValue toJson(const DrawingDocument& document) {
     for (const DrawingView* view : document.views()) {
         JsonValue entry = JsonValue::makeObject();
         entry.set("id", JsonValue::makeString(idToString(view->id())));
+        // v46 (M44). WHICH PAGE, resolved -- a file never says "wherever the
+        // first one is", because the reader would have to make the same guess
+        // and two guesses is a pair to keep in step.
+        entry.set("sheetId",
+                  JsonValue::makeString(idToString(document.sheetOfObject(view->id()))));
         entry.set("name", JsonValue::makeString(view->name()));
         // A PATH AND A BODY NAME -- the sentence "that body, in that file",
         // exactly as an instance stores it (ADR-M22-003). No geometry: the
@@ -503,6 +600,11 @@ JsonValue toJson(const DrawingDocument& document) {
     for (const DrawingEntity* entity : document.entities()) {
         JsonValue item = JsonValue::makeObject();
         item.set("id", JsonValue::makeString(idToString(entity->id())));
+        // v46 (M44). WHICH PAGE, resolved -- a file never says "wherever the
+        // first one is", because the reader would have to make the same guess
+        // and two guesses is a pair to keep in step.
+        item.set("sheetId",
+                  JsonValue::makeString(idToString(document.sheetOfObject(entity->id()))));
         item.set("layerId", JsonValue::makeString(idToString(entity->layerId())));
         item.set("color", JsonValue::makeNumber(static_cast<double>(entity->color())));
         item.set("linetype", JsonValue::makeString(entity->linetype()));
@@ -588,11 +690,54 @@ JsonValue toJson(const DrawingDocument& document) {
     root.set("currentDimensionStyleId",
              JsonValue::makeString(idToString(document.currentDimensionStyleId())));
 
+    // v46 (M44). THE PAGES, in order -- and the order IS the numbering, so
+    // "2 / 3" is never written down anywhere.
+    JsonValue pages = JsonValue::makeArray();
+    for (const SheetPage* page : document.sheetPages()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(page->id())));
+        item.set("name", JsonValue::makeString(page->name()));
+        item.set("paper", WriteSheet(page->paper()));
+        item.set("bindingMm", JsonValue::makeNumber(page->frameMargins().bindingMm));
+        item.set("marginMm", JsonValue::makeNumber(page->frameMargins().otherMm));
+        item.set("zoneTargetMm", JsonValue::makeNumber(page->frameZoneTargetMm()));
+        item.set("frameVisible", JsonValue::makeBool(page->isFrameVisible()));
+        pages.add(std::move(item));
+    }
+    root.set("sheets", std::move(pages));
+    root.set("currentSheetId", JsonValue::makeString(idToString(document.currentSheetId())));
+
+    // ONE TITLE BLOCK FOR THE DRAWING (M44). The Sheet row is the only part of
+    // it that differs page to page, and that row is derived from where the
+    // page sits -- so there is nothing per-page to write.
+    JsonValue titleBlock = JsonValue::makeObject();
+    titleBlock.set("widthMm", JsonValue::makeNumber(document.titleBlock().widthMm()));
+    titleBlock.set("rowHeightMm", JsonValue::makeNumber(document.titleBlock().rowHeightMm()));
+    titleBlock.set("visible", JsonValue::makeBool(document.titleBlock().isVisible()));
+    JsonValue rows = JsonValue::makeArray();
+    for (const TitleBlockField& field : document.titleBlock().fields()) {
+        JsonValue row = JsonValue::makeObject();
+        row.set("label", JsonValue::makeString(field.label));
+        row.set("source", JsonValue::makeString(std::string(toString(field.source))));
+        // A DERIVED ROW WRITES NO VALUE. There is nothing to write: what it
+        // prints is fetched at draw time, and a value beside it in the file
+        // would be a second answer waiting to go stale.
+        if (!field.isDerived()) row.set("value", JsonValue::makeString(field.value));
+        rows.add(std::move(row));
+    }
+    titleBlock.set("fields", std::move(rows));
+    root.set("titleBlock", std::move(titleBlock));
+
     JsonValue dimensions = JsonValue::makeArray();
     const auto& anchorToJson = WriteDimensionAnchor;
     for (const DrawingDimension* dimension : document.dimensions()) {
         JsonValue item = JsonValue::makeObject();
         item.set("id", JsonValue::makeString(idToString(dimension->id())));
+        // v46 (M44). WHICH PAGE, resolved -- a file never says "wherever the
+        // first one is", because the reader would have to make the same guess
+        // and two guesses is a pair to keep in step.
+        item.set("sheetId",
+                  JsonValue::makeString(idToString(document.sheetOfObject(dimension->id()))));
         item.set("kind", JsonValue::makeString(std::string(toString(dimension->kind()))));
         item.set("direction",
                  JsonValue::makeString(std::string(toString(dimension->direction()))));
@@ -639,30 +784,6 @@ JsonValue toJson(const DrawingDocument& document) {
     // rows of the title block are all DERIVED from the sheet and none of them
     // is written. A file carrying them would come back holding an A3 border on
     // a sheet somebody has since made A2 -- and it would look right.
-    JsonValue frame = JsonValue::makeObject();
-    frame.set("bindingMm", JsonValue::makeNumber(document.frameMargins().bindingMm));
-    frame.set("otherMm", JsonValue::makeNumber(document.frameMargins().otherMm));
-    frame.set("zoneTargetMm", JsonValue::makeNumber(document.frameZoneTargetMm()));
-    frame.set("visible", JsonValue::makeBool(document.isFrameVisible()));
-    root.set("frame", std::move(frame));
-
-    JsonValue titleBlock = JsonValue::makeObject();
-    titleBlock.set("widthMm", JsonValue::makeNumber(document.titleBlock().widthMm()));
-    titleBlock.set("rowHeightMm", JsonValue::makeNumber(document.titleBlock().rowHeightMm()));
-    titleBlock.set("visible", JsonValue::makeBool(document.titleBlock().isVisible()));
-    JsonValue rows = JsonValue::makeArray();
-    for (const TitleBlockField& field : document.titleBlock().fields()) {
-        JsonValue row = JsonValue::makeObject();
-        row.set("label", JsonValue::makeString(field.label));
-        row.set("source", JsonValue::makeString(std::string(toString(field.source))));
-        // A DERIVED ROW WRITES NO VALUE. There is nothing to write: what it
-        // prints is fetched from the sheet at draw time, and a value beside it
-        // in the file would be a second answer waiting to go stale.
-        if (!field.isDerived()) row.set("value", JsonValue::makeString(field.value));
-        rows.add(std::move(row));
-    }
-    titleBlock.set("fields", std::move(rows));
-    root.set("titleBlock", std::move(titleBlock));
 
     // v39 (M35.6). WHICH FILE, WHICH COLUMNS, HOW DEEP -- and the stamp, so
     // staleness survives a reopen.
@@ -675,6 +796,11 @@ JsonValue toJson(const DrawingDocument& document) {
     for (const BomTable* table : document.bomTables()) {
         JsonValue item = JsonValue::makeObject();
         item.set("id", JsonValue::makeString(idToString(table->id())));
+        // v46 (M44). WHICH PAGE, resolved -- a file never says "wherever the
+        // first one is", because the reader would have to make the same guess
+        // and two guesses is a pair to keep in step.
+        item.set("sheetId",
+                  JsonValue::makeString(idToString(document.sheetOfObject(table->id()))));
         item.set("name", JsonValue::makeString(table->name()));
         item.set("sourcePath", JsonValue::makeString(table->sourcePath()));
         item.set("xMm", JsonValue::makeNumber(table->positionMm().x));
@@ -700,6 +826,11 @@ JsonValue toJson(const DrawingDocument& document) {
     for (const HoleTable* table : document.holeTables()) {
         JsonValue item = JsonValue::makeObject();
         item.set("id", JsonValue::makeString(idToString(table->id())));
+        // v46 (M44). WHICH PAGE, resolved -- a file never says "wherever the
+        // first one is", because the reader would have to make the same guess
+        // and two guesses is a pair to keep in step.
+        item.set("sheetId",
+                  JsonValue::makeString(idToString(document.sheetOfObject(table->id()))));
         item.set("name", JsonValue::makeString(table->name()));
         item.set("viewId", JsonValue::makeString(idToString(table->viewId())));
         item.set("xMm", JsonValue::makeNumber(table->positionMm().x));
@@ -723,6 +854,11 @@ JsonValue toJson(const DrawingDocument& document) {
     for (const Annotation* annotation : document.annotations()) {
         JsonValue item = JsonValue::makeObject();
         item.set("id", JsonValue::makeString(idToString(annotation->id())));
+        // v46 (M44). WHICH PAGE, resolved -- a file never says "wherever the
+        // first one is", because the reader would have to make the same guess
+        // and two guesses is a pair to keep in step.
+        item.set("sheetId",
+                  JsonValue::makeString(idToString(document.sheetOfObject(annotation->id()))));
         item.set("xMm", JsonValue::makeNumber(annotation->positionMm().x));
         item.set("yMm", JsonValue::makeNumber(annotation->positionMm().y));
         item.set("layerId", JsonValue::makeString(idToString(annotation->layerId())));
@@ -916,61 +1052,36 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     ProjectionAngle projectionAngle = ProjectionAngle::First;
     double customWidthMm = 0.0;
     double customHeightMm = 0.0;
+    // WHICH PAGE EACH OBJECT IS ON, collected as the objects are read and
+    // applied in ONE place once the pages exist. Applying it per object as it
+    // is restored would mean six restore signatures growing a parameter, and
+    // six chances for the next kind of object to be forgotten.
+    std::vector<std::pair<ObjectId, ObjectId>> objectSheets;
+    const auto noteSheet = [&objectSheets](const JsonValue& entry, ObjectId objectId) {
+        if (const JsonValue* value = entry.find("sheetId"))
+            if (value->type() == JsonType::String)
+                if (const auto parsed = idFromString(value->asString()))
+                    objectSheets.emplace_back(objectId, *parsed);
+    };
+
     if (const JsonValue* paper = root.find("sheet")) {
+        // A DRAWING FROM BEFORE M44: one sheet, at the top level. Read by the
+        // SAME function a page's paper is, so the two cannot come to disagree
+        // about what a sheet is -- and then unpacked into the locals the rest
+        // of this loader already uses.
         const std::string context = "sheet";
         if (paper->type() != JsonType::Object)
             return loadFailure(SerializationError::InvalidFieldType,
                                "document: field 'sheet' is not an object");
-        const JsonValue* size = requireField(*paper, "size", JsonType::String, context, err);
-        if (size == nullptr) return loadFailure(err.error, err.message);
-        const auto parsedSize = sheetSizeFromString(size->asString());
-        if (!parsedSize.has_value())
-            return loadFailure(SerializationError::InvalidEnumValue,
-                               context + ": unknown sheet size '" + size->asString() + "'");
-        sheetSize = *parsedSize;
-
-        const JsonValue* orientation =
-            requireField(*paper, "orientation", JsonType::String, context, err);
-        if (orientation == nullptr) return loadFailure(err.error, err.message);
-        const auto parsedOrientation = sheetOrientationFromString(orientation->asString());
-        if (!parsedOrientation.has_value())
-            return loadFailure(SerializationError::InvalidEnumValue,
-                               context + ": unknown orientation '" + orientation->asString() +
-                                   "'");
-        sheetOrientation = *parsedOrientation;
-
-        const JsonValue* scale = requireField(*paper, "scale", JsonType::String, context, err);
-        if (scale == nullptr) return loadFailure(err.error, err.message);
-        if (!ParseDrawingScale(scale->asString(), sheetScale))
-            return loadFailure(SerializationError::InvalidFieldType,
-                               context + ": '" + scale->asString() +
-                                   "' is not a scale like 1:2");
-
-        if (const JsonValue* angle = paper->find("projectionAngle")) {
-            if (angle->type() != JsonType::String)
-                return loadFailure(SerializationError::InvalidFieldType,
-                                   context + ": field 'projectionAngle' is not a string");
-            if (angle->asString() == "First") projectionAngle = ProjectionAngle::First;
-            else if (angle->asString() == "Third") projectionAngle = ProjectionAngle::Third;
-            else
-                return loadFailure(SerializationError::InvalidEnumValue,
-                                   context + ": unknown projection angle '" +
-                                       angle->asString() + "'");
-        }
-
-        if (sheetSize == SheetSize::Custom) {
-            const JsonValue* width =
-                requireField(*paper, "widthMm", JsonType::Number, context, err);
-            if (width == nullptr) return loadFailure(err.error, err.message);
-            const JsonValue* height =
-                requireField(*paper, "heightMm", JsonType::Number, context, err);
-            if (height == nullptr) return loadFailure(err.error, err.message);
-            customWidthMm = width->asNumber();
-            customHeightMm = height->asNumber();
-            if (!(customWidthMm > 0.0) || !(customHeightMm > 0.0))
-                return loadFailure(SerializationError::InvalidFieldType,
-                                   context + ": a custom sheet has no area");
-        }
+        Sheet legacy;
+        if (!ReadSheet(*paper, context, err, legacy))
+            return loadFailure(err.error, err.message);
+        sheetSize = legacy.size();
+        sheetOrientation = legacy.orientation();
+        sheetScale = legacy.scale();
+        projectionAngle = legacy.projectionAngle();
+        customWidthMm = legacy.customWidthMm();
+        customHeightMm = legacy.customHeightMm();
     }
 
     // --- Linetypes, then layers, then views ----------------------------------
@@ -994,6 +1105,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
             if (name == nullptr) return loadFailure(err.error, err.message);
@@ -1041,6 +1153,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
             if (name == nullptr) return loadFailure(err.error, err.message);
@@ -1109,6 +1222,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
             if (name == nullptr) return loadFailure(err.error, err.message);
@@ -1300,6 +1414,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* layerField =
                 requireField(entry, "layerId", JsonType::String, context, err);
@@ -1490,6 +1605,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
             const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
             if (name == nullptr) return loadFailure(err.error, err.message);
             if (name->asString().empty())
@@ -1571,6 +1687,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* kind = requireField(entry, "kind", JsonType::String, context, err);
             if (kind == nullptr) return loadFailure(err.error, err.message);
@@ -1743,6 +1860,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* tag = requireField(entry, "tag", JsonType::String, context, err);
             if (tag == nullptr) return loadFailure(err.error, err.message);
@@ -1830,6 +1948,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* points =
                 requireField(entry, "points", JsonType::Array, context, err);
@@ -1907,6 +2026,81 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     };
     std::vector<HoleTableData> holeTableData;
     std::vector<BomData> bomData;
+    // v46 (M44). THE PAGES.
+    //
+    // A file WITHOUT this array is a drawing from before there was more than
+    // one page: its sheet, frame and title block are at the top level and the
+    // document was constructed with exactly the page they describe, so that
+    // path needs no code here at all -- it is the absence of this block.
+    struct PageData {
+        ObjectId id = kInvalidObjectId;
+        std::string name;
+        Sheet paper;
+        FrameMargins margins;
+        double zoneTargetMm = 100.0;
+        bool frameVisible = true;
+    };
+    std::vector<PageData> pageData;
+    ObjectId currentPage = kInvalidObjectId;
+    if (const JsonValue* field = root.find("sheets")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'sheets' is not an array");
+        // A DRAWING WITH NO PAGES IS NOT A DRAWING, and an empty array is a
+        // clearer way to write that than a missing one.
+        if (field->items().empty())
+            return loadFailure(SerializationError::MissingField,
+                               "document: this drawing has no sheets");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "sheets[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            PageData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+            noteSheet(entry, one.id);
+
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            if (name->asString().empty())
+                return loadFailure(SerializationError::MissingField,
+                                   context + ": a sheet has no name");
+            one.name = name->asString();
+            for (const PageData& already : pageData)
+                if (already.name == one.name)
+                    return loadFailure(SerializationError::DuplicateId,
+                                       context + ": two sheets are both called '" +
+                                           one.name + "'");
+
+            const JsonValue* paper =
+                requireField(entry, "paper", JsonType::Object, context, err);
+            if (paper == nullptr) return loadFailure(err.error, err.message);
+            if (!ReadSheet(*paper, context, err, one.paper))
+                return loadFailure(err.error, err.message);
+
+            if (const JsonValue* binding = entry.find("bindingMm"))
+                if (binding->type() == JsonType::Number)
+                    one.margins.bindingMm = binding->asNumber();
+            if (const JsonValue* margin = entry.find("marginMm"))
+                if (margin->type() == JsonType::Number) one.margins.otherMm = margin->asNumber();
+            if (const JsonValue* zone = entry.find("zoneTargetMm"))
+                if (zone->type() == JsonType::Number) one.zoneTargetMm = zone->asNumber();
+            if (const JsonValue* visible = entry.find("frameVisible"))
+                if (visible->type() == JsonType::Bool) one.frameVisible = visible->asBool();
+            pageData.push_back(std::move(one));
+        }
+        if (const JsonValue* current = root.find("currentSheetId"))
+            if (const auto parsed = idFromString(current->asString())) currentPage = *parsed;
+    }
+
     if (const JsonValue* field = root.find("symbols")) {
         if (field->type() != JsonType::Array)
             return loadFailure(SerializationError::InvalidFieldType,
@@ -1926,6 +2120,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* x = requireField(entry, "xMm", JsonType::Number, context, err);
             const JsonValue* y = requireField(entry, "yMm", JsonType::Number, context, err);
@@ -2094,6 +2289,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
             if (name == nullptr) return loadFailure(err.error, err.message);
@@ -2183,6 +2379,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    context + ": field 'id' is not a valid ObjectId");
             if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
             one.id = *id;
+            noteSheet(entry, one.id);
 
             const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
             if (name == nullptr) return loadFailure(err.error, err.message);
@@ -2551,6 +2748,22 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     for (auto& one : wireData)
         document->restoreWire(one.id, std::move(one.pointsMm), one.layerId,
                               std::move(one.label));
+    // THE PAGES BEFORE EVERYTHING ELSE, because every object says which one it
+    // is on and the check at the end asks whether that page is here.
+    if (!pageData.empty()) {
+        document->clearSheetPagesForRestore();
+        for (auto& one : pageData)
+            document->restoreSheetPage(one.id, std::move(one.name), std::move(one.paper),
+                                       one.margins, one.zoneTargetMm, one.frameVisible);
+        // A CURRENT PAGE THE FILE DOES NOT HAVE falls back to the first, rather
+        // than leaving the document pointing at nothing. Which page was on
+        // screen when somebody saved is a convenience, not a fact about the
+        // drawing, and it is the one field here worth being forgiving about.
+        document->restoreCurrentSheet(document->findSheetPage(currentPage) != nullptr
+                                          ? currentPage
+                                          : document->sheetPages().front()->id());
+    }
+
     // THE DATUMS FIRST, so a frame restored after them can find the datum it
     // names. Written in one array and separated here, because the ORDER a
     // datum sits in that array is what its letter is derived from -- reading
@@ -2586,6 +2799,24 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         document->restoreBomTable(one.id, std::move(one.name), std::move(one.sourcePath),
                                   one.positionMm, one.depth, std::move(one.columns),
                                   one.rowHeightMm, one.growsUpward, one.sourceStamp);
+    // AND WHERE EVERYTHING SITS, in one place, now the pages are here.
+    //
+    // A PAGE THIS DRAWING DOES NOT HAVE IS A REFUSAL. setObjectSheet says no
+    // and leaves the object where it was -- which resolves to the first page,
+    // so the drawing looks perfectly consistent afterwards and the object has
+    // silently moved to sheet 1. Nobody would ever see that happen, which is
+    // exactly why the load stops here instead.
+    for (const auto& [objectId, sheetId] : objectSheets)
+        if (!document->setObjectSheet(objectId, sheetId))
+            return loadFailure(SerializationError::UnknownDependencyId,
+                               "an object in this file is on a sheet that is not in the "
+                               "drawing");
+
+    // EVERY OBJECT ON A PAGE THAT IS HERE (M44) -- the saver's rule, asked of
+    // the same function, once the pages and the objects are all back.
+    if (const std::string why = document->whyDrawingRefused(); !why.empty())
+        return loadFailure(SerializationError::UnknownDependencyId, why);
+
     // THE SAME CHECK THE SAVER MAKES (ADR-M3-008), once everything a symbol
     // reads is back: a frame's datums, and a balloon's parts list.
     for (const auto& one : symbolData) {
@@ -2594,7 +2825,11 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
             return loadFailure(SerializationError::InvalidFieldType,
                                "a symbol in this file cannot be drawn: " + why);
     }
-    document->restoreFrame(margins, zoneTargetMm, frameVisible);
+    // ONLY FOR A FILE FROM BEFORE M44. A drawing with pages carries its frame
+    // on each of them, and applying the legacy defaults here would quietly
+    // overwrite what those pages said -- which it did: a reopened drawing came
+    // back with a zone size nobody had chosen.
+    if (pageData.empty()) document->restoreFrame(margins, zoneTargetMm, frameVisible);
     // A FILE WITHOUT A TITLE BLOCK KEEPS THE SEEDED ONE, rather than being
     // given an empty box -- an older file predates the block, and a drawing
     // with nowhere to put its number is not an improvement on one with the

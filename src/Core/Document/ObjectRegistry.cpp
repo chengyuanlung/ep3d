@@ -13,6 +13,7 @@
 #include "Core/Drawing/DrawingDimension.h"
 #include "Core/Drawing/BomTable.h"
 #include "Core/Drawing/Annotation.h"
+#include "Core/Drawing/SheetPage.h"
 #include "Core/Drawing/HoleTable.h"
 #include "Core/Electrical/SchematicObjects.h"
 #include "Core/Drawing/DimensionStyle.h"

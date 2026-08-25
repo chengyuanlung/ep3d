@@ -4886,6 +4886,57 @@ int main(int argc, char** argv) {
                         }
                     }
 
+                    // --- M44's GATE: a second sheet -------------------------
+                    //
+                    // The Core suite proves the pages hold together. Only
+                    // starting the program can prove that a user can add one,
+                    // that going to it EMPTIES the canvas of the first page's
+                    // work, and that coming back brings it all with them --
+                    // which is the whole of what a page means and the one
+                    // thing a reader would mistake for lost work.
+                    {
+                        const std::size_t onSheetOne = window.drawnCurveCountForTesting();
+                        if (onSheetOne == 0)
+                            fail("M44 expected sheet 1 to have something drawn on it");
+
+                        const QString added = window.addSheetCommand(QStringLiteral("Details"));
+                        if (!added.contains(QStringLiteral("2 / 2")))
+                            fail(("adding a sheet did not make it 2 of 2: " +
+                                  added.toStdString())
+                                     .c_str());
+
+                        window.repaintDrawingForTesting();
+                        if (window.drawnCurveCountForTesting() != 0)
+                            fail("the second sheet drew the first sheet's views");
+                        if (window.drawnSymbolCountForTesting() != 0)
+                            fail("the second sheet drew the first sheet's symbols");
+
+                        // ...AND THE WORK IS NOT GONE. Coming back has to bring
+                        // it all, or "another sheet" and "deleted" look the same
+                        // from where the user is sitting.
+                        const std::vector<const SheetPage*> pages =
+                            window.sheetPagesForTesting();
+                        if (pages.size() != 2u) fail("the drawing does not have two sheets");
+                        window.goToSheetCommand(pages.front()->id());
+                        window.repaintDrawingForTesting();
+                        if (window.drawnCurveCountForTesting() != onSheetOne)
+                            fail("going back to sheet 1 did not bring its views back");
+
+                        // A SHEET WITH WORK ON IT IS NOT DELETED, and the
+                        // refusal says how much there is to move.
+                        const QString refused =
+                            window.deleteSheetCommand(pages.front()->id());
+                        if (!refused.contains(QStringLiteral("object(s)")))
+                            fail(("deleting a sheet with work on it was not refused: " +
+                                  refused.toStdString())
+                                     .c_str());
+                        // ...and the empty one goes.
+                        const QString gone = window.deleteSheetCommand(pages.back()->id());
+                        if (!gone.contains(QStringLiteral("1 left")))
+                            fail(("the empty sheet was not deleted: " + gone.toStdString())
+                                     .c_str());
+                    }
+
                     // --- M41's GATE: the symbols on the paper ----------------
                     //
                     // The Core suite proves the RULES -- which characteristics

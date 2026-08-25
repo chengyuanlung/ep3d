@@ -237,6 +237,13 @@ public:
     ObjectId layerId() const noexcept { return layerId_; }
     void setLayerId(ObjectId layerId) noexcept { layerId_ = layerId; }
 
+    // WHICH PAGE THIS SITS ON (M44). kInvalidObjectId means the drawing's
+    // first page, which is what every object made before there was more than
+    // one page belongs to.
+    ObjectId sheetId() const noexcept { return sheetId_; }
+    void setSheetId(ObjectId sheetId) noexcept { sheetId_ = sheetId; }
+
+
     bool isDatum() const noexcept {
         return std::holds_alternative<DatumFeatureSpec>(body_);
     }
@@ -253,6 +260,8 @@ private:
     AnnotationBody body_;
     DimensionAnchor anchor_;
     Vec2 positionMm_{};
+    // M44. Set when the object is added, from whichever page was current.
+    ObjectId sheetId_ = kInvalidObjectId;
     ObjectId layerId_ = kInvalidObjectId;
 };
 

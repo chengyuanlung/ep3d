@@ -22,6 +22,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/DimensionStyle.cpp
     src/Core/Drawing/DrawingDimension.cpp
     src/Core/Drawing/SheetFrame.cpp
+    src/Core/Drawing/SheetPage.cpp
     src/Core/Drawing/TitleBlock.cpp
     src/Core/Drawing/Hatch.cpp
     src/Core/Drawing/Tolerance.cpp
@@ -561,6 +562,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/AnnotationTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
+        tests/SheetPageTests.cpp
         tests/AnnotationDocumentTests.cpp
         tests/HoleStandardsTests.cpp
         tests/HoleTableTests.cpp

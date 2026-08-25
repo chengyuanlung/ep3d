@@ -350,6 +350,12 @@ public:
     QString setHoleStandardCommand(ObjectId featureId, const QString& designation, bool tapped,
                                    ClearanceFit fit, HoleKind kind);
     QString addHoleTableCommand(const QString& name, Vec2 positionMm, Vec2 datumMm);
+    // ONE COMMAND FOR THE PAGES, because "which page am I on" is one question
+    // and three commands answering it would be three places to forget the
+    // repaint.
+    QString addSheetCommand(const QString& name);
+    QString goToSheetCommand(ObjectId sheetId);
+    QString deleteSheetCommand(ObjectId sheetId);
     // ONE COMMAND FOR ALL THREE SYMBOLS, because they are one object with
     // three bodies -- three commands would be three places to forget the
     // leader, and three ideas of what a refused symbol does.
@@ -376,6 +382,7 @@ public:
     // M42. The gate needs the list's own rows to know what number to expect --
     // asked of the document rather than counted again here, because a gate
     // that did its own counting would be checking itself.
+    std::vector<const SheetPage*> sheetPagesForTesting() const;
     std::vector<const BomTable*> bomTablesForTesting() const;
     BomContents countBomForTesting(ObjectId tableId) const;
     std::size_t drawnSymbolCountForTesting() const;
@@ -881,6 +888,10 @@ private slots:
     // M39: what screw a hole is for, and the table that lists them all.
     void onHoleStandardRequested();
     void onHoleTableRequested();
+    // M44: the pages of a drawing.
+    void onAddSheetRequested();
+    void onNextSheetRequested();
+    void onDeleteSheetRequested();
     // M41: the three symbols, one handler each over one command.
     void onDatumRequested();
     void onFeatureControlFrameRequested();
@@ -1154,6 +1165,9 @@ private:
     QAction* sectionViewAction_ = nullptr;
     QAction* holeStandardAction_ = nullptr;
     QAction* holeTableAction_ = nullptr;
+    QAction* addSheetAction_ = nullptr;
+    QAction* nextSheetAction_ = nullptr;
+    QAction* deleteSheetAction_ = nullptr;
     QAction* datumAction_ = nullptr;
     QAction* gdtFrameAction_ = nullptr;
     QAction* surfaceFinishAction_ = nullptr;

@@ -730,6 +730,16 @@ struct DrawingEntityPropertyEdit {
 // deleted. ONE delta for all three, because they are one object with three
 // bodies -- three deltas would be three places to forget a field the day a
 // fourth symbol arrives.
+// M44. A page of the drawing, added or deleted. Its paper, frame and title
+// block are NOT in the delta: a page that is deleted has nothing on it (the
+// document refuses otherwise), so what comes back is a blank page of the same
+// name, which is what was taken away.
+struct SheetPageExistenceEdit {
+    ObjectId pageId = kInvalidObjectId;
+    std::string name;
+    bool addedByTheEdit = false;
+};
+
 struct AnnotationExistenceEdit {
     ObjectId annotationId = kInvalidObjectId;
     AnnotationBody body;
@@ -859,7 +869,7 @@ using UndoDelta =
                  BomExistenceEdit, BomEdit, SymbolExistenceEdit, SymbolPlacementEdit,
                  WireExistenceEdit, WireEdit, DimensionToleranceEdit,
                  GeneralToleranceEdit, HoleTableExistenceEdit, HoleTableEdit,
-                 AnnotationExistenceEdit, AnnotationEdit>;
+                 AnnotationExistenceEdit, AnnotationEdit, SheetPageExistenceEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

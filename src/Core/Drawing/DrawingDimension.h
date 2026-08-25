@@ -162,6 +162,13 @@ public:
     ObjectId layerId() const noexcept { return layerId_; }
     void setLayerId(ObjectId layerId) noexcept { layerId_ = layerId; }
 
+    // WHICH PAGE THIS SITS ON (M44). kInvalidObjectId means the drawing's
+    // first page, which is what every object made before there was more than
+    // one page belongs to.
+    ObjectId sheetId() const noexcept { return sheetId_; }
+    void setSheetId(ObjectId sheetId) noexcept { sheetId_ = sheetId; }
+
+
     // AN OVERRIDE, when the drafter has to say something the measurement does
     // not -- "2x", "TYP", a theoretical dimension in a box. EMPTY means "use
     // the measurement", which is the case that must stay the default: a
@@ -187,6 +194,8 @@ private:
     LinearDirection direction_ = LinearDirection::Aligned;
     Vec2 linePositionMm_{};
     ObjectId styleId_ = kInvalidObjectId;
+    // M44. Set when the object is added, from whichever page was current.
+    ObjectId sheetId_ = kInvalidObjectId;
     ObjectId layerId_ = kInvalidObjectId;
     std::string textOverride_;
     DimensionTolerance tolerance_;

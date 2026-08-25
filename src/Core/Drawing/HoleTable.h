@@ -97,6 +97,13 @@ public:
     Vec2 datumMm() const noexcept { return datumMm_; }
     void setDatumMm(Vec2 at) noexcept { datumMm_ = at; }
 
+    // WHICH PAGE THIS SITS ON (M44). kInvalidObjectId means the drawing's
+    // first page, which is what every object made before there was more than
+    // one page belongs to.
+    ObjectId sheetId() const noexcept { return sheetId_; }
+    void setSheetId(ObjectId sheetId) noexcept { sheetId_ = sheetId; }
+
+
     const std::vector<HoleColumn>& columns() const noexcept { return columns_; }
     bool setColumns(std::vector<HoleColumn> columns);
 
@@ -117,6 +124,8 @@ private:
     std::string name_;
     ObjectId viewId_ = kInvalidObjectId;
     Vec2 positionMm_{0.0, 0.0};
+    // M44. Set when the object is added, from whichever page was current.
+    ObjectId sheetId_ = kInvalidObjectId;
     Vec2 datumMm_{0.0, 0.0};
     std::vector<HoleColumn> columns_{HoleColumn::Tag, HoleColumn::X, HoleColumn::Y,
                                      HoleColumn::Description};
