@@ -24,10 +24,12 @@
 // the rule has to decide between them.
 
 #include "Core/Drawing/DrawingDocument.h"
+#include "Core/Serialization/DrawingDocumentSerializer.h"
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -204,6 +206,105 @@ TEST(ViewAnchorTest, M43_ANCHOR_006_AMiddleIsItsOwnKindAndNotACorner) {
     // same place would be ambiguous between them -- and says so.
     EXPECT_FALSE(sheet.resolve(Vec2{20.0, 0.0}, ViewPointRole::Corner, 30.0).has_value())
         << "an anchor exactly between two corners chose one of them";
+}
+
+TEST(ViewAnchorTest, M43_ANCHOR_007_APointThatMovedMoreThanHalfTheToleranceStillResolves) {
+    // THE BUG THE FIRST VERSION SHIPPED WITH, as a test rather than a memory.
+    //
+    // Starting the runner-up at the tolerance makes "no rival at all" and "a
+    // rival exactly at the edge of reach" the same number. Every test above
+    // has its point moving less than half the tolerance, where 2 x best is
+    // still under the tolerance and the mistake does not show. This one puts
+    // it at 3 mm of a 5 mm tolerance, where it does.
+    Sheet sheet;
+    sheet.projects({Sheet::circle(Vec2{10.0, 0.0}, 3.0)});
+
+    const std::optional<Vec2> found = sheet.resolve(Vec2{13.0, 0.0},
+                                                    ViewPointRole::Centre, 5.0);
+    ASSERT_TRUE(found.has_value())
+        << "a lone centre 3 mm away was refused as though something else were near it";
+    EXPECT_NEAR(found->x, 150.0 + 10.0, 1e-6);
+}
+
+TEST(ViewAnchorTest, M43_ANCHOR_008_ALoneCandidateBeyondTheToleranceIsStillOutOfReach) {
+    // The tolerance is a BOUND, and it has to be one on its own -- not because
+    // some rival happens to be equally far. With one circle in the view there
+    // is nothing to be ambiguous with, so if the bound stops working this is
+    // the only thing that notices.
+    Sheet sheet;
+    sheet.projects({Sheet::circle(Vec2{10.0, 0.0}, 3.0)});
+
+    EXPECT_FALSE(sheet.resolve(Vec2{40.0, 0.0}, ViewPointRole::Centre, 5.0).has_value())
+        << "an anchor 30 mm from the only centre in the view adopted it anyway";
+    // ...and the same point with a tolerance wide enough DOES reach it, so the
+    // check above is about the bound and not about the point being unfindable.
+    EXPECT_TRUE(sheet.resolve(Vec2{40.0, 0.0}, ViewPointRole::Centre, 40.0).has_value());
+}
+
+TEST(ViewAnchorTest, M43_ANCHOR_009_TheFourRolesAreFourDifferentNames) {
+    // The names go in the file. Two that shared one would make a centre and a
+    // corner the same thing on the way back in, which is the silent
+    // re-attachment this whole mechanism exists to stop -- arriving through
+    // the loader instead of through the search.
+    const ViewPointRole all[] = {ViewPointRole::Corner, ViewPointRole::Middle,
+                                 ViewPointRole::Centre, ViewPointRole::CurveEnd};
+    for (const ViewPointRole a : all)
+        for (const ViewPointRole b : all)
+            if (a != b)
+                EXPECT_NE(toString(a), toString(b))
+                    << "two roles are written the same way";
+
+    // ...and each name reads back as itself.
+    for (const ViewPointRole role : all) {
+        ViewPointRole read = ViewPointRole::CurveEnd;
+        ASSERT_TRUE(ParseViewPointRole(toString(role), read));
+        EXPECT_EQ(read, role);
+    }
+
+    // A NAME THIS BUILD DOES NOT KNOW IS REFUSED, and the value it was asked
+    // to fill is left alone. Defaulted to Corner, a centre written by a newer
+    // build would come back as a corner and measure something else.
+    ViewPointRole untouched = ViewPointRole::Centre;
+    EXPECT_FALSE(ParseViewPointRole("tangent", untouched));
+    EXPECT_EQ(untouched, ViewPointRole::Centre) << "a failed parse changed the value anyway";
+}
+
+TEST(ViewAnchorTest, M43_ANCHOR_010_TheRoleSurvivesASaveAndAnUnknownOneIsREFUSED) {
+    Sheet sheet;
+    sheet.projects({Sheet::line(Vec2{0.0, 0.0}, Vec2{40.0, 0.0}),
+                    Sheet::circle(Vec2{10.0, 0.0}, 3.0)});
+    const DrawingDimension& dimension = sheet.document.addDimension(
+        DimensionKind::Diameter,
+        DimensionAnchor::inView(sheet.view, Vec2{10.0, 0.0}, ViewPointRole::Centre, 5.0),
+        DimensionAnchor::inView(sheet.view, Vec2{13.0, 0.0}, ViewPointRole::CurveEnd, 5.0),
+        Vec2{150.0, 120.0});
+    const ObjectId id = dimension.id();
+
+    std::ostringstream out;
+    ASSERT_TRUE(saveDrawingDocument(sheet.document, out));
+    std::string text = out.str();
+    ASSERT_NE(text.find("\"role\": \"centre\""), std::string::npos)
+        << "the role was never written, so a reopened drawing forgets what kind of point "
+           "the dimension was on";
+
+    std::istringstream in(text);
+    const DrawingLoadResult loaded = loadDrawingDocument(in);
+    ASSERT_TRUE(loaded) << loaded.message;
+    const DrawingDimension* back = loaded.document->findDimension(id);
+    ASSERT_NE(back, nullptr);
+    EXPECT_EQ(back->first().role, ViewPointRole::Centre);
+    EXPECT_EQ(back->second().role, ViewPointRole::CurveEnd)
+        << "both anchors came back with the same role";
+
+    // A ROLE THIS BUILD DOES NOT KNOW IS REFUSED, not quietly turned into a
+    // corner -- which would make the dimension measure to a different point
+    // with nothing said.
+    const std::size_t at = text.find("\"role\": \"centre\"");
+    ASSERT_NE(at, std::string::npos);
+    text.replace(at, std::string("\"role\": \"centre\"").size(), "\"role\": \"tangent\"");
+    std::istringstream broken(text);
+    EXPECT_FALSE(loadDrawingDocument(broken))
+        << "a role this build does not know was read as one it does";
 }
 
 } // namespace

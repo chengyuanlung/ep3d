@@ -1784,12 +1784,16 @@ std::optional<Vec2> DrawingDocument::resolveAnchor(const DimensionAnchor& anchor
     const DrawingView* view = findView(anchor.viewId);
     if (view == nullptr || view->currentState() != ComputeState::Valid) return std::nullopt;
 
-    // BOTH START AT INFINITY, not at the tolerance.
+    // BOTH START AT INFINITY, not at the tolerance -- and it has to be BOTH.
     //
     // Started at the tolerance, "no rival at all" and "a rival exactly at the
     // edge of reach" are the same number -- and the ambiguity test below then
     // refuses a perfectly ordinary lone candidate that moved a little. Which
     // it did, the first time this ran.
+    //
+    // Changing only ONE of them back is an equivalent mutation and the gate
+    // says so: whichever is left at infinity overwrites the other on the first
+    // candidate. The defect needs the pair, which is how it was written.
     double bestDistance = std::numeric_limits<double>::infinity();
     double runnerUp = std::numeric_limits<double>::infinity();
     std::optional<Vec2> bestModelPoint;
