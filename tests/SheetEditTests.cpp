@@ -340,4 +340,61 @@ TEST(SheetEditTest, M40_ARRAY_003_RotatingTheItemsIsADifferentAnswerFromCarrying
     EXPECT_FALSE(PolarArray(shapes, Vec2{0.0, 0.0}, 0, kPi, true).ok);
 }
 
+TEST(SheetEditTest, M40_EXTEND_003_ABoundaryTheLineAlreadyCROSSESIsNotSomethingToReachTo) {
+    // A boundary between the two ends would SHORTEN the line, which is what
+    // trim is for. Taken as a candidate, extend quietly pulls the end backwards
+    // -- and a line that got shorter when the user asked for longer still looks
+    // like a line.
+    const DrawShape victim = DrawLine{Vec2{0.0, 0.0}, Vec2{100.0, 0.0}};
+    const std::vector<DrawShape> through{DrawLine{Vec2{40.0, -10.0}, Vec2{40.0, 10.0}}};
+    EXPECT_FALSE(ExtendShape(victim, through, Vec2{99.0, 0.0}).ok)
+        << "extend reached back to a boundary the line already crosses";
+
+    // ...and with something genuinely ahead as well, it reaches THAT one and
+    // not the near crossing.
+    const std::vector<DrawShape> both{DrawLine{Vec2{40.0, -10.0}, Vec2{40.0, 10.0}},
+                                      DrawLine{Vec2{150.0, -10.0}, Vec2{150.0, 10.0}}};
+    const SheetEditResult result = ExtendShape(victim, both, Vec2{99.0, 0.0});
+    ASSERT_TRUE(result.ok) << result.why;
+    EXPECT_TRUE(HasLine(result, Vec2{0.0, 0.0}, Vec2{150.0, 0.0}))
+        << "extend stopped at a boundary behind the end it was moving";
+}
+
+TEST(SheetEditTest, M40_FILLET_004_TheSetbackFollowsTheANGLEAndNotJustTheRadius) {
+    // AT A RIGHT ANGLE THE SETBACK EQUALS THE RADIUS, and that coincidence
+    // hides the arithmetic: every test above uses 90 degrees, so a build that
+    // forgot the angle entirely passes all of them. A sharper corner is where
+    // the two part company -- the arc has to sit further back to stay tangent.
+    //
+    // 60 degrees between the kept directions: half is 30, tan 30 is 0.5774, so
+    // a radius of 10 touches 17.32 along each line.
+    const double sixty = kPi / 3.0;
+    const DrawShape first = DrawLine{Vec2{100.0, 0.0}, Vec2{0.0, 0.0}};
+    const DrawShape second =
+        DrawLine{Vec2{0.0, 0.0}, Vec2{100.0 * std::cos(sixty), 100.0 * std::sin(sixty)}};
+
+    const SheetEditResult result =
+        FilletLines(first, second, Vec2{50.0, 0.0},
+                    Vec2{50.0 * std::cos(sixty), 50.0 * std::sin(sixty)}, 10.0);
+    ASSERT_TRUE(result.ok) << result.why;
+    ASSERT_EQ(result.shapes.size(), 3u);
+
+    const double setback = 10.0 / std::tan(sixty / 2.0);
+    EXPECT_NEAR(setback, 17.3205, 1e-3) << "the test's own arithmetic";
+    EXPECT_TRUE(HasLine(result, Vec2{100.0, 0.0}, Vec2{setback, 0.0}))
+        << "the first line was not cut back to where the arc meets it";
+
+    // ...and the arc really is tangent: its centre is `radius` away from both
+    // lines. Measured rather than compared to a constant, because that is the
+    // property a fillet has and a wrong setback breaks.
+    const DrawArc* arc = nullptr;
+    for (const DrawShape& shape : result.shapes)
+        if (const DrawArc* one = AsArc(shape)) arc = one;
+    ASSERT_NE(arc, nullptr);
+    EXPECT_NEAR(std::fabs(arc->centre.y), 10.0, 1e-6) << "the arc is not tangent to the first line";
+    const double toSecond =
+        std::fabs(arc->centre.x * std::sin(sixty) - arc->centre.y * std::cos(sixty));
+    EXPECT_NEAR(toSecond, 10.0, 1e-6) << "the arc is not tangent to the second line";
+}
+
 } // namespace

@@ -7,6 +7,7 @@
 
 #include "Core/Drawing/DrawingDocument.h"
 #include "Core/Drawing/HoleTable.h"
+#include "Core/Drawing/SheetEdits.h"
 #include "Core/Serialization/DrawingDocumentSerializer.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/HoleFeature.h"
@@ -17,6 +18,8 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 
@@ -321,6 +324,96 @@ TEST(HoleTableTest, M39_CHART_005_AFileWhoseTableNamesNoViewIsREFUSED) {
     const DrawingLoadResult loaded = loadDrawingDocument(in);
     EXPECT_FALSE(loaded) << "a hole table of a view that is not there was accepted";
     EXPECT_EQ(loaded.error, SerializationError::UnknownDependencyId);
+}
+
+TEST(HoleTableTest, M39_SER_001_AFileNamingAThreadThisBuildCannotSizeIsREFUSED) {
+    // ADR-M3-008: what the saver refuses, the loader refuses -- and by the SAME
+    // rule, because a file can be written by hand or by a build whose tables
+    // are not these. Accepted here it would come back as a hole that cannot
+    // recompute: a document that opens and then fails, which is harder to
+    // explain than one that says why it will not open.
+    Plate plate;
+    HoleFeature& hole = plate.drill("Tapped", {Vec2{20.0, 20.0}}, 12.0);
+    HoleScrew screw;
+    screw.designation = "M8";
+    screw.tapped = true;
+    ASSERT_TRUE(plate.part.setHoleScrew(hole.id(), screw));
+    ScratchPart file{"badthread.ep3d"};
+    plate.writeTo(file);
+
+    std::ifstream in(file.path);
+    ASSERT_TRUE(in.good());
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+
+    const std::string real = "\"designation\": \"M8\"";
+    const std::size_t at = text.find(real);
+    ASSERT_NE(at, std::string::npos) << text;
+    // M9 is not an ISO 261 first-choice size and is in no table here.
+    text.replace(at, real.size(), "\"designation\": \"M9\"");
+    {
+        std::ofstream out(file.path, std::ios::trunc);
+        ASSERT_TRUE(out.good());
+        out << text;
+    }
+
+    const LoadResult loaded = loadPartDocumentFromFile(file.path);
+    EXPECT_FALSE(loaded) << "a hole naming a thread with no drill size was accepted";
+    EXPECT_NE(loaded.message.find("M9"), std::string::npos) << loaded.message;
+}
+
+TEST(HoleTableTest, M40_APPLY_001_ARefusedEditLeavesTheDrawingALONE) {
+    // THE DESTRUCTIVE ONE. Applied anyway, a refused trim removes the line it
+    // refused to cut and puts nothing back -- so the tool that would not do
+    // the job deletes the work instead. There is no worse outcome available
+    // to any of these six commands.
+    DrawingDocument drawing{"Sheet"};
+    const ObjectId line =
+        drawing.addEntity(DrawLine{Vec2{0.0, 0.0}, Vec2{100.0, 0.0}}).id();
+    const std::size_t before = drawing.entities().size();
+
+    // What a tool hands back when it will not do the job.
+    const SheetEditResult refused = TrimShape(*&drawing.findEntity(line)->shape(), {},
+                                              Vec2{50.0, 0.0});
+    ASSERT_FALSE(refused.ok);
+
+    std::string why;
+    const std::vector<ObjectId> arrived =
+        drawing.applySheetEdit({line}, refused, "Trim", &why);
+    EXPECT_TRUE(arrived.empty());
+    EXPECT_FALSE(why.empty()) << "a refused edit said nothing about why";
+    EXPECT_EQ(drawing.entities().size(), before)
+        << "a refused edit deleted the object it refused to change";
+    EXPECT_NE(drawing.findEntity(line), nullptr);
+}
+
+TEST(HoleTableTest, M40_APPLY_002_AnEditNamingSomethingThatHasGoneChangesNOTHING) {
+    // Half-applied, it deletes two of three lines and stops, and the undo step
+    // is labelled as though it had worked. Every id is checked before anything
+    // is touched.
+    DrawingDocument drawing{"Sheet"};
+    const ObjectId here = drawing.addEntity(DrawLine{Vec2{0.0, 0.0}, Vec2{10.0, 0.0}}).id();
+    const std::size_t before = drawing.entities().size();
+
+    SheetEditResult made;
+    made.ok = true;
+    made.shapes.push_back(DrawLine{Vec2{0.0, 5.0}, Vec2{10.0, 5.0}});
+
+    std::string why;
+    const std::vector<ObjectId> arrived =
+        drawing.applySheetEdit({here, 987654}, made, "Trim", &why);
+    EXPECT_TRUE(arrived.empty());
+    EXPECT_FALSE(why.empty());
+    EXPECT_EQ(drawing.entities().size(), before)
+        << "an edit naming a missing object still removed the ones that were there";
+    EXPECT_NE(drawing.findEntity(here), nullptr);
+
+    // ...and the same edit with every id real DOES go through, so the check
+    // above is about the missing id and not about the edit being refused for
+    // some other reason.
+    const std::vector<ObjectId> good = drawing.applySheetEdit({here}, made, "Trim", &why);
+    EXPECT_EQ(good.size(), 1u) << why;
+    EXPECT_EQ(drawing.findEntity(here), nullptr);
 }
 
 } // namespace
