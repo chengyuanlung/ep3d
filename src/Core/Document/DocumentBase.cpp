@@ -13,6 +13,25 @@ DocumentBase::DocumentBase(std::string name) : CadDocument(std::move(name)) {}
 
 DocumentBase::DocumentBase(ObjectId id, std::string name) : CadDocument(id, std::move(name)) {}
 
+bool DocumentBase::removeObject(ObjectId id) {
+    // The OUTERMOST call owns the transaction: a cascade re-entering here sees
+    // it open and leaves it alone. Nothing is opened while history is being
+    // applied, because undo must not record.
+    struct OneStep {
+        DocumentBase* document = nullptr;
+        bool owned = false;
+        ~OneStep() {
+            if (owned) document->commitTransaction();
+        }
+    };
+    const bool ownsTheStep = !isTransactionOpen() && !applyingHistory();
+    // The label is read BEFORE anything is unhooked, because afterwards there
+    // is nothing left to ask what it was called.
+    if (ownsTheStep) beginTransaction("Delete " + objectName(id));
+    const OneStep step{this, ownsTheStep};
+    return removeOwnObject(id);
+}
+
 bool DocumentBase::restoreRemoveObject(ObjectId id) {
     const bool wasApplying = applyingHistory_;
     applyingHistory_ = true;

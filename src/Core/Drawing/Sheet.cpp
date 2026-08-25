@@ -40,6 +40,10 @@ std::string_view toString(SheetSize size) noexcept {
     return "A3";
 }
 
+std::string_view toString(ProjectionAngle angle) noexcept {
+    return angle == ProjectionAngle::First ? "First" : "Third";
+}
+
 std::string_view toString(SheetOrientation orientation) noexcept {
     return orientation == SheetOrientation::Portrait ? "Portrait" : "Landscape";
 }

@@ -1,6 +1,7 @@
 #include "Core/Drawing/DrawingDocument.h"
 
 #include "Core/Document/ObjectRegistry.h"
+#include "Core/Document/SourceShapeResolver.h"
 #include "Core/Undo/UndoRecord.h"
 
 #include <stdexcept>
@@ -19,6 +20,7 @@ struct SheetSnapshot {
     int denominator;
     double widthMm;
     double heightMm;
+    int angle;
 };
 
 SheetSnapshot SnapshotOf(const Sheet& sheet) {
@@ -27,7 +29,8 @@ SheetSnapshot SnapshotOf(const Sheet& sheet) {
                          sheet.scale().numerator,
                          sheet.scale().denominator,
                          sheet.widthMm(),
-                         sheet.heightMm()};
+                         sheet.heightMm(),
+                         static_cast<int>(sheet.projectionAngle())};
 }
 
 } // namespace
@@ -84,6 +87,8 @@ bool DrawingDocument::setSheetSize(SheetSize size) {
     edit.beforeHeightMm = before.heightMm;
     edit.afterWidthMm = after.widthMm;
     edit.afterHeightMm = after.heightMm;
+    edit.beforeAngle = before.angle;
+    edit.afterAngle = after.angle;
     recordDelta(edit, "Sheet size");
     return true;
 }
@@ -105,6 +110,8 @@ bool DrawingDocument::setSheetOrientation(SheetOrientation orientation) {
     edit.beforeHeightMm = before.heightMm;
     edit.afterWidthMm = after.widthMm;
     edit.afterHeightMm = after.heightMm;
+    edit.beforeAngle = before.angle;
+    edit.afterAngle = after.angle;
     recordDelta(edit, "Sheet orientation");
     return true;
 }
@@ -127,6 +134,8 @@ bool DrawingDocument::setSheetScale(const DrawingScale& scale) {
     edit.beforeHeightMm = before.heightMm;
     edit.afterWidthMm = after.widthMm;
     edit.afterHeightMm = after.heightMm;
+    edit.beforeAngle = before.angle;
+    edit.afterAngle = after.angle;
     recordDelta(edit, "Sheet scale");
     // NOTHING IS REPROJECTED. The curves are in MODEL millimetres (see
     // ProjectedGeometry.h), so the scale changes how much paper a view takes
@@ -153,13 +162,15 @@ bool DrawingDocument::setSheetCustomSize(double widthMm, double heightMm) {
     edit.beforeHeightMm = before.heightMm;
     edit.afterWidthMm = after.widthMm;
     edit.afterHeightMm = after.heightMm;
+    edit.beforeAngle = before.angle;
+    edit.afterAngle = after.angle;
     recordDelta(edit, "Sheet size");
     return true;
 }
 
 void DrawingDocument::restoreSheet(SheetSize size, SheetOrientation orientation,
                                    DrawingScale scale, double customWidthMm,
-                                   double customHeightMm) {
+                                   double customHeightMm, ProjectionAngle angle) {
     // ORDER MATTERS: setCustomSize sets the size to Custom as a side effect,
     // so it runs FIRST and the explicit size wins afterwards. Written down
     // because the other order silently turns every A3 sheet into a custom one.
@@ -167,6 +178,7 @@ void DrawingDocument::restoreSheet(SheetSize size, SheetOrientation orientation,
     sheet_.setSize(size);
     sheet_.setOrientation(orientation);
     sheet_.setScale(scale);
+    sheet_.setProjectionAngle(angle);
 }
 
 // =============================================================================
@@ -460,18 +472,154 @@ DrawingView& DrawingDocument::addView(std::string name, std::string sourcePath,
     return ref;
 }
 
+std::string DrawingDocument::whyViewCannotBeProjectedFrom(ObjectId parentViewId,
+                                                          ViewDirection direction) const {
+    const DrawingView* parent = findView(parentViewId);
+    if (parent == nullptr) return "there is no view to project that one from";
+    if (parent->direction() == direction)
+        return "a view projected from another one has to look at it from a different side";
+    const ViewAlignmentRule rule = AlignmentOf(parent->direction(), direction);
+    if (rule.alignment == ViewAlignment::None)
+        return "an " + std::string(toString(direction)) + " view is not square to a " +
+               std::string(toString(parent->direction())) +
+               " one, so there is no side of it to sit on";
+    return {};
+}
+
+DrawingView& DrawingDocument::addProjectedView(std::string name, ObjectId parentViewId,
+                                               ViewDirection direction, double offsetMm) {
+    if (name.empty()) throw std::invalid_argument("addProjectedView: a view needs a name");
+    if (nameIsTaken(name, kInvalidObjectId))
+        throw std::invalid_argument("addProjectedView: '" + name + "' is already taken");
+    if (const std::string why = whyViewCannotBeProjectedFrom(parentViewId, direction);
+        !why.empty())
+        throw std::invalid_argument("addProjectedView: " + why);
+
+    // THE SAME MODEL AS ITS PARENT, always. A "projected view" of a different
+    // file is not a projected view -- it is a second base view that happens to
+    // sit beside this one, and calling it a child would make the alignment a
+    // lie the moment somebody read a measurement across.
+    const DrawingView* parent = findView(parentViewId);
+    auto item = std::make_unique<DrawingView>(std::move(name), parent->sourcePath(),
+                                              parent->bodyName(), direction, Vec2{0.0, 0.0});
+    auto& ref = *item;
+    ref.setParentViewId(parentViewId);
+    ref.setAlignmentOffsetMm(offsetMm);
+    views_.push_back(std::move(item));
+    addRecomputableNode(ref);
+    // THE ONE EDGE A CHILD VIEW HAS: its parent. It is not a geometric
+    // dependency -- the child projects the same file for itself -- but it IS a
+    // placement one, and the graph is how a placement change reaches whatever
+    // it moves.
+    addDependency(ref.id(), parentViewId);
+
+    DrawingViewExistenceEdit edit;
+    edit.viewId = ref.id();
+    edit.name = ref.name();
+    edit.sourcePath = ref.sourcePath();
+    edit.bodyName = ref.bodyName();
+    edit.direction = static_cast<int>(ref.direction());
+    edit.positionXMm = 0.0;
+    edit.positionYMm = 0.0;
+    edit.scaleNumerator = ref.scale().numerator;
+    edit.scaleDenominator = ref.scale().denominator;
+    edit.ownScale = ref.hasOwnScale();
+    edit.showHidden = ref.showsHiddenLines();
+    edit.showTangent = ref.showsTangentEdges();
+    edit.parentViewId = parentViewId;
+    edit.alignmentOffsetMm = offsetMm;
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Project " + ref.name());
+    return ref;
+}
+
+Vec2 DrawingDocument::viewPositionMm(ObjectId viewId) const {
+    const DrawingView* view = findView(viewId);
+    if (view == nullptr) return Vec2{0.0, 0.0};
+    if (view->parentViewId() == kInvalidObjectId) return view->positionMm();
+
+    // COMPOSED, NEVER STORED. Walked up rather than cached, so moving a parent
+    // moves everything under it without anything being told -- the same reason
+    // a frame's world transform is composed (ADR-M10-002).
+    //
+    // Bounded by the view count: a parent chain that had somehow closed a loop
+    // would otherwise spin here for ever, and refusing to create one is worth
+    // nothing if the reader can still hang.
+    Vec2 place{0.0, 0.0};
+    const DrawingView* walk = view;
+    for (std::size_t step = 0; step <= views_.size(); ++step) {
+        const DrawingView* parent = findView(walk->parentViewId());
+        if (parent == nullptr) return Vec2{place.x + walk->positionMm().x,
+                                           place.y + walk->positionMm().y};
+        const ViewAlignmentRule rule = AlignmentOf(parent->direction(), walk->direction());
+        // FIRST ANGLE PUTS EVERY VIEW ON THE OTHER SIDE. One flip, here, for
+        // exactly the reason the angle lives on the SHEET: a drawing is in one
+        // convention or the other, never both.
+        const double sign =
+            rule.sign * (sheet_.projectionAngle() == ProjectionAngle::First ? -1.0 : 1.0);
+        if (rule.alignment == ViewAlignment::Horizontal)
+            place.x += sign * walk->alignmentOffsetMm();
+        else if (rule.alignment == ViewAlignment::Vertical)
+            place.y += sign * walk->alignmentOffsetMm();
+        walk = parent;
+    }
+    return place;
+}
+
+std::vector<ObjectId> DrawingDocument::staleViews() const {
+    std::vector<ObjectId> behind;
+    for (const std::unique_ptr<DrawingView>& view : views_) {
+        // A VIEW THAT NEVER BUILT IS NOT "STALE", it is broken, and the tree
+        // already says so. Offering to update it would send the user round a
+        // loop that cannot end.
+        if (view->currentState() != ComputeState::Valid) continue;
+        if (SourceFileStamp(view->sourcePath()) != view->sourceStamp())
+            behind.push_back(view->id());
+    }
+    return behind;
+}
+
+bool DrawingDocument::setSheetProjectionAngle(ProjectionAngle angle) {
+    if (sheet_.projectionAngle() == angle) return true;
+    const SheetSnapshot before = SnapshotOf(sheet_);
+    sheet_.setProjectionAngle(angle);
+    const SheetSnapshot after = SnapshotOf(sheet_);
+    SheetEdit edit;
+    edit.beforeSize = before.size;
+    edit.afterSize = after.size;
+    edit.beforeOrientation = before.orientation;
+    edit.afterOrientation = after.orientation;
+    edit.beforeScaleNumerator = before.numerator;
+    edit.beforeScaleDenominator = before.denominator;
+    edit.afterScaleNumerator = after.numerator;
+    edit.afterScaleDenominator = after.denominator;
+    edit.beforeWidthMm = before.widthMm;
+    edit.beforeHeightMm = before.heightMm;
+    edit.afterWidthMm = after.widthMm;
+    edit.afterHeightMm = after.heightMm;
+    edit.beforeAngle = before.angle;
+    edit.afterAngle = after.angle;
+    recordDelta(edit, "Projection angle");
+    // NOTHING IS REPROJECTED. Every view still looks the same way; they have
+    // moved to the other side of each other, which is a placement change.
+    return true;
+}
+
 DrawingView& DrawingDocument::restoreView(ObjectId id, std::string name, ComputeState state,
                                           std::string sourcePath, std::string bodyName,
                                           ViewDirection direction, Vec2 positionMm,
                                           DrawingScale scale, bool ownScale, bool showHidden,
-                                          bool showTangent) {
+                                          bool showTangent, ObjectId parentViewId,
+                                          double alignmentOffsetMm) {
     requireUnusedId(id, "restoreView");
     auto item = std::make_unique<DrawingView>(id, std::move(name), state, std::move(sourcePath),
                                               std::move(bodyName), direction, positionMm, scale,
-                                              ownScale, showHidden, showTangent);
+                                              ownScale, showHidden, showTangent, parentViewId,
+                                              alignmentOffsetMm);
     auto& ref = *item;
     views_.push_back(std::move(item));
     addRecomputableNode(ref);
+    if (parentViewId != kInvalidObjectId) addDependency(ref.id(), parentViewId);
     return ref;
 }
 
@@ -519,12 +667,34 @@ void SnapshotViewInto(const DrawingView& view, DrawingViewPlacementEdit& edit) {
     edit.afterShowHidden = view.showsHiddenLines();
     edit.beforeShowTangent = view.showsTangentEdges();
     edit.afterShowTangent = view.showsTangentEdges();
+    edit.beforeAlignmentOffsetMm = view.alignmentOffsetMm();
+    edit.afterAlignmentOffsetMm = view.alignmentOffsetMm();
 }
 } // namespace
+
+// A CHILD IS MOVED BY ITS OFFSET, never by a free position -- see
+// setViewPosition for why.
+bool DrawingDocument::setViewAlignmentOffsetMm(ObjectId viewId, double offsetMm) {
+    DrawingView* view = findViewForEdit(viewId);
+    if (view == nullptr) return false;
+    if (view->parentViewId() == kInvalidObjectId) return false;
+    DrawingViewPlacementEdit edit;
+    SnapshotViewInto(*view, edit);
+    edit.afterAlignmentOffsetMm = offsetMm;
+    view->setAlignmentOffsetMm(offsetMm);
+    recordDelta(edit, "Move " + view->name());
+    return true;
+}
 
 bool DrawingDocument::setViewPosition(ObjectId viewId, Vec2 positionMm) {
     DrawingView* view = findViewForEdit(viewId);
     if (view == nullptr) return false;
+    // A CHILD HAS NO FREE POSITION. It slides along one axis and shares the
+    // other with its parent -- that sharing is the whole point of an
+    // orthographic layout, and a child that could be dragged anywhere would
+    // silently break the ruler-across-views property a reader relies on.
+    // `setViewAlignmentOffsetMm` is how a child is moved.
+    if (view->parentViewId() != kInvalidObjectId) return false;
     if (!whyViewCannotSitAt(positionMm).empty()) return false;
     DrawingViewPlacementEdit edit;
     SnapshotViewInto(*view, edit);
@@ -631,7 +801,7 @@ void DrawingDocument::forEachOwnNamed(const std::function<void(const NamedSlot&)
     }
 }
 
-bool DrawingDocument::removeObject(ObjectId id) {
+bool DrawingDocument::removeOwnObject(ObjectId id) {
     ObjectRegistry::ObjectRef* found = registry_.find(id);
     if (found == nullptr) return false;
     const ObjectRegistry::ObjectRef handle = *found;
@@ -639,6 +809,19 @@ bool DrawingDocument::removeObject(ObjectId id) {
     // A VIEW: nothing owns it and nothing else reads it yet. Annotation that
     // measures it arrives in M34, and that is when this grows a cascade.
     if (const DrawingView* view = findView(id)) {
+        // ...EXCEPT ITS CHILDREN. A projected view's place is composed from
+        // its parent's, so a child whose parent is gone has nowhere to be.
+        // Taken FIRST so each records its own delta and one undo puts the
+        // whole family back -- the same cascade a mate's relations get.
+        for (bool again = true; again;) {
+            again = false;
+            for (const std::unique_ptr<DrawingView>& one : views_) {
+                if (one->parentViewId() != id) continue;
+                removeObject(one->id());
+                again = true;
+                break;
+            }
+        }
         if (!applyingHistory()) {
             DrawingViewExistenceEdit edit;
             edit.viewId = id;
@@ -653,6 +836,8 @@ bool DrawingDocument::removeObject(ObjectId id) {
             edit.ownScale = view->hasOwnScale();
             edit.showHidden = view->showsHiddenLines();
             edit.showTangent = view->showsTangentEdges();
+            edit.parentViewId = view->parentViewId();
+            edit.alignmentOffsetMm = view->alignmentOffsetMm();
             edit.addedByTheEdit = false;
             recordDelta(edit, "Delete " + view->name());
         }
@@ -745,6 +930,8 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         const int size = forward ? edit->afterSize : edit->beforeSize;
         const int orientation = forward ? edit->afterOrientation : edit->beforeOrientation;
         sheet_.setOrientation(static_cast<SheetOrientation>(orientation));
+        sheet_.setProjectionAngle(
+            static_cast<ProjectionAngle>(forward ? edit->afterAngle : edit->beforeAngle));
         sheet_.setScale(DrawingScale{
             forward ? edit->afterScaleNumerator : edit->beforeScaleNumerator,
             forward ? edit->afterScaleDenominator : edit->beforeScaleDenominator});
@@ -807,7 +994,8 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
                         edit->bodyName, static_cast<ViewDirection>(edit->direction),
                         Vec2{edit->positionXMm, edit->positionYMm},
                         DrawingScale{edit->scaleNumerator, edit->scaleDenominator},
-                        edit->ownScale, edit->showHidden, edit->showTangent);
+                        edit->ownScale, edit->showHidden, edit->showTangent, edit->parentViewId,
+                        edit->alignmentOffsetMm);
         else
             removeObject(edit->viewId);
         return;
@@ -827,6 +1015,8 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
             view->clearScale();
         view->setShowsHiddenLines(forward ? edit->afterShowHidden : edit->beforeShowHidden);
         view->setShowsTangentEdges(forward ? edit->afterShowTangent : edit->beforeShowTangent);
+        view->setAlignmentOffsetMm(forward ? edit->afterAlignmentOffsetMm
+                                           : edit->beforeAlignmentOffsetMm);
         graph_.markDirty(edit->viewId);
         return;
     }

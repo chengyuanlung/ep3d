@@ -344,7 +344,7 @@ public:
 
     DocumentRecomputeReport recompute() override;
 
-    bool removeObject(ObjectId id) override;
+    bool removeOwnObject(ObjectId id) override;
 
 protected:
     void requireUnusedIdHook(ObjectId id, const char* who) const override;

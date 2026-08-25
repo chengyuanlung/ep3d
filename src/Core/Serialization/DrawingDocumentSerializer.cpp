@@ -147,6 +147,11 @@ JsonValue toJson(const DrawingDocument& document) {
     paper.set("orientation",
               JsonValue::makeString(std::string(toString(sheet.orientation()))));
     paper.set("scale", JsonValue::makeString(sheet.scale().toString()));
+    // WHICH SIDE THE PROJECTED VIEWS GO. On the sheet, because a drawing is in
+    // one convention or the other and never both -- which is what the
+    // projection symbol in a title block promises.
+    paper.set("projectionAngle",
+              JsonValue::makeString(std::string(toString(sheet.projectionAngle()))));
     if (sheet.size() == SheetSize::Custom) {
         // AS TYPED. A custom sheet ignores orientation (see Sheet::widthMm),
         // so these two numbers ARE its width and height in both directions.
@@ -213,6 +218,11 @@ JsonValue toJson(const DrawingDocument& document) {
         // sheet may reasonably differ about them.
         entry.set("showHiddenLines", JsonValue::makeBool(view->showsHiddenLines()));
         entry.set("showTangentEdges", JsonValue::makeBool(view->showsTangentEdges()));
+        // A CHILD STORES ITS PARENT AND AN OFFSET, NOT A POSITION. Where it
+        // sits is composed (ADR-M10-002), so writing the composed answer would
+        // put a second, stale copy of it in the file.
+        entry.set("parentViewId", JsonValue::makeString(idToString(view->parentViewId())));
+        entry.set("alignmentOffsetMm", JsonValue::makeNumber(view->alignmentOffsetMm()));
         views.add(std::move(entry));
     }
     root.set("views", std::move(views));
@@ -248,6 +258,8 @@ struct ViewData {
     bool ownScale = false;
     bool showHidden = true;
     bool showTangent = false;
+    ObjectId parentViewId = kInvalidObjectId;
+    double alignmentOffsetMm = 0.0;
 };
 
 } // namespace
@@ -306,6 +318,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     SheetSize sheetSize = SheetSize::A3;
     SheetOrientation sheetOrientation = SheetOrientation::Landscape;
     DrawingScale sheetScale{1, 1};
+    ProjectionAngle projectionAngle = ProjectionAngle::First;
     double customWidthMm = 0.0;
     double customHeightMm = 0.0;
     if (const JsonValue* paper = root.find("sheet")) {
@@ -337,6 +350,18 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
             return loadFailure(SerializationError::InvalidFieldType,
                                context + ": '" + scale->asString() +
                                    "' is not a scale like 1:2");
+
+        if (const JsonValue* angle = paper->find("projectionAngle")) {
+            if (angle->type() != JsonType::String)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'projectionAngle' is not a string");
+            if (angle->asString() == "First") projectionAngle = ProjectionAngle::First;
+            else if (angle->asString() == "Third") projectionAngle = ProjectionAngle::Third;
+            else
+                return loadFailure(SerializationError::InvalidEnumValue,
+                                   context + ": unknown projection angle '" +
+                                       angle->asString() + "'");
+        }
 
         if (sheetSize == SheetSize::Custom) {
             const JsonValue* width =
@@ -542,13 +567,36 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
             //
             // Found by M32_SER_005: the save side refused an off-sheet view
             // and the load side did not, which is half of ADR-M3-008.
-            Sheet paper(sheetSize, sheetOrientation);
-            if (sheetSize == SheetSize::Custom)
-                paper.setCustomSize(customWidthMm, customHeightMm);
-            if (one.positionMm.x < 0.0 || one.positionMm.y < 0.0 ||
-                one.positionMm.x > paper.widthMm() || one.positionMm.y > paper.heightMm())
-                return loadFailure(SerializationError::InvalidFieldType,
-                                   context + ": this view sits off the sheet");
+            //
+            // A CHILD IS NOT CHECKED, because it has no position of its own --
+            // its place is composed from its parent's, and its stored one is
+            // the zero it was constructed with.
+            if (one.parentViewId == kInvalidObjectId) {
+                Sheet paper(sheetSize, sheetOrientation);
+                if (sheetSize == SheetSize::Custom)
+                    paper.setCustomSize(customWidthMm, customHeightMm);
+                if (one.positionMm.x < 0.0 || one.positionMm.y < 0.0 ||
+                    one.positionMm.x > paper.widthMm() || one.positionMm.y > paper.heightMm())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": this view sits off the sheet");
+            }
+            if (const JsonValue* parent = entry.find("parentViewId")) {
+                if (parent->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'parentViewId' is not a string");
+                const auto parsed = idFromString(parent->asString());
+                if (!parsed.has_value())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": 'parentViewId' is not a valid ObjectId");
+                one.parentViewId = *parsed;
+            }
+            if (const JsonValue* offset = entry.find("alignmentOffsetMm")) {
+                if (offset->type() != JsonType::Number)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'alignmentOffsetMm' is not a number");
+                one.alignmentOffsetMm = offset->asNumber();
+            }
+
             const auto readViewFlag = [&](const char* key, bool& into) -> bool {
                 const JsonValue* flag = entry.find(key);
                 if (flag == nullptr) return true; // absent keeps the default
@@ -561,6 +609,41 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                 return loadFailure(SerializationError::InvalidFieldType,
                                    context + ": a view flag is not a boolean");
             viewData.push_back(std::move(one));
+        }
+    }
+
+    // EVERY PARENT IS A VIEW IN THIS FILE, and no chain of them closes a loop.
+    //
+    // Checked after all the views are read, because a child may legitimately
+    // precede its parent in the array -- the file is in creation order, and a
+    // view can be projected off one made later only if somebody reorders it by
+    // hand, which is exactly the case this has to survive.
+    //
+    // A LOOP WOULD HANG viewPositionMm's walk. That walk is bounded so it
+    // cannot spin for ever, but a bounded walk over a cyclic chain returns a
+    // position nobody can explain -- so the file is refused instead.
+    for (std::size_t i = 0; i < viewData.size(); ++i) {
+        if (viewData[i].parentViewId == kInvalidObjectId) continue;
+        const std::string context = "views[" + std::to_string(i) + "]";
+        std::size_t walk = i;
+        for (std::size_t step = 0; step <= viewData.size(); ++step) {
+            const ObjectId parent = viewData[walk].parentViewId;
+            if (parent == kInvalidObjectId) break;
+            std::size_t found = viewData.size();
+            for (std::size_t j = 0; j < viewData.size(); ++j)
+                if (viewData[j].id == parent) found = j;
+            if (found == viewData.size())
+                return loadFailure(SerializationError::UnknownDependencyId,
+                                   context + ": parentViewId " + idToString(parent) +
+                                       " is not a view in this document");
+            if (found == i)
+                return loadFailure(SerializationError::InvalidDependency,
+                                   context + ": this view is projected from itself");
+            walk = found;
+            if (step == viewData.size())
+                return loadFailure(SerializationError::InvalidDependency,
+                                   context + ": these views are projected from each other in "
+                                             "a loop");
         }
     }
 
@@ -610,12 +693,34 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     // VIEWS LAST, because a view sits on the sheet and the sheet has to be the
     // one the file describes before a position can be judged against it.
     document->restoreSheet(sheetSize, sheetOrientation, sheetScale, customWidthMm,
-                           customHeightMm);
-    for (auto& one : viewData)
+                           customHeightMm, projectionAngle);
+    // PARENTS FIRST. `restoreView` makes the graph edge to the parent, and a
+    // dependency on a node that is not there yet is an edge that never
+    // existed -- so a child restored first would never move when its parent
+    // did. Ordered by walking the chain rather than by trusting the file's
+    // order, for the reason the loop check above gives.
+    std::vector<std::size_t> order;
+    std::vector<bool> placed(viewData.size(), false);
+    for (std::size_t pass = 0; pass < viewData.size() + 1 && order.size() < viewData.size();
+         ++pass) {
+        for (std::size_t i = 0; i < viewData.size(); ++i) {
+            if (placed[i]) continue;
+            const ObjectId parent = viewData[i].parentViewId;
+            bool parentReady = parent == kInvalidObjectId;
+            for (const std::size_t done : order)
+                if (viewData[done].id == parent) parentReady = true;
+            if (!parentReady) continue;
+            order.push_back(i);
+            placed[i] = true;
+        }
+    }
+    for (const std::size_t index : order) {
+        auto& one = viewData[index];
         document->restoreView(one.id, std::move(one.name), ComputeState::Dirty,
                               std::move(one.sourcePath), std::move(one.bodyName), one.direction,
                               one.positionMm, one.scale, one.ownScale, one.showHidden,
-                              one.showTangent);
+                              one.showTangent, one.parentViewId, one.alignmentOffsetMm);
+    }
     if (currentLayerId != kInvalidObjectId) document->restoreCurrentLayer(currentLayerId);
 
     // A loaded document starts with an EMPTY history (ADR-M9-001).

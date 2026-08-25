@@ -4,6 +4,7 @@
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Recompute/RecomputeContext.h"
 
+#include <cmath>
 #include <utility>
 
 namespace paramcad {
@@ -57,6 +58,66 @@ ViewCamera CameraFor(ViewDirection direction) noexcept {
     return ViewCamera{};
 }
 
+std::string_view toString(ViewAlignment alignment) noexcept {
+    switch (alignment) {
+        case ViewAlignment::None: return "None";
+        case ViewAlignment::Horizontal: return "Horizontal";
+        case ViewAlignment::Vertical: return "Vertical";
+    }
+    return "None";
+}
+
+namespace {
+
+double Dot(const Vec3& a, const Vec3& b) noexcept { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+Vec3 Cross(const Vec3& a, const Vec3& b) noexcept {
+    return Vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+Vec3 Normalised(const Vec3& v) noexcept {
+    const double length = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (!(length > 1.0e-12)) return Vec3{0.0, 0.0, 0.0};
+    return Vec3{v.x / length, v.y / length, v.z / length};
+}
+
+} // namespace
+
+ViewAlignmentRule AlignmentOf(ViewDirection parent, ViewDirection child) noexcept {
+    // DERIVED, NOT TABULATED. "The top view goes above the front" is not an
+    // independent fact -- it follows from the top view looking ALONG the front
+    // view's up vector. Writing the placements down as a second table would be
+    // a second thing to keep in step, and the first draft of this file already
+    // had one table too many.
+    const ViewCamera from = CameraFor(parent);
+    const ViewCamera to = CameraFor(child);
+    const Vec3 sight = Normalised(Vec3{-from.towards.x, -from.towards.y, -from.towards.z});
+    const Vec3 up = Normalised(from.up);
+    // The page's X, by the same formula the projector uses: page Y is up, and
+    // page X completes the frame.
+    const Vec3 pageX = Normalised(Cross(up, sight));
+    const Vec3 look = Normalised(to.towards);
+
+    constexpr double kSquare = 1.0 - 1.0e-9;
+
+    // LOOKING ALONG THE PARENT'S UP means the child is the view from above or
+    // below, so it slides vertically. In third angle the view from ABOVE goes
+    // above -- and looking from above means looking along MINUS up, so the
+    // sign is the negative of the dot.
+    const double vertical = Dot(look, up);
+    if (std::fabs(vertical) >= kSquare)
+        return ViewAlignmentRule{ViewAlignment::Vertical, vertical > 0.0 ? -1 : 1};
+
+    const double horizontal = Dot(look, pageX);
+    if (std::fabs(horizontal) >= kSquare)
+        return ViewAlignmentRule{ViewAlignment::Horizontal, horizontal > 0.0 ? -1 : 1};
+
+    // NOT SQUARE TO THE PARENT -- an isometric beside a front view. Such a
+    // view is not aligned to anything, and saying so is better than inventing
+    // a side for it to sit on.
+    return ViewAlignmentRule{};
+}
+
 DrawingView::DrawingView(std::string name, std::string sourcePath, std::string bodyName,
                          ViewDirection direction, Vec2 positionMm)
     : id_(ObjectIdGenerator::Next()),
@@ -69,7 +130,7 @@ DrawingView::DrawingView(std::string name, std::string sourcePath, std::string b
 DrawingView::DrawingView(ObjectId id, std::string name, ComputeState state,
                          std::string sourcePath, std::string bodyName, ViewDirection direction,
                          Vec2 positionMm, DrawingScale scale, bool ownScale, bool showHidden,
-                         bool showTangent)
+                         bool showTangent, ObjectId parentViewId, double alignmentOffsetMm)
     : id_(RestoreObjectId(id)),
       name_(std::move(name)),
       sourcePath_(std::move(sourcePath)),
@@ -78,6 +139,8 @@ DrawingView::DrawingView(ObjectId id, std::string name, ComputeState state,
       positionMm_(positionMm),
       scale_(scale),
       ownScale_(ownScale),
+      parentViewId_(parentViewId),
+      alignmentOffsetMm_(alignmentOffsetMm),
       showHidden_(showHidden),
       showTangent_(showTangent),
       state_(state) {}
@@ -134,6 +197,10 @@ RecomputeResult DrawingView::recompute(const RecomputeContext& context) {
     if (!projection) return fail(projection.message);
 
     projected_ = std::move(projection.drawing);
+    // WHEN THE MODEL WAS LAST WRITTEN, taken AFTER a successful projection.
+    // Taken before, a failed build would still stamp the view as current and
+    // the drawing would stop offering to update itself.
+    sourceStamp_ = SourceFileStamp(sourcePath_);
     state_ = ComputeState::Valid;
     diagnostic_.clear();
     return {RecomputeStatus::Success, {}};

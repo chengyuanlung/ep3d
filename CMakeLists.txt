@@ -532,6 +532,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/M4ReviewFindingTests.cpp
         tests/DocumentOutlineTests.cpp
         tests/AssemblyOutlineTests.cpp
+        tests/DrawingAlignmentTests.cpp
         tests/DrawingDocumentTests.cpp
         tests/NamedObjectTests.cpp
         tests/RelationTests.cpp

@@ -810,7 +810,7 @@ public:
     // (edges cleaned, former dependents dirtied per ADR-007) -> registry ->
     // owning container (Parameter/Body; externally owned IRecomputables have
     // no owner step here). False if the id is not registered.
-    bool removeObject(ObjectId id) override;
+    bool removeOwnObject(ObjectId id) override;
 
     // Const-only access; mutation goes through the facade above.
 

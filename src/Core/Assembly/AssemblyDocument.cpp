@@ -1664,33 +1664,10 @@ void AssemblyDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
     throw std::runtime_error("this assembly cannot undo a change of that kind");
 }
 
-bool AssemblyDocument::removeObject(ObjectId id) {
+bool AssemblyDocument::removeOwnObject(ObjectId id) {
     ObjectRegistry::ObjectRef* found = registry_.find(id);
     if (found == nullptr) return false;
     const ObjectRegistry::ObjectRef handle = *found; // copy before unregistering
-
-    // ONE UNDO STEP FOR THE WHOLE DELETION, CASCADE INCLUDED.
-    //
-    // Deleting an instance takes its mates, and deleting a mate takes its
-    // relations. Each of those records its own delta -- as it must, so undo
-    // puts each thing back exactly as it was -- and without this they would
-    // land as SEPARATE undo steps. The user deleted one thing; pressing undo
-    // once would then bring back a relation and leave the mate it names still
-    // gone, which is a state the model was never in.
-    //
-    // The OUTERMOST call owns the transaction: the recursive ones see it open
-    // and leave it alone. Nothing is opened while history is being applied,
-    // because undo must not record.
-    struct OneStep {
-        AssemblyDocument* document = nullptr;
-        bool owned = false;
-        ~OneStep() {
-            if (owned) document->commitTransaction();
-        }
-    };
-    const bool ownsTheStep = !isTransactionOpen() && !applyingHistory();
-    if (ownsTheStep) beginTransaction("Delete " + objectName(id));
-    const OneStep step{this, ownsTheStep};
 
     // Decided BEFORE anything is unhooked, so a refusal leaves the document
     // byte-for-byte unchanged.

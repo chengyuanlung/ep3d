@@ -63,7 +63,7 @@ public:
     // `customHeightMm` are read only for a Custom sheet, and are PORTRAIT
     // millimetres as `setCustomSize` stores them.
     void restoreSheet(SheetSize size, SheetOrientation orientation, DrawingScale scale,
-                      double customWidthMm, double customHeightMm);
+                      double customWidthMm, double customHeightMm, ProjectionAngle angle);
 
     // --- Layers (the DXF table model) ----------------------------------------
     //
@@ -113,10 +113,38 @@ public:
     // permanent failure in the tree whose cause is a blank field.
     DrawingView& addView(std::string name, std::string sourcePath, std::string bodyName,
                          ViewDirection direction, Vec2 positionMm);
+    // A CHILD VIEW: the same model, seen from another side, LINED UP with its
+    // parent (M32.3).
+    //
+    // It takes no position of its own. Where it sits is COMPOSED from its
+    // parent's place plus an offset along the alignment axis -- exactly as an
+    // instance's placement is composed from its frame (ADR-M10-002) -- so
+    // moving the parent moves the children and nothing had to be told.
+    //
+    // Refused when the child is not square to the parent: an isometric beside
+    // a front view is not aligned to anything, and inventing a side for it to
+    // sit on would put it somewhere the user cannot predict.
+    DrawingView& addProjectedView(std::string name, ObjectId parentViewId,
+                                  ViewDirection direction, double offsetMm);
+
     DrawingView& restoreView(ObjectId id, std::string name, ComputeState state,
                              std::string sourcePath, std::string bodyName,
                              ViewDirection direction, Vec2 positionMm, DrawingScale scale,
-                             bool ownScale, bool showHidden, bool showTangent);
+                             bool ownScale, bool showHidden, bool showTangent,
+                             ObjectId parentViewId, double alignmentOffsetMm);
+
+    // WHERE A VIEW ACTUALLY SITS, base or child. The one reader, so a
+    // renderer, a plot and the "does it fit" check cannot disagree.
+    Vec2 viewPositionMm(ObjectId viewId) const;
+
+    // Why this view cannot be projected off that one, or empty when it can.
+    std::string whyViewCannotBeProjectedFrom(ObjectId parentViewId,
+                                             ViewDirection direction) const;
+
+    // WHICH VIEWS ARE BEHIND THEIR MODELS. A drawing does not watch the disk;
+    // it answers when asked, and the shell turns that into "3 views are out of
+    // date -- update?" rather than silently rebuilding everything.
+    std::vector<ObjectId> staleViews() const;
     std::vector<const DrawingView*> views() const;
     const DrawingView* findView(ObjectId id) const noexcept;
     const DrawingView* findViewNamed(const std::string& name) const noexcept;
@@ -125,6 +153,8 @@ public:
     bool setViewDirection(ObjectId viewId, ViewDirection direction);
     bool setViewScale(ObjectId viewId, const DrawingScale& scale);
     bool clearViewScale(ObjectId viewId);
+    bool setSheetProjectionAngle(ProjectionAngle angle);
+    bool setViewAlignmentOffsetMm(ObjectId viewId, double offsetMm);
     bool setViewShowsHiddenLines(ObjectId viewId, bool show);
     bool setViewShowsTangentEdges(ObjectId viewId, bool show);
 
@@ -135,7 +165,7 @@ public:
 
     // --- DocumentBase --------------------------------------------------------
     DocumentRecomputeReport recompute() override;
-    bool removeObject(ObjectId id) override;
+    bool removeOwnObject(ObjectId id) override;
 
 protected:
     void forEachOwnNamed(const std::function<void(const NamedSlot&)>& visit) override;

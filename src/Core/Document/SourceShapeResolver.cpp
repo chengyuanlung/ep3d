@@ -10,6 +10,8 @@
 #include "Core/Serialization/AssemblyDocumentSerializer.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 
+#include <filesystem>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -88,6 +90,13 @@ SourceShapeResult ResolveAssembly(const std::string& sourcePath,
 }
 
 } // namespace
+
+long long SourceFileStamp(const std::string& path) {
+    std::error_code error;
+    const auto written = std::filesystem::last_write_time(path, error);
+    if (error) return 0;
+    return static_cast<long long>(written.time_since_epoch().count());
+}
 
 bool IsAssemblySourceFile(const std::string& path) {
     // Read from the header rather than from the extension, because the

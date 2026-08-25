@@ -176,7 +176,29 @@ public:
     // Unhooks graph -> registry -> owner, in that order, so no dangling
     // reference is reachable through a public path. Subclasses own the last
     // step for the objects they hold; frames and connectors are unhooked here.
-    virtual bool removeObject(ObjectId id) = 0;
+    //
+    // ONE UNDO STEP FOR THE WHOLE DELETION, CASCADE INCLUDED, and that is why
+    // this is no longer the virtual.
+    //
+    // Deleting one thing takes others with it: an instance takes its mates, a
+    // mate takes its relations, a drawing view takes the views projected off
+    // it. Each of those records its own delta -- as it must, so undo puts each
+    // thing back exactly as it was -- and without a transaction around the lot
+    // they land as SEPARATE undo steps. The user deleted ONE thing; pressing
+    // undo once would then bring back a child and leave its parent gone, which
+    // is a state the model was never in.
+    //
+    // M31 wrote this guard for the assembly. M32 was about to write it a third
+    // time, which is when it moved here.
+    bool removeObject(ObjectId id);
+
+protected:
+    // What a subclass actually does. Reached only through removeObject above,
+    // so every path -- including a cascade calling back into removeObject --
+    // is inside the one transaction.
+    virtual bool removeOwnObject(ObjectId id) = 0;
+
+public:
     // The restore-path twin: removes recording NO undo step. Used by every
     // loader to drop the constructor's auto-created Origin when the file
     // supplies its own frames -- without it, a load arrives with one undo step

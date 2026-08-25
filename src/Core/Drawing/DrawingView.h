@@ -48,6 +48,38 @@ struct ViewCamera {
 
 ViewCamera CameraFor(ViewDirection direction) noexcept;
 
+// HOW A CHILD VIEW LINES UP WITH ITS PARENT.
+//
+// An orthographic drawing is not a set of independent pictures: the top view
+// sits directly above or below the front and shares its horizontal position,
+// and the side view sits beside it and shares its vertical one. That is what
+// lets a reader carry a measurement from one view to another with a ruler.
+enum class ViewAlignment {
+    None,       // a base view -- it sits where it was put
+    Horizontal, // slides left and right, sharing the parent's height on the page
+    Vertical,   // slides up and down, sharing the parent's horizontal position
+};
+
+std::string_view toString(ViewAlignment alignment) noexcept;
+
+// Which way a child looking `child` lines up beside a parent looking `parent`,
+// and which side it falls on -- +1 or -1 along that axis, in THIRD angle.
+//
+// DERIVED FROM THE CAMERA TABLE, not written down a second time. "Top goes
+// above the front" is not an independent fact: it follows from the top view
+// looking along the front view's up vector. A second table would be a second
+// thing to keep in step the day a direction is added.
+//
+// `sign` is 0 when the two directions are not square to each other -- an
+// isometric beside a front view, say. Such a view is not aligned, and saying
+// so is better than inventing a side for it to sit on.
+struct ViewAlignmentRule {
+    ViewAlignment alignment = ViewAlignment::None;
+    int sign = 0;
+};
+
+ViewAlignmentRule AlignmentOf(ViewDirection parent, ViewDirection child) noexcept;
+
 // ONE PROJECTED VIEW ON A SHEET.
 //
 // WHAT IT HOLDS IS A SENTENCE, not geometry: "that file, seen from there, at
@@ -70,7 +102,8 @@ public:
                 ViewDirection direction, Vec2 positionMm);
     DrawingView(ObjectId id, std::string name, ComputeState state, std::string sourcePath,
                 std::string bodyName, ViewDirection direction, Vec2 positionMm,
-                DrawingScale scale, bool ownScale, bool showHidden, bool showTangent);
+                DrawingScale scale, bool ownScale, bool showHidden, bool showTangent,
+                ObjectId parentViewId, double alignmentOffsetMm);
 
     ObjectId id() const noexcept override { return id_; }
     static std::string_view typeName() noexcept { return "DrawingView"; }
@@ -88,12 +121,35 @@ public:
     ViewDirection direction() const noexcept { return direction_; }
     void setDirection(ViewDirection direction) noexcept { direction_ = direction; }
 
-    // Where the view's ORIGIN sits on the paper, in sheet millimetres from the
-    // bottom-left corner. The origin is the projection of the model origin,
-    // not the centre of what is drawn -- so a part that grows does not drag
-    // its own view across the page.
+    // Where a BASE view's origin sits on the paper, in sheet millimetres from
+    // the bottom-left corner. The origin is the projection of the model
+    // origin, not the centre of what is drawn -- so a part that grows does not
+    // drag its own view across the page.
+    //
+    // MEANINGLESS FOR A CHILD. A projected view's place on the paper is
+    // COMPOSED from its parent's, exactly as an instance's placement is
+    // composed from its frame (ADR-M10-002) -- so moving the parent moves the
+    // children and nothing had to be told. Ask the document
+    // (viewPositionMm) rather than reading this.
     Vec2 positionMm() const noexcept { return positionMm_; }
     void setPositionMm(Vec2 positionMm) noexcept { positionMm_ = positionMm; }
+
+    // --- Alignment (M32.3) ---------------------------------------------------
+    ObjectId parentViewId() const noexcept { return parentViewId_; }
+    // How far along its alignment axis this child sits from its parent, in
+    // SHEET millimetres. Signed: which way is decided by the alignment rule
+    // and the sheet's projection angle, so a positive offset always means
+    // "further from the parent".
+    double alignmentOffsetMm() const noexcept { return alignmentOffsetMm_; }
+    void setAlignmentOffsetMm(double offsetMm) noexcept { alignmentOffsetMm_ = offsetMm; }
+    void setParentViewId(ObjectId parentViewId) noexcept { parentViewId_ = parentViewId; }
+
+    // --- Is the model still what this was drawn from? (M32.3) ----------------
+    //
+    // RUNTIME ONLY, never serialized. A reopened drawing has every view dirty
+    // anyway, so a stamp written to the file would be a fact about a previous
+    // session that could only ever mislead.
+    long long sourceStamp() const noexcept { return sourceStamp_; }
 
     // A VIEW MAY OVERRIDE THE SHEET'S SCALE, and a drawing that shows one
     // detail at 2:1 beside a general view at 1:5 is ordinary. `ownScale` says
@@ -146,6 +202,9 @@ private:
     Vec2 positionMm_{0.0, 0.0};
     DrawingScale scale_{1, 1};
     bool ownScale_{false};
+    ObjectId parentViewId_{kInvalidObjectId};
+    double alignmentOffsetMm_{0.0};
+    long long sourceStamp_{0};
     bool showHidden_{true};
     bool showTangent_{false};
     ProjectedDrawing projected_;

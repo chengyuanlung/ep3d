@@ -2789,7 +2789,7 @@ DocumentRecomputeReport PartDocument::recomputeFrom(ObjectId id) {
     return report;
 }
 
-bool PartDocument::removeObject(ObjectId id) {
+bool PartDocument::removeOwnObject(ObjectId id) {
     ObjectRegistry::ObjectRef* found = registry_.find(id);
     if (found == nullptr) return false;
     const ObjectRegistry::ObjectRef handle = *found; // copy before unregistering

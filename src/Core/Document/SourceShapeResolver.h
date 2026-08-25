@@ -52,4 +52,17 @@ SourceShapeResult ResolveSourceShape(
 // Is this file an assembly? Asked of the header, not the extension.
 bool IsAssemblySourceFile(const std::string& path);
 
+// WHEN THAT FILE WAS LAST WRITTEN, as an opaque number, or 0 when it cannot
+// be read.
+//
+// A drawing view holds this so the shell can say WHICH views are behind their
+// models rather than offering "Update" against everything. It is a fact about
+// the disk, not about the document, so it is never serialized: a stamp written
+// to a file would describe a previous session and could only mislead.
+//
+// ZERO IS "UNKNOWN", not "very old". A missing file compares unequal to
+// everything including itself, which is the honest answer -- a view whose
+// model has been deleted is out of step in a way no timestamp captures.
+long long SourceFileStamp(const std::string& path);
+
 } // namespace paramcad

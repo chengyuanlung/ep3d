@@ -428,6 +428,8 @@ struct SheetEdit {
     double beforeHeightMm = 0.0;
     double afterWidthMm = 0.0;
     double afterHeightMm = 0.0;
+    int beforeAngle = 0;
+    int afterAngle = 0;
 };
 
 struct LayerExistenceEdit {
@@ -484,6 +486,8 @@ struct DrawingViewExistenceEdit {
     bool ownScale = false;
     bool showHidden = true;
     bool showTangent = false;
+    ObjectId parentViewId = kInvalidObjectId;
+    double alignmentOffsetMm = 0.0;
     bool addedByTheEdit = false;
 };
 
@@ -507,6 +511,8 @@ struct DrawingViewPlacementEdit {
     bool afterShowHidden = true;
     bool beforeShowTangent = false;
     bool afterShowTangent = false;
+    double beforeAlignmentOffsetMm = 0.0;
+    double afterAlignmentOffsetMm = 0.0;
 };
 
 using UndoDelta =

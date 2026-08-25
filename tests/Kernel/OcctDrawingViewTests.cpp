@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -222,4 +223,78 @@ TEST(OcctDrawingViewTest, M32_VIEW_016_AViewAndAnInstanceAgreeAboutWhatIsInAFile
     DrawingView& named = drawing.addView("Named", file.path, "Second", ViewDirection::Front,
                                          Vec2{100.0, 150.0});
     EXPECT_TRUE(drawing.recompute().success) << named.diagnostic();
+}
+
+TEST(OcctDrawingViewTest, M32_STALE_001_ADrawingSaysWHICHViewsAreBehindTheirModels) {
+    // A drawing does not watch the disk. It answers when asked, and the shell
+    // turns that into "3 views are out of date -- update?" rather than
+    // silently rebuilding everything or, worse, showing a picture of a part
+    // that no longer looks like that.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"stale.ep3d"};
+    WriteBlockPart(file.path, 100.0, 40.0, 10.0);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& front = drawing.addView("Front", file.path, "Block", ViewDirection::Front,
+                                         Vec2{150.0, 150.0});
+    ASSERT_TRUE(drawing.recompute().success) << front.diagnostic();
+    EXPECT_TRUE(drawing.staleViews().empty())
+        << "a view was called stale the moment it was drawn";
+
+    // THE MODEL CHANGES UNDER IT -- which is the whole case this exists for.
+    WriteBlockPart(file.path, 200.0, 40.0, 10.0);
+    const std::vector<ObjectId> behind = drawing.staleViews();
+    ASSERT_EQ(behind.size(), 1u) << "the drawing did not notice its model changed";
+    EXPECT_EQ(behind.front(), front.id());
+
+    // ...and updating it clears the flag AND redraws it at the new size.
+    ASSERT_TRUE(drawing.markDirty(front.id()));
+    ASSERT_TRUE(drawing.recompute().success) << front.diagnostic();
+    EXPECT_TRUE(drawing.staleViews().empty()) << "the view was updated and still reads stale";
+    EXPECT_NEAR(front.projected().extent.widthMm(), 200.0, 1e-6)
+        << "the view says it is up to date and is still drawing the old part";
+}
+
+TEST(OcctDrawingViewTest, M32_STALE_002_ABrokenViewIsNotSTALEItIsBROKEN) {
+    // Offering to update a view that never built would send the user round a
+    // loop that cannot end -- update, fail, still offered. The tree already
+    // says "failed"; that is the message that has somewhere to go.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"broken.ep3d"};
+    WriteBlockPart(file.path, 100.0, 40.0, 10.0);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& front = drawing.addView("Front", file.path, "Block", ViewDirection::Front,
+                                         Vec2{150.0, 150.0});
+    ASSERT_TRUE(drawing.recompute().success);
+
+    std::remove(file.path.c_str());
+    ASSERT_TRUE(drawing.markDirty(front.id()));
+    EXPECT_FALSE(drawing.recompute().success);
+    EXPECT_EQ(front.currentState(), ComputeState::Failed);
+    EXPECT_TRUE(drawing.staleViews().empty())
+        << "a view that cannot build at all was offered as merely out of date";
+}
+
+TEST(OcctDrawingViewTest, M32_STALE_003_ProjectedChildrenGoStaleWithTheirParent) {
+    // They read the same file, so they are behind it too -- and a drawing that
+    // updated only the base view would show a front view of the new part
+    // beside a top view of the old one, which is worse than showing neither.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"family.ep3d"};
+    WriteBlockPart(file.path, 100.0, 40.0, 10.0);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& front = drawing.addView("Front", file.path, "Block", ViewDirection::Front,
+                                         Vec2{150.0, 150.0});
+    drawing.addProjectedView("Top", front.id(), ViewDirection::Top, 60.0);
+    ASSERT_TRUE(drawing.recompute().success);
+    ASSERT_TRUE(drawing.staleViews().empty());
+
+    WriteBlockPart(file.path, 200.0, 40.0, 10.0);
+    EXPECT_EQ(drawing.staleViews().size(), 2u)
+        << "only some of the views that read this model noticed it changed";
 }

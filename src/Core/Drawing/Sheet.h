@@ -29,6 +29,25 @@ std::string_view toString(SheetSize size) noexcept;
 
 enum class SheetOrientation { Portrait, Landscape };
 
+// WHICH SIDE THE PROJECTED VIEWS GO (ISO 128 / ASME Y14.3).
+//
+//   Third angle   the top view sits ABOVE the front, the right view to the
+//                 RIGHT. North America.
+//   First angle   the top view sits BELOW, the right view to the LEFT.
+//                 Europe and most of Asia.
+//
+// A PROPERTY OF THE SHEET, not of a view. It decides where views are placed
+// relative to each other, not what any single one looks like -- and putting it
+// on a view would let one drawing hold both conventions at once, which is the
+// one thing the projection symbol in the title block exists to promise cannot
+// happen.
+//
+// There is no "neither". A drawing with orthographic views is in one
+// convention or the other, and a reader who cannot tell which cannot read it.
+enum class ProjectionAngle { First, Third };
+
+std::string_view toString(ProjectionAngle angle) noexcept;
+
 std::string_view toString(SheetOrientation orientation) noexcept;
 
 // A SCALE IS A RATIO, NOT A NUMBER.
@@ -66,6 +85,8 @@ public:
     Sheet(SheetSize size, SheetOrientation orientation);
 
     SheetSize size() const noexcept { return size_; }
+    ProjectionAngle projectionAngle() const noexcept { return angle_; }
+    void setProjectionAngle(ProjectionAngle angle) noexcept { angle_ = angle; }
     SheetOrientation orientation() const noexcept { return orientation_; }
     const DrawingScale& scale() const noexcept { return scale_; }
 
@@ -92,6 +113,9 @@ private:
     SheetSize size_{SheetSize::A3};
     SheetOrientation orientation_{SheetOrientation::Landscape};
     DrawingScale scale_{1, 1};
+    // FIRST by default. ISO is what most of the world outside North America
+    // draws in, and a default has to be one of them.
+    ProjectionAngle angle_{ProjectionAngle::First};
     // Only read when size_ is Custom. Kept rather than folded into
     // width/height so switching to A3 and back does not lose what was typed.
     double customWidthMm_{420.0};
