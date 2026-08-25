@@ -5498,10 +5498,47 @@ int main(int argc, char** argv) {
                     if (window.staleBomCountForTesting() != 0)
                         fail("a freshly made parts list is already stale");
 
-                    // A PICTURE OF A DRAWING WITH A PARTS LIST ON IT.
+                    // --- M42's GATE: a balloon on the picture ---------------
+                    //
+                    // The Core suite proves the number comes from the list.
+                    // Only starting the program can prove a user can put one
+                    // on the sheet and that the circle reaches the canvas with
+                    // a number in it -- an empty balloon being exactly what a
+                    // reader would take for one nobody filled in.
+                    {
+                        const BomTable* list = nullptr;
+                        for (const BomTable* one : window.bomTablesForTesting()) list = one;
+                        if (list == nullptr) fail("M42 found no parts list to balloon");
+                        const BomContents counted = window.countBomForTesting(list->id());
+                        if (!counted.ok || counted.rows.empty())
+                            fail("M42's parts list counted nothing to balloon");
+
+                        BalloonSpec spec;
+                        spec.tableId = list->id();
+                        spec.sourceFile = counted.rows.front().sourcePath;
+                        spec.partName = counted.rows.front().partName;
+                        const QString said = window.addSymbolCommand(
+                            spec, Vec2{150.0, 120.0}, Vec2{160.0, 135.0});
+                        // THE BALLOON SAYS WHAT THE ROW SAYS.
+                        if (!said.contains(QString::number(counted.rows.front().item)))
+                            fail(("the balloon did not carry the row's item number: " +
+                                  said.toStdString())
+                                     .c_str());
+
+                        window.repaintDrawingForTesting();
+                        if (window.drawnSymbolCountForTesting() == 0)
+                            fail("the balloon never reached the canvas");
+                        if (window.unreadableSymbolsForTesting() != 0)
+                            fail("the balloon was drawn without a number in it");
+                    }
+
+                    // A PICTURE OF A DRAWING WITH A PARTS LIST AND A BALLOON.
                     // Whether a table READS -- whether the columns are wide
-                    // enough, whether the heading is where a reader expects --
-                    // is a judgement, and no assertion makes it.
+                    // enough, whether the heading is where a reader expects,
+                    // whether the circled number is findable -- is a judgement,
+                    // and no assertion makes it. Taken AFTER the balloon,
+                    // because a picture of the list alone was a picture of
+                    // half the thing being built.
                     if (screenshotPath != nullptr) {
                         std::string beside = screenshotPath;
                         const std::size_t dot = beside.rfind('.');

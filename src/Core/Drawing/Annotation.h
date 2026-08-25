@@ -183,8 +183,33 @@ struct DatumFeatureSpec {
     std::string note;
 };
 
-using AnnotationBody =
-    std::variant<SurfaceFinishSpec, FeatureControlFrameSpec, DatumFeatureSpec>;
+// --- ITEM BALLOON (M42) -----------------------------------------------------
+//
+// THE NUMBER IS NOT HERE, and that is the entire design.
+//
+// A balloon exists to tie a part on the picture to a row in the parts list. A
+// balloon carrying its own number is a second copy of that row's item number:
+// somebody inserts a part, the list renumbers, and the balloons go on pointing
+// at rows that have moved. Every number on the sheet is still a number the
+// list contains, which is what makes it unreadable rather than obviously
+// wrong -- the reader orders the wrong part and nothing looked broken.
+//
+// So a balloon stores WHICH ROW, as the same sentence the parts list groups
+// by: the file the part came from and the body inside it. The number is asked
+// for at every repaint (ADR-M10-002, composed never stored).
+//
+// AND IT NAMES ITS TABLE. A sheet can carry two lists -- this assembly's parts
+// and every part however deep -- and the same bolt is item 4 in one and item
+// 11 in the other. A balloon that only said "the parts list" would be right on
+// whichever one was drawn first.
+struct BalloonSpec {
+    ObjectId tableId = kInvalidObjectId;
+    std::string sourceFile;
+    std::string partName;
+};
+
+using AnnotationBody = std::variant<SurfaceFinishSpec, FeatureControlFrameSpec,
+                                    DatumFeatureSpec, BalloonSpec>;
 
 // THE ANNOTATION ITSELF: a body, a leader, and where the symbol sits.
 class Annotation {
@@ -221,6 +246,7 @@ public:
     bool isSurfaceFinish() const noexcept {
         return std::holds_alternative<SurfaceFinishSpec>(body_);
     }
+    bool isBalloon() const noexcept { return std::holds_alternative<BalloonSpec>(body_); }
 
 private:
     ObjectId id_;

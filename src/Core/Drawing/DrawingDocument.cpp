@@ -1415,6 +1415,14 @@ Annotation& DrawingDocument::addAnnotation(AnnotationBody body, DimensionAnchor 
         const std::string why = WhySurfaceFinishRefused(*finish);
         if (!why.empty()) throw std::invalid_argument("addAnnotation: " + why);
     }
+    if (const auto* balloon = std::get_if<BalloonSpec>(&body)) {
+        if (findBomTable(balloon->tableId) == nullptr)
+            throw std::invalid_argument(
+                "addAnnotation: a balloon carries a row number from a parts list, and that "
+                "list is not in this drawing");
+        if (balloon->sourceFile.empty())
+            throw std::invalid_argument("addAnnotation: a balloon has to name a part");
+    }
 
     auto item = std::make_unique<Annotation>(std::move(body), anchor, positionMm,
                                              currentLayerId_);
@@ -1571,6 +1579,23 @@ std::string DrawingDocument::whyAnnotationRefused(ObjectId annotationId) const {
                 return "this frame refers to a datum that is no longer in the drawing";
         }
     }
+    if (const auto* balloon = std::get_if<BalloonSpec>(&annotation->body())) {
+        // A BALLOON WITH NO ROW TO READ IS THE FAILURE THIS IS FOR. Left to
+        // draw an empty circle, or worse a stale number, it ties a part on the
+        // picture to a line in the list that is not about it.
+        const BomTable* table = findBomTable(balloon->tableId);
+        if (table == nullptr)
+            return "this balloon reads a parts list that is no longer in the drawing";
+        if (balloon->sourceFile.empty())
+            return "this balloon names no part, so there is no row for it to carry";
+        const BomContents rows = countBom(*table);
+        if (!rows.ok)
+            return "this balloon's parts list could not be counted: " + rows.why;
+        for (const BomRow& row : rows.rows)
+            if (row.sourcePath == balloon->sourceFile && row.partName == balloon->partName)
+                return {};
+        return "this balloon names a part that is not in the parts list it reads";
+    }
     return {};
 }
 
@@ -1589,6 +1614,19 @@ std::string DrawingDocument::annotationText(ObjectId annotationId) const {
         for (const DatumReference& reference : frame->datums)
             letters.push_back(datumLetterOf(reference.datumId));
         return FrameText(*frame, letters);
+    }
+    if (const auto* balloon = std::get_if<BalloonSpec>(&annotation->body())) {
+        // THE NUMBER IS THE LIST'S ANSWER, asked for now. This is the one
+        // place a balloon's number comes from, which is what makes it
+        // impossible for the circle on the picture and the row in the table to
+        // carry different item numbers.
+        const BomTable* table = findBomTable(balloon->tableId);
+        if (table == nullptr) return {};
+        const BomContents rows = countBom(*table);
+        for (const BomRow& row : rows.rows)
+            if (row.sourcePath == balloon->sourceFile && row.partName == balloon->partName)
+                return std::to_string(row.item);
+        return {};
     }
     return datumLetterOf(annotationId);
 }

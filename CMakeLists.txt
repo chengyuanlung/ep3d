@@ -559,6 +559,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/HatchTests.cpp
         tests/ToleranceTests.cpp
         tests/AnnotationTests.cpp
+        tests/BalloonTests.cpp
         tests/AnnotationDocumentTests.cpp
         tests/HoleStandardsTests.cpp
         tests/HoleTableTests.cpp

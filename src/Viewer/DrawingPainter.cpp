@@ -565,6 +565,16 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             painter.drawRect(QRectF(corner.x(), corner.y() - height, width + 10.0,
                                     height + 2.0));
             painter.drawText(QPointF(corner.x() + 5.0, corner.y() - 2.0), said);
+        } else if (annotation->isBalloon()) {
+            // A CIRCLE WITH THE ROW NUMBER IN IT. Round on purpose: a reader
+            // scanning an assembly drawing finds balloons by their shape, and
+            // a boxed number is a feature control frame.
+            const double radius = std::max(height * 0.75, width * 0.7);
+            painter.drawEllipse(QPointF(corner.x() + radius, corner.y() - height * 0.4),
+                                radius, radius);
+            painter.drawText(QRectF(corner.x(), corner.y() - height * 0.4 - radius,
+                                    radius * 2.0, radius * 2.0),
+                             Qt::AlignCenter, said);
         } else if (annotation->isDatum()) {
             // A DATUM IS A LETTER IN A BOX with a filled triangle at the end
             // of its leader -- the triangle is what makes it a datum rather

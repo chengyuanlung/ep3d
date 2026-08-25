@@ -373,6 +373,11 @@ public:
     std::size_t drawnHoleTagsForTesting() const;
     std::size_t uncountedHoleTablesForTesting() const;
     // M41. Symbols drawn, and the two ways one can be wrong on the paper.
+    // M42. The gate needs the list's own rows to know what number to expect --
+    // asked of the document rather than counted again here, because a gate
+    // that did its own counting would be checking itself.
+    std::vector<const BomTable*> bomTablesForTesting() const;
+    BomContents countBomForTesting(ObjectId tableId) const;
     std::size_t drawnSymbolCountForTesting() const;
     std::size_t danglingSymbolsForTesting() const;
     std::size_t unreadableSymbolsForTesting() const;
@@ -880,6 +885,7 @@ private slots:
     void onDatumRequested();
     void onFeatureControlFrameRequested();
     void onSurfaceFinishRequested();
+    void onBalloonRequested();
     // M40: the sheet editing tools. One handler each, one command each --
     // every one of them a thin shell over a pure function in SheetEdits.h.
     void onSheetTrimRequested();
@@ -1151,6 +1157,7 @@ private:
     QAction* datumAction_ = nullptr;
     QAction* gdtFrameAction_ = nullptr;
     QAction* surfaceFinishAction_ = nullptr;
+    QAction* balloonAction_ = nullptr;
     QAction* sheetTrimAction_ = nullptr;
     QAction* sheetExtendAction_ = nullptr;
     QAction* sheetFilletAction_ = nullptr;

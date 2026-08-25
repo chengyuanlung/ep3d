@@ -742,6 +742,14 @@ JsonValue toJson(const DrawingDocument& document) {
                 datums.add(std::move(one));
             }
             item.set("datums", std::move(datums));
+        } else if (const auto* balloon = std::get_if<BalloonSpec>(&annotation->body())) {
+            item.set("kind", JsonValue::makeString("balloon"));
+            // WHICH LIST AND WHICH ROW, and not the number the row currently
+            // carries -- the number is the list's answer and is asked for
+            // again on every repaint.
+            item.set("tableId", JsonValue::makeString(idToString(balloon->tableId)));
+            item.set("sourceFile", JsonValue::makeString(balloon->sourceFile));
+            item.set("partName", JsonValue::makeString(balloon->partName));
         } else {
             item.set("kind", JsonValue::makeString("datum"));
             const auto* datum = std::get_if<DatumFeatureSpec>(&annotation->body());
@@ -2020,6 +2028,24 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                     }
                 }
                 one.body = std::move(frame);
+            } else if (kind->asString() == "balloon") {
+                BalloonSpec balloon;
+                const JsonValue* tableId =
+                    requireField(entry, "tableId", JsonType::String, context, err);
+                if (tableId == nullptr) return loadFailure(err.error, err.message);
+                const auto parsed = idFromString(tableId->asString());
+                if (!parsed.has_value() || *parsed > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a balloon's parts list is not a valid id");
+                balloon.tableId = *parsed;
+                const JsonValue* sourceFile =
+                    requireField(entry, "sourceFile", JsonType::String, context, err);
+                if (sourceFile == nullptr) return loadFailure(err.error, err.message);
+                balloon.sourceFile = sourceFile->asString();
+                if (const JsonValue* partName = entry.find("partName"))
+                    if (partName->type() == JsonType::String)
+                        balloon.partName = partName->asString();
+                one.body = std::move(balloon);
             } else if (kind->asString() == "datum") {
                 DatumFeatureSpec datum;
                 if (const JsonValue* note = entry.find("note"))
@@ -2522,16 +2548,12 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         if (!std::holds_alternative<DatumFeatureSpec>(one.body))
             document->restoreAnnotation(one.id, one.body, one.anchor, one.positionMm,
                                         one.layerId);
+    // ...and the balloons cannot be checked until the parts lists are back, so
+    // the check below runs after restoreBomTable. Moved rather than repeated:
+    // one check, in one place, after everything it reads exists.
     // ...AND THEN THE SAME CHECK THE SAVER MAKES (ADR-M3-008). Not a second
     // list of rules here: the document is asked, exactly as it is asked before
     // writing, so what one refuses the other refuses and neither can drift.
-    for (const auto& one : symbolData) {
-        const std::string why = document->whyAnnotationRefused(one.id);
-        if (!why.empty())
-            return loadFailure(SerializationError::InvalidFieldType,
-                               "a symbol in this file cannot be drawn: " + why);
-    }
-
     for (auto& one : holeTableData) {
         // THE VIEW HAS TO BE HERE, and it is by now -- views are restored
         // first. A table pointing at nothing would come back as an empty box
@@ -2549,6 +2571,14 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         document->restoreBomTable(one.id, std::move(one.name), std::move(one.sourcePath),
                                   one.positionMm, one.depth, std::move(one.columns),
                                   one.rowHeightMm, one.growsUpward, one.sourceStamp);
+    // THE SAME CHECK THE SAVER MAKES (ADR-M3-008), once everything a symbol
+    // reads is back: a frame's datums, and a balloon's parts list.
+    for (const auto& one : symbolData) {
+        const std::string why = document->whyAnnotationRefused(one.id);
+        if (!why.empty())
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "a symbol in this file cannot be drawn: " + why);
+    }
     document->restoreFrame(margins, zoneTargetMm, frameVisible);
     // A FILE WITHOUT A TITLE BLOCK KEEPS THE SEEDED ONE, rather than being
     // given an empty box -- an older file predates the block, and a drawing

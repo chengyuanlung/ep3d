@@ -516,6 +516,13 @@ void MainWindow::buildMenus() {
     connect(surfaceFinishAction_, &QAction::triggered, this,
             &MainWindow::onSurfaceFinishRequested);
 
+    balloonAction_ = symbolMenu->addAction(QStringLiteral("&Balloon..."));
+    balloonAction_->setToolTip(
+        QStringLiteral("A circled item number, tied to a row of the parts list.\n"
+                       "The NUMBER is the list's answer, asked for every time it is drawn -- "
+                       "insert a part and every balloon renumbers with the list."));
+    connect(balloonAction_, &QAction::triggered, this, &MainWindow::onBalloonRequested);
+
     QMenu* editMenu = drawingMenu_->addMenu(QStringLiteral("&Modify"));
     sheetTrimAction_ = editMenu->addAction(QStringLiteral("&Trim"));
     sheetTrimAction_->setToolTip(
@@ -5536,6 +5543,62 @@ void MainWindow::onFeatureControlFrameRequested() {
     addSymbolCommand(spec, at, Vec2{at.x + 15.0, at.y + 15.0});
 }
 
+void MainWindow::onBalloonRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const std::vector<const BomTable*> tables = drawing->bomTables();
+    if (tables.empty()) {
+        statusLeft_->setText(
+            QStringLiteral("A balloon carries a row number, so the sheet needs a parts "
+                           "list first."));
+        return;
+    }
+
+    // WHICH LIST. Asked rather than assumed, because a sheet can carry two and
+    // the same bolt is a different item in each.
+    const BomTable* table = tables.front();
+    if (tables.size() > 1) {
+        QStringList names;
+        for (const BomTable* one : tables) names << QString::fromStdString(one->name());
+        bool ok = false;
+        const QString chosen =
+            QInputDialog::getItem(this, QStringLiteral("Balloon"),
+                                  QStringLiteral("Parts list:"), names, 0, false, &ok);
+        if (!ok) return;
+        table = tables[static_cast<std::size_t>(names.indexOf(chosen))];
+    }
+
+    // WHICH ROW, offered as the list currently reads -- item number, quantity
+    // and part -- so what the user picks is what they can see on the paper.
+    const BomContents rows = drawing->countBom(*table);
+    if (!rows.ok || rows.rows.empty()) {
+        statusLeft_->setText(QStringLiteral("That parts list has nothing to balloon: %1")
+                                 .arg(QString::fromStdString(rows.why)));
+        return;
+    }
+    QStringList labels;
+    for (const BomRow& row : rows.rows)
+        labels << QStringLiteral("%1  x%2  %3")
+                      .arg(row.item)
+                      .arg(row.quantity)
+                      .arg(QString::fromStdString(row.partName));
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(this, QStringLiteral("Balloon"),
+                                                 QStringLiteral("Part:"), labels, 0, false,
+                                                 &ok);
+    if (!ok) return;
+    const BomRow& row = rows.rows[static_cast<std::size_t>(labels.indexOf(chosen))];
+
+    BalloonSpec spec;
+    spec.tableId = table->id();
+    // THE ROW'S IDENTITY, not its number. The number is what the list says
+    // today; the path and the body are what the row is about.
+    spec.sourceFile = row.sourcePath;
+    spec.partName = row.partName;
+    const Vec2 at = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
+    addSymbolCommand(spec, at, Vec2{at.x + 12.0, at.y + 12.0});
+}
+
 void MainWindow::onSurfaceFinishRequested() {
     DrawingDocument* drawing = AsDrawing(document_);
     if (drawing == nullptr) return;
@@ -5571,6 +5634,18 @@ QString MainWindow::sectionLetterForTesting(ObjectId viewId) const {
     const DrawingDocument* drawing = AsDrawing(document_);
     return drawing == nullptr ? QString()
                               : QString::fromStdString(drawing->sectionLetterOf(viewId));
+}
+
+std::vector<const BomTable*> MainWindow::bomTablesForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? std::vector<const BomTable*>{} : drawing->bomTables();
+}
+
+BomContents MainWindow::countBomForTesting(ObjectId tableId) const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const BomTable* table = drawing->findBomTable(tableId);
+    return table == nullptr ? BomContents{} : drawing->countBom(*table);
 }
 
 std::size_t MainWindow::drawnSymbolCountForTesting() const {

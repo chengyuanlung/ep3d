@@ -69,7 +69,10 @@ std::string BomRow::cell(BomColumn column) const {
         case BomColumn::Item: return std::to_string(item);
         case BomColumn::Quantity: return std::to_string(quantity);
         case BomColumn::PartName: return partName;
-        case BomColumn::SourceFile: return sourceFile;
+        // THE FILENAME, derived. A drawing has no room for D:/work/2026/... and
+        // a reader does not want it; what the row is ABOUT is the whole path.
+        case BomColumn::SourceFile:
+            return std::filesystem::path{sourcePath}.filename().string();
         case BomColumn::Description: return description;
     }
     return {};
@@ -116,7 +119,7 @@ void Tally(const Instance& instance, int quantityEach, std::vector<BomRow>& rows
     row.item = static_cast<int>(rows.size()) + 1;
     row.quantity = quantityEach;
     row.partName = PartNameOf(instance);
-    row.sourceFile = std::filesystem::path{instance.sourcePath()}.filename().string();
+    row.sourcePath = instance.sourcePath();
     rows.push_back(std::move(row));
     keys.push_back(key);
 }

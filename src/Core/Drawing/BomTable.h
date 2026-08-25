@@ -60,7 +60,15 @@ struct BomRow {
     int item = 0;
     int quantity = 0;
     std::string partName;
-    std::string sourceFile;
+    // THE FULL PATH, which is what the row was GROUPED BY -- and the filename
+    // is derived from it for the column.
+    //
+    // It kept only the filename, and that threw away the identity it had just
+    // been grouped on: two parts of the same name in different folders are
+    // correctly two rows, and nothing downstream could tell which was which.
+    // A balloon needs exactly that (M42), and so would anything else that has
+    // to point back at a row.
+    std::string sourcePath;
     std::string description;
 
     // The cell this row shows under `column`.
