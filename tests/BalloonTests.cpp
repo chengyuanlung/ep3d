@@ -206,31 +206,105 @@ TEST(BalloonTest, M42_BAL_006_ABalloonReadsTheListITNamesAndNotJustAnyList) {
     // part however deep -- and the same bolt is a different item in each. A
     // balloon that only said "the parts list" would be right on whichever was
     // drawn first.
-    Rig rig;
-    const ObjectId exploded =
-        rig.drawing.addBomTable("Every part", rig.rig.path, Vec2{200.0, 140.0}).id();
-    ASSERT_TRUE(rig.drawing.setBomDepth(exploded, BomDepth::Exploded));
+    //
+    // THE TWO LISTS HAVE TO ACTUALLY DIFFER, and the first version of this
+    // test missed that: with no sub-assembly, top-level and exploded give the
+    // same rows in the same order, so a balloon reading the wrong list still
+    // came out with the right number. The rig below has a sub-assembly, which
+    // is the only thing that makes the two depths different answers.
+    Scratch bolt{"b6.ep3d"};
+    Scratch plate{"p6.ep3d"};
+    Scratch washer{"w6.ep3d"};
+    Scratch sub{"sub6.ep3da"};
+    Scratch outerFile{"outer6.ep3da"};
+    WritePart(bolt.path, "M6x20");
+    WritePart(plate.path, "Plate");
+    WritePart(washer.path, "M6 washer");
+    {
+        // TWO parts ahead of the bolt inside the sub-assembly, so exploding it
+        // pushes the bolt to item 3 while top level still calls it item 2.
+        // With one, both lists said 2 and the test proved nothing.
+        AssemblyDocument inner{"Sub"};
+        inner.addInstance("P", plate.path, "Plate");
+        inner.addInstance("W", washer.path, "M6 washer");
+        inner.addInstance("B1", bolt.path, "M6x20");
+        std::ofstream out(sub.path, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        ASSERT_TRUE(saveAssemblyDocument(inner, out));
+    }
+    {
+        AssemblyDocument outer{"Rig"};
+        outer.addInstance("Sub", sub.path, "");
+        outer.addInstance("B2", bolt.path, "M6x20");
+        std::ofstream out(outerFile.path, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        ASSERT_TRUE(saveAssemblyDocument(outer, out));
+    }
 
-    const ObjectId onFirst = rig.balloonOn(rig.bolt.path, "M6x20", Vec2{60.0, 80.0});
-    BalloonSpec second;
-    second.tableId = exploded;
-    second.sourceFile = rig.bolt.path;
-    second.partName = "M6x20";
-    const ObjectId onSecond =
-        rig.drawing.addAnnotation(second, Somewhere(Vec2{90.0, 80.0}), Vec2{100.0, 90.0})
-            .id();
+    DrawingDocument drawing{"Assembly"};
+    const ObjectId top = drawing.addBomTable("Parts", outerFile.path, Vec2{200.0, 40.0}).id();
+    const ObjectId every =
+        drawing.addBomTable("Every part", outerFile.path, Vec2{200.0, 140.0}).id();
+    ASSERT_TRUE(drawing.setBomDepth(every, BomDepth::Exploded));
 
-    // Both are the bolt, and each reads its OWN list's row number.
-    const BomContents topRows = rig.drawing.countBom(*rig.drawing.findBomTable(rig.table));
-    const BomContents allRows = rig.drawing.countBom(*rig.drawing.findBomTable(exploded));
+    const BomContents topRows = drawing.countBom(*drawing.findBomTable(top));
+    const BomContents allRows = drawing.countBom(*drawing.findBomTable(every));
     ASSERT_TRUE(topRows.ok) << topRows.why;
     ASSERT_TRUE(allRows.ok) << allRows.why;
+
+    // At top level the sub-assembly is one line and the bolt outside it is
+    // item 2. Exploded, the PLATE comes first and the bolt is item... whatever
+    // the list says -- which is the point: the two lists number it differently.
+    int topItem = 0;
+    int everyItem = 0;
     for (const BomRow& row : topRows.rows)
-        if (row.partName == "M6x20")
-            EXPECT_EQ(rig.drawing.annotationText(onFirst), std::to_string(row.item));
+        if (row.partName == "M6x20") topItem = row.item;
     for (const BomRow& row : allRows.rows)
-        if (row.partName == "M6x20")
-            EXPECT_EQ(rig.drawing.annotationText(onSecond), std::to_string(row.item));
+        if (row.partName == "M6x20") everyItem = row.item;
+    ASSERT_NE(topItem, 0);
+    ASSERT_NE(everyItem, 0);
+    ASSERT_NE(topItem, everyItem)
+        << "the two lists number the bolt the same, so this test cannot tell them apart";
+
+    BalloonSpec onTop;
+    onTop.tableId = top;
+    onTop.sourceFile = bolt.path;
+    onTop.partName = "M6x20";
+    const ObjectId first =
+        drawing.addAnnotation(onTop, Somewhere(Vec2{60.0, 80.0}), Vec2{70.0, 90.0}).id();
+
+    BalloonSpec onEvery = onTop;
+    onEvery.tableId = every;
+    const ObjectId second =
+        drawing.addAnnotation(onEvery, Somewhere(Vec2{90.0, 80.0}), Vec2{100.0, 90.0}).id();
+
+    EXPECT_EQ(drawing.annotationText(first), std::to_string(topItem));
+    EXPECT_EQ(drawing.annotationText(second), std::to_string(everyItem))
+        << "a balloon read a list other than the one it names";
+}
+
+TEST(BalloonTest, M42_BAL_009_ThePartsListShowsAFILENAMEAndKeepsThePATH) {
+    // The row is GROUPED by the whole path and READ as a filename. Print the
+    // path in the column and a drawing carries D:/work/2026/... across a
+    // column sized for "bolt.ep3d"; keep only the filename in the row and
+    // nothing can point back at which part it is about.
+    Rig rig;
+    const BomContents rows = rig.drawing.countBom(*rig.drawing.findBomTable(rig.table));
+    ASSERT_TRUE(rows.ok) << rows.why;
+    ASSERT_FALSE(rows.rows.empty());
+
+    for (const BomRow& row : rows.rows) {
+        const std::string shown = row.cell(BomColumn::SourceFile);
+        EXPECT_EQ(shown.find('/'), std::string::npos) << "the column printed a path: " << shown;
+        EXPECT_EQ(shown.find('\\'), std::string::npos)
+            << "the column printed a path: " << shown;
+        EXPECT_FALSE(shown.empty());
+        // ...and the row still knows the whole path, which is what a balloon
+        // finds it by.
+        EXPECT_NE(row.sourcePath.size(), shown.size())
+            << "the row kept only what the column shows";
+        EXPECT_NE(row.sourcePath.find(shown), std::string::npos);
+    }
 }
 
 TEST(BalloonTest, M42_BAL_007_ABalloonSurvivesASaveAndStillReadsTheSameRow) {

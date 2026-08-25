@@ -569,6 +569,13 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             // A CIRCLE WITH THE ROW NUMBER IN IT. Round on purpose: a reader
             // scanning an assembly drawing finds balloons by their shape, and
             // a boxed number is a feature control frame.
+            //
+            // THE SHAPE IS CHECKED BY EYE, not by an assertion, and that is
+            // recorded here rather than pretended otherwise: a mutation
+            // turning this ellipse into a rectangle survives every test in the
+            // suite, because no tally can see a shape. What sees it is the
+            // screenshot the self test writes beside the parts list, which is
+            // what ADR-M26-009 says a visual fact needs.
             const double radius = std::max(height * 0.75, width * 0.7);
             painter.drawEllipse(QPointF(corner.x() + radius, corner.y() - height * 0.4),
                                 radius, radius);
