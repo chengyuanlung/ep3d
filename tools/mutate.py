@@ -190,6 +190,35 @@ def main(argv):
         return 2
     mutations = json.load(io.open(argv[1], encoding='utf-8'))
 
+    # A RUN THAT WAS KILLED LEAVES THE TREE MUTATED.
+    #
+    # `finally` restores the file when a mutation finishes or throws. It does
+    # NOT run when the process is killed from outside -- a timeout, a Ctrl-C
+    # that lands in the wrong place -- and what is left behind is a source file
+    # with a deliberate defect in it and a .bak beside it.
+    #
+    # That happened: a run killed at a timeout left Hatch.cpp with its "a loop
+    # of three points encloses an area" test reading two, and the NEXT full run
+    # measured twenty-eight mutations against it. Nothing went red, because
+    # another check happened to cover the same case -- so the damage was
+    # invisible and every number in that report was about the wrong build.
+    #
+    # This is ADR-M11-013 again, for the fifth time: a mutation harness with a
+    # broken oracle is worse than no harness. So the first thing a run does is
+    # put back anything the last one dropped.
+    stray = 0
+    for mutation in mutations:
+        backup = mutation['path'] + '.bak'
+        if os.path.exists(backup):
+            shutil.move(backup, mutation['path'])
+            os.utime(mutation['path'], None)
+            say('PUT BACK %s -- a previous run was killed before it could' % mutation['path'])
+            stray += 1
+    if stray:
+        say('%d file(s) were left mutated by an interrupted run and have been restored.\n'
+            'Rebuilding before measuring anything.' % stray)
+        subprocess.run(['cmake', '--build', 'build', '--config', 'Debug'], capture_output=True)
+
     survivors = []
     for mutation in mutations:
         name = mutation['name']
@@ -224,6 +253,15 @@ def main(argv):
             say('       ' + reason)
         if not reasons:
             survivors.append(name)
+
+    # ...and the same sweep on the way out, so a run that threw somewhere
+    # unexpected still hands back a clean tree.
+    for mutation in mutations:
+        backup = mutation['path'] + '.bak'
+        if os.path.exists(backup):
+            shutil.move(backup, mutation['path'])
+            os.utime(mutation['path'], None)
+            say('PUT BACK %s on the way out' % mutation['path'])
 
     subprocess.run(['cmake', '--build', 'build', '--config', 'Debug'], capture_output=True)
     say('restored')

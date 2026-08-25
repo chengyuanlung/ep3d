@@ -340,6 +340,13 @@ public:
     std::size_t drawnUnknownSymbolsForTesting() const;
     std::size_t drawnJunctionsForTesting() const;
     Box2D drawnSymbolExtentForTesting() const;
+    // --- Section views (M38) --------------------------------------------------
+    QString addSectionViewCommand(const QString& name, Vec2 fromMm, Vec2 toMm, int arrowSide,
+                                  double offsetMm);
+    std::size_t drawnHatchLinesForTesting() const;
+    std::size_t drawnSectionArrowsForTesting() const;
+    std::size_t unhatchedSectionsForTesting() const;
+    QString sectionLetterForTesting(ObjectId viewId) const;
     // The tag a new component of this kind would get: the symbol's prefix plus
     // the next free number. ONE answer, so the menu and a script agree.
     QString nextTagFor(const QString& symbolName) const;
@@ -835,6 +842,7 @@ private slots:
     void onDimensionStyleRequested();
     void onToleranceRequested();
     void onGeneralToleranceRequested();
+    void onSectionViewRequested();
     void onTitleBlockRequested();
     void onFrameRequested();
     void onPlotPdfRequested();
@@ -1092,6 +1100,7 @@ private:
     QAction* dimensionStyleAction_ = nullptr;
     QAction* toleranceAction_ = nullptr;
     QAction* generalToleranceAction_ = nullptr;
+    QAction* sectionViewAction_ = nullptr;
     QAction* drawLineAction_ = nullptr;
     QAction* drawCircleAction_ = nullptr;
     QAction* drawRectangleAction_ = nullptr;

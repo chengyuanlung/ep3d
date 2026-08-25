@@ -21,7 +21,23 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRep_Tool.hxx>
 #include <GeomAbs_CurveType.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepPrimAPI_MakeHalfSpace.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
+#include <GCPnts_QuasiUniformDeflection.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_Surface.hxx>
 #include <HLRAlgo_Projector.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Wire.hxx>
+#include <gp_Pln.hxx>
 #include <HLRBRep_Algo.hxx>
 #include <HLRBRep_HLRToShape.hxx>
 #include <TopExp_Explorer.hxx>
@@ -141,7 +157,7 @@ DrawingProjectionResult ProjectShapeForDrawing(const KernelShape& shape,
     const auto* occtShape = dynamic_cast<const OcctShape*>(shape.handle());
     if (occtShape == nullptr || occtShape->shape().IsNull())
         return DrawingProjectionResult{
-            false, "projection input is not an OcctShape (null or foreign kernel)", {}};
+            false, "projection input is not an OcctShape (null or foreign kernel)", {}, {}};
 
     const Vec3& towards = request.towards;
     const Vec3& up = request.up;
@@ -149,7 +165,7 @@ DrawingProjectionResult ProjectShapeForDrawing(const KernelShape& shape,
         std::sqrt(towards.x * towards.x + towards.y * towards.y + towards.z * towards.z);
     const double upLength = std::sqrt(up.x * up.x + up.y * up.y + up.z * up.z);
     if (!(towardsLength > 1.0e-12) || !(upLength > 1.0e-12))
-        return DrawingProjectionResult{false, "a view needs a direction and an up", {}};
+        return DrawingProjectionResult{false, "a view needs a direction and an up", {}, {}};
 
     // THE CAMERA. OCCT's projector wants the direction it looks ALONG and a
     // frame to flatten into; gp_Ax2's main direction is the one that ends up
@@ -163,7 +179,7 @@ DrawingProjectionResult ProjectShapeForDrawing(const KernelShape& shape,
     const gp_Dir upward(up.x, up.y, up.z);
     if (std::fabs(sight.Dot(upward)) > 1.0e-9)
         return DrawingProjectionResult{
-            false, "this view's up vector leans into its own line of sight", {}};
+            false, "this view's up vector leans into its own line of sight", {}, {}};
 
     // gp_Ax2's THIRD ARGUMENT IS THE PAGE'S X DIRECTION, not its up.
     //
@@ -175,10 +191,130 @@ DrawingProjectionResult ProjectShapeForDrawing(const KernelShape& shape,
     //
     // Page Y is N x Vx, so for page Y to BE the up vector, Vx = up x N.
     const gp_Dir pageX = upward.Crossed(sight);
-    HLRAlgo_Projector projector(gp_Ax2(gp_Pnt(0.0, 0.0, 0.0), sight, pageX));
+    const gp_Ax2 page(gp_Pnt(0.0, 0.0, 0.0), sight, pageX);
+    HLRAlgo_Projector projector(page);
+
+    // A 3D POINT ONTO THE PAGE, by the SAME frame the projector uses.
+    //
+    // The cut faces have to land in the same millimetres as the curves or the
+    // hatch will not sit inside the outline it belongs to -- and it would be
+    // off by a rotation, which looks like the section being drawn twice.
+    const auto projectPoint = [&page](const gp_Pnt& point) {
+        const gp_Vec fromOrigin(page.Location(), point);
+        return Vec2{fromOrigin.Dot(gp_Vec(page.XDirection())),
+                    fromOrigin.Dot(gp_Vec(page.YDirection()))};
+    };
+
+    // --- THE CUT (M38) -------------------------------------------------------
+    //
+    // A half-space is subtracted before anything is projected, so every step
+    // after this -- hidden lines, silhouettes, the extent -- works on the cut
+    // solid without knowing a cut happened.
+    TopoDS_Shape subject = occtShape->shape();
+    std::vector<std::vector<Vec2>> cutLoops;
+    if (request.section.active) {
+        const Vec3& n = request.section.normal;
+        const double normalLength = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (!(normalLength > 1.0e-12))
+            return DrawingProjectionResult{false, "a section plane needs a normal", {}, {}};
+        const gp_Pnt origin(request.section.origin.x, request.section.origin.y,
+                            request.section.origin.z);
+        const gp_Dir normal(n.x, n.y, n.z);
+
+        // THE HALF-SPACE IS BUILT FROM THE PLANE PLUS A POINT ON THE SIDE TO
+        // REMOVE. OCCT's MakeHalfSpace keeps the side the reference point is
+        // on, and what we want to CUT AWAY is the side the normal points at --
+        // so the reference point goes along the normal.
+        //
+        // The step is sized from the shape itself rather than a constant: a
+        // fixed offset that happened to fall inside a large part would build a
+        // half-space through the middle of it.
+        Bnd_Box box;
+        BRepBndLib::Add(subject, box);
+        if (box.IsVoid())
+            return DrawingProjectionResult{false, "this shape has no extent to section", {}, {}};
+        double xMin = 0.0, yMin = 0.0, zMin = 0.0, xMax = 0.0, yMax = 0.0, zMax = 0.0;
+        box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+        const double reach =
+            std::max({xMax - xMin, yMax - yMin, zMax - zMin, 1.0}) * 2.0 + 10.0;
+        const gp_Pnt awayFromMaterial(origin.X() + normal.X() * reach,
+                                      origin.Y() + normal.Y() * reach,
+                                      origin.Z() + normal.Z() * reach);
+
+        const gp_Pln plane(origin, normal);
+        BRepBuilderAPI_MakeFace faceMaker(plane, -reach, reach, -reach, reach);
+        if (!faceMaker.IsDone())
+            return DrawingProjectionResult{false, "the section plane could not be built",
+                                           {}, {}};
+        BRepPrimAPI_MakeHalfSpace halfSpace(faceMaker.Face(), awayFromMaterial);
+        if (!halfSpace.IsDone())
+            return DrawingProjectionResult{false, "the section half-space could not be built",
+                                           {}, {}};
+
+        BRepAlgoAPI_Cut cut(subject, halfSpace.Solid());
+        cut.Build();
+        if (!cut.IsDone())
+            return DrawingProjectionResult{false, "the section cut failed", {}, {}};
+        subject = cut.Shape();
+        // NOTHING LEFT IS NOT A DRAWING.
+        //
+        // A boolean that removes everything hands back an empty COMPOUND, not
+        // a null shape -- so asking IsNull alone is asking a question that is
+        // never true, and a cut whose plane misses the part came back VALID
+        // with no curves in it. On the sheet that is a view with nothing in
+        // it, which reads as a part still computing rather than as a knife in
+        // the wrong place.
+        // The face count is BELT AND BRACES and is recorded as such: on this
+        // OCCT a cut that removes everything hands back a null shape, so a
+        // mutation deleting the second half of this test survives. It stays
+        // because the other outcome -- an empty compound reported as a good
+        // section -- is a view with nothing in it on a sheet somebody signs,
+        // and because which of the two OCCT returns is not this file's to
+        // promise.
+        if (subject.IsNull() || !TopExp_Explorer(subject, TopAbs_FACE).More())
+            return DrawingProjectionResult{
+                false, "the section cut removed the whole part -- the plane misses it", {}, {}};
+
+        // --- WHICH FACES ARE THE CUT ------------------------------------------
+        //
+        // The ones LYING ON THE PLANE. Not "the new ones": a boolean renames
+        // everything, and asking which faces are new is asking the question
+        // FaceQuery exists because nobody can answer stably. Asking which are
+        // ON the plane is a geometric question with a geometric answer.
+        for (TopExp_Explorer faces(subject, TopAbs_FACE); faces.More(); faces.Next()) {
+            const TopoDS_Face face = TopoDS::Face(faces.Current());
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+            const Handle(Geom_Plane) asPlane = Handle(Geom_Plane)::DownCast(surface);
+            if (asPlane.IsNull()) continue;
+            const gp_Pln facePlane = asPlane->Pln();
+            if (!facePlane.Axis().Direction().IsParallel(normal, 1.0e-7)) continue;
+            if (std::fabs(facePlane.Distance(origin)) > 1.0e-7) continue;
+
+            for (TopExp_Explorer wires(face, TopAbs_WIRE); wires.More(); wires.Next()) {
+                const TopoDS_Wire wire = TopoDS::Wire(wires.Current());
+                std::vector<Vec2> loop;
+                // FLATTENED WITH THE SAME DEFLECTION the curves use, so a
+                // hatch boundary and the outline drawn over it agree about
+                // where the edge is.
+                for (BRepTools_WireExplorer along(wire); along.More(); along.Next()) {
+                    const TopoDS_Edge edge = along.Current();
+                    BRepAdaptor_Curve curve(edge);
+                    GCPnts_QuasiUniformDeflection points(curve, 0.05);
+                    if (!points.IsDone()) continue;
+                    // The LAST point of each edge is the first of the next, so
+                    // it is dropped -- a loop that repeated every corner would
+                    // give the scanline two crossings at one place and invert
+                    // the fill.
+                    for (int i = 1; i < points.NbPoints(); ++i)
+                        loop.push_back(projectPoint(points.Value(i)));
+                }
+                if (loop.size() >= 3) cutLoops.push_back(std::move(loop));
+            }
+        }
+    }
 
     Handle(HLRBRep_Algo) algo = new HLRBRep_Algo();
-    algo->Add(occtShape->shape());
+    algo->Add(subject);
     algo->Projector(projector);
     algo->Update();
     // WHICH EDGES ARE HIDDEN is a separate pass from projecting them, and
@@ -214,11 +350,12 @@ DrawingProjectionResult ProjectShapeForDrawing(const KernelShape& shape,
     }
 
     if (drawing.curves.empty())
-        return DrawingProjectionResult{false, "this view projected to nothing at all", {}};
+        return DrawingProjectionResult{false, "this view projected to nothing at all", {}, {}};
 
-    return DrawingProjectionResult{true, "projected " + std::to_string(drawing.curves.size()) +
-                                             " curves",
-                                   std::move(drawing)};
+    return DrawingProjectionResult{true,
+                                   "projected " + std::to_string(drawing.curves.size()) +
+                                       " curves",
+                                   std::move(drawing), std::move(cutLoops)};
 }
 
 } // namespace paramcad

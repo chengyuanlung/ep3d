@@ -1,5 +1,6 @@
 #include "Viewer/DrawingPainter.h"
 
+#include "Core/Drawing/Hatch.h"
 #include "Core/Electrical/SymbolLibrary.h"
 
 #include <QFont>
@@ -528,6 +529,36 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             return page.toScreen(document.viewPointToSheetMm(view->id(), modelMm));
         };
 
+        // --- THE CUT FACE, HATCHED (M38) -------------------------------------
+        //
+        // FIRST, under the curves: hatch is a fill and the outline belongs on
+        // top of it. Drawn at the SHEET's pitch rather than the model's, so a
+        // 1:10 view is not filled solid -- a hatch is annotation, like a
+        // dimension, and does not scale with what it annotates.
+        if (!view->projected().cutLoops.empty()) {
+            // THE REGION AND THE PATTERN BOTH COME FROM THE DOCUMENT.
+            //
+            // They were worked out here, which put the conversion out of model
+            // millimetres -- the one line that decides whether a 1:10 section
+            // fills solid -- in the one place a test cannot look. The painter
+            // draws; what to draw is a question the document answers.
+            const HatchRegion region = document.sectionHatchRegionMm(view->id());
+            const HatchStyle hatchStyle = document.sectionHatchStyle(view->id());
+            const HatchLines hatch = HatchTheRegion(region, hatchStyle);
+            if (!hatch.ok) {
+                ++tally.unhatchedSections;
+            } else {
+                QPen hatchPen(QColor(ink.red(), ink.green(), ink.blue(), 170));
+                hatchPen.setWidthF(std::max(0.5, 0.25 * page.pixelsPerMm));
+                painter.setPen(hatchPen);
+                for (const auto& segment : hatch.segments) {
+                    painter.drawLine(page.toScreen(segment.first),
+                                     page.toScreen(segment.second));
+                    ++tally.hatchLines;
+                }
+            }
+        }
+
         for (const ProjectedCurve& curve : view->projected().curves) {
             // A LAYER IS NOT CONSULTED YET: projected curves are derived and
             // belong to no layer (M33 gives authored geometry layers). What
@@ -588,10 +619,62 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
                                     view->projected().extent.min.y}),
                          place(Vec2{view->projected().extent.max.x,
                                     view->projected().extent.max.y}));
-        QString label = QString::fromStdString(view->name());
-        if (view->hasOwnScale())
-            label += QStringLiteral("  (%1)")
-                         .arg(QString::fromStdString(view->scale().toString()));
+        // --- THE SECTION LINE ON THE PARENT (M38) ----------------------------
+        //
+        // Drawn on the view the cut was taken FROM, not on the section itself,
+        // with the letter at each end and arrows showing which way the reader
+        // is looking. The letter comes from the document, so the line and the
+        // section's own title cannot end up carrying different ones.
+        for (const DrawingView* child : document.views()) {
+            if (child->parentViewId() != view->id() || !child->isSection()) continue;
+            const std::string letter = document.sectionLetterOf(child->id());
+            const Vec2 from =
+                document.viewPointToSheetMm(view->id(), child->sectionCut().fromMm);
+            const Vec2 to =
+                document.viewPointToSheetMm(view->id(), child->sectionCut().toMm);
+
+            QPen cutPen(ScreenColorOf(1, ink)); // red by convention
+            cutPen.setWidthF(std::max(1.0, 0.7 * page.pixelsPerMm));
+            // A CHAIN-DASHED LINE is what a cutting plane is drawn with, and a
+            // solid one would read as an edge of the part.
+            QList<qreal> dashes;
+            dashes << 8.0 << 3.0 << 1.0 << 3.0;
+            cutPen.setDashPattern(dashes);
+            painter.setPen(cutPen);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawLine(page.toScreen(from), page.toScreen(to));
+
+            // The arrows, at each end, pointing the way the reader looks.
+            const double dx = to.x - from.x;
+            const double dy = to.y - from.y;
+            const double run = std::hypot(dx, dy);
+            if (run > 1e-9) {
+                const double side = child->sectionCut().arrowSide >= 0 ? 1.0 : -1.0;
+                // Across the line, on the arrow side -- the same cross product
+                // the cut plane is built from, in two dimensions.
+                const Vec2 across{dy / run * side, -dx / run * side};
+                const double lengthMm = 6.0;
+                QFont letterFont = painter.font();
+                letterFont.setPixelSize(std::max(6, static_cast<int>(4.0 * page.pixelsPerMm)));
+                painter.setFont(letterFont);
+                for (const Vec2 end : {from, to}) {
+                    const Vec2 tip{end.x + across.x * lengthMm, end.y + across.y * lengthMm};
+                    QPen solid(ScreenColorOf(1, ink));
+                    solid.setWidthF(std::max(1.0, 0.7 * page.pixelsPerMm));
+                    painter.setPen(solid);
+                    painter.drawLine(page.toScreen(end), page.toScreen(tip));
+                    painter.drawText(page.toScreen(Vec2{tip.x + across.x * 3.0,
+                                                        tip.y + across.y * 3.0}),
+                                     QString::fromStdString(letter));
+                    ++tally.sectionArrows;
+                }
+            }
+        }
+
+        // WHAT GOES UNDER A VIEW is the document's answer, not one composed
+        // here: the letter has to match the cut line drawn on the parent, and
+        // a caption typed in the renderer is a caption no test can read.
+        const QString label = QString::fromStdString(document.viewLabelText(view->id()));
         painter.setPen(QPen(QColor(ink.red(), ink.green(), ink.blue(), 190)));
         QFont small = painter.font();
         small.setPointSizeF(std::max(6.0, small.pointSizeF() - 1.0));

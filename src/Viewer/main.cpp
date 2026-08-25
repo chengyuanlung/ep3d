@@ -4765,6 +4765,60 @@ int main(int argc, char** argv) {
                             fail("the toleranced dimensions stopped being drawn");
                     }
 
+                    // M38's GATE RUNS AFTER M37's, and the order is not
+                    // arbitrary: making a section selects the new view, and
+                    // the tolerance checks need a DIMENSION selected. Put
+                    // first, it left them asking a drawing with nothing chosen
+                    // and they failed with "select a dimension first" -- which
+                    // reads as a broken command rather than a test in the
+                    // wrong order.
+                    // --- M38's GATE: a section view --------------------------
+                    //
+                    // The kernel suite proves the knife cuts and the Core
+                    // suite proves the hatch fills. Only starting the program
+                    // can prove a user can make a section and that the hatch,
+                    // the cut line and the arrows reach the paper.
+                    {
+                        window.selectDrawingViewForTesting(QStringLiteral("Top"));
+                        const QString made = window.addSectionViewCommand(
+                            QStringLiteral("SectionA"), Vec2{40.0, -30.0}, Vec2{40.0, 30.0},
+                            1, 90.0);
+                        if (!made.contains(QStringLiteral("A-A")))
+                            fail(("the section was not made: " + made.toStdString()).c_str());
+                        if (made.contains(QStringLiteral("would not cut")))
+                            fail(("the section would not cut: " + made.toStdString()).c_str());
+
+                        window.repaintDrawingForTesting();
+                        // THE HATCH. Without it a section is a drawing of the
+                        // inside of a part with no way to tell cut material
+                        // from what is behind it.
+                        if (window.drawnHatchLinesForTesting() == 0)
+                            fail("the section drew no hatch, so nothing says where the "
+                                 "knife went");
+                        if (window.unhatchedSectionsForTesting() != 0)
+                            fail("a section's cut face could not be hatched");
+                        // THE CUT LINE ON THE PARENT, with an arrow at each
+                        // end. A section with no line on its parent is one a
+                        // reader cannot locate.
+                        if (window.drawnSectionArrowsForTesting() < 2)
+                            fail("the cut line was drawn without arrows at both ends");
+
+                        // A PICTURE OF A SECTION. Whether a section READS --
+                        // whether the hatch is dense enough, whether the cut
+                        // line is findable, whether A-A sits where a reader
+                        // looks -- is a judgement no assertion makes.
+                        if (screenshotPath != nullptr) {
+                            std::string beside = screenshotPath;
+                            const std::size_t dot = beside.rfind('.');
+                            beside = dot == std::string::npos
+                                         ? beside + "-section"
+                                         : beside.substr(0, dot) + "-section" +
+                                               beside.substr(dot);
+                            if (!shoot(window, QString::fromStdString(beside)))
+                                fail("could not write the section screenshot");
+                        }
+                    }
+
                     // --- THE TOOLBAR CARRIES THEM -----------------------------
                     for (const char* wanted : {"Line", "Circle", "Rect", "Dim", "Dia",
                                                "Angle", "Style", "Title"}) {

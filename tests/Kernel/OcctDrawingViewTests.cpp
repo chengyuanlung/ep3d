@@ -6,7 +6,9 @@
 // that a view is a VIEW OF SOMETHING.
 
 #include "Core/Document/PartDocument.h"
+#include "Core/Feature/PadFeature.h"
 #include "Core/Drawing/DrawingDocument.h"
+#include "Core/Serialization/DrawingDocumentSerializer.h"
 #include "Core/Serialization/PartDocumentSerializer.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
 
@@ -16,6 +18,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
+#include <algorithm>
+#include <variant>
 #include <string>
 #include <vector>
 
@@ -455,4 +460,452 @@ TEST(OcctDrawingViewTest, M34_VIEW_021_AnInViewAnchorWillNOTReattachBeyondItsTol
     const DimensionMeasurement near = drawing.measure(found);
     ASSERT_TRUE(near.ok) << near.why;
     EXPECT_NEAR(near.valueMm, 100.0, 1e-6);
+}
+
+// =============================================================================
+// M38 -- section views
+// =============================================================================
+//
+// A section is the ordinary projection of a solid with a half-space taken out.
+// These live in the kernel suite because the cut needs a real solid; what the
+// Core suite can pin on its own is the letter and the undo.
+
+namespace {
+
+// A block with a hole through it, which is the shape a section is FOR: the
+// bore is invisible on an outside view and is the whole point of cutting.
+void WriteBlockWithBore(const std::string& path) {
+    PartDocument part{"Source"};
+    Sketch& outline = part.addSketch("Base");
+    part.addSketchEntity(outline.id(), SketchLine{Vec2{0, 0}, Vec2{100, 0}});
+    part.addSketchEntity(outline.id(), SketchLine{Vec2{100, 0}, Vec2{100, 40}});
+    part.addSketchEntity(outline.id(), SketchLine{Vec2{100, 40}, Vec2{0, 40}});
+    part.addSketchEntity(outline.id(), SketchLine{Vec2{0, 40}, Vec2{0, 0}});
+    Parameter& tall = part.addParameter("H", 30.0, UnitType::Millimeter);
+    Body& body = part.addBody("Block");
+    PadFeature& pad = part.addPadFeature(body, "Pad", outline.id(), tall.id());
+
+    // The bore is what a section is FOR: invisible from outside, and the whole
+    // reason somebody cuts the part open.
+    Sketch& bore = part.addSketch("Bore");
+    part.addSketchEntity(bore.id(), SketchCircle{Vec2{50, 20}, 10.0});
+    Parameter& deep = part.addParameter("D", 30.0, UnitType::Millimeter);
+    part.addPocketFeature(body, "Bore", pad.id(), bore.id(), deep.id());
+    ASSERT_TRUE(savePartDocumentToFile(part, path));
+}
+
+} // namespace
+
+TEST(OcctDrawingViewTest, M38_SECTION_001_ASectionShowsWhatTheOutsideViewCannot) {
+    OcctGeometryKernel kernel;
+    ScratchPart file{"section.ep3d"};
+    WriteBlockWithBore(file.path);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success) << top.diagnostic();
+
+    // Cut straight down the middle of the top view, arrows one way.
+    DrawingView& section = drawing.addSectionView("A-A", top.id(), Vec2{50.0, -20.0},
+                                                  Vec2{50.0, 60.0}, 1, 60.0);
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+    EXPECT_EQ(section.currentState(), ComputeState::Valid);
+    EXPECT_TRUE(section.isSection());
+
+    // THE CUT FACE IS THERE TO HATCH. Without it a section is a drawing of the
+    // inside of a part with no way to tell cut material from what is behind.
+    EXPECT_FALSE(section.projected().cutLoops.empty())
+        << "the section produced no cut face";
+
+    // AND IT SHOWS THE BORE, which is the entire point of cutting.
+    //
+    // NOT the extent: a section looks ALONG the cut's normal, so what it shows
+    // is the OTHER two axes -- 40 by 30 here -- whatever the cut removed. A
+    // first draft measured the width and expected it to halve, which is a
+    // check that can never pass and says nothing about whether the knife did
+    // anything.
+    //
+    // What DOES change is the shape of the cut face. The plane at x = 50 runs
+    // straight down the bore's axis, and the bore goes right through -- so the
+    // face is in TWO pieces, one either side of it.
+    EXPECT_EQ(section.projected().cutLoops.size(), 2u)
+        << "the section did not cut through the bore";
+
+    // ...and a cut CLEAR of the bore is one solid face.
+    ASSERT_TRUE(drawing.setSectionCut(section.id(), Vec2{10.0, -20.0}, Vec2{10.0, 60.0}, 1));
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+    EXPECT_EQ(section.projected().cutLoops.size(), 1u)
+        << "a cut that misses the bore came back in pieces";
+}
+
+TEST(OcctDrawingViewTest, M38_SECTION_002_TurningTheARROWSKeepsTheOtherHalf) {
+    // The one thing that is a coin toss if it is not written down, and getting
+    // it backwards draws a perfectly plausible picture of the wrong half.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"arrows.ep3d"};
+    WriteBlockWithBore(file.path);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success);
+
+    // The cut is at x = 30 and the bore is at x = 50. One half contains the
+    // bore and the other does not, so WHICH HALF SURVIVED is visible in what
+    // the section draws -- and that is the question, not the extent.
+    DrawingView& section = drawing.addSectionView("A-A", top.id(), Vec2{30.0, -20.0},
+                                                  Vec2{30.0, 60.0}, 1, 60.0);
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+    const std::size_t oneWay = section.projected().curves.size();
+
+    ASSERT_TRUE(drawing.setSectionCut(section.id(), Vec2{30.0, -20.0}, Vec2{30.0, 60.0}, -1));
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+    const std::size_t otherWay = section.projected().curves.size();
+
+    EXPECT_NE(oneWay, otherWay)
+        << "reversing the arrows kept the same half: " << oneWay << " curves both times";
+}
+
+TEST(OcctDrawingViewTest, M38_SECTION_003_TurningTheParentTURNSTheCut) {
+    // THE WHOLE REASON THE CUT LINE IS A SENTENCE ON THE PARENT. A stored 3D
+    // plane would keep pointing the old way, and the section would be of a
+    // place the line no longer crosses -- a good section of the wrong thing.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"turned.ep3d"};
+    WriteBlockWithBore(file.path);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& parent = drawing.addView("Parent", file.path, "Block", ViewDirection::Top,
+                                          Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success);
+    DrawingView& section = drawing.addSectionView("A-A", parent.id(), Vec2{50.0, -20.0},
+                                                  Vec2{50.0, 60.0}, 1, 60.0);
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+    // The parent's page changes under the same cut line, so the section is
+    // taken through the part a different way -- and what it DRAWS changes,
+    // which is the observable thing. (The extent alone can coincide; the
+    // curves cannot.)
+    const double before = section.projected().extent.heightMm();
+
+    // The parent becomes a FRONT view. The same cut line on its page now runs
+    // through the part a different way, so the section must change.
+    ASSERT_TRUE(drawing.setViewDirection(parent.id(), ViewDirection::Front));
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+    EXPECT_NE(section.projected().extent.heightMm(), before)
+        << "the parent turned and the section did not follow";
+}
+
+TEST(OcctDrawingViewTest, M38_SECTION_004_ACutLineOfNOLENGTHIsREFUSED) {
+    OcctGeometryKernel kernel;
+    ScratchPart file{"nocut.ep3d"};
+    WriteBlockWithBore(file.path);
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success);
+
+    EXPECT_THROW(drawing.addSectionView("A-A", top.id(), Vec2{50.0, 20.0}, Vec2{50.0, 20.0},
+                                        1, 60.0),
+                 std::invalid_argument);
+    // ...and a section of a section, which is a real thing and not this one.
+    DrawingView& section = drawing.addSectionView("A-A", top.id(), Vec2{50.0, -20.0},
+                                                  Vec2{50.0, 60.0}, 1, 60.0);
+    EXPECT_THROW(drawing.addSectionView("B-B", section.id(), Vec2{10.0, -20.0},
+                                        Vec2{10.0, 60.0}, 1, 60.0),
+                 std::invalid_argument);
+}
+
+TEST(OcctDrawingViewTest, M38_SECTION_005_TheLETTERIsDerivedAndTheSameOnBothSides) {
+    // The line on the parent and the title under the section have to carry the
+    // SAME letter -- the classic "two things that must agree" trap, so neither
+    // is typed and both ask the document.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"letters.ep3d"};
+    WriteBlockWithBore(file.path);
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success);
+
+    DrawingView& first = drawing.addSectionView("Sec1", top.id(), Vec2{30.0, -20.0},
+                                                Vec2{30.0, 60.0}, 1, 60.0);
+    DrawingView& second = drawing.addSectionView("Sec2", top.id(), Vec2{70.0, -20.0},
+                                                 Vec2{70.0, 60.0}, 1, 120.0);
+    EXPECT_EQ(drawing.sectionLetterOf(first.id()), "A");
+    EXPECT_EQ(drawing.sectionLetterOf(second.id()), "B");
+    // A view that is not a section has no letter, which is a real answer.
+    EXPECT_TRUE(drawing.sectionLetterOf(top.id()).empty());
+}
+
+TEST(OcctDrawingViewTest, M38_SECTION_006_UndoingASectionTakesItsCUTWithIt) {
+    // A restored section with no cut line projects the WHOLE part and looks
+    // entirely reasonable -- which is why the cut travels in the delta.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"undo.ep3d"};
+    WriteBlockWithBore(file.path);
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success);
+    const ObjectId sectionId = drawing
+                                   .addSectionView("A-A", top.id(), Vec2{50.0, -20.0},
+                                                   Vec2{50.0, 60.0}, 1, 60.0)
+                                   .id();
+    ASSERT_TRUE(drawing.recompute().success);
+
+    // MAKING A SECTION IS ONE UNDO STEP: a view with no cut line is a state no
+    // drawing was ever in.
+    ASSERT_TRUE(drawing.undo());
+    EXPECT_EQ(drawing.findView(sectionId), nullptr);
+    ASSERT_TRUE(drawing.redo());
+    const DrawingView* back = drawing.findView(sectionId);
+    ASSERT_NE(back, nullptr);
+    EXPECT_TRUE(back->isSection()) << "the section came back with no cut line";
+    EXPECT_NEAR(back->sectionCut().fromMm.x, 50.0, 1e-9);
+    ASSERT_TRUE(drawing.recompute().success);
+    // The cut at x = 50 runs down the bore, so the face comes back in two
+    // pieces -- which a view projecting the WHOLE part could not do.
+    EXPECT_EQ(back->projected().cutLoops.size(), 2u)
+        << "the restored section is projecting the whole part";
+}
+
+TEST(OcctDrawingViewTest, M38_SECTION_007_ASectionSurvivesASaveAndStillCuts) {
+    // THE WRITE SIDE WENT MISSING ONCE and nothing noticed: sections could be
+    // read from a file and never written to one, so a drawing saved and
+    // reopened came back with the section view projecting the WHOLE part --
+    // which looks like a perfectly ordinary view.
+    //
+    // It was caught by a mutation whose pattern matched nothing, not by a
+    // test, which is what this closes.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"sectionsave.ep3d"};
+    WriteBlockWithBore(file.path);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success);
+    drawing.addSectionView("A-A", top.id(), Vec2{50.0, -20.0}, Vec2{50.0, 60.0}, 1, 60.0);
+    ASSERT_TRUE(drawing.recompute().success);
+
+    std::ostringstream out;
+    ASSERT_TRUE(saveDrawingDocument(drawing, out));
+    const std::string saved = out.str();
+    EXPECT_NE(saved.find("fromXMm"), std::string::npos)
+        << "the cut line was not written to the file";
+    // THE PLANE IS NOT IN THE FILE, only the line -- see the writer.
+    EXPECT_EQ(saved.find("normal"), std::string::npos);
+
+    std::istringstream in(saved);
+    DrawingLoadResult loaded = loadDrawingDocument(in);
+    ASSERT_TRUE(loaded) << loaded.message;
+    loaded.document->setGeometryKernel(&kernel);
+    ASSERT_TRUE(loaded.document->recompute().success);
+
+    const DrawingView* back = nullptr;
+    for (const DrawingView* one : loaded.document->views())
+        if (one->isSection()) back = one;
+    ASSERT_NE(back, nullptr) << "the reopened drawing has no section at all";
+    EXPECT_NEAR(back->sectionCut().fromMm.x, 50.0, 1e-9);
+    // ...and it STILL CUTS: the plane at x = 50 runs down the bore, so the
+    // face comes back in two pieces. A view projecting the whole part could
+    // not.
+    EXPECT_EQ(back->projected().cutLoops.size(), 2u)
+        << "the reopened section is projecting the whole part";
+    EXPECT_EQ(loaded.document->sectionLetterOf(back->id()), "A");
+}
+
+namespace {
+
+// A STEPPED block: full height at one end, half height at the other.
+//
+// The shape exists so that "which half was kept" is a question the SILHOUETTE
+// answers. A symmetrical part gives the same picture whichever half survives,
+// which is exactly why getting this backwards is invisible.
+void WriteSteppedBlock(const std::string& path) {
+    PartDocument part{"Source"};
+    Sketch& outline = part.addSketch("Base");
+    part.addSketchEntity(outline.id(), SketchLine{Vec2{0, 0}, Vec2{100, 0}});
+    part.addSketchEntity(outline.id(), SketchLine{Vec2{100, 0}, Vec2{100, 40}});
+    part.addSketchEntity(outline.id(), SketchLine{Vec2{100, 40}, Vec2{0, 40}});
+    part.addSketchEntity(outline.id(), SketchLine{Vec2{0, 40}, Vec2{0, 0}});
+    Parameter& tall = part.addParameter("H", 30.0, UnitType::Millimeter);
+    Body& body = part.addBody("Block");
+    PadFeature& pad = part.addPadFeature(body, "Pad", outline.id(), tall.id());
+
+    // Take the top half off everything past x = 22, leaving a block that is
+    // 30 tall at one end and 15 at the other.
+    Sketch& step = part.addSketch("Step");
+    part.addSketchEntity(step.id(), SketchLine{Vec2{22, -10}, Vec2{130, -10}});
+    part.addSketchEntity(step.id(), SketchLine{Vec2{130, -10}, Vec2{130, 50}});
+    part.addSketchEntity(step.id(), SketchLine{Vec2{130, 50}, Vec2{22, 50}});
+    part.addSketchEntity(step.id(), SketchLine{Vec2{22, 50}, Vec2{22, -10}});
+    Parameter& deep = part.addParameter("D", 15.0, UnitType::Millimeter);
+    part.addPocketFeature(body, "Step", pad.id(), step.id(), deep.id());
+    ASSERT_TRUE(savePartDocumentToFile(part, path));
+}
+
+// The bounding box of what a view actually drew, in MODEL millimetres.
+Box2D DrawnExtent(const DrawingView& view) {
+    Box2D box;
+    for (const ProjectedCurve& curve : view.projected().curves) {
+        if (const auto* line = std::get_if<ProjectedLine>(&curve.shape)) {
+            box.grow(line->a);
+            box.grow(line->b);
+        } else if (const auto* arc = std::get_if<ProjectedArc>(&curve.shape)) {
+            box.grow(Vec2{arc->centre.x - arc->radius, arc->centre.y - arc->radius});
+            box.grow(Vec2{arc->centre.x + arc->radius, arc->centre.y + arc->radius});
+        } else if (const auto* poly = std::get_if<ProjectedPolyline>(&curve.shape)) {
+            for (const Vec2 point : poly->points) box.grow(point);
+        }
+    }
+    return box;
+}
+
+} // namespace
+
+TEST(OcctDrawingViewTest, M38_SECTION_008_TheHalfBETWEENTheReaderAndThePlaneIsTheOneThatGoes) {
+    // WHICH HALF SURVIVES IS A COIN TOSS IF IT IS NOT WRITTEN DOWN, and it is
+    // written down in exactly one place: the section's normal points at the
+    // material that is REMOVED, which is the side the reader is standing on.
+    //
+    // Get it backwards and the reader is looking THROUGH the part at the half
+    // behind the plane -- a perfectly sharp, perfectly plausible drawing of
+    // the wrong half. A symmetrical part cannot tell the difference, so this
+    // one is stepped: the far half is 15 tall and the near half 30.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"stepped.ep3d"};
+    WriteSteppedBlock(file.path);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success) << top.diagnostic();
+
+    // A cut across the part at x = 60, arrows pointing along +x -- the reader
+    // looks the way the arrows point, so everything nearer than the plane
+    // goes. What is left is the far, SHORT half.
+    DrawingView& section = drawing.addSectionView("A-A", top.id(), Vec2{60.0, -20.0},
+                                                  Vec2{60.0, 60.0}, 1, 60.0);
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+    const Box2D shortHalf = DrawnExtent(section);
+    ASSERT_FALSE(shortHalf.empty);
+
+    // Which axis is the height depends on how the section's own page came out;
+    // the test asks for the SHORTER of the two, which is 15 either way. The
+    // other is the part's 40 depth, which both halves share.
+    const double thin = std::min(shortHalf.width(), shortHalf.height());
+    EXPECT_NEAR(thin, 15.0, 1e-6)
+        << "the reader is seeing the half that should have been cut away";
+
+    // TURN THE ARROWS AND THE OTHER HALF IS KEPT -- the tall one, 30.
+    ASSERT_TRUE(drawing.setSectionCut(section.id(), Vec2{60.0, -20.0}, Vec2{60.0, 60.0}, -1));
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+    const Box2D tallHalf = DrawnExtent(section);
+    ASSERT_FALSE(tallHalf.empty);
+    const double thick = std::min(tallHalf.width(), tallHalf.height());
+    EXPECT_NEAR(thick, 30.0, 1e-6) << "turning the arrows did not keep the other half";
+}
+
+TEST(OcctDrawingViewTest, M38_SECTION_009_ACutThatRemovesTheWHOLEPartIsSAIDNotDrawnEmpty) {
+    // The plane misses the part and the half-space swallows all of it. An
+    // empty drawing reported as a good one is the worst answer available: the
+    // sheet shows a view with nothing in it, which reads as a part that has
+    // not finished computing rather than as a cut in the wrong place.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"missed.ep3d"};
+    WriteBlockWithBore(file.path);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success) << top.diagnostic();
+
+    // The part runs x = 0 to 100. Cut at x = 400 with the arrows pointing at
+    // +x: the reader stands on the far side of the part looking towards the
+    // plane, so everything between them -- the whole part -- is what goes.
+    DrawingView& section = drawing.addSectionView("A-A", top.id(), Vec2{400.0, -20.0},
+                                                  Vec2{400.0, 60.0}, 1, 60.0);
+    drawing.recompute();
+    EXPECT_EQ(section.currentState(), ComputeState::Failed)
+        << "a section that removed the whole part came back as a good, empty drawing";
+    EXPECT_FALSE(section.diagnostic().empty());
+    EXPECT_TRUE(section.projected().curves.empty());
+}
+
+TEST(OcctDrawingViewTest, M38_SECTION_010_ASectionOfASectionIsREFUSEDByTheViewToo) {
+    // addSectionView refuses it, but that is not the only way in: a plain
+    // projected view can be hung off a section and THEN given a cut line. The
+    // check in the view is what catches that, and a rule enforced in one place
+    // and relied on in two is this project's recurring defect.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"nested.ep3d"};
+    WriteBlockWithBore(file.path);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success);
+    DrawingView& section = drawing.addSectionView("A-A", top.id(), Vec2{50.0, -20.0},
+                                                  Vec2{50.0, 60.0}, 1, 60.0);
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+
+    // The way round the front door.
+    DrawingView& child = drawing.addProjectedView("Detail", section.id(),
+                                                  ViewDirection::Front, 60.0);
+    ASSERT_TRUE(drawing.setSectionCut(child.id(), Vec2{10.0, -20.0}, Vec2{10.0, 20.0}, 1));
+    drawing.recompute();
+    EXPECT_EQ(child.currentState(), ComputeState::Failed)
+        << "a section of a section was projected from a camera that is itself derived";
+    EXPECT_NE(child.diagnostic().find("section of a section"), std::string::npos)
+        << child.diagnostic();
+}
+
+TEST(OcctDrawingViewTest, M38_SECTION_011_TheHatchRegionIsInSHEETMillimetresNotModelOnes) {
+    // A hatch is ANNOTATION, like a dimension: its pitch is a paper
+    // measurement. Hatch a 1:2 section in model millimetres and the region is
+    // twice the size it will be drawn at, so the lines come out at half the
+    // pitch -- and at 1:10 the cut face fills in solid black.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"scaled.ep3d"};
+    WriteBlockWithBore(file.path);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& top = drawing.addView("Top", file.path, "Block", ViewDirection::Top,
+                                       Vec2{150.0, 200.0});
+    ASSERT_TRUE(drawing.recompute().success) << top.diagnostic();
+    DrawingView& section = drawing.addSectionView("A-A", top.id(), Vec2{10.0, -20.0},
+                                                  Vec2{10.0, 60.0}, 1, 60.0);
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+
+    const Box2D full = drawing.sectionHatchRegionMm(section.id()).bounds();
+    ASSERT_FALSE(full.empty);
+    ASSERT_FALSE(drawing.sectionHatchRegionMm(section.id()).empty());
+
+    ASSERT_TRUE(drawing.setViewScale(section.id(), DrawingScale{1, 2}));
+    ASSERT_TRUE(drawing.recompute().success) << section.diagnostic();
+    const Box2D half = drawing.sectionHatchRegionMm(section.id()).bounds();
+    ASSERT_FALSE(half.empty);
+
+    EXPECT_NEAR(half.width(), full.width() / 2.0, 1e-6)
+        << "the region handed to the hatcher did not shrink with the view's scale";
+    EXPECT_NEAR(half.height(), full.height() / 2.0, 1e-6);
+
+    // ...and the hatch itself still fills it, at the pitch the style asked for
+    // -- which is the point: the SAME pitch on paper at either scale.
+    const HatchLines lines = HatchTheRegion(drawing.sectionHatchRegionMm(section.id()),
+                                            drawing.sectionHatchStyle(section.id()));
+    EXPECT_TRUE(lines.ok) << lines.why;
 }

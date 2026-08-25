@@ -23,6 +23,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/DrawingDimension.cpp
     src/Core/Drawing/SheetFrame.cpp
     src/Core/Drawing/TitleBlock.cpp
+    src/Core/Drawing/Hatch.cpp
     src/Core/Drawing/Tolerance.cpp
     src/Core/Drawing/BomTable.cpp
     src/Core/Electrical/SchematicObjects.cpp
@@ -551,6 +552,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/AssemblyOutlineTests.cpp
         tests/DrawingAlignmentTests.cpp
         tests/DrawingDimensionTests.cpp
+        tests/HatchTests.cpp
         tests/ToleranceTests.cpp
         tests/BomTableTests.cpp
         tests/NetlistTests.cpp

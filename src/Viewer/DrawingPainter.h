@@ -93,6 +93,13 @@ struct DrawnTally {
     // placement would CONNECT in one place and DRAW in another, and the tally
     // would be identical.
     Box2D symbolExtentMm;
+    // Hatch lines drawn, and section views whose cut face could not be filled.
+    // The second is counted apart because an unhatched section looks like an
+    // ordinary view of the inside of a part -- there is no way to tell from
+    // the paper that anything went wrong.
+    std::size_t hatchLines = 0;
+    std::size_t unhatchedSections = 0;
+    std::size_t sectionArrows = 0;
 };
 
 DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,

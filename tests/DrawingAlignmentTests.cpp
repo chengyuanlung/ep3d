@@ -251,3 +251,94 @@ TEST(DrawingAlignmentTest, M32_ALIGN_011_AFileNamingAParentThatIsNotThereIsREFUS
     EXPECT_EQ(loaded.error, SerializationError::UnknownDependencyId);
     EXPECT_NE(loaded.message.find("777333"), std::string::npos) << loaded.message;
 }
+
+TEST(DrawingAlignmentTest, M38_ALIGN_012_ASectionSitsOFFTheViewItWasCutFrom) {
+    // THE FIRST SCREENSHOT HAD THEM ON TOP OF EACH OTHER, two captions written
+    // over one another.
+    //
+    // A section records its PARENT'S direction -- its real camera is worked
+    // out from the cut line at every recompute -- so the six-direction
+    // alignment table compares Front with Front, finds no relationship, and
+    // leaves the offset unapplied. Where a section belongs is off to the side
+    // the reader looks FROM, along the arrows.
+    Sheet3 sheet;
+    const Vec2 parent = sheet.document.viewPositionMm(sheet.front);
+
+    // A VERTICAL cut line: the arrows are horizontal, so the section goes to
+    // one side, not above or below.
+    DrawingView& section = sheet.document.addSectionView(
+        "A-A", sheet.front, Vec2{20.0, -30.0}, Vec2{20.0, 30.0}, 1, 70.0);
+    const Vec2 placed = sheet.document.viewPositionMm(section.id());
+
+    EXPECT_NEAR(std::hypot(placed.x - parent.x, placed.y - parent.y), 70.0, 1e-9)
+        << "the section was not moved off its parent by the offset it was given";
+    EXPECT_NEAR(placed.y, parent.y, 1e-9) << "a vertical cut should not move it up or down";
+    EXPECT_NEAR(placed.x, parent.x + 70.0, 1e-9);
+
+    // TURNING THE ARROWS PUTS IT ON THE OTHER SIDE, because the side it sits
+    // on IS the side the reader is looking from -- the same direction the
+    // arrows are drawn in, computed the same way, so the two cannot disagree.
+    ASSERT_TRUE(sheet.document.setSectionCut(section.id(), Vec2{20.0, -30.0},
+                                             Vec2{20.0, 30.0}, -1));
+    const Vec2 flipped = sheet.document.viewPositionMm(section.id());
+    EXPECT_NEAR(flipped.x, parent.x - 70.0, 1e-9)
+        << "turning the arrows did not move the section to the other side";
+}
+
+TEST(DrawingAlignmentTest, M38_ALIGN_013_WhatIsWrittenUnderAViewIsTheDocumentsAnswer) {
+    // The caption used to be composed in the painter, where the only way to
+    // read it was off a screenshot -- so "titled by its name instead of its
+    // letter" was a change nothing could catch. A section's caption has to
+    // match the cut line on its parent, and both now come from here.
+    Sheet3 sheet;
+    EXPECT_EQ(sheet.document.viewLabelText(sheet.front), "Front");
+
+    DrawingView& first = sheet.document.addSectionView("Through the boss", sheet.front,
+                                                       Vec2{20.0, -30.0}, Vec2{20.0, 30.0},
+                                                       1, 70.0);
+    EXPECT_EQ(sheet.document.viewLabelText(first.id()), "A-A")
+        << "a section was titled by its name rather than its letter";
+    EXPECT_EQ(sheet.document.sectionLetterOf(first.id()), "A")
+        << "the caption and the cut line would carry different letters";
+
+    DrawingView& second = sheet.document.addSectionView("B-B", sheet.front, Vec2{60.0, -30.0},
+                                                        Vec2{60.0, 30.0}, 1, 70.0);
+    EXPECT_EQ(sheet.document.viewLabelText(second.id()), "B-B");
+
+    // A SCALE THAT IS NOT THE SHEET'S IS SAID. One that is, is not: written
+    // always it is noise, written never a detail view at 2:1 reads full size.
+    ASSERT_TRUE(sheet.document.setViewScale(second.id(), DrawingScale{2, 1}));
+    EXPECT_EQ(sheet.document.viewLabelText(second.id()), "B-B  (2:1)");
+    EXPECT_EQ(sheet.document.viewLabelText(sheet.front), "Front");
+
+    // ...and the two sections hatch at DIFFERENT angles, which is the whole
+    // reason the angle exists -- two cut parts meeting on one sheet.
+    EXPECT_NE(sheet.document.sectionHatchStyle(first.id()).angleRad,
+              sheet.document.sectionHatchStyle(second.id()).angleRad);
+}
+
+TEST(DrawingAlignmentTest, M38_ALIGN_014_AFileWhoseCutLineHasNOLENGTHIsREFUSED) {
+    // ADR-M3-008: what the saver refuses, the loader has to refuse too, and by
+    // the SAME rule -- a document that saves cleanly and will not reopen is
+    // the named worst case. The document refuses a cut of no length; so must
+    // a file, because a file can be written by an older build or by hand.
+    Sheet3 rig;
+    rig.document.addSectionView("A-A", rig.front, Vec2{20.0, -30.0}, Vec2{20.0, 30.0}, 1,
+                                70.0);
+    std::string text = SaveToString(rig.document);
+
+    // Put the far end of the cut on top of the near end: a knife with no
+    // length, which cuts nothing and whose arrows have no direction. Written
+    // by finding the key and replacing whatever number follows it, rather than
+    // matching a number the writer formats.
+    const std::string key = "\"toYMm\":";
+    const std::size_t at = text.find(key);
+    ASSERT_NE(at, std::string::npos) << text;
+    const std::size_t ends = text.find_first_of(",}", at + key.size());
+    ASSERT_NE(ends, std::string::npos) << text;
+    text.replace(at, ends - at, key + " -30");
+
+    const DrawingLoadResult loaded = LoadFromString(text);
+    EXPECT_FALSE(loaded) << "a section whose cut line has no length was accepted";
+    EXPECT_FALSE(loaded.message.empty());
+}

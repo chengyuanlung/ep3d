@@ -246,6 +246,19 @@ SaveResult validateSaveable(const DrawingDocument& document) {
     if (!(document.frameZoneTargetMm() > 0.0))
         return SaveResult{SerializationError::InvalidFieldType,
                           "a zone size of zero divides the border into nothing"};
+    // v42 (M38). A section has to be cut FROM something, and its line has to
+    // have length -- both checked here because the loader checks both
+    // (ADR-M3-008).
+    for (const DrawingView* view : document.views()) {
+        if (!view->isSection()) continue;
+        if (view->parentViewId() == kInvalidObjectId)
+            return SaveResult{SerializationError::MissingField,
+                              "a section view is not cut from any view"};
+        if (!view->sectionCut().usable())
+            return SaveResult{SerializationError::InvalidFieldType,
+                              "a section's cut line has no length, so it cuts nothing"};
+    }
+
     // v41 (M37). A fit the build cannot compute must not be saved as if it
     // were fine: the file would open on another machine, print a size with no
     // tolerance where a fit was asked for, and look finished.
@@ -346,6 +359,21 @@ JsonValue toJson(const DrawingDocument& document) {
         // the sheet" survives the sheet later being changed.
         entry.set("ownScale", JsonValue::makeBool(view->hasOwnScale()));
         entry.set("scale", JsonValue::makeString(view->scale().toString()));
+        // v42 (M38). THE CUT LINE, AND NOT THE PLANE IT MAKES. The plane is
+        // worked out from the parent's camera at every recompute, so writing
+        // it would put a second answer in the file -- one that goes wrong the
+        // moment somebody turns the parent, leaving a section of a place the
+        // line no longer crosses.
+        if (view->isSection()) {
+            JsonValue cut = JsonValue::makeObject();
+            cut.set("fromXMm", JsonValue::makeNumber(view->sectionCut().fromMm.x));
+            cut.set("fromYMm", JsonValue::makeNumber(view->sectionCut().fromMm.y));
+            cut.set("toXMm", JsonValue::makeNumber(view->sectionCut().toMm.x));
+            cut.set("toYMm", JsonValue::makeNumber(view->sectionCut().toMm.y));
+            cut.set("arrowSide",
+                    JsonValue::makeNumber(static_cast<double>(view->sectionCut().arrowSide)));
+            entry.set("section", std::move(cut));
+        }
         // DRAWING CONVENTIONS, on the view: two views of the same part on one
         // sheet may reasonably differ about them.
         entry.set("showHiddenLines", JsonValue::makeBool(view->showsHiddenLines()));
@@ -641,6 +669,12 @@ struct ViewData {
     bool ownScale = false;
     bool showHidden = true;
     bool showTangent = false;
+    // v42 (M38): the cut LINE, on the parent's page. The plane it makes is
+    // worked out at every recompute, so it is not in the file.
+    bool sectionActive = false;
+    Vec2 sectionFromMm{};
+    Vec2 sectionToMm{};
+    int sectionArrowSide = 1;
     ObjectId parentViewId = kInvalidObjectId;
     double alignmentOffsetMm = 0.0;
 };
@@ -991,6 +1025,36 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                 !readViewFlag("showTangentEdges", one.showTangent))
                 return loadFailure(SerializationError::InvalidFieldType,
                                    context + ": a view flag is not a boolean");
+            if (const JsonValue* cut = entry.find("section")) {
+                if (cut->type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'section' is not an object");
+                const JsonValue* fx =
+                    requireField(*cut, "fromXMm", JsonType::Number, context, err);
+                const JsonValue* fy =
+                    requireField(*cut, "fromYMm", JsonType::Number, context, err);
+                const JsonValue* tx =
+                    requireField(*cut, "toXMm", JsonType::Number, context, err);
+                const JsonValue* ty =
+                    requireField(*cut, "toYMm", JsonType::Number, context, err);
+                if (fx == nullptr || fy == nullptr || tx == nullptr || ty == nullptr)
+                    return loadFailure(err.error, err.message);
+                one.sectionFromMm = Vec2{fx->asNumber(), fy->asNumber()};
+                one.sectionToMm = Vec2{tx->asNumber(), ty->asNumber()};
+                // A CUT LINE OF NO LENGTH CUTS NOTHING, and a section with one
+                // would project the whole part and look entirely ordinary.
+                if (std::fabs(one.sectionToMm.x - one.sectionFromMm.x) < 1e-9 &&
+                    std::fabs(one.sectionToMm.y - one.sectionFromMm.y) < 1e-9)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": this section's cut line has no length");
+                if (const JsonValue* side = cut->find("arrowSide")) {
+                    if (side->type() != JsonType::Number)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'arrowSide' is not a number");
+                    one.sectionArrowSide = side->asNumber() >= 0.0 ? 1 : -1;
+                }
+                one.sectionActive = true;
+            }
             viewData.push_back(std::move(one));
         }
     }
@@ -2018,10 +2082,18 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     }
     for (const std::size_t index : order) {
         auto& one = viewData[index];
-        document->restoreView(one.id, std::move(one.name), ComputeState::Dirty,
-                              std::move(one.sourcePath), std::move(one.bodyName), one.direction,
-                              one.positionMm, one.scale, one.ownScale, one.showHidden,
-                              one.showTangent, one.parentViewId, one.alignmentOffsetMm);
+        DrawingView& made = document->restoreView(
+            one.id, std::move(one.name), ComputeState::Dirty, std::move(one.sourcePath),
+            std::move(one.bodyName), one.direction, one.positionMm, one.scale, one.ownScale,
+            one.showHidden, one.showTangent, one.parentViewId, one.alignmentOffsetMm);
+        if (one.sectionActive) {
+            DrawingView::SectionCut cut;
+            cut.active = true;
+            cut.fromMm = one.sectionFromMm;
+            cut.toMm = one.sectionToMm;
+            cut.arrowSide = one.sectionArrowSide;
+            made.setSectionCut(cut);
+        }
     }
     // ENTITIES AFTER THE TABLES, because each names a layer.
     for (auto& one : entityData)

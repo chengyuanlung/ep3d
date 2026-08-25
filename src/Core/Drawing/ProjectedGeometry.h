@@ -97,6 +97,12 @@ struct ProjectedExtent {
 };
 
 struct ProjectedDrawing {
+    // THE CUT FACES, as closed loops, for a section view (M38). Empty on every
+    // ordinary view. They are an AREA to hatch and not edges to draw: the
+    // outline is already among the curves, and drawing it again would double
+    // its weight.
+    std::vector<std::vector<Vec2>> cutLoops;
+
     std::vector<ProjectedCurve> curves;
     ProjectedExtent extent;
 };

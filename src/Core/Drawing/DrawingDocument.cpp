@@ -570,6 +570,32 @@ Vec2 DrawingDocument::viewPositionMm(ObjectId viewId) const {
         const DrawingView* parent = findView(walk->parentViewId());
         if (parent == nullptr) return Vec2{place.x + walk->positionMm().x,
                                            place.y + walk->positionMm().y};
+        // A SECTION IS ALIGNED ALONG ITS ARROWS, not by the six-direction table.
+        //
+        // Its stored direction is its PARENT'S -- the real camera is worked
+        // out from the cut line at every recompute -- so AlignmentOf would
+        // compare a direction with itself, find no relationship, and leave the
+        // section sitting ON TOP OF the view it was cut from. Which is exactly
+        // what it did: the first screenshot showed the section overlapping its
+        // parent with the two labels written over each other.
+        //
+        // Where it belongs is off to the side the reader is looking FROM,
+        // along the arrows -- the same direction the painter draws them in,
+        // computed the same way, so the view and its arrows cannot disagree.
+        if (walk->isSection() && walk->sectionCut().usable()) {
+            const Vec2 from = walk->sectionCut().fromMm;
+            const Vec2 to = walk->sectionCut().toMm;
+            const double dx = to.x - from.x;
+            const double dy = to.y - from.y;
+            const double run = std::hypot(dx, dy);
+            if (run > 1e-9) {
+                const double side = walk->sectionCut().arrowSide >= 0 ? 1.0 : -1.0;
+                place.x += dy / run * side * walk->alignmentOffsetMm();
+                place.y += -dx / run * side * walk->alignmentOffsetMm();
+            }
+            walk = parent;
+            continue;
+        }
         const ViewAlignmentRule rule = AlignmentOf(parent->direction(), walk->direction());
         // FIRST ANGLE PUTS EVERY VIEW ON THE OTHER SIDE. One flip, here, for
         // exactly the reason the angle lives on the SHEET: a drawing is in one
@@ -669,6 +695,14 @@ const DrawingView* DrawingDocument::findViewNamed(const std::string& name) const
 
 namespace {
 void SnapshotViewInto(const DrawingView& view, DrawingViewPlacementEdit& edit) {
+    // The cut, both sides, so an edit that does not touch it puts it back
+    // exactly -- see DrawingViewPlacementEdit.
+    edit.beforeSectionActive = edit.afterSectionActive = view.sectionCut().active;
+    edit.beforeSectionFromXMm = edit.afterSectionFromXMm = view.sectionCut().fromMm.x;
+    edit.beforeSectionFromYMm = edit.afterSectionFromYMm = view.sectionCut().fromMm.y;
+    edit.beforeSectionToXMm = edit.afterSectionToXMm = view.sectionCut().toMm.x;
+    edit.beforeSectionToYMm = edit.afterSectionToYMm = view.sectionCut().toMm.y;
+    edit.beforeSectionArrowSide = edit.afterSectionArrowSide = view.sectionCut().arrowSide;
     edit.viewId = view.id();
     edit.beforeXMm = view.positionMm().x;
     edit.afterXMm = view.positionMm().x;
@@ -703,6 +737,177 @@ bool DrawingDocument::setViewAlignmentOffsetMm(ObjectId viewId, double offsetMm)
     view->setAlignmentOffsetMm(offsetMm);
     recordDelta(edit, "Move " + view->name());
     return true;
+}
+
+DrawingView& DrawingDocument::addSectionView(std::string name, ObjectId parentViewId,
+                                             Vec2 fromMm, Vec2 toMm, int arrowSide,
+                                             double offsetMm) {
+    const DrawingView* parent = findView(parentViewId);
+    if (parent == nullptr)
+        throw std::invalid_argument("addSectionView: a section is cut from a view, and that "
+                                    "view is not in this drawing");
+    if (parent->isSection())
+        throw std::invalid_argument("addSectionView: a section of a section is not supported "
+                                    "yet -- cut from a plain view instead");
+    if (std::fabs(toMm.x - fromMm.x) < 1e-9 && std::fabs(toMm.y - fromMm.y) < 1e-9)
+        throw std::invalid_argument("addSectionView: a cut line of no length cuts nothing");
+
+    if (name.empty()) throw std::invalid_argument("addSectionView: a view needs a name");
+    if (nameIsTaken(name, kInvalidObjectId))
+        throw std::invalid_argument("addSectionView: '" + name + "' is already taken");
+
+    // ONE UNDO STEP for the view and its cut together: making a section is one
+    // thing the user did, and a half-made section -- a view with no cut line --
+    // is a state no drawing was ever in.
+    const bool ownsStep = !isTransactionOpen() && !applyingHistory();
+    if (ownsStep) beginTransaction("Add section view");
+
+    // THE SAME MODEL AS ITS PARENT, always -- the same rule a projected view
+    // follows, and for the same reason: a section of a different file is not a
+    // section of this one.
+    //
+    // The DIRECTION recorded is the parent's. The section's real camera is
+    // worked out from the cut line at every recompute (see DrawingView), so
+    // this is only what it falls back to before it has one -- and it is why
+    // the direction is not asked of the caller.
+    auto item = std::make_unique<DrawingView>(name, parent->sourcePath(), parent->bodyName(),
+                                              parent->direction(), Vec2{0.0, 0.0});
+    auto& ref = *item;
+    ref.setParentViewId(parentViewId);
+    ref.setAlignmentOffsetMm(offsetMm);
+    DrawingView::SectionCut cut;
+    cut.active = true;
+    cut.fromMm = fromMm;
+    cut.toMm = toMm;
+    cut.arrowSide = arrowSide >= 0 ? 1 : -1;
+    ref.setSectionCut(cut);
+    views_.push_back(std::move(item));
+    addRecomputableNode(ref);
+    // THE PLACEMENT EDGE, as a projected view has: a section is positioned
+    // relative to the view it was cut from.
+    addDependency(ref.id(), parentViewId);
+
+    DrawingViewExistenceEdit edit;
+    edit.viewId = ref.id();
+    edit.name = ref.name();
+    edit.sourcePath = ref.sourcePath();
+    edit.bodyName = ref.bodyName();
+    edit.direction = static_cast<int>(ref.direction());
+    edit.scaleNumerator = ref.scale().numerator;
+    edit.scaleDenominator = ref.scale().denominator;
+    edit.ownScale = ref.hasOwnScale();
+    edit.showHidden = ref.showsHiddenLines();
+    edit.showTangent = ref.showsTangentEdges();
+    edit.parentViewId = parentViewId;
+    edit.alignmentOffsetMm = offsetMm;
+    edit.sectionActive = true;
+    edit.sectionFromXMm = fromMm.x;
+    edit.sectionFromYMm = fromMm.y;
+    edit.sectionToXMm = toMm.x;
+    edit.sectionToYMm = toMm.y;
+    edit.sectionArrowSide = ref.sectionCut().arrowSide;
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Section " + ref.name());
+    if (ownsStep) commitTransaction();
+    return ref;
+}
+
+bool DrawingDocument::setSectionCut(ObjectId viewId, Vec2 fromMm, Vec2 toMm, int arrowSide) {
+    DrawingView* view = findViewForEdit(viewId);
+    if (view == nullptr) return false;
+    if (std::fabs(toMm.x - fromMm.x) < 1e-9 && std::fabs(toMm.y - fromMm.y) < 1e-9)
+        return false;
+    DrawingView::SectionCut cut;
+    cut.active = true;
+    cut.fromMm = fromMm;
+    cut.toMm = toMm;
+    cut.arrowSide = arrowSide >= 0 ? 1 : -1;
+    DrawingViewPlacementEdit edit;
+    SnapshotViewInto(*view, edit);
+    edit.afterSectionFromXMm = fromMm.x;
+    edit.afterSectionFromYMm = fromMm.y;
+    edit.afterSectionToXMm = toMm.x;
+    edit.afterSectionToYMm = toMm.y;
+    edit.afterSectionArrowSide = cut.arrowSide;
+    view->setSectionCut(cut);
+    recordDelta(edit, "Move the section line");
+    // THE VIEW IS NOW OUT OF DATE. Moving the knife changes what is drawn, and
+    // a section that kept its old curves would be a picture of a cut nobody
+    // asked for.
+    markDirty(viewId);
+    return true;
+}
+
+std::string DrawingDocument::sectionLetterOf(ObjectId viewId) const {
+    const DrawingView* asked = findView(viewId);
+    // The `!isSection()` half of this is an EARLY-OUT, not a guard, and a
+    // mutation deleting it survives: the walk below skips every view that is
+    // not a section, so a plain view's id never matches and the answer is the
+    // same empty string either way. It stays because every caption on the
+    // sheet asks this question of every view, and because the contract reads
+    // better stated at the top than inferred from a loop three lines down.
+    if (asked == nullptr || !asked->isSection()) return {};
+    // IN DOCUMENT ORDER, so the first section made is A. Derived rather than
+    // stored: the line on the parent and the title under the section both ask
+    // here, so they cannot end up carrying different letters.
+    int index = 0;
+    for (const std::unique_ptr<DrawingView>& one : views_) {
+        if (!one->isSection()) continue;
+        if (one->id() == viewId) {
+            std::string letter;
+            int number = index + 1;
+            while (number > 0) {
+                const int remainder = (number - 1) % 26;
+                letter.insert(letter.begin(), static_cast<char>('A' + remainder));
+                number = (number - 1) / 26;
+            }
+            return letter;
+        }
+        ++index;
+    }
+    return {};
+}
+
+std::string DrawingDocument::viewLabelText(ObjectId viewId) const {
+    const DrawingView* view = findView(viewId);
+    if (view == nullptr) return {};
+    // A SECTION IS TITLED BY ITS LETTER, not by its name: "A-A" is what a
+    // reader looks for under it, and it has to match the line drawn on the
+    // parent -- so neither is typed and both come from sectionLetterOf.
+    const std::string letter = sectionLetterOf(viewId);
+    std::string label = letter.empty() ? view->name() : letter + "-" + letter;
+    // The scale is written only when it is NOT the sheet's. Written always, it
+    // is noise; written never, a detail view at 2:1 is read as full size.
+    if (view->hasOwnScale()) label += "  (" + view->scale().toString() + ")";
+    return label;
+}
+
+HatchRegion DrawingDocument::sectionHatchRegionMm(ObjectId viewId) const {
+    HatchRegion region;
+    const DrawingView* view = findView(viewId);
+    if (view == nullptr) return region;
+    for (const std::vector<Vec2>& loop : view->projected().cutLoops) {
+        std::vector<Vec2> onSheet;
+        onSheet.reserve(loop.size());
+        // SHEET MILLIMETRES. The curves never carry the scale, so the cut
+        // loops do not either -- hatching them where they lie would give a
+        // 1:2 section twice the pitch of a 1:1 one on the same sheet.
+        for (const Vec2 point : loop) onSheet.push_back(viewPointToSheetMm(viewId, point));
+        region.add(std::move(onSheet));
+    }
+    return region;
+}
+
+HatchStyle DrawingDocument::sectionHatchStyle(ObjectId viewId) const {
+    HatchStyle style;
+    const std::string letter = sectionLetterOf(viewId);
+    const int which = letter.empty() ? 0 : (letter.front() - 'A');
+    // 45 degrees, then 135, alternating -- the convention for telling two cut
+    // parts apart where they touch. The offset walks as well, so two sections
+    // at the SAME angle still do not line up.
+    style.angleRad = (which % 2 == 0) ? 0.7853981633974483 : -0.7853981633974483;
+    style.offsetMm = static_cast<double>(which % 3) * 1.0;
+    return style;
 }
 
 bool DrawingDocument::setViewPosition(ObjectId viewId, Vec2 positionMm) {
@@ -2943,13 +3148,25 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         const bool shouldExist = forward ? edit->addedByTheEdit : !edit->addedByTheEdit;
         const bool doesExist = findView(edit->viewId) != nullptr;
         if (shouldExist == doesExist) return;
-        if (shouldExist)
-            restoreView(edit->viewId, edit->name, ComputeState::Dirty, edit->sourcePath,
-                        edit->bodyName, static_cast<ViewDirection>(edit->direction),
-                        Vec2{edit->positionXMm, edit->positionYMm},
-                        DrawingScale{edit->scaleNumerator, edit->scaleDenominator},
-                        edit->ownScale, edit->showHidden, edit->showTangent, edit->parentViewId,
-                        edit->alignmentOffsetMm);
+        if (shouldExist) {
+            DrawingView& back =
+                restoreView(edit->viewId, edit->name, ComputeState::Dirty, edit->sourcePath,
+                            edit->bodyName, static_cast<ViewDirection>(edit->direction),
+                            Vec2{edit->positionXMm, edit->positionYMm},
+                            DrawingScale{edit->scaleNumerator, edit->scaleDenominator},
+                            edit->ownScale, edit->showHidden, edit->showTangent,
+                            edit->parentViewId, edit->alignmentOffsetMm);
+            // THE CUT COMES BACK WITH IT. A restored section with no cut line
+            // projects the WHOLE part and looks entirely reasonable.
+            if (edit->sectionActive) {
+                DrawingView::SectionCut cut;
+                cut.active = true;
+                cut.fromMm = Vec2{edit->sectionFromXMm, edit->sectionFromYMm};
+                cut.toMm = Vec2{edit->sectionToXMm, edit->sectionToYMm};
+                cut.arrowSide = edit->sectionArrowSide;
+                back.setSectionCut(cut);
+            }
+        }
         else
             removeObject(edit->viewId);
         return;
@@ -2971,6 +3188,14 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         view->setShowsTangentEdges(forward ? edit->afterShowTangent : edit->beforeShowTangent);
         view->setAlignmentOffsetMm(forward ? edit->afterAlignmentOffsetMm
                                            : edit->beforeAlignmentOffsetMm);
+        DrawingView::SectionCut cut;
+        cut.active = forward ? edit->afterSectionActive : edit->beforeSectionActive;
+        cut.fromMm = Vec2{forward ? edit->afterSectionFromXMm : edit->beforeSectionFromXMm,
+                          forward ? edit->afterSectionFromYMm : edit->beforeSectionFromYMm};
+        cut.toMm = Vec2{forward ? edit->afterSectionToXMm : edit->beforeSectionToXMm,
+                        forward ? edit->afterSectionToYMm : edit->beforeSectionToYMm};
+        cut.arrowSide = forward ? edit->afterSectionArrowSide : edit->beforeSectionArrowSide;
+        view->setSectionCut(cut);
         graph_.markDirty(edit->viewId);
         return;
     }

@@ -7,6 +7,7 @@
 // status -- and the failure would first be noticed as a drawing that is
 // missing its holes.
 
+#include "Core/Drawing/Geometry2D.h"
 #include "Core/Drawing/ProjectedGeometry.h"
 #include "Core/Kernel/DrawingProjection.h"
 #include "Core/Sketch/Profile.h"
@@ -246,4 +247,127 @@ TEST(OcctDrawingProjectionTest, M32_HLR_009_TheExtentOfAnArcIsTheArcNotItsWholeC
     GrowExtent(whole, circle);
     EXPECT_NEAR(whole.min.x, -50.0, 1e-9);
     EXPECT_NEAR(whole.max.y, 50.0, 1e-9);
+}
+
+// =============================================================================
+// M38 -- the section cut
+// =============================================================================
+//
+// A section view is the ordinary projection of a solid with a half-space taken
+// out of it. What has to be right is which half survives, and that the faces
+// the knife made come back as CLOSED LOOPS in the same millimetres as the
+// curves -- otherwise the hatch sits somewhere other than the outline it
+// belongs to, which looks like the section being drawn twice.
+
+TEST(OcctDrawingProjectionTest, M38_CUT_001_TheHalfTheNormalPointsAtIsTheHalfREMOVED) {
+    // A coin toss otherwise, and getting it backwards draws a perfectly
+    // plausible picture of the wrong half.
+    OcctGeometryKernel kernel;
+    // 100 wide, 40 deep, 20 tall, from the origin.
+    const ShapeResult made = Block(kernel, 100.0, 40.0, 20.0);
+    ASSERT_TRUE(made) << made.message;
+    const KernelShape& block = made.shape;
+
+    DrawingProjectionRequest request;
+    request.towards = Vec3{0.0, 1.0, 0.0};
+    request.up = Vec3{0.0, 0.0, 1.0};
+    request.section.active = true;
+    // Cut at x = 50, normal pointing at +x: the material ABOVE x = 50 goes.
+    request.section.origin = Vec3{50.0, 0.0, 0.0};
+    request.section.normal = Vec3{1.0, 0.0, 0.0};
+
+    const DrawingProjectionResult cut = kernel.projectForDrawing(block, request);
+    ASSERT_TRUE(cut) << cut.message;
+    // The front view looks along +y, so the page's width is the model's x.
+    // Half the block is gone, so 100 wide becomes 50.
+    EXPECT_NEAR(cut.drawing.extent.widthMm(), 50.0, 1e-6)
+        << "the cut kept the wrong half, or did not cut at all";
+    EXPECT_NEAR(cut.drawing.extent.heightMm(), 20.0, 1e-6)
+        << "the cut took material it should not have";
+
+    // ...and the OTHER way round removes the other half, which is the same
+    // width and a different place. Checking only the width would pass on a cut
+    // that removed either half.
+    request.section.normal = Vec3{-1.0, 0.0, 0.0};
+    const DrawingProjectionResult other = kernel.projectForDrawing(block, request);
+    ASSERT_TRUE(other) << other.message;
+    EXPECT_NEAR(other.drawing.extent.widthMm(), 50.0, 1e-6);
+    EXPECT_GT(other.drawing.extent.min.x, cut.drawing.extent.min.x + 40.0)
+        << "reversing the normal kept the same half";
+}
+
+TEST(OcctDrawingProjectionTest, M38_CUT_002_TheCutFaceComesBackAsAClosedLoopToHatch) {
+    OcctGeometryKernel kernel;
+    const ShapeResult made = Block(kernel, 100.0, 40.0, 20.0);
+    ASSERT_TRUE(made) << made.message;
+    const KernelShape& block = made.shape;
+
+    DrawingProjectionRequest request;
+    // Look ALONG the cut's normal, so the cut face is seen square on and its
+    // loop is the whole section -- which is how a section view is set up.
+    request.towards = Vec3{1.0, 0.0, 0.0};
+    request.up = Vec3{0.0, 0.0, 1.0};
+    request.section.active = true;
+    request.section.origin = Vec3{50.0, 0.0, 0.0};
+    request.section.normal = Vec3{1.0, 0.0, 0.0};
+
+    const DrawingProjectionResult cut = kernel.projectForDrawing(block, request);
+    ASSERT_TRUE(cut) << cut.message;
+    ASSERT_FALSE(cut.cutLoops.empty()) << "the knife made no face to hatch";
+
+    // The cut face is the block's 40 x 20 cross-section.
+    Box2D box;
+    for (const Vec2 point : cut.cutLoops.front()) box.grow(point);
+    EXPECT_NEAR(std::max(box.width(), box.height()), 40.0, 1e-3);
+    EXPECT_NEAR(std::min(box.width(), box.height()), 20.0, 1e-3);
+    EXPECT_GE(cut.cutLoops.front().size(), 4u) << "a rectangle needs four corners";
+
+    // ...AND IT IS IN THE SAME MILLIMETRES AS THE CURVES. If the loop were
+    // projected by a different frame it would be rotated or offset, and the
+    // hatch would sit beside the outline instead of inside it.
+    EXPECT_NEAR(box.min.x, cut.drawing.extent.min.x, 0.5)
+        << "the cut face is not in the same place as the curves";
+    EXPECT_NEAR(box.min.y, cut.drawing.extent.min.y, 0.5);
+}
+
+TEST(OcctDrawingProjectionTest, M38_CUT_003_AnOrdinaryViewHasNoCutLoopsAtAll) {
+    // The section machinery must cost an ordinary view nothing -- including
+    // not handing it an empty area to hatch that it would then have to check.
+    OcctGeometryKernel kernel;
+    const ShapeResult made = Block(kernel, 100.0, 40.0, 20.0);
+    ASSERT_TRUE(made) << made.message;
+    const KernelShape& block = made.shape;
+    DrawingProjectionRequest request;
+    request.towards = Vec3{0.0, 1.0, 0.0};
+    request.up = Vec3{0.0, 0.0, 1.0};
+    const DrawingProjectionResult plain = kernel.projectForDrawing(block, request);
+    ASSERT_TRUE(plain) << plain.message;
+    EXPECT_TRUE(plain.cutLoops.empty());
+    EXPECT_NEAR(plain.drawing.extent.widthMm(), 100.0, 1e-6) << "an uncut view was cut";
+}
+
+TEST(OcctDrawingProjectionTest, M38_CUT_004_APlaneThatMISSESThePartIsSAIDRatherThanDrawn) {
+    // A cut that removed everything leaves a view of nothing, and "nothing"
+    // looks exactly like a projection that silently failed.
+    OcctGeometryKernel kernel;
+    const ShapeResult made = Block(kernel, 100.0, 40.0, 20.0);
+    ASSERT_TRUE(made) << made.message;
+    const KernelShape& block = made.shape;
+    DrawingProjectionRequest request;
+    request.towards = Vec3{0.0, 1.0, 0.0};
+    request.up = Vec3{0.0, 0.0, 1.0};
+    request.section.active = true;
+    // The plane is well clear of the block, with its normal pointing back at
+    // it -- so everything is on the removed side.
+    request.section.origin = Vec3{-50.0, 0.0, 0.0};
+    request.section.normal = Vec3{1.0, 0.0, 0.0};
+
+    const DrawingProjectionResult gone = kernel.projectForDrawing(block, request);
+    EXPECT_FALSE(gone) << "a cut that removed the whole part reported success";
+    EXPECT_FALSE(gone.message.empty());
+
+    // A section with no normal at all is refused too.
+    request.section.origin = Vec3{50.0, 0.0, 0.0};
+    request.section.normal = Vec3{0.0, 0.0, 0.0};
+    EXPECT_FALSE(kernel.projectForDrawing(block, request));
 }

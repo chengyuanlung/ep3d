@@ -79,6 +79,9 @@ public:
     std::size_t drawnUnknownSymbolsForTesting() const noexcept { return drawnUnknown_; }
     std::size_t drawnJunctionsForTesting() const noexcept { return drawnJunctions_; }
     Box2D drawnSymbolExtentForTesting() const noexcept { return drawnSymbolExtent_; }
+    std::size_t drawnHatchLinesForTesting() const noexcept { return drawnHatch_; }
+    std::size_t drawnSectionArrowsForTesting() const noexcept { return drawnArrows_; }
+    std::size_t unhatchedSectionsForTesting() const noexcept { return unhatched_; }
     // The sheet's rectangle in WIDGET pixels, so a test can check the paper is
     // actually inside the window after a fit.
     QRectF sheetRectForTesting() const;
@@ -158,6 +161,9 @@ private:
     std::size_t drawnUnknown_ = 0;
     std::size_t drawnJunctions_ = 0;
     Box2D drawnSymbolExtent_;
+    std::size_t drawnHatch_ = 0;
+    std::size_t drawnArrows_ = 0;
+    std::size_t unhatched_ = 0;
 
     DrawingTool tool_ = DrawingTool::None;
     std::vector<Vec2> picked_;

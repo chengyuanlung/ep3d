@@ -185,6 +185,9 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     drawnUnknown_ = 0;
     drawnJunctions_ = 0;
     drawnSymbolExtent_ = Box2D{};
+    drawnHatch_ = 0;
+    drawnArrows_ = 0;
+    unhatched_ = 0;
     if (document_ == nullptr) return;
 
     DrawingPaintOptions options;
@@ -206,6 +209,9 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     drawnUnknown_ = tally.unknownSymbols;
     drawnJunctions_ = tally.junctions;
     drawnSymbolExtent_ = tally.symbolExtentMm;
+    drawnHatch_ = tally.hatchLines;
+    drawnArrows_ = tally.sectionArrows;
+    unhatched_ = tally.unhatchedSections;
 
     // --- WHAT THE TOOL IS ABOUT TO MAKE --------------------------------------
     //

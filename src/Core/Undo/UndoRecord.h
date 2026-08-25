@@ -589,6 +589,16 @@ struct LinetypeExistenceEdit {
 };
 
 struct DrawingViewExistenceEdit {
+    // A SECTION'S CUT COMES BACK WITH IT. Without this, undoing the delete of
+    // a section view would restore a view with no cut line -- which projects
+    // the WHOLE part and looks entirely reasonable.
+    bool sectionActive = false;
+    double sectionFromXMm = 0.0;
+    double sectionFromYMm = 0.0;
+    double sectionToXMm = 0.0;
+    double sectionToYMm = 0.0;
+    int sectionArrowSide = 1;
+
     ObjectId viewId = kInvalidObjectId;
     std::string name;
     std::string sourcePath;
@@ -628,6 +638,22 @@ struct DrawingViewPlacementEdit {
     bool afterShowTangent = false;
     double beforeAlignmentOffsetMm = 0.0;
     double afterAlignmentOffsetMm = 0.0;
+    // WHERE THE KNIFE WENT (M38). Part of the placement rather than a delta of
+    // its own: moving a section line is the same kind of edit as moving the
+    // view, and splitting them would leave a section whose line came back
+    // while its position did not.
+    bool beforeSectionActive = false;
+    bool afterSectionActive = false;
+    double beforeSectionFromXMm = 0.0;
+    double beforeSectionFromYMm = 0.0;
+    double beforeSectionToXMm = 0.0;
+    double beforeSectionToYMm = 0.0;
+    int beforeSectionArrowSide = 1;
+    double afterSectionFromXMm = 0.0;
+    double afterSectionFromYMm = 0.0;
+    double afterSectionToXMm = 0.0;
+    double afterSectionToYMm = 0.0;
+    int afterSectionArrowSide = 1;
 };
 
 // --- Authored drawing geometry (M33) -----------------------------------------

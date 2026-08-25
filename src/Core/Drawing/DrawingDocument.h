@@ -10,6 +10,7 @@
 #include "Core/Drawing/TitleBlock.h"
 #include "Core/Drawing/DrawingTables.h"
 #include "Core/Drawing/DrawingView.h"
+#include "Core/Drawing/Hatch.h"
 #include "Core/Drawing/Sheet.h"
 
 #include <memory>
@@ -144,6 +145,48 @@ public:
                              ViewDirection direction, Vec2 positionMm, DrawingScale scale,
                              bool ownScale, bool showHidden, bool showTangent,
                              ObjectId parentViewId, double alignmentOffsetMm);
+
+    // --- Section views (M38) --------------------------------------------------
+    //
+    // A section is an ordinary projected view of a solid with a half-space
+    // taken out of it. The cut line is a SENTENCE on the parent -- two points
+    // in the parent's model millimetres and which way the arrows point -- so
+    // turning the parent turns the cut with it.
+    DrawingView& addSectionView(std::string name, ObjectId parentViewId, Vec2 fromMm,
+                                Vec2 toMm, int arrowSide, double offsetMm);
+    bool setSectionCut(ObjectId viewId, Vec2 fromMm, Vec2 toMm, int arrowSide);
+
+    // WHICH LETTER THIS SECTION IS: "A" for the first, "B" for the second.
+    //
+    // DERIVED from the order the sections were made, and empty for a view that
+    // is not one. The line on the parent and the title under the section have
+    // to carry the SAME letter, and that is the classic "two things that must
+    // agree" trap -- so neither of them is typed and both ask here.
+    std::string sectionLetterOf(ObjectId viewId) const;
+
+    // WHAT IS WRITTEN UNDER A VIEW: "A-A" for a section, its name otherwise,
+    // with its scale after it when it does not follow the sheet's.
+    //
+    // Here rather than in the painter because the painter is not a place a
+    // test can look. The screen and the plot share one renderer (M35), but
+    // that renderer is still Qt, and the only way to check the caption was to
+    // read it off a screenshot. A section titled by its NAME instead of its
+    // letter -- a real mutation that survived -- draws a caption that looks
+    // entirely reasonable and does not match the line on the parent.
+    std::string viewLabelText(ObjectId viewId) const;
+
+    // THE CUT FACE TO FILL, IN SHEET MILLIMETRES, and the pattern to fill it
+    // with. Empty loops for a view that is not a section or has no cut face.
+    //
+    // A hatch is ANNOTATION: its pitch is a paper measurement, so a 1:10
+    // section is not filled solid. That means the region has to be converted
+    // out of model millimetres before it is hatched, and converting it in the
+    // painter put the one line that decides this where nothing could test it.
+    HatchRegion sectionHatchRegionMm(ObjectId viewId) const;
+    // The angle and offset alternate with the section's letter, so two
+    // sections on one sheet are told apart -- and derived from the letter, so
+    // they survive a reopen.
+    HatchStyle sectionHatchStyle(ObjectId viewId) const;
 
     // WHERE A VIEW ACTUALLY SITS, base or child. The one reader, so a
     // renderer, a plot and the "does it fit" check cannot disagree.

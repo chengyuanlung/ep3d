@@ -1,5 +1,9 @@
 #include "Core/Drawing/DrawingView.h"
 
+#include "Core/Drawing/DrawingDocument.h"
+
+
+
 #include "Core/Document/SourceShapeResolver.h"
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Recompute/RecomputeContext.h"
@@ -80,6 +84,20 @@ Vec3 Normalised(const Vec3& v) noexcept {
     if (!(length > 1.0e-12)) return Vec3{0.0, 0.0, 0.0};
     return Vec3{v.x / length, v.y / length, v.z / length};
 }
+
+// The two a section plane needs on top of the three above (M38). Vec3 is a
+// bare triple with no arithmetic, and adding operators to the shared header
+// for one caller is a change every file pays for.
+Vec3 Add(const Vec3& a, const Vec3& b) noexcept {
+    return Vec3{a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+Vec3 Scale(const Vec3& a, double by) noexcept { return Vec3{a.x * by, a.y * by, a.z * by}; }
+
+// A DIRECTION THAT IS ACTUALLY A DIRECTION. Normalised answers zero for a zero
+// input rather than NaN, so this is how a caller finds out -- and a NaN would
+// travel silently into the projector and come back as a view of nothing.
+bool IsRealDirection(const Vec3& a) noexcept { return Dot(a, a) > 1.0e-18; }
 
 } // namespace
 
@@ -185,18 +203,79 @@ RecomputeResult DrawingView::recompute(const RecomputeContext& context) {
 
     // THE CAMERA COMES FROM THE ONE TABLE (CameraFor), so the projector never
     // decides which way up this view is.
-    const ViewCamera camera = CameraFor(direction_);
+    ViewCamera camera = CameraFor(direction_);
     DrawingProjectionRequest request;
-    request.towards = camera.towards;
-    request.up = camera.up;
     request.includeHidden = showHidden_;
     request.includeSmooth = showTangent_;
+
+    // --- A SECTION IS THE ORDINARY PROJECTION OF A CUT SOLID (M38) ----------
+    //
+    // The cut line lives on the PARENT'S page, so the plane is worked out from
+    // the parent's camera HERE, every recompute. Storing the 3D plane instead
+    // would leave it pointing the old way the moment somebody turned the
+    // parent -- and the section would then be of a place the line no longer
+    // crosses, which looks like a perfectly good section of the wrong thing.
+    if (section_.active) {
+        if (!section_.usable()) return fail("this section's cut line has no length");
+        auto* drawing = dynamic_cast<DrawingDocument*>(&context.document);
+        const DrawingView* parent =
+            drawing != nullptr ? drawing->findView(parentViewId_) : nullptr;
+        if (parent == nullptr)
+            return fail("a section view has to be cut from another view, and this one has "
+                        "no parent");
+        // A SECTION OF A SECTION IS A REAL THING AND NOT THIS ONE. Allowing it
+        // by accident would build the plane from a camera that is itself
+        // derived, and the failure would be a view of something nobody asked
+        // for rather than a refusal.
+        if (parent->isSection())
+            return fail("a section of a section is not supported yet -- cut from a plain "
+                        "view instead");
+
+        const ViewCamera parentCamera = CameraFor(parent->direction());
+        // The parent's page, as three directions in model space. THE SAME
+        // construction the projector uses (see OcctDrawingProjection), because
+        // the cut line's coordinates came off that page.
+        const Vec3 sight{-parentCamera.towards.x, -parentCamera.towards.y,
+                         -parentCamera.towards.z};
+        const Vec3 pageX = Cross(parentCamera.up, sight);
+        const Vec3 pageY = parentCamera.up;
+
+        const Vec2 along{section_.toMm.x - section_.fromMm.x,
+                         section_.toMm.y - section_.fromMm.y};
+        const Vec3 lineDirection = Add(Scale(pageX, along.x), Scale(pageY, along.y));
+        // The arrows point across the line, in the parent's page. Their
+        // direction IS the section view's line of sight.
+        const Vec3 arrow = Normalised(Scale(Cross(lineDirection, sight),
+                                            section_.arrowSide >= 0 ? 1.0 : -1.0));
+        if (!IsRealDirection(arrow))
+            return fail("this section's cut line has no direction");
+
+        camera.towards = arrow;
+        // THE PARENT'S UP, unless the arrows point along it -- which happens on
+        // a horizontal cut, where the section is effectively a top or bottom
+        // view and its up is the parent's line of sight instead.
+        camera.up = std::fabs(Dot(arrow, parentCamera.up)) > 0.9
+                        ? parentCamera.towards
+                        : parentCamera.up;
+
+        request.section.active = true;
+        request.section.origin = Add(Scale(pageX, section_.fromMm.x),
+                                     Scale(pageY, section_.fromMm.y));
+        // THE NORMAL POINTS AT THE MATERIAL THAT GOES. Everything between the
+        // reader and the plane is removed, and the reader is looking along the
+        // arrows -- so the removed side is the one the arrows come FROM.
+        request.section.normal = Scale(arrow, -1.0);
+    }
+
+    request.towards = camera.towards;
+    request.up = camera.up;
 
     DrawingProjectionResult projection = context.kernel->projectForDrawing(resolved.shape,
                                                                           request);
     if (!projection) return fail(projection.message);
 
     projected_ = std::move(projection.drawing);
+    projected_.cutLoops = std::move(projection.cutLoops);
     // WHEN THE MODEL WAS LAST WRITTEN, taken AFTER a successful projection.
     // Taken before, a failed build would still stamp the view as current and
     // the drawing would stop offering to update itself.

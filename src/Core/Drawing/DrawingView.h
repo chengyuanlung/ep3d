@@ -6,6 +6,7 @@
 #include "Core/Geometry/MathTypes.h"
 #include "Core/Recompute/IRecomputable.h"
 
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -176,6 +177,32 @@ public:
     void setShowsHiddenLines(bool show) noexcept { showHidden_ = show; }
     void setShowsTangentEdges(bool show) noexcept { showTangent_ = show; }
 
+    // WHERE THE KNIFE WENT (M38).
+    //
+    // The line is drawn ON THE PARENT VIEW, in the parent's model millimetres
+    // -- which is what makes it a sentence rather than geometry: turn the
+    // parent and the cut follows, because the plane is worked out from the
+    // parent's camera every time this is recomputed.
+    //
+    // `arrowSide` is which way the arrows point, and so which half survives.
+    // Everything between the reader and the cutting plane is removed, which is
+    // the convention every drawing standard uses and the one thing here that
+    // is a coin toss if it is not written down.
+    struct SectionCut {
+        bool active = false;
+        Vec2 fromMm{};
+        Vec2 toMm{};
+        int arrowSide = 1;
+
+        bool usable() const noexcept {
+            return active && (std::fabs(toMm.x - fromMm.x) > 1e-9 ||
+                              std::fabs(toMm.y - fromMm.y) > 1e-9);
+        }
+    };
+    const SectionCut& sectionCut() const noexcept { return section_; }
+    void setSectionCut(SectionCut cut) noexcept { section_ = cut; }
+    bool isSection() const noexcept { return section_.active; }
+
     // THE CURVES, IN MODEL MILLIMETRES (see ProjectedGeometry.h). Derived:
     // no ObjectId, not registered, not undoable, thrown away and rebuilt
     // whenever the model changes.
@@ -208,6 +235,7 @@ private:
     bool showHidden_{true};
     bool showTangent_{false};
     ProjectedDrawing projected_;
+    SectionCut section_;
     ComputeState state_{ComputeState::Dirty};
     std::string diagnostic_;
 };

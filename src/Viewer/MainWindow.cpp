@@ -473,6 +473,15 @@ void MainWindow::buildMenus() {
         onAddDimensionRequested(DimensionKind::Angular, LinearDirection::Aligned);
     });
 
+    sectionViewAction_ = drawingMenu_->addAction(QStringLiteral("&Section View..."));
+    sectionViewAction_->setToolTip(
+        QStringLiteral("Cuts the model on a line drawn across the selected view.\n"
+                       "The line is a sentence on that view -- turn the view and the cut "
+                       "turns with it. Everything between the reader and the plane is "
+                       "removed."));
+    connect(sectionViewAction_, &QAction::triggered, this,
+            &MainWindow::onSectionViewRequested);
+
     toleranceAction_ = drawingMenu_->addAction(QStringLiteral("T&olerance..."));
     toleranceAction_->setToolTip(
         QStringLiteral("How close the size has to be held.\n"
@@ -2991,11 +3000,24 @@ void MainWindow::onPropertyCommitted(int row, int column) {
                                   ? (item->checkState() == Qt::Checked ? "1" : "0")
                                   : item->text().toStdString();
 
+    // PARAMETERS ARE A PART'S. On a drawing or an assembly there is nothing
+    // here to edit, and this used to call part() regardless -- which THROWS,
+    // so committing a property row on a drawing aborted the program.
+    //
+    // The fourth time this exact shape has turned up (M27.3, the status bar,
+    // saveDocumentFile, this): a command that only a part can serve, reaching
+    // for part() without asking. Declining is the whole fix.
+    PartDocument* asPart = partOrNull();
+    if (asPart == nullptr) {
+        statusLeft_->setText(QStringLiteral("This document has no parameters to edit."));
+        return;
+    }
+
     // EVERY decision is in ApplyPropertyEdit, which is Qt-free and unit tested.
     // What is left here is what only a widget can do: show the result. That
     // split is the M6.14 lesson applied on purpose rather than after the fact.
     const PropertyEditOutcome outcome =
-        ApplyPropertyEdit(part(), parameterId, field, typed);
+        ApplyPropertyEdit(*asPart, parameterId, field, typed);
 
     // Immediate feedback, no modal dialog (UI spec 7).
     statusLeft_->setText(QString::fromStdString(outcome.status));
@@ -3187,6 +3209,7 @@ void MainWindow::refreshCommandStates() {
         if (addBaseViewAction_ != nullptr) addBaseViewAction_->setEnabled(isDrawing);
         if (addProjectedViewAction_ != nullptr)
             addProjectedViewAction_->setEnabled(haveDrawingView);
+        if (sectionViewAction_ != nullptr) sectionViewAction_->setEnabled(haveDrawingView);
         if (updateViewsAction_ != nullptr)
             updateViewsAction_->setEnabled(isDrawing && staleViewCountForTesting() != 0);
         if (sheetSetupAction_ != nullptr) sheetSetupAction_->setEnabled(isDrawing);
@@ -4968,6 +4991,61 @@ std::size_t MainWindow::drawnJunctionsForTesting() const {
     return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnJunctionsForTesting();
 }
 
+QString MainWindow::addSectionViewCommand(const QString& name, Vec2 fromMm, Vec2 toMm,
+                                          int arrowSide, double offsetMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Sections belong to a drawing."));
+    const ObjectId parent = selectedDrawingView();
+    if (parent == kInvalidObjectId)
+        return say(QStringLiteral("Select the view to cut from first."));
+
+    document_->beginTransaction("Add section view");
+    DrawingView* made = nullptr;
+    try {
+        made = &drawing->addSectionView(name.toStdString(), parent, fromMm, toMm, arrowSide,
+                                        offsetMm);
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That section was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction()) return say(QStringLiteral("That section was refused."));
+    const ObjectId madeId = made->id();
+    onRecomputeRequested();
+    selectedId_ = madeId;
+    refreshAll();
+    const DrawingView* back = drawing->findView(madeId);
+    if (back != nullptr && back->currentState() == ComputeState::Failed)
+        return say(QStringLiteral("Section %1-%1 would not cut: %2")
+                       .arg(QString::fromStdString(drawing->sectionLetterOf(madeId)),
+                            QString::fromStdString(back->diagnostic())));
+    return say(QStringLiteral("Added section %1-%1")
+                   .arg(QString::fromStdString(drawing->sectionLetterOf(madeId))));
+}
+
+QString MainWindow::sectionLetterForTesting(ObjectId viewId) const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? QString()
+                              : QString::fromStdString(drawing->sectionLetterOf(viewId));
+}
+
+std::size_t MainWindow::drawnHatchLinesForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnHatchLinesForTesting();
+}
+
+std::size_t MainWindow::drawnSectionArrowsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnSectionArrowsForTesting();
+}
+
+std::size_t MainWindow::unhatchedSectionsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->unhatchedSectionsForTesting();
+}
+
 Box2D MainWindow::drawnSymbolExtentForTesting() const {
     return drawingCanvas_ == nullptr ? Box2D{} : drawingCanvas_->drawnSymbolExtentForTesting();
 }
@@ -5615,6 +5693,34 @@ void MainWindow::onToleranceRequested() {
     setDimensionToleranceCommand(which == QStringLiteral("Limits") ? ToleranceKind::Limits
                                                                    : ToleranceKind::Deviation,
                                  std::max(upper, lower), std::min(upper, lower));
+}
+
+void MainWindow::onSectionViewRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || selectedDrawingView() == kInvalidObjectId) return;
+    const DrawingView* parent = drawing->findView(selectedDrawingView());
+    if (parent == nullptr) return;
+    // THROUGH THE MIDDLE OF THE PARENT, straight down, unless the user says
+    // otherwise -- which is where a first section usually goes, and it is
+    // somewhere the line can be seen and dragged from rather than off the
+    // part.
+    const ProjectedExtent extent = parent->projected().extent;
+    const double middle = (extent.min.x + extent.max.x) / 2.0;
+    const double below = extent.min.y - (extent.max.y - extent.min.y) * 0.2;
+    const double above = extent.max.y + (extent.max.y - extent.min.y) * 0.2;
+    bool ok = false;
+    const double at = QInputDialog::getDouble(
+        this, QStringLiteral("Section View"),
+        QStringLiteral("Cut at (mm across the view):"), middle, extent.min.x - 1000.0,
+        extent.max.x + 1000.0, 2, &ok);
+    if (!ok) return;
+    const QStringList sides{QStringLiteral("Looking right"), QStringLiteral("Looking left")};
+    const QString side = QInputDialog::getItem(this, QStringLiteral("Section View"),
+                                               QStringLiteral("Arrows:"), sides, 0, false, &ok);
+    if (!ok) return;
+    addSectionViewCommand(QStringLiteral("Section%1").arg(drawing->views().size()),
+                          Vec2{at, below}, Vec2{at, above},
+                          side == sides[0] ? 1 : -1, 80.0);
 }
 
 void MainWindow::onGeneralToleranceRequested() {
