@@ -4886,6 +4886,84 @@ int main(int argc, char** argv) {
                         }
                     }
 
+                    // --- M41's GATE: the symbols on the paper ----------------
+                    //
+                    // The Core suite proves the RULES -- which characteristics
+                    // take a datum, which zones can be cylindrical, that a
+                    // letter is derived. Only starting the program can prove a
+                    // user can put the symbols on a sheet and that all three
+                    // reach the canvas.
+                    {
+                        const QString datum = window.addSymbolCommand(
+                            DatumFeatureSpec{}, Vec2{60.0, 120.0}, Vec2{60.0, 135.0});
+                        if (!datum.contains(QStringLiteral("A")))
+                            fail(("the datum did not come out as A: " + datum.toStdString())
+                                     .c_str());
+
+                        // The command selects what it made, so the selection
+                        // IS the datum -- and asking that way exercises the
+                        // path a user takes rather than reaching past it.
+                        const ObjectId datumId = window.selectedObjectId();
+                        if (datumId == kInvalidObjectId) fail("the datum was not created");
+
+                        FeatureControlFrameSpec frame;
+                        frame.characteristic = GeometricCharacteristic::Position;
+                        frame.toleranceMm = 0.25;
+                        frame.diametricZone = true;
+                        frame.datums.push_back(DatumReference{datumId});
+                        const QString said = window.addSymbolCommand(
+                            frame, Vec2{90.0, 120.0}, Vec2{90.0, 140.0});
+                        // THE FRAME HAS TO READ THE DATUM'S LETTER, and this is
+                        // the pair the whole design exists to keep together.
+                        if (!said.contains(QStringLiteral("| A")))
+                            fail(("the frame did not name datum A: " + said.toStdString())
+                                     .c_str());
+
+                        SurfaceFinishSpec finish;
+                        finish.symbol = SurfaceSymbol::Machined;
+                        finish.raMicrometres = 1.6;
+                        const QString ground = window.addSymbolCommand(
+                            finish, Vec2{120.0, 120.0}, Vec2{120.0, 135.0});
+                        if (!ground.contains(QStringLiteral("Ra 1.6")))
+                            fail(("the finish symbol said the wrong thing: " +
+                                  ground.toStdString())
+                                     .c_str());
+
+                        // A FORM TOLERANCE WITH A DATUM IS REFUSED, and the
+                        // refusal has to reach the user rather than being
+                        // swallowed into a blank box on the sheet.
+                        FeatureControlFrameSpec flat;
+                        flat.characteristic = GeometricCharacteristic::Flatness;
+                        flat.toleranceMm = 0.05;
+                        flat.diametricZone = false;
+                        flat.datums.push_back(DatumReference{datumId});
+                        const QString refused =
+                            window.addSymbolCommand(flat, Vec2{40.0, 120.0}, Vec2{40.0, 135.0});
+                        if (!refused.contains(QStringLiteral("refused")))
+                            fail(("a flatness frame with a datum was accepted: " +
+                                  refused.toStdString())
+                                     .c_str());
+
+                        window.repaintDrawingForTesting();
+                        if (window.drawnSymbolCountForTesting() != 3)
+                            fail("the three symbols did not all reach the canvas");
+                        if (window.danglingSymbolsForTesting() != 0)
+                            fail("a symbol came adrift from what it points at");
+                        if (window.unreadableSymbolsForTesting() != 0)
+                            fail("a symbol on the sheet could not be written");
+
+                        if (screenshotPath != nullptr) {
+                            std::string beside = screenshotPath;
+                            const std::size_t dot = beside.rfind('.');
+                            beside = dot == std::string::npos
+                                         ? beside + "-symbols"
+                                         : beside.substr(0, dot) + "-symbols" +
+                                               beside.substr(dot);
+                            if (!shoot(window, QString::fromStdString(beside)))
+                                fail("could not write the symbols screenshot");
+                        }
+                    }
+
                     // --- M40's GATE: the editing tools -----------------------
                     //
                     // Every one of these does something PLAUSIBLE to the wrong

@@ -187,6 +187,9 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     drawnSymbolExtent_ = Box2D{};
     drawnHatch_ = 0;
     drawnHoleRows_ = 0;
+    drawnSymbols2_ = 0;
+    danglingSymbols_ = 0;
+    unreadableSymbols_ = 0;
     drawnHoleTags_ = 0;
     uncountedHoleTables_ = 0;
     drawnArrows_ = 0;
@@ -214,6 +217,9 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     drawnSymbolExtent_ = tally.symbolExtentMm;
     drawnHatch_ = tally.hatchLines;
     drawnHoleRows_ = tally.holeTableRows;
+    drawnSymbols2_ = tally.symbols;
+    danglingSymbols_ = tally.danglingSymbols;
+    unreadableSymbols_ = tally.unreadableSymbols;
     drawnHoleTags_ = tally.holeTags;
     uncountedHoleTables_ = tally.uncountedHoleTables;
     drawnArrows_ = tally.sectionArrows;

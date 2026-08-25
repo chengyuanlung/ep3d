@@ -1,4 +1,6 @@
 #include "Viewer/MainWindow.h"
+
+#include <cstdio>
 #include "Core/Feature/TransformFeatures.h"
 #include "Core/Feature/ImportFeature.h"
 #include "Core/Feature/HoleFeature.h"
@@ -489,6 +491,30 @@ void MainWindow::buildMenus() {
                        "The rows are counted from the part each time, so the table can "
                        "never describe holes the part no longer has."));
     connect(holeTableAction_, &QAction::triggered, this, &MainWindow::onHoleTableRequested);
+
+    QMenu* symbolMenu = drawingMenu_->addMenu(QStringLiteral("S&ymbols"));
+    datumAction_ = symbolMenu->addAction(QStringLiteral("&Datum"));
+    datumAction_->setToolTip(
+        QStringLiteral("A datum on the picked point.\n"
+                       "Its LETTER is worked out from the order datums were placed, so the "
+                       "symbol and every frame that refers to it always agree."));
+    connect(datumAction_, &QAction::triggered, this, &MainWindow::onDatumRequested);
+    gdtFrameAction_ = symbolMenu->addAction(QStringLiteral("&Geometric Tolerance..."));
+    gdtFrameAction_->setToolTip(
+        QStringLiteral("A feature control frame: characteristic, zone, and the datums it is "
+                       "measured against.\n"
+                       "Form tolerances refuse a datum and the rest insist on one -- a "
+                       "flatness with a datum in it means nothing, and a position with none "
+                       "cannot be measured."));
+    connect(gdtFrameAction_, &QAction::triggered, this,
+            &MainWindow::onFeatureControlFrameRequested);
+    surfaceFinishAction_ = symbolMenu->addAction(QStringLiteral("Surface &Finish..."));
+    surfaceFinishAction_->setToolTip(
+        QStringLiteral("Ra, the process, and whether material must be removed.\n"
+                       "Those last two are opposite instructions, so neither is a silent "
+                       "default."));
+    connect(surfaceFinishAction_, &QAction::triggered, this,
+            &MainWindow::onSurfaceFinishRequested);
 
     QMenu* editMenu = drawingMenu_->addMenu(QStringLiteral("&Modify"));
     sheetTrimAction_ = editMenu->addAction(QStringLiteral("&Trim"));
@@ -5402,10 +5428,161 @@ void MainWindow::onHoleStandardRequested() {
     setHoleStandardCommand(featureId, designation, kind == kinds[0], fit, shape);
 }
 
+QString MainWindow::addSymbolCommand(const AnnotationBody& body, Vec2 pointsAtMm,
+                                    Vec2 positionMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Symbols belong to a drawing."));
+
+    DimensionAnchor anchor;
+    anchor.kind = DimensionAnchorKind::Free;
+    anchor.at = pointsAtMm;
+
+    Annotation* made = nullptr;
+    try {
+        made = &drawing->addAnnotation(body, anchor, positionMm);
+    } catch (const std::exception& error) {
+        return say(QStringLiteral("That symbol was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    selectedId_ = made->id();
+    refreshAll();
+    // WHAT IT SAYS BACK IS WHAT THE PAPER SAYS. Asked of the document, so the
+    // status bar cannot report a frame different from the one drawn.
+    const QString said = QString::fromStdString(drawing->annotationText(made->id()));
+    return say(said.isEmpty() ? QStringLiteral("Added a symbol")
+                              : QStringLiteral("Added %1").arg(said));
+}
+
+void MainWindow::onDatumRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const Vec2 at = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
+    addSymbolCommand(DatumFeatureSpec{}, at, Vec2{at.x + 12.0, at.y + 12.0});
+}
+
+void MainWindow::onFeatureControlFrameRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+
+    QStringList names;
+    std::vector<GeometricCharacteristic> all{
+        GeometricCharacteristic::Straightness,   GeometricCharacteristic::Flatness,
+        GeometricCharacteristic::Roundness,      GeometricCharacteristic::Cylindricity,
+        GeometricCharacteristic::LineProfile,    GeometricCharacteristic::SurfaceProfile,
+        GeometricCharacteristic::Parallelism,    GeometricCharacteristic::Perpendicularity,
+        GeometricCharacteristic::Angularity,     GeometricCharacteristic::Position,
+        GeometricCharacteristic::Concentricity,  GeometricCharacteristic::Symmetry,
+        GeometricCharacteristic::CircularRunout, GeometricCharacteristic::TotalRunout};
+    for (const GeometricCharacteristic one : all)
+        names << QString::fromStdString(std::string(toString(one)));
+
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(this, QStringLiteral("Geometric Tolerance"),
+                                                 QStringLiteral("Characteristic:"), names, 9,
+                                                 false, &ok);
+    if (!ok) return;
+    FeatureControlFrameSpec spec;
+    spec.characteristic = all[static_cast<std::size_t>(names.indexOf(chosen))];
+    spec.toleranceMm = QInputDialog::getDouble(this, QStringLiteral("Geometric Tolerance"),
+                                               QStringLiteral("Zone (mm):"), 0.1, 0.0001,
+                                               1000.0, 4, &ok);
+    if (!ok) return;
+
+    // WHICH DATUMS -- offered by the LETTER they carry right now, which is the
+    // document's answer and not one composed here.
+    const DatumNeed need = DatumNeedOf(spec.characteristic);
+    if (need != DatumNeed::Never) {
+        QStringList letters;
+        std::vector<ObjectId> ids;
+        for (const Annotation* one : drawing->annotations()) {
+            if (!one->isDatum()) continue;
+            letters << QString::fromStdString(drawing->datumLetterOf(one->id()));
+            ids.push_back(one->id());
+        }
+        if (letters.isEmpty() && need == DatumNeed::Always) {
+            statusLeft_->setText(
+                QStringLiteral("%1 is measured against a datum, and this drawing has none "
+                               "yet.")
+                    .arg(chosen));
+            return;
+        }
+        if (!letters.isEmpty()) {
+            letters.prepend(QStringLiteral("(none)"));
+            const QString primary =
+                QInputDialog::getItem(this, QStringLiteral("Geometric Tolerance"),
+                                      QStringLiteral("Primary datum:"), letters,
+                                      need == DatumNeed::Always ? 1 : 0, false, &ok);
+            if (!ok) return;
+            const int index = letters.indexOf(primary) - 1;
+            if (index >= 0)
+                spec.datums.push_back(
+                    DatumReference{ids[static_cast<std::size_t>(index)]});
+        }
+    }
+    // A SURFACE'S ZONE IS NOT A CYLINDER, so the diameter symbol is offered
+    // only where it means something.
+    spec.diametricZone = need != DatumNeed::Never &&
+                         spec.characteristic != GeometricCharacteristic::LineProfile &&
+                         spec.characteristic != GeometricCharacteristic::SurfaceProfile &&
+                         spec.characteristic != GeometricCharacteristic::CircularRunout &&
+                         spec.characteristic != GeometricCharacteristic::TotalRunout;
+
+    const Vec2 at = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
+    addSymbolCommand(spec, at, Vec2{at.x + 15.0, at.y + 15.0});
+}
+
+void MainWindow::onSurfaceFinishRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const QStringList symbols{QStringLiteral("Material must be removed"),
+                              QStringLiteral("Material must NOT be removed"),
+                              QStringLiteral("Unspecified")};
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(this, QStringLiteral("Surface Finish"),
+                                                 QStringLiteral("Process:"), symbols, 0, false,
+                                                 &ok);
+    if (!ok) return;
+    SurfaceFinishSpec spec;
+    spec.symbol = chosen == symbols[0]   ? SurfaceSymbol::Machined
+                  : chosen == symbols[1] ? SurfaceSymbol::AsCast
+                                         : SurfaceSymbol::Basic;
+
+    // THE PREFERRED SERIES IS OFFERED, NOT ENFORCED. A roughness is a number
+    // the designer chooses, and 1.2 is as real an instruction as 1.6.
+    QStringList series;
+    for (const double value : PreferredRaSeries())
+        series << QString::number(value);
+    const QString ra = QInputDialog::getItem(this, QStringLiteral("Surface Finish"),
+                                             QStringLiteral("Ra (um) -- or type your own:"),
+                                             series, 8, true, &ok);
+    if (!ok) return;
+    spec.raMicrometres = ra.toDouble();
+
+    const Vec2 at = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
+    addSymbolCommand(spec, at, Vec2{at.x + 10.0, at.y + 10.0});
+}
+
 QString MainWindow::sectionLetterForTesting(ObjectId viewId) const {
     const DrawingDocument* drawing = AsDrawing(document_);
     return drawing == nullptr ? QString()
                               : QString::fromStdString(drawing->sectionLetterOf(viewId));
+}
+
+std::size_t MainWindow::drawnSymbolCountForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnSymbolCountForTesting();
+}
+
+std::size_t MainWindow::danglingSymbolsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->danglingSymbolsForTesting();
+}
+
+std::size_t MainWindow::unreadableSymbolsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->unreadableSymbolsForTesting();
 }
 
 std::size_t MainWindow::drawnHoleRowsForTesting() const {

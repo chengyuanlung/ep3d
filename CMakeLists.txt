@@ -26,6 +26,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/Hatch.cpp
     src/Core/Drawing/Tolerance.cpp
     src/Core/Drawing/BomTable.cpp
+    src/Core/Drawing/Annotation.cpp
     src/Core/Drawing/HoleTable.cpp
     src/Core/Drawing/SheetEdits.cpp
     src/Core/Feature/HoleStandards.cpp
@@ -557,6 +558,8 @@ if(PARAMCAD_BUILD_TESTS)
         tests/DrawingDimensionTests.cpp
         tests/HatchTests.cpp
         tests/ToleranceTests.cpp
+        tests/AnnotationTests.cpp
+        tests/AnnotationDocumentTests.cpp
         tests/HoleStandardsTests.cpp
         tests/HoleTableTests.cpp
         tests/SheetEditTests.cpp

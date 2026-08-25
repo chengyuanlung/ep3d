@@ -79,6 +79,9 @@ public:
     std::size_t drawnUnknownSymbolsForTesting() const noexcept { return drawnUnknown_; }
     std::size_t drawnJunctionsForTesting() const noexcept { return drawnJunctions_; }
     Box2D drawnSymbolExtentForTesting() const noexcept { return drawnSymbolExtent_; }
+    std::size_t drawnSymbolCountForTesting() const noexcept { return drawnSymbols2_; }
+    std::size_t danglingSymbolsForTesting() const noexcept { return danglingSymbols_; }
+    std::size_t unreadableSymbolsForTesting() const noexcept { return unreadableSymbols_; }
     std::size_t drawnHoleRowsForTesting() const noexcept { return drawnHoleRows_; }
     std::size_t drawnHoleTagsForTesting() const noexcept { return drawnHoleTags_; }
     std::size_t uncountedHoleTablesForTesting() const noexcept { return uncountedHoleTables_; }
@@ -173,6 +176,11 @@ private:
     Box2D drawnSymbolExtent_;
     std::size_t drawnHatch_ = 0;
     std::size_t drawnHoleRows_ = 0;
+    // `drawnSymbols_` is already the schematic's component count (M36), so
+    // this one carries the suffix rather than the other losing its name.
+    std::size_t drawnSymbols2_ = 0;
+    std::size_t danglingSymbols_ = 0;
+    std::size_t unreadableSymbols_ = 0;
     std::size_t drawnHoleTags_ = 0;
     std::size_t uncountedHoleTables_ = 0;
     std::size_t drawnArrows_ = 0;

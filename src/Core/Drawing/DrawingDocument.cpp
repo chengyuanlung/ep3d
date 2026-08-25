@@ -1394,6 +1394,205 @@ bool DrawingDocument::setCurrentDimensionStyle(ObjectId styleId) {
     return true;
 }
 
+Annotation& DrawingDocument::addAnnotation(AnnotationBody body, DimensionAnchor anchor,
+                                           Vec2 positionMm) {
+    // REFUSED AT THE DOOR, the way a section and a hole table are. A symbol
+    // that cannot be drawn would otherwise sit on the paper as a blank, and
+    // the drawing would refuse to save later for a reason nobody connects to
+    // this moment.
+    if (const auto* frame = std::get_if<FeatureControlFrameSpec>(&body)) {
+        const std::string why = WhyFrameRefused(*frame);
+        if (!why.empty()) throw std::invalid_argument("addAnnotation: " + why);
+        for (const DatumReference& reference : frame->datums) {
+            const Annotation* datum = findAnnotation(reference.datumId);
+            if (datum == nullptr || !datum->isDatum())
+                throw std::invalid_argument(
+                    "addAnnotation: this frame names something that is not a datum in this "
+                    "drawing");
+        }
+    }
+    if (const auto* finish = std::get_if<SurfaceFinishSpec>(&body)) {
+        const std::string why = WhySurfaceFinishRefused(*finish);
+        if (!why.empty()) throw std::invalid_argument("addAnnotation: " + why);
+    }
+
+    auto item = std::make_unique<Annotation>(std::move(body), anchor, positionMm,
+                                             currentLayerId_);
+    auto& ref = *item;
+    annotations_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+
+    AnnotationExistenceEdit edit;
+    edit.annotationId = ref.id();
+    edit.body = ref.body();
+    edit.anchor = ref.anchor();
+    edit.xMm = positionMm.x;
+    edit.yMm = positionMm.y;
+    edit.layerId = ref.layerId();
+    edit.addedByTheEdit = true;
+    recordDelta(edit, ref.isDatum() ? "Datum" : (ref.isFrame() ? "Feature control frame"
+                                                               : "Surface finish"));
+    return ref;
+}
+
+Annotation& DrawingDocument::restoreAnnotation(ObjectId id, AnnotationBody body,
+                                               DimensionAnchor anchor, Vec2 positionMm,
+                                               ObjectId layerId) {
+    auto item = std::make_unique<Annotation>(id, std::move(body), anchor, positionMm, layerId);
+    auto& ref = *item;
+    annotations_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const Annotation*> DrawingDocument::annotations() const {
+    std::vector<const Annotation*> out;
+    out.reserve(annotations_.size());
+    for (const std::unique_ptr<Annotation>& one : annotations_) out.push_back(one.get());
+    return out;
+}
+
+const Annotation* DrawingDocument::findAnnotation(ObjectId id) const noexcept {
+    for (const std::unique_ptr<Annotation>& one : annotations_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+Annotation* DrawingDocument::findAnnotationForEdit(ObjectId id) noexcept {
+    for (const std::unique_ptr<Annotation>& one : annotations_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+bool DrawingDocument::setAnnotationPosition(ObjectId id, Vec2 positionMm) {
+    Annotation* annotation = findAnnotationForEdit(id);
+    if (annotation == nullptr) return false;
+    AnnotationEdit edit;
+    edit.annotationId = id;
+    edit.beforeBody = edit.afterBody = annotation->body();
+    edit.beforeXMm = annotation->positionMm().x;
+    edit.beforeYMm = annotation->positionMm().y;
+    edit.afterXMm = positionMm.x;
+    edit.afterYMm = positionMm.y;
+    annotation->setPositionMm(positionMm);
+    recordDelta(edit, "Move the symbol");
+    return true;
+}
+
+bool DrawingDocument::setAnnotationBody(ObjectId id, AnnotationBody body) {
+    Annotation* annotation = findAnnotationForEdit(id);
+    if (annotation == nullptr) return false;
+    // A BODY THAT CANNOT BE DRAWN IS REFUSED NOW, not at the next repaint. A
+    // frame that goes blank some time later points at a decision the user has
+    // stopped thinking about -- the same reason a hole refuses an unsizable
+    // thread the moment it is typed (M39).
+    if (const auto* frame = std::get_if<FeatureControlFrameSpec>(&body)) {
+        if (!WhyFrameRefused(*frame).empty()) return false;
+        // ...and every datum it names has to BE a datum in this drawing. A
+        // frame pointing at a dimension, or at nothing, would draw a letter
+        // that belongs to something else.
+        for (const DatumReference& reference : frame->datums) {
+            const Annotation* datum = findAnnotation(reference.datumId);
+            if (datum == nullptr || !datum->isDatum()) return false;
+        }
+    }
+    if (const auto* finish = std::get_if<SurfaceFinishSpec>(&body))
+        if (!WhySurfaceFinishRefused(*finish).empty()) return false;
+
+    AnnotationEdit edit;
+    edit.annotationId = id;
+    edit.beforeBody = annotation->body();
+    edit.afterBody = body;
+    edit.beforeXMm = edit.afterXMm = annotation->positionMm().x;
+    edit.beforeYMm = edit.afterYMm = annotation->positionMm().y;
+    annotation->setBody(std::move(body));
+    recordDelta(edit, "Edit the symbol");
+    return true;
+}
+
+std::string DrawingDocument::datumLetterOf(ObjectId annotationId) const {
+    const Annotation* asked = findAnnotation(annotationId);
+    if (asked == nullptr || !asked->isDatum()) return {};
+    // IN DOCUMENT ORDER, so the first datum placed is A. Derived rather than
+    // stored, for the reason M38's section letters are: the symbol on the face
+    // and every frame that refers to it ask the same question, so they cannot
+    // come back with different answers.
+    int index = 0;
+    for (const std::unique_ptr<Annotation>& one : annotations_) {
+        if (!one->isDatum()) continue;
+        if (one->id() == annotationId) {
+            std::string letter;
+            int number = index + 1;
+            while (number > 0) {
+                const int remainder = (number - 1) % 26;
+                letter.insert(letter.begin(), static_cast<char>('A' + remainder));
+                number = (number - 1) / 26;
+            }
+            return letter;
+        }
+        ++index;
+    }
+    return {};
+}
+
+std::size_t DrawingDocument::framesReferringToDatum(ObjectId datumId) const {
+    std::size_t count = 0;
+    for (const std::unique_ptr<Annotation>& one : annotations_) {
+        const auto* frame = std::get_if<FeatureControlFrameSpec>(&one->body());
+        if (frame == nullptr) continue;
+        for (const DatumReference& reference : frame->datums)
+            if (reference.datumId == datumId) {
+                ++count;
+                break;
+            }
+    }
+    return count;
+}
+
+std::optional<Vec2> DrawingDocument::annotationLeaderTipMm(ObjectId annotationId) const {
+    const Annotation* annotation = findAnnotation(annotationId);
+    if (annotation == nullptr) return std::nullopt;
+    // THE SAME RESOLVER A DIMENSION USES, so a symbol dangles under exactly
+    // the conditions a dimension does and at exactly the same tolerance.
+    return resolveAnchor(annotation->anchor());
+}
+
+std::string DrawingDocument::whyAnnotationRefused(ObjectId annotationId) const {
+    const Annotation* annotation = findAnnotation(annotationId);
+    if (annotation == nullptr) return "this symbol is no longer in the drawing";
+    if (const auto* finish = std::get_if<SurfaceFinishSpec>(&annotation->body()))
+        return WhySurfaceFinishRefused(*finish);
+    if (const auto* frame = std::get_if<FeatureControlFrameSpec>(&annotation->body())) {
+        const std::string why = WhyFrameRefused(*frame);
+        if (!why.empty()) return why;
+        for (const DatumReference& reference : frame->datums) {
+            const Annotation* datum = findAnnotation(reference.datumId);
+            if (datum == nullptr || !datum->isDatum())
+                return "this frame refers to a datum that is no longer in the drawing";
+        }
+    }
+    return {};
+}
+
+std::string DrawingDocument::annotationText(ObjectId annotationId) const {
+    const Annotation* annotation = findAnnotation(annotationId);
+    if (annotation == nullptr) return {};
+    if (!whyAnnotationRefused(annotationId).empty()) return {};
+    if (const auto* finish = std::get_if<SurfaceFinishSpec>(&annotation->body()))
+        return SurfaceFinishText(*finish);
+    if (const auto* frame = std::get_if<FeatureControlFrameSpec>(&annotation->body())) {
+        // THE LETTERS COME FROM THE DATUMS THEMSELVES, resolved here and now.
+        // This is the one place a frame's letters are worked out, which is what
+        // makes it impossible for the frame and the symbol to disagree.
+        std::vector<std::string> letters;
+        letters.reserve(frame->datums.size());
+        for (const DatumReference& reference : frame->datums)
+            letters.push_back(datumLetterOf(reference.datumId));
+        return FrameText(*frame, letters);
+    }
+    return datumLetterOf(annotationId);
+}
+
 DrawingDimension& DrawingDocument::addDimension(DimensionKind kind, DimensionAnchor first,
                                                 DimensionAnchor second, Vec2 linePositionMm) {
     auto item = std::make_unique<DrawingDimension>(kind, first, second, linePositionMm,
@@ -2807,6 +3006,37 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
 
     // A PARTS LIST: nothing reads it, and its rows were never stored, so
     // there is nothing to cascade -- deleting one takes only itself.
+    if (const Annotation* annotation = findAnnotation(id)) {
+        // A DATUM STILL NAMED BY FRAMES IS NOT DELETED.
+        //
+        // The two alternatives are both worse. Cascading the delete throws
+        // away frames the user spent time on and did not ask to lose.
+        // Letting them dangle leaves a document that will not SAVE -- a
+        // drawing a user cannot get out of because of a delete nobody warned
+        // them about, which is the failure M39's hole tables were changed to
+        // avoid. Refusing loses nothing and says exactly what to do next.
+        if (annotation->isDatum() && framesReferringToDatum(id) > 0) return false;
+
+        if (!applyingHistory()) {
+            AnnotationExistenceEdit edit;
+            edit.annotationId = id;
+            edit.body = annotation->body();
+            edit.anchor = annotation->anchor();
+            edit.xMm = annotation->positionMm().x;
+            edit.yMm = annotation->positionMm().y;
+            edit.layerId = annotation->layerId();
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Delete the symbol");
+        }
+        for (auto it = annotations_.begin(); it != annotations_.end(); ++it) {
+            if ((*it)->id() != id) continue;
+            registry_.unregisterObject(id);
+            annotations_.erase(it);
+            return true;
+        }
+        return false;
+    }
+
     if (const HoleTable* table = findHoleTable(id)) {
         if (!applyingHistory()) {
             HoleTableExistenceEdit edit;
@@ -3214,6 +3444,32 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         wire->setPointsMm(UnflattenPoints(forward ? edit->afterPointsXY
                                                   : edit->beforePointsXY));
         wire->setLabel(forward ? edit->afterLabel : edit->beforeLabel);
+        return;
+    }
+
+    if (const auto* edit = std::get_if<AnnotationExistenceEdit>(&delta)) {
+        const bool wanted = forward == edit->addedByTheEdit;
+        if (wanted) {
+            if (findAnnotation(edit->annotationId) == nullptr)
+                restoreAnnotation(edit->annotationId, edit->body, edit->anchor,
+                                  Vec2{edit->xMm, edit->yMm}, edit->layerId);
+        } else {
+            for (auto it = annotations_.begin(); it != annotations_.end(); ++it) {
+                if ((*it)->id() != edit->annotationId) continue;
+                registry_.unregisterObject(edit->annotationId);
+                annotations_.erase(it);
+                break;
+            }
+        }
+        return;
+    }
+
+    if (const auto* edit = std::get_if<AnnotationEdit>(&delta)) {
+        Annotation* annotation = findAnnotationForEdit(edit->annotationId);
+        if (annotation == nullptr) return;
+        annotation->setBody(forward ? edit->afterBody : edit->beforeBody);
+        annotation->setPositionMm(forward ? Vec2{edit->afterXMm, edit->afterYMm}
+                                          : Vec2{edit->beforeXMm, edit->beforeYMm});
         return;
     }
 

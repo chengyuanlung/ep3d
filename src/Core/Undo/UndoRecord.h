@@ -2,6 +2,7 @@
 
 #include "Core/Assembly/AssemblyStates.h"
 #include "Core/Document/ObjectId.h"
+#include "Core/Drawing/Annotation.h"
 #include "Core/Drawing/DrawingDimension.h"
 #include "Core/Drawing/DrawingEntity.h"
 #include "Core/Feature/FeatureSnapshot.h"
@@ -725,6 +726,30 @@ struct DrawingEntityPropertyEdit {
 };
 
 // --- Dimensions (M34) --------------------------------------------------------
+// M41. A surface finish, a feature control frame or a datum: added, moved,
+// deleted. ONE delta for all three, because they are one object with three
+// bodies -- three deltas would be three places to forget a field the day a
+// fourth symbol arrives.
+struct AnnotationExistenceEdit {
+    ObjectId annotationId = kInvalidObjectId;
+    AnnotationBody body;
+    DimensionAnchor anchor;
+    double xMm = 0.0;
+    double yMm = 0.0;
+    ObjectId layerId = kInvalidObjectId;
+    bool addedByTheEdit = false;
+};
+
+struct AnnotationEdit {
+    ObjectId annotationId = kInvalidObjectId;
+    AnnotationBody beforeBody;
+    AnnotationBody afterBody;
+    double beforeXMm = 0.0;
+    double beforeYMm = 0.0;
+    double afterXMm = 0.0;
+    double afterYMm = 0.0;
+};
+
 struct DimensionExistenceEdit {
     ObjectId dimensionId = kInvalidObjectId;
     int kind = 0;
@@ -833,7 +858,8 @@ using UndoDelta =
                  CurrentDimensionStyleEdit, TitleBlockEdit, SheetFrameEdit,
                  BomExistenceEdit, BomEdit, SymbolExistenceEdit, SymbolPlacementEdit,
                  WireExistenceEdit, WireEdit, DimensionToleranceEdit,
-                 GeneralToleranceEdit, HoleTableExistenceEdit, HoleTableEdit>;
+                 GeneralToleranceEdit, HoleTableExistenceEdit, HoleTableEdit,
+                 AnnotationExistenceEdit, AnnotationEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

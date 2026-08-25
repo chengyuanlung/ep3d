@@ -12,11 +12,66 @@ namespace paramcad {
 
 namespace {
 
+
 using docjson::FieldError;
 using docjson::fieldError;
 using docjson::idFromString;
 using docjson::idToString;
 using docjson::requireField;
+
+// AN ANCHOR IS A REFERENCE, not a coordinate -- except for Free, which is a
+// coordinate on purpose. What is written is exactly what the resolver asks
+// again on the next rebuild.
+//
+// LIFTED OUT OF THE DIMENSION WRITER (M41). The symbols point at things the
+// same way a dimension does, and a second codec for the same struct is two
+// readings that drift: the day one of them learns a new anchor kind, files
+// written by one half stop opening in the other.
+JsonValue WriteDimensionAnchor(const DimensionAnchor& anchor) {
+    JsonValue out = JsonValue::makeObject();
+    out.set("kind", JsonValue::makeString(std::string(toString(anchor.kind))));
+    out.set("x", JsonValue::makeNumber(anchor.at.x));
+    out.set("y", JsonValue::makeNumber(anchor.at.y));
+    out.set("entityId", JsonValue::makeString(idToString(anchor.entityId)));
+    out.set("snapIndex", JsonValue::makeNumber(static_cast<double>(anchor.snapIndex)));
+    out.set("viewId", JsonValue::makeString(idToString(anchor.viewId)));
+    out.set("toleranceMm", JsonValue::makeNumber(anchor.toleranceMm));
+    return out;
+}
+
+// The other half of the same codec. Returns false with `err` filled for a
+// missing or mistyped field, and false with `err` untouched for an anchor kind
+// this build does not know -- which the caller turns into its own message.
+bool ReadDimensionAnchor(const JsonValue& entry, const char* key, const std::string& context,
+                         docjson::FieldError& err, DimensionAnchor& into) {
+    const JsonValue* at = requireField(entry, key, JsonType::Object, context, err);
+    if (at == nullptr) return false;
+    const JsonValue* kindField = requireField(*at, "kind", JsonType::String, context, err);
+    if (kindField == nullptr) return false;
+    if (kindField->asString() == "Free")
+        into.kind = DimensionAnchorKind::Free;
+    else if (kindField->asString() == "Entity")
+        into.kind = DimensionAnchorKind::Entity;
+    else if (kindField->asString() == "InView")
+        into.kind = DimensionAnchorKind::InView;
+    else
+        return false;
+    const JsonValue* x = requireField(*at, "x", JsonType::Number, context, err);
+    const JsonValue* y = requireField(*at, "y", JsonType::Number, context, err);
+    if (x == nullptr || y == nullptr) return false;
+    into.at = Vec2{x->asNumber(), y->asNumber()};
+    if (const JsonValue* entityId = at->find("entityId"))
+        if (const auto parsed = idFromString(entityId->asString())) into.entityId = *parsed;
+    if (const JsonValue* snapIndex = at->find("snapIndex"))
+        if (snapIndex->type() == JsonType::Number)
+            into.snapIndex = static_cast<int>(snapIndex->asNumber());
+    if (const JsonValue* viewId = at->find("viewId"))
+        if (const auto parsed = idFromString(viewId->asString())) into.viewId = *parsed;
+    if (const JsonValue* tolerance = at->find("toleranceMm"))
+        if (tolerance->type() == JsonType::Number && tolerance->asNumber() > 0.0)
+            into.toleranceMm = tolerance->asNumber();
+    return true;
+}
 
 DrawingLoadResult loadFailure(SerializationError error, std::string message) {
     return DrawingLoadResult{nullptr, error, std::move(message)};
@@ -212,6 +267,19 @@ SaveResult validateSaveable(const DrawingDocument& document) {
         if (document.findLayer(wire->layerId()) == nullptr)
             return SaveResult{SerializationError::UnknownDependencyId,
                               "a wire is on a layer that is not in this document"};
+    }
+
+    // v44 (M41). EVERY SYMBOL HAS TO BE ONE THAT CAN BE DRAWN, and the check
+    // is the DOCUMENT'S OWN -- the same call the loader makes below, and the
+    // same one the painter asks before drawing. Written out here as its own
+    // list of rules it would be a third reading of ISO 1101, and the day one
+    // of the three was corrected the other two would still be wrong.
+    for (const Annotation* annotation : document.annotations()) {
+        if (const SaveResult bad = claim(annotation->id(), "symbol"); !bad) return bad;
+        const std::string why = document.whyAnnotationRefused(annotation->id());
+        if (!why.empty())
+            return SaveResult{SerializationError::InvalidFieldType,
+                              "a symbol on this sheet cannot be drawn: " + why};
     }
 
     // v43 (M39). A HOLE TABLE IS A TABLE OF A VIEW'S HOLES, so that view has
@@ -496,20 +564,7 @@ JsonValue toJson(const DrawingDocument& document) {
              JsonValue::makeString(idToString(document.currentDimensionStyleId())));
 
     JsonValue dimensions = JsonValue::makeArray();
-    const auto anchorToJson = [](const DimensionAnchor& anchor) {
-        JsonValue out = JsonValue::makeObject();
-        out.set("kind", JsonValue::makeString(std::string(toString(anchor.kind))));
-        // AN ANCHOR IS A REFERENCE, not a coordinate -- except for Free, which
-        // is a coordinate on purpose. What is written is exactly what the
-        // resolver asks again on the next rebuild.
-        out.set("x", JsonValue::makeNumber(anchor.at.x));
-        out.set("y", JsonValue::makeNumber(anchor.at.y));
-        out.set("entityId", JsonValue::makeString(idToString(anchor.entityId)));
-        out.set("snapIndex", JsonValue::makeNumber(static_cast<double>(anchor.snapIndex)));
-        out.set("viewId", JsonValue::makeString(idToString(anchor.viewId)));
-        out.set("toleranceMm", JsonValue::makeNumber(anchor.toleranceMm));
-        return out;
-    };
+    const auto& anchorToJson = WriteDimensionAnchor;
     for (const DrawingDimension* dimension : document.dimensions()) {
         JsonValue item = JsonValue::makeObject();
         item.set("id", JsonValue::makeString(idToString(dimension->id())));
@@ -634,6 +689,58 @@ JsonValue toJson(const DrawingDocument& document) {
         holeTables.add(std::move(item));
     }
     root.set("holeTables", std::move(holeTables));
+
+    // v44 (M41). One array for all three symbols, because they are one object
+    // with three bodies. A DATUM'S LETTER IS NOT WRITTEN: it is derived from
+    // the order below, and a stored letter would be a second answer that goes
+    // stale the first time a datum is deleted.
+    JsonValue symbols = JsonValue::makeArray();
+    for (const Annotation* annotation : document.annotations()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(annotation->id())));
+        item.set("xMm", JsonValue::makeNumber(annotation->positionMm().x));
+        item.set("yMm", JsonValue::makeNumber(annotation->positionMm().y));
+        item.set("layerId", JsonValue::makeString(idToString(annotation->layerId())));
+        item.set("anchor", WriteDimensionAnchor(annotation->anchor()));
+
+        if (const auto* finish = std::get_if<SurfaceFinishSpec>(&annotation->body())) {
+            item.set("kind", JsonValue::makeString("surface-finish"));
+            item.set("symbol", JsonValue::makeString(std::string(toString(finish->symbol))));
+            item.set("raMicrometres", JsonValue::makeNumber(finish->raMicrometres));
+            item.set("raLowerMicrometres",
+                     JsonValue::makeNumber(finish->raLowerMicrometres));
+            item.set("process", JsonValue::makeString(finish->process));
+            item.set("lay", JsonValue::makeString(std::string(toString(finish->lay))));
+            item.set("machiningAllowanceMm",
+                     JsonValue::makeNumber(finish->machiningAllowanceMm));
+            item.set("allAround", JsonValue::makeBool(finish->allAround));
+        } else if (const auto* frame =
+                       std::get_if<FeatureControlFrameSpec>(&annotation->body())) {
+            item.set("kind", JsonValue::makeString("frame"));
+            item.set("characteristic",
+                     JsonValue::makeString(std::string(toString(frame->characteristic))));
+            item.set("toleranceMm", JsonValue::makeNumber(frame->toleranceMm));
+            item.set("diametricZone", JsonValue::makeBool(frame->diametricZone));
+            item.set("condition",
+                     JsonValue::makeString(std::string(toString(frame->condition))));
+            JsonValue datums = JsonValue::makeArray();
+            for (const DatumReference& reference : frame->datums) {
+                JsonValue one = JsonValue::makeObject();
+                one.set("datumId", JsonValue::makeString(idToString(reference.datumId)));
+                one.set("condition",
+                        JsonValue::makeString(std::string(toString(reference.condition))));
+                datums.add(std::move(one));
+            }
+            item.set("datums", std::move(datums));
+        } else {
+            item.set("kind", JsonValue::makeString("datum"));
+            const auto* datum = std::get_if<DatumFeatureSpec>(&annotation->body());
+            item.set("note", JsonValue::makeString(datum != nullptr ? datum->note
+                                                                    : std::string{}));
+        }
+        symbols.add(std::move(item));
+    }
+    root.set("symbols", std::move(symbols));
 
     // v40 (M36). A component stores a SENTENCE -- which symbol, where, which
     // way round -- and not the geometry (ADR-M22-003): copying the shapes in
@@ -1458,37 +1565,8 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                            direction->asString() + "'");
             }
 
-            const auto readAnchor = [&](const char* key, DimensionAnchor& into) -> bool {
-                const JsonValue* at = requireField(entry, key, JsonType::Object, context, err);
-                if (at == nullptr) return false;
-                const JsonValue* kindField =
-                    requireField(*at, "kind", JsonType::String, context, err);
-                if (kindField == nullptr) return false;
-                if (kindField->asString() == "Free")
-                    into.kind = DimensionAnchorKind::Free;
-                else if (kindField->asString() == "Entity")
-                    into.kind = DimensionAnchorKind::Entity;
-                else if (kindField->asString() == "InView")
-                    into.kind = DimensionAnchorKind::InView;
-                else
-                    return false;
-                const JsonValue* x = requireField(*at, "x", JsonType::Number, context, err);
-                const JsonValue* y = requireField(*at, "y", JsonType::Number, context, err);
-                if (x == nullptr || y == nullptr) return false;
-                into.at = Vec2{x->asNumber(), y->asNumber()};
-                if (const JsonValue* entityId = at->find("entityId"))
-                    if (const auto parsed = idFromString(entityId->asString()))
-                        into.entityId = *parsed;
-                if (const JsonValue* snapIndex = at->find("snapIndex"))
-                    if (snapIndex->type() == JsonType::Number)
-                        into.snapIndex = static_cast<int>(snapIndex->asNumber());
-                if (const JsonValue* viewId = at->find("viewId"))
-                    if (const auto parsed = idFromString(viewId->asString()))
-                        into.viewId = *parsed;
-                if (const JsonValue* tolerance = at->find("toleranceMm"))
-                    if (tolerance->type() == JsonType::Number && tolerance->asNumber() > 0.0)
-                        into.toleranceMm = tolerance->asNumber();
-                return true;
+            const auto readAnchor = [&](const char* key, DimensionAnchor& into) {
+                return ReadDimensionAnchor(entry, key, context, err, into);
             };
             if (!readAnchor("first", one.first) || !readAnchor("second", one.second))
                 // `readAnchor` fills `err` for a missing or mistyped field and
@@ -1776,6 +1854,15 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         bool growsUpward = true;
         long long sourceStamp = 0;
     };
+    struct SymbolData {
+        ObjectId id = kInvalidObjectId;
+        AnnotationBody body;
+        DimensionAnchor anchor;
+        Vec2 positionMm{};
+        ObjectId layerId = kInvalidObjectId;
+    };
+    std::vector<SymbolData> symbolData;
+
     struct HoleTableData {
         ObjectId id = kInvalidObjectId;
         std::string name;
@@ -1787,6 +1874,156 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     };
     std::vector<HoleTableData> holeTableData;
     std::vector<BomData> bomData;
+    if (const JsonValue* field = root.find("symbols")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'symbols' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "symbols[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            SymbolData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+
+            const JsonValue* x = requireField(entry, "xMm", JsonType::Number, context, err);
+            const JsonValue* y = requireField(entry, "yMm", JsonType::Number, context, err);
+            if (x == nullptr || y == nullptr) return loadFailure(err.error, err.message);
+            one.positionMm = Vec2{x->asNumber(), y->asNumber()};
+            if (const JsonValue* layerId = entry.find("layerId"))
+                if (const auto parsed = idFromString(layerId->asString()))
+                    one.layerId = *parsed;
+            // THE SAME CODEC A DIMENSION USES. Not a second reading of the
+            // same struct -- see WriteDimensionAnchor.
+            if (!ReadDimensionAnchor(entry, "anchor", context, err, one.anchor))
+                // ReadDimensionAnchor fills `err` for a missing or mistyped
+                // field and leaves it untouched for an anchor kind this build
+                // does not know -- the same contract the dimension reader
+                // relies on, so the two failures keep their own messages.
+                return err.ok() ? loadFailure(SerializationError::InvalidEnumValue,
+                                              context + ": this symbol points at something in "
+                                                        "a way this build does not know")
+                                : loadFailure(err.error, err.message);
+
+            const JsonValue* kind = requireField(entry, "kind", JsonType::String, context, err);
+            if (kind == nullptr) return loadFailure(err.error, err.message);
+            if (kind->asString() == "surface-finish") {
+                SurfaceFinishSpec finish;
+                const JsonValue* symbol =
+                    requireField(entry, "symbol", JsonType::String, context, err);
+                if (symbol == nullptr) return loadFailure(err.error, err.message);
+                // REFUSED, NOT DEFAULTED. "Material must be removed" and
+                // "material must NOT be removed" are opposite instructions,
+                // and quietly picking one scraps either a casting or a batch.
+                if (!ParseSurfaceSymbol(symbol->asString(), finish.symbol))
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       context + ": unknown surface symbol '" +
+                                           symbol->asString() + "'");
+                const JsonValue* ra =
+                    requireField(entry, "raMicrometres", JsonType::Number, context, err);
+                if (ra == nullptr) return loadFailure(err.error, err.message);
+                finish.raMicrometres = ra->asNumber();
+                if (const JsonValue* lower = entry.find("raLowerMicrometres"))
+                    if (lower->type() == JsonType::Number)
+                        finish.raLowerMicrometres = lower->asNumber();
+                if (const JsonValue* process = entry.find("process"))
+                    if (process->type() == JsonType::String) finish.process = process->asString();
+                if (const JsonValue* lay = entry.find("lay")) {
+                    if (lay->type() != JsonType::String)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'lay' is not a string");
+                    if (!ParseSurfaceLay(lay->asString(), finish.lay))
+                        return loadFailure(SerializationError::InvalidEnumValue,
+                                           context + ": unknown lay '" + lay->asString() + "'");
+                }
+                if (const JsonValue* allowance = entry.find("machiningAllowanceMm"))
+                    if (allowance->type() == JsonType::Number)
+                        finish.machiningAllowanceMm = allowance->asNumber();
+                if (const JsonValue* around = entry.find("allAround"))
+                    if (around->type() == JsonType::Bool) finish.allAround = around->asBool();
+                one.body = std::move(finish);
+            } else if (kind->asString() == "frame") {
+                FeatureControlFrameSpec frame;
+                const JsonValue* characteristic =
+                    requireField(entry, "characteristic", JsonType::String, context, err);
+                if (characteristic == nullptr) return loadFailure(err.error, err.message);
+                // A characteristic this build does not know would otherwise
+                // become the default -- position -- and a flatness frame read
+                // as a position frame is a different specification entirely.
+                if (!ParseGeometricCharacteristic(characteristic->asString(),
+                                                  frame.characteristic))
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       context + ": unknown characteristic '" +
+                                           characteristic->asString() + "'");
+                const JsonValue* tolerance =
+                    requireField(entry, "toleranceMm", JsonType::Number, context, err);
+                if (tolerance == nullptr) return loadFailure(err.error, err.message);
+                frame.toleranceMm = tolerance->asNumber();
+                if (const JsonValue* zone = entry.find("diametricZone"))
+                    if (zone->type() == JsonType::Bool) frame.diametricZone = zone->asBool();
+                if (const JsonValue* condition = entry.find("condition")) {
+                    if (condition->type() != JsonType::String)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'condition' is not a string");
+                    if (!ParseMaterialCondition(condition->asString(), frame.condition))
+                        return loadFailure(SerializationError::InvalidEnumValue,
+                                           context + ": unknown material condition '" +
+                                               condition->asString() + "'");
+                }
+                if (const JsonValue* datums = entry.find("datums")) {
+                    if (datums->type() != JsonType::Array)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'datums' is not an array");
+                    for (const JsonValue& each : datums->items()) {
+                        if (each.type() != JsonType::Object)
+                            return loadFailure(SerializationError::InvalidFieldType,
+                                               context + ": a datum reference is not an object");
+                        DatumReference reference;
+                        const JsonValue* datumId =
+                            requireField(each, "datumId", JsonType::String, context, err);
+                        if (datumId == nullptr) return loadFailure(err.error, err.message);
+                        const auto parsed = idFromString(datumId->asString());
+                        if (!parsed.has_value() || *parsed > kMaxObjectId)
+                            return loadFailure(SerializationError::InvalidFieldType,
+                                               context + ": a datum reference is not a valid id");
+                        reference.datumId = *parsed;
+                        if (const JsonValue* condition = each.find("condition")) {
+                            if (condition->type() != JsonType::String)
+                                return loadFailure(SerializationError::InvalidFieldType,
+                                                   context + ": a datum's condition is not a "
+                                                             "string");
+                            if (!ParseMaterialCondition(condition->asString(),
+                                                        reference.condition))
+                                return loadFailure(SerializationError::InvalidEnumValue,
+                                                   context + ": unknown material condition '" +
+                                                       condition->asString() + "'");
+                        }
+                        frame.datums.push_back(reference);
+                    }
+                }
+                one.body = std::move(frame);
+            } else if (kind->asString() == "datum") {
+                DatumFeatureSpec datum;
+                if (const JsonValue* note = entry.find("note"))
+                    if (note->type() == JsonType::String) datum.note = note->asString();
+                one.body = std::move(datum);
+            } else {
+                return loadFailure(SerializationError::InvalidEnumValue,
+                                   context + ": '" + kind->asString() +
+                                       "' is not a symbol this build knows");
+            }
+            symbolData.push_back(std::move(one));
+        }
+    }
+
     if (const JsonValue* field = root.find("holeTables")) {
         if (field->type() != JsonType::Array)
             return loadFailure(SerializationError::InvalidFieldType,
@@ -2263,6 +2500,28 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     for (auto& one : wireData)
         document->restoreWire(one.id, std::move(one.pointsMm), one.layerId,
                               std::move(one.label));
+    // THE DATUMS FIRST, so a frame restored after them can find the datum it
+    // names. Written in one array and separated here, because the ORDER a
+    // datum sits in that array is what its letter is derived from -- reading
+    // datums out of order would re-letter the drawing.
+    for (auto& one : symbolData)
+        if (std::holds_alternative<DatumFeatureSpec>(one.body))
+            document->restoreAnnotation(one.id, one.body, one.anchor, one.positionMm,
+                                        one.layerId);
+    for (auto& one : symbolData)
+        if (!std::holds_alternative<DatumFeatureSpec>(one.body))
+            document->restoreAnnotation(one.id, one.body, one.anchor, one.positionMm,
+                                        one.layerId);
+    // ...AND THEN THE SAME CHECK THE SAVER MAKES (ADR-M3-008). Not a second
+    // list of rules here: the document is asked, exactly as it is asked before
+    // writing, so what one refuses the other refuses and neither can drift.
+    for (const auto& one : symbolData) {
+        const std::string why = document->whyAnnotationRefused(one.id);
+        if (!why.empty())
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "a symbol in this file cannot be drawn: " + why);
+    }
+
     for (auto& one : holeTableData) {
         // THE VIEW HAS TO BE HERE, and it is by now -- views are restored
         // first. A table pointing at nothing would come back as an empty box

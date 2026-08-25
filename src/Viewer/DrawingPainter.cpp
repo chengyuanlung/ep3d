@@ -518,6 +518,93 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
         ++tally.curves;
     }
 
+    // --- THE SYMBOLS (M41) ---------------------------------------------------
+    //
+    // Drawn from the document's answers, not from the specifications: what a
+    // frame SAYS is asked for, letters and all, so the box on the paper cannot
+    // carry a letter the datum does not.
+    for (const Annotation* annotation : document.annotations()) {
+        const QString said = QString::fromStdString(document.annotationText(annotation->id()));
+        const std::optional<Vec2> tip = document.annotationLeaderTipMm(annotation->id());
+        const Vec2 at = annotation->positionMm();
+
+        QFont symbolFont = painter.font();
+        symbolFont.setPixelSize(std::max(6, static_cast<int>(3.0 * page.pixelsPerMm)));
+        painter.setFont(symbolFont);
+        const QFontMetricsF metrics(symbolFont);
+
+        // A DANGLING SYMBOL IS DRAWN IN THE ALARM COLOUR AND COUNTED. It still
+        // draws -- deleting it would throw away what the drafter said -- but
+        // it must not look like one that is attached.
+        const QColor ink2 = tip.has_value() ? ink : QColor(190, 60, 40);
+        painter.setPen(QPen(ink2, 1.0));
+        if (!tip.has_value()) ++tally.danglingSymbols;
+
+        // THE LEADER, from the symbol to the thing it is about.
+        if (tip.has_value())
+            painter.drawLine(page.toScreen(at), page.toScreen(*tip));
+
+        if (said.isEmpty()) {
+            // The specification cannot be written. Said out loud rather than
+            // drawn as an empty box, which is what it would otherwise be.
+            ++tally.unreadableSymbols;
+            painter.setPen(QPen(QColor(190, 60, 40)));
+            painter.drawText(page.toScreen(at), QStringLiteral("?"));
+            continue;
+        }
+
+        const double width = metrics.horizontalAdvance(said);
+        const double height = metrics.height();
+        const QPointF corner = page.toScreen(at);
+        if (annotation->isFrame()) {
+            // A FEATURE CONTROL FRAME IS A BOX. Without the box it is a line
+            // of symbols a reader has no reason to read as a specification.
+            // The padding is 5 either side rather than 3: at 3 the box closed
+            // on the last datum letter, which on the screenshot read as a
+            // letter clipped by the frame rather than one inside it.
+            painter.drawRect(QRectF(corner.x(), corner.y() - height, width + 10.0,
+                                    height + 2.0));
+            painter.drawText(QPointF(corner.x() + 5.0, corner.y() - 2.0), said);
+        } else if (annotation->isDatum()) {
+            // A DATUM IS A LETTER IN A BOX with a filled triangle at the end
+            // of its leader -- the triangle is what makes it a datum rather
+            // than a note.
+            const double box = std::max(width + 6.0, height + 2.0);
+            painter.drawRect(QRectF(corner.x(), corner.y() - height, box, height + 2.0));
+            painter.drawText(QPointF(corner.x() + 3.0, corner.y() - 2.0), said);
+            if (tip.has_value()) {
+                const QPointF point = page.toScreen(*tip);
+                const double size = std::max(3.0, 1.5 * page.pixelsPerMm);
+                QPolygonF triangle;
+                triangle << point << QPointF(point.x() - size, point.y() - size)
+                         << QPointF(point.x() + size, point.y() - size);
+                painter.setBrush(QBrush(ink2));
+                painter.drawPolygon(triangle);
+                painter.setBrush(Qt::NoBrush);
+            }
+        } else {
+            // THE ISO 1302 TICK. The bar across the top says material MUST be
+            // removed and the circle in the vee says it must NOT -- which is
+            // the whole difference between a machined face and a cast one.
+            const auto* finish = std::get_if<SurfaceFinishSpec>(&annotation->body());
+            const double tick = std::max(4.0, 2.5 * page.pixelsPerMm);
+            const QPointF root(corner.x(), corner.y());
+            const QPointF dip(corner.x() + tick * 0.5, corner.y() + tick * 0.5);
+            const QPointF peak(corner.x() + tick * 1.5, corner.y() - tick);
+            painter.drawLine(root, dip);
+            painter.drawLine(dip, peak);
+            if (finish != nullptr && finish->symbol == SurfaceSymbol::Machined)
+                painter.drawLine(peak, QPointF(peak.x() + width + 6.0, peak.y()));
+            if (finish != nullptr && finish->symbol == SurfaceSymbol::AsCast)
+                painter.drawEllipse(QPointF(corner.x() + tick * 0.75, corner.y() - tick * 0.1),
+                                    tick * 0.35, tick * 0.35);
+            if (finish != nullptr && finish->allAround)
+                painter.drawEllipse(root, tick * 0.3, tick * 0.3);
+            painter.drawText(QPointF(peak.x() + 2.0, peak.y() - 2.0), said);
+        }
+        ++tally.symbols;
+    }
+
     // --- THE HOLE TABLES, AND THE TAGS IN THE VIEW (M39.4) -------------------
     //
     // Drawn from ONE reading of the part. The row says A1 at (10, 40) and the

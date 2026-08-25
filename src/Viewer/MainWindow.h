@@ -350,6 +350,10 @@ public:
     QString setHoleStandardCommand(ObjectId featureId, const QString& designation, bool tapped,
                                    ClearanceFit fit, HoleKind kind);
     QString addHoleTableCommand(const QString& name, Vec2 positionMm, Vec2 datumMm);
+    // ONE COMMAND FOR ALL THREE SYMBOLS, because they are one object with
+    // three bodies -- three commands would be three places to forget the
+    // leader, and three ideas of what a refused symbol does.
+    QString addSymbolCommand(const AnnotationBody& body, Vec2 pointsAtMm, Vec2 positionMm);
     // THE IDS AND THE PICK ARE ARGUMENTS, not read off a selection.
     //
     // The last id is the object being edited and the rest are what it is
@@ -368,6 +372,10 @@ public:
     std::size_t drawnHoleRowsForTesting() const;
     std::size_t drawnHoleTagsForTesting() const;
     std::size_t uncountedHoleTablesForTesting() const;
+    // M41. Symbols drawn, and the two ways one can be wrong on the paper.
+    std::size_t drawnSymbolCountForTesting() const;
+    std::size_t danglingSymbolsForTesting() const;
+    std::size_t unreadableSymbolsForTesting() const;
     QString sectionLetterForTesting(ObjectId viewId) const;
     // The tag a new component of this kind would get: the symbol's prefix plus
     // the next free number. ONE answer, so the menu and a script agree.
@@ -868,6 +876,10 @@ private slots:
     // M39: what screw a hole is for, and the table that lists them all.
     void onHoleStandardRequested();
     void onHoleTableRequested();
+    // M41: the three symbols, one handler each over one command.
+    void onDatumRequested();
+    void onFeatureControlFrameRequested();
+    void onSurfaceFinishRequested();
     // M40: the sheet editing tools. One handler each, one command each --
     // every one of them a thin shell over a pure function in SheetEdits.h.
     void onSheetTrimRequested();
@@ -1136,6 +1148,9 @@ private:
     QAction* sectionViewAction_ = nullptr;
     QAction* holeStandardAction_ = nullptr;
     QAction* holeTableAction_ = nullptr;
+    QAction* datumAction_ = nullptr;
+    QAction* gdtFrameAction_ = nullptr;
+    QAction* surfaceFinishAction_ = nullptr;
     QAction* sheetTrimAction_ = nullptr;
     QAction* sheetExtendAction_ = nullptr;
     QAction* sheetFilletAction_ = nullptr;

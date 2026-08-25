@@ -2,6 +2,7 @@
 
 #include "Core/Document/DocumentBase.h"
 #include "Core/Drawing/BomTable.h"
+#include "Core/Drawing/Annotation.h"
 #include "Core/Drawing/HoleTable.h"
 #include "Core/Drawing/SheetEdits.h"
 #include "Core/Electrical/SchematicObjects.h"
@@ -382,6 +383,53 @@ public:
     // quantities are not: a table holding its own copy is a drawing stating
     // hole positions the part no longer has.
     HoleTableContents holesOf(const HoleTable& table) const;
+
+    // --- THE SYMBOLS (M41) ---------------------------------------------------
+    //
+    // Surface finish, feature control frame and datum, added the same way and
+    // through the same door, because they are one object with three bodies.
+    Annotation& addAnnotation(AnnotationBody body, DimensionAnchor anchor, Vec2 positionMm);
+    Annotation& restoreAnnotation(ObjectId id, AnnotationBody body, DimensionAnchor anchor,
+                                  Vec2 positionMm, ObjectId layerId);
+    std::vector<const Annotation*> annotations() const;
+    const Annotation* findAnnotation(ObjectId id) const noexcept;
+    bool setAnnotationPosition(ObjectId id, Vec2 positionMm);
+    bool setAnnotationBody(ObjectId id, AnnotationBody body);
+
+    // WHICH LETTER THIS DATUM IS: "A" for the first placed, "B" for the second.
+    //
+    // DERIVED from the order they were placed, and empty for an annotation that
+    // is not a datum. The symbol on the face and every frame that refers to it
+    // must carry the SAME letter, which is the trap M38's section letters were
+    // built to avoid -- so neither is typed and both ask here.
+    std::string datumLetterOf(ObjectId annotationId) const;
+
+    // WHAT THE SYMBOL SAYS, with its datums' current letters resolved. Empty
+    // when the annotation cannot be drawn -- ask whyAnnotationRefused.
+    std::string annotationText(ObjectId annotationId) const;
+    // Why it cannot be drawn, or empty when it can. A frame naming a datum
+    // that has been deleted lands here.
+    std::string whyAnnotationRefused(ObjectId annotationId) const;
+
+    // HOW MANY FRAMES STILL REFER TO THIS DATUM.
+    //
+    // Deleting a datum that frames still name is REFUSED, and this is what the
+    // refusal counts. The alternatives are worse: cascading the delete throws
+    // away drafting work the user did not ask to lose, and letting the frames
+    // dangle leaves a document that cannot be saved -- a drawing a user cannot
+    // get out of, because of a delete nobody warned them about.
+    std::size_t framesReferringToDatum(ObjectId datumId) const;
+
+    // WHERE THE LEADER LANDS, in sheet millimetres, or nothing when the symbol
+    // has lost what it pointed at.
+    //
+    // A DANGLING LEADER IS NOT THE SAME AS AN UNDRAWABLE BODY, and the two are
+    // deliberately separate: the specification is still perfectly good, it is
+    // the attachment that has gone. So this does NOT stop a save -- a
+    // dimension that dangles does not either -- but the reader has to be told,
+    // because a finish symbol that quietly stays put beside a face that has
+    // moved says the wrong surface has to be ground.
+    std::optional<Vec2> annotationLeaderTipMm(ObjectId annotationId) const;
     // Which lists are counting a file that has changed since. The same
     // question a view answers, through the same content hash (M32.4).
     std::vector<ObjectId> staleBomTables() const;
@@ -547,6 +595,7 @@ private:
     DrawingDimension* findDimensionForEdit(ObjectId id) noexcept;
     BomTable* findBomTableForEdit(ObjectId id) noexcept;
     HoleTable* findHoleTableForEdit(ObjectId id) noexcept;
+    Annotation* findAnnotationForEdit(ObjectId id) noexcept;
     SymbolPlacement* findSymbolForEdit(ObjectId id) noexcept;
     WireEntity* findWireForEdit(ObjectId id) noexcept;
     DimensionStyle* findDimensionStyleForEdit(ObjectId id) noexcept;
@@ -575,6 +624,7 @@ private:
     ObjectId currentStyleId_{kInvalidObjectId};
     std::vector<std::unique_ptr<BomTable>> bomTables_;
     std::vector<std::unique_ptr<HoleTable>> holeTables_;
+    std::vector<std::unique_ptr<Annotation>> annotations_;
     std::vector<std::unique_ptr<SymbolPlacement>> symbols_;
     std::vector<std::unique_ptr<WireEntity>> wires_;
     TitleBlock titleBlock_;

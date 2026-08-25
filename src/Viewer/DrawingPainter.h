@@ -110,6 +110,13 @@ struct DrawnTally {
     // bomUncounted is: a table that came back empty looks exactly like a part
     // with no holes in it.
     std::size_t uncountedHoleTables = 0;
+    // M41. Symbols drawn, and the two ways one can be wrong. Counted apart
+    // because each is invisible on its own: a symbol whose leader has come
+    // adrift still draws, and one whose specification cannot be written draws
+    // as an empty box.
+    std::size_t symbols = 0;
+    std::size_t danglingSymbols = 0;
+    std::size_t unreadableSymbols = 0;
 };
 
 DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
