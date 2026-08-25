@@ -307,19 +307,20 @@ footer p { max-width: 74ch; }
 <body>
 <header class="masthead">
   <div class="wrap">
-    <div class="eyebrow">能力對照 · EP3D M36 · 2026-08-25</div>
+    <div class="eyebrow">能力對照 · EP3D M40 · 2026-08-25</div>
     <h1>EP3D 對照 Inventor</h1>
     <p class="sub">
-      一份工具列層級的落差清單。上一版寫於 M31，結論是「畫得出零件，送不出一張圖」——
-      那個洞在 M32–M36 補掉了：現在有工程圖、尺寸、標題欄、PDF 與 DXF 輸出、材料表，
-      還有 Inventor 本身沒有的電氣圖。剩下的差距換了位置，但沒有變小。
+      一份工具列層級的落差清單。上一版寫於 M36，那時的結論是「圖印得出來，但那張圖不完整」——
+      缺公差、缺剖視圖、缺孔的標準規格。M37–M40 把這四項補掉了：ISO 286 配合與 ISO 2768
+      一般公差、剖視圖與剖面線、依螺紋推導尺寸的孔與孔表，以及圖紙上的六個編修工具。
+      剩下的差距換了位置，也確實變小了 —— 但沒有消失。
     </p>
     <div class="stamp">
-      <div><span class="n">36</span><span class="l">里程碑</span></div>
-      <div><span class="n">2020</span><span class="l">測試</span></div>
+      <div><span class="n">40</span><span class="l">里程碑</span></div>
+      <div><span class="n">2127</span><span class="l">測試</span></div>
       <div><span class="n">3</span><span class="l">文件型別 / Inventor 為 5</span></div>
       <div><span class="n">7</span><span class="l">mate 型別 / Inventor 約 12</span></div>
-      <div><span class="n">0</span><span class="l">剖視圖／公差</span></div>
+      <div><span class="n">0</span><span class="l">GD&amp;T／表面符號</span></div>
     </div>
   </div>
 </header>
@@ -378,7 +379,7 @@ footer p { max-width: 74ch; }
         <div class="panel">
           <div class="panel-name"><b>修改</b><span class="frac">5 / 11</span></div>
           <div class="chips">
-            <span class="chip c-partial">孔<small>Hole</small></span>
+            <span class="chip c-have">孔<small>Hole</small></span>
             <span class="chip c-partial">圓角<small>Fillet</small></span>
             <span class="chip c-have">倒角<small>Chamfer</small></span>
             <span class="chip c-have">薄殼<small>Shell</small></span>
@@ -460,10 +461,24 @@ footer p { max-width: 74ch; }
     </p>
 
     <div class="callout">
-      <h3>差最多的一格：孔</h3>
+      <h3>孔：上一版差最多的一格（M39 補掉）</h3>
       <p>
-        EP3D 的 Hole 只有直孔，通孔或盲孔。<b>沒有沉頭、埋頭、螺紋，也沒有 M6×1.0 那種標準規格</b>，
-        更沒有孔標註。Inventor 的孔特徵本身就是一個裝滿的對話框，它撐著整個緊固件工作流。
+        上一版這裡寫「只有直孔，沒有沉頭、埋頭、螺紋，也沒有 M6×1.0 那種標準規格」。
+        現在孔存的是<b>一句話</b>——「M8x1.25，攻牙」——而<b>每個數字都從那句話查表得出</b>：
+        攻牙孔鑽 6.8，通孔依 ISO 273 的近／中／遠三級鑽 8.4／9.0／10.0，
+        沉頭與埋頭依 DIN 974-1 與 ISO 7046 取尺寸。同一個函式同時算出<b>要切的幾何</b>和
+        <b>圖上要寫的字</b>，所以「圖上寫 M8、孔卻鑽成別的尺寸」這件事沒有發生的路徑。
+      </p>
+      <p style="margin-top:.75rem">
+        <b>表，不是公式。</b>「攻牙鑽頭 = 公稱 − 螺距」在十九個尺寸裡對十七個，
+        錯的偏偏是 M8 和 M12（給 6.75 與 10.25，標準是 6.8 與 10.2）—— 全世界最常用的兩個螺紋。
+        表裡沒有的尺寸一律拒絕，不內插：孔標註是一份加工指示，猜出來的數字等於自己編一個標準。
+      </p>
+      <p style="margin-top:.75rem">
+        <b>螺紋本身不建模。</b>攻牙孔是一個鑽頭尺寸的圓柱，加上寫在它身上的螺紋規格 ——
+        這也是每一套值得用的 CAD 的做法：真的建螺旋會讓檔案變大、剖面難讀、布林脆弱，
+        而現場看的那張圖無論如何都只寫 M8x1.25。<b>剩下的差距是標準件庫</b>：
+        孔知道 M8，但沒有 M8 螺絲可以放進去。
       </p>
     </div>
   </div>
@@ -622,12 +637,13 @@ footer p { max-width: 74ch; }
 <section>
   <div class="wrap">
     <header>
-      <div class="eyebrow">M32 – M36 · 新的一整塊</div>
+      <div class="eyebrow">M32 – M40 · 新的一整塊</div>
       <h2>工程圖與電氣圖</h2>
       <p>
-        上一版這一格是「完全沒有」，而且被列為「如果只補一項」的那一項。
-        它現在是第三種文件型別，和零件、組合件共用序列化、undo、相依圖、選取與 UI 樹。
-        下面逐項寫清楚<b>做到哪裡</b>，以及<b>停在哪裡</b> —— 一張沒有公差的圖，在很多零件上還是不能拿去加工。
+        M31 的版本這一格是「完全沒有」，M36 的版本是「有，但沒有公差也沒有剖視圖」。
+        M37–M40 之後，這一節裡上一版標成紅色的四項有三項變綠了。
+        它是第三種文件型別，和零件、組合件共用序列化、undo、相依圖、選取與 UI 樹。
+        下面逐項寫清楚<b>做到哪裡</b>，以及<b>停在哪裡</b>。
       </p>
     </header>
 
@@ -659,26 +675,30 @@ footer p { max-width: 74ch; }
               <td class="note">本層／全展開兩種；相同零件合併成一列加數量（「相同」是同檔案同 body，不是同名稱）。<b>數量是每次畫的時候現算的</b>，檔案裡沒有那個數字。</td></tr>
           <tr><td class="who">電氣圖</td><td><span class="pill p-have">有</span></td>
               <td class="note">9 個 IEC 60617 符號（電阻、電容、線圈、常開／常閉接點、端子、保險絲、三相馬達、指示燈）、導線、<b>導出的</b> netlist、線號編排。接腳名稱用端子上真正印的號碼（A1/A2、13/14、11/12）。<b>Inventor 沒有這個模組</b>；AutoCAD Electrical 是另一個產品。</td></tr>
+          <tr><td class="who">公差 <span class="mono" style="font-size:.72rem;color:var(--ink-3)">M37</span></td><td><span class="pill p-have">有</span></td>
+              <td class="note">對稱（±）、上下偏差、上下限、基本尺寸、以及<b>配合代號</b>（H7、g6、h6…）。配合存的是<b>代號</b>，偏差每次從尺寸現算 —— 模型一改，偏差跟著改。ISO 286 的 IT 級距與軸偏差是<b>抄下來的表</b>不是公式：公式在四個級距上差一個微米，而在精密配合上一個微米就是全部的爭點。另有 ISO 2768 一般公差（f／m／c／v 四級），寫在標題欄旁邊。</td></tr>
+          <tr><td class="who">剖視圖 <span class="mono" style="font-size:.72rem;color:var(--ink-3)">M38</span></td><td><span class="pill p-have">有</span></td>
+              <td class="note">在父視圖上畫一條剖切線（兩點加箭頭方向），平面<b>每次重算時才從父視圖的相機推導</b> —— 父視圖一轉，剖面跟著轉。存平面的話，轉過之後就會得到一張很漂亮、切在剖切線已經不經過的地方的圖。切割用半空間相減；<b>剖面線</b>用掃描線加奇偶規則，角度依剖面字母交替，節距是<b>紙上的</b>尺寸而不是模型的（1:10 的剖面不會填成一團黑）。</td></tr>
+          <tr><td class="who">孔表 <span class="mono" style="font-size:.72rem;color:var(--ink-3)">M39</span></td><td><span class="pill p-have">有</span></td>
+              <td class="note">TAG／X／Y／說明四欄，每一欄都是<b>從零件現算的</b>：位置來自孔特徵的草圖點，說明來自和切削同一個函式。標籤是<b>依尺寸分組</b>的（A1、A2、B1），因為讀圖的人要知道「這六個是同一種孔」。基準是<b>圖紙上宣告的</b>那個角，不是建模者當初隨手畫的原點。表格屬於<b>視圖</b>而不是檔案 —— 帶自己來源路徑的表格可以指到另一個零件，而每一列都還會是某個零件的正確資料。</td></tr>
+          <tr><td class="who">圖紙上的編輯工具 <span class="mono" style="font-size:.72rem;color:var(--ink-3)">M40</span></td><td><span class="pill p-have">有</span></td>
+              <td class="note">TRIM、EXTEND、FILLET、CHAMFER、OFFSET、ARRAY。每一個都吃<b>點選點</b>——不是旗標、不是側別、不是慣例 —— 因為這六個工具的錯法都一樣：<b>對錯的那一塊做了非常合理的事</b>，而點選點是唯一能區分兩個同樣合法答案的東西。全部是純函式，一次 undo 還原整個編修。</td></tr>
 
           <tr><td class="who">尺寸的關聯性</td><td><span class="pill p-partial">近似</span></td>
               <td class="note">視圖<b>內</b>的尺寸重新投影後，會在容差內找回最近的投影點；找不到就大聲失效。這是刻意標明的<b>近似</b>，不是拓樸參照 —— 真正的做法是像 <span class="mono">FaceQuery</span> 那樣的邊參照，已記為欠帳。</td></tr>
           <tr><td class="who">一個檔案一張紙</td><td><span class="pill p-partial">單張</span></td>
               <td class="note">標題欄有「1 / 1」那一列，但一個工程圖檔目前只有一張圖紙。多張圖紙、圖紙集、跨頁交叉參照都還沒有。</td></tr>
 
-          <tr><td class="who">剖視圖／局部放大／破斷</td><td><span class="pill p-none">沒有</span></td>
-              <td class="note">視圖方向只有六面加等角。剖視需要在模型上切一刀再投影，是<b>新的幾何操作</b>而不是新的視圖種類。</td></tr>
-          <tr><td class="who">公差</td><td><span class="pill p-none">沒有</span></td>
-              <td class="note">尺寸公差、配合（H7/g6）、一般公差表。<b>這是現在最要緊的一個洞</b>：沒有公差的尺寸，在任何要配合的零件上都是不完整的。</td></tr>
+          <tr><td class="who">局部放大／破斷視圖</td><td><span class="pill p-none">沒有</span></td>
+              <td class="note">剖視圖已經證明「一種新的視圖種類」這條路走得通，這兩項是同一條路上的。破斷還需要一套斷裂線的畫法。</td></tr>
           <tr><td class="who">幾何公差 GD&amp;T</td><td><span class="pill p-none">沒有</span></td>
-              <td class="note">形位公差框、基準符號。要先有公差才談得上。</td></tr>
+              <td class="note">形位公差框、基準符號。上一版寫「要先有公差才談得上」——<b>現在有了</b>，所以這一項換到了最前面。它跟尺寸公差不是同一件事：位置度與垂直度是關於<b>基準</b>的，而基準是圖上一個要被指名、被繼承、被量測的物件。</td></tr>
           <tr><td class="who">表面粗糙度／熔接符號</td><td><span class="pill p-none">沒有</span></td>
-              <td class="note">兩者都是「符號＋引線＋一組欄位」，機制和標註共用，但欄位規則各自是一套標準。</td></tr>
+              <td class="note">兩者都是「符號＋引線＋一組欄位」，機制和 GD&amp;T 框共用，欄位規則各自是一套標準。<b>幾乎每一張加工圖都有粗糙度</b>；沒有它的圖，表面要求是靠口頭傳的。</td></tr>
           <tr><td class="who">零件表泡泡球</td><td><span class="pill p-none">沒有</span></td>
               <td class="note">材料表已經有 ITEM 欄，泡泡球要參照那個列號 —— 設計時已經留位，還沒做。</td></tr>
-          <tr><td class="who">孔表／修訂表</td><td><span class="pill p-none">沒有</span></td>
-              <td class="note">孔表要先有孔特徵（見下一節）。</td></tr>
-          <tr><td class="who">圖紙上的編輯工具</td><td><span class="pill p-none">沒有</span></td>
-              <td class="note">TRIM、EXTEND、FILLET、CHAMFER、OFFSET、ARRAY。<b>幾何已經寫好</b>（<span class="mono">Geometry2D.h</span> 裡的交點與弧計算），缺的是指令與互動 —— M33 記下的欠帳。</td></tr>
+          <tr><td class="who">修訂表</td><td><span class="pill p-none">沒有</span></td>
+              <td class="note">機制和材料表、孔表同一套（導出的列＋存下來的位置），缺的是修訂本身要存在哪裡 —— 那是版本管理的問題，不是表格的問題。</td></tr>
         </tbody>
       </table>
     </div>
@@ -702,8 +722,8 @@ footer p { max-width: 74ch; }
         <tbody>
           <tr>
             <td class="who">工程圖<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">.ep3dd</span></td>
-            <td><span class="pill p-partial">有，缺公差與剖視</span></td>
-            <td class="note">上一版這裡寫「目前最大的一個洞」。M32–M36 補掉了主體：視圖投影、隱線消除、尺寸、標題欄、框線、材料表、PDF 與 DXF 輸出。<b>剩下的是剖視圖與公差</b> —— 見上一節逐項。</td>
+            <td><span class="pill p-partial">有，缺 GD&amp;T 與表面符號</span></td>
+            <td class="note">M31 的版本這裡寫「目前最大的一個洞」，M36 的版本寫「剩下的是剖視圖與公差」。兩項都做完了：視圖投影、隱線消除、尺寸、公差與配合、剖視圖與剖面線、孔表、標題欄、框線、材料表、圖紙編修工具、PDF 與 DXF 輸出。<b>剩下的是符號類的標註</b>——GD&amp;T、表面粗糙度、熔接、泡泡球 —— 以及一個檔案多張圖紙。</td>
           </tr>
           <tr>
             <td class="who">電氣圖<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">同 .ep3dd</span></td>
@@ -790,23 +810,34 @@ footer p { max-width: 74ch; }
       <h2>如果只補一項</h2>
     </header>
     <div class="callout">
-      <h3>公差。</h3>
+      <h3>表面粗糙度與 GD&amp;T —— 同一套符號機制。</h3>
       <p>
-        上一版這裡寫的是「工程圖」，那一項已經做完了 ——
-        而且成本確實比第二個文件型別低得多，M23 抽出來的共用機制付了大部分帳。
+        上一版這裡寫的是「公差」，前一版是「工程圖」。兩項都做完了，
+        而且成本都確實比看起來低：共用機制先付掉了大部分帳。
       </p>
       <p style="margin-top:.75rem">
-        現在換公差站在同一個位置，理由也一樣：其他每一項都是「Inventor 多一個能力」，
-        公差是<b>「EP3D 印得出圖，但那張圖不完整」</b>。
-        一個要配合的孔沒有 H7，加工的人只能打電話問；一張沒有一般公差表的圖，每個未標註的尺寸都是未定義的。
-        機制上它也不貴：尺寸文字、標註樣式、DXF 與 PDF 輸出都已經在了，公差是<b>接在既有尺寸上的一組欄位</b>，
-        不是新的幾何。
+        現在換這一組站在同一個位置，理由也一樣 —— 其他每一項都是「Inventor 多一個能力」，
+        這一組是<b>「EP3D 印得出圖，但那張圖不完整」</b>。
+        幾乎每一張加工圖都有粗糙度符號；沒有它，表面要求靠口頭傳。
+        而位置度與垂直度是<b>公差管不到的另一半</b>：一個孔的直徑在 H7 之內、位置差了兩毫米，
+        每個尺寸都合格而零件裝不上。
+      </p>
+      <p style="margin-top:.75rem">
+        機制上它們是<b>同一件事</b>：符號 ＋ 引線 ＋ 一組欄位。引線在標註裡已經有了，
+        欄位規則各自是一套標準（ISO 1302、ISO 1101）—— 也就是說，和 M37 的配合表、
+        M39 的螺紋表一樣，<b>抄下來的表加上「查不到就拒絕」</b>，而不是新的幾何。
+        GD&amp;T 多一件事要先想清楚：<b>基準</b>是圖上一個會被指名、被繼承、被量測的物件，
+        不只是一個字母。
       </p>
     </div>
     <ul style="margin-top:1.25rem;max-width:74ch">
-      <li><b>其次是剖視圖。</b>它跟公差不同 —— 需要在模型上真的切一刀再投影，是新的幾何操作。有它之前，任何有內部特徵的零件都畫不完整。</li>
-      <li><b>再其次是孔。</b>沉頭、埋頭、螺紋、標準規格 —— 它撐著整個緊固件工作流，而且不需要新的幾何觀念。孔表也要等它。</li>
-      <li><b>圖紙上的 TRIM／EXTEND／FILLET</b> 是便宜的一筆：幾何在 <span class="mono">Geometry2D.h</span> 裡已經寫好也測過，缺的只是指令與互動。</li>
+      <li><b>其次是泡泡球。</b>材料表已經有 ITEM 欄，引線也已經在了 —— 缺的是把兩者接起來。
+        沒有它，一張組合圖上的零件表<b>沒有辦法對回圖上的零件</b>，那份表就只能用眼睛猜。</li>
+      <li><b>再其次是拓樸參照（<span class="mono">EdgeQuery</span>）。</b>視圖內的尺寸目前是用容差找回最近的投影點 ——
+        刻意標明的近似。有了剖視圖之後這一項更要緊了：剖面的邊是布林產生的，而布林會把所有東西改名。</li>
+      <li><b>一個檔案多張圖紙。</b>標題欄已經有「1 / 1」那一列，但目前永遠是 1 / 1。</li>
+      <li><b>標準件庫</b>現在的位置變了：M39 之後孔知道 M8 是什麼，<b>但沒有 M8 螺絲可以放進去</b>。
+        它是資料問題不是幾何問題，成本在建資料來源。</li>
       <li><b>接觸求解</b>要不要做仍然值得先想清楚：它會改變組合件求解器的性質，不是加一個按鈕。</li>
     </ul>
   </div>
@@ -815,12 +846,16 @@ footer p { max-width: 74ch; }
 <footer>
   <div class="wrap">
     <p>
-      EP3D 側的每一項都是在 M36 的程式碼裡查證過的，不是憑印象：特徵清單來自
+      EP3D 側的每一項都是在 M40 的程式碼裡查證過的，不是憑印象：特徵清單來自
       <span class="mono">src/Core/Feature/</span>，約束清單來自 <span class="mono">SketchConstraint.h</span>，
       mate 型別來自 <span class="mono">Mate.h</span>，三張工具列是 <span class="mono">--selftest --screenshot</span> 抓的實圖。
-      工程圖那一節的每一格也一樣查過原始碼：說「沒有」的六項（剖視、公差、GD&amp;T、
-      表面粗糙度與熔接符號、泡泡球、圖紙編輯工具）在 <span class="mono">src/Core/Drawing/</span>
-      裡只出現在註解裡，沒有對應的型別或 API。
+      工程圖那一節的每一格也一樣查過原始碼。上一版說「沒有」的六項裡，四項現在有型別也有測試：
+      公差在 <span class="mono">Tolerance.h</span>，剖視與剖面線在 <span class="mono">Hatch.h</span>
+      與 <span class="mono">DrawingView::sectionCut</span>，孔表在 <span class="mono">HoleTable.h</span>，
+      圖紙編修工具在 <span class="mono">SheetEdits.h</span>；孔的標準規格在
+      <span class="mono">HoleStandards.h</span>。仍然說「沒有」的（GD&amp;T、表面粗糙度與熔接符號、
+      泡泡球、局部放大與破斷、修訂表、多張圖紙）在 <span class="mono">src/Core/</span> 裡
+      只出現在註解裡，沒有對應的型別或 API。
       Inventor 側的 ribbon 是示意重繪、非截圖，版本之間會有出入。
     </p>
   </div>
