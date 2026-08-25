@@ -11,6 +11,7 @@
 #include "Core/Serialization/PartDocumentSerializer.h"
 
 #include <filesystem>
+#include <fstream>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -92,10 +93,27 @@ SourceShapeResult ResolveAssembly(const std::string& sourcePath,
 } // namespace
 
 long long SourceFileStamp(const std::string& path) {
-    std::error_code error;
-    const auto written = std::filesystem::last_write_time(path, error);
-    if (error) return 0;
-    return static_cast<long long>(written.time_since_epoch().count());
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return 0;
+    // FNV-1a over the bytes, with the LENGTH mixed in at the end so a file
+    // that is a prefix of another cannot collide with it.
+    unsigned long long hash = 1469598103934665603ULL;
+    char buffer[8192];
+    unsigned long long length = 0;
+    while (in.read(buffer, sizeof(buffer)) || in.gcount() > 0) {
+        const std::streamsize got = in.gcount();
+        for (std::streamsize i = 0; i < got; ++i) {
+            hash ^= static_cast<unsigned char>(buffer[i]);
+            hash *= 1099511628211ULL;
+        }
+        length += static_cast<unsigned long long>(got);
+        if (!in) break;
+    }
+    hash ^= length;
+    hash *= 1099511628211ULL;
+    // Never 0, which means "could not be read" and must stay distinguishable
+    // from a file that happens to hash to nothing.
+    return static_cast<long long>(hash == 0 ? 1ULL : hash);
 }
 
 bool IsAssemblySourceFile(const std::string& path) {

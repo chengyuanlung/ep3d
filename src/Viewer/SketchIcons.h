@@ -136,6 +136,20 @@ enum class SketchIcon {
     // another, and the link is the only part of it a user can point at.
     AddRelation,
 
+    // --- Drawing (M32.4) ----------------------------------------------------
+    //
+    // Their own group again, drawn to read as being ABOUT PAPER: every one of
+    // them has a sheet outline in it, where an assembly icon has a filled
+    // block and a sketch icon is a bare line. That is the one visual rule this
+    // set follows, and it is what tells a user at a glance which document they
+    // are in.
+    NewDrawing,
+    BaseView,
+    ProjectedView,
+    UpdateViews,
+    SheetSetup,
+    DrawingLayer,
+
     Count
 };
 

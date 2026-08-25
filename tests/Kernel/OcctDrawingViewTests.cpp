@@ -14,6 +14,8 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -297,4 +299,62 @@ TEST(OcctDrawingViewTest, M32_STALE_003_ProjectedChildrenGoStaleWithTheirParent)
     WriteBlockPart(file.path, 200.0, 40.0, 10.0);
     EXPECT_EQ(drawing.staleViews().size(), 2u)
         << "only some of the views that read this model noticed it changed";
+}
+
+TEST(OcctDrawingViewTest, M32_STALE_004_TwoSavesInsideOneClockTickAreStillNoticed) {
+    // THE FLAKY TEST'S REAL CAUSE, pinned so it cannot come back.
+    //
+    // M32_STALE_001 passed alone and failed in a full run, because the first
+    // version of the stamp hashed `last_write_time` -- and two saves inside one
+    // filesystem timestamp tick are indistinguishable by mtime. That is not a
+    // test problem: a user who edits and saves quickly would get a drawing that
+    // says it is up to date and shows the old part.
+    //
+    // Writing twice with no delay is exactly that case, deliberately.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"quick.ep3d"};
+    WriteBlockPart(file.path, 100.0, 40.0, 10.0);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& front = drawing.addView("Front", file.path, "Block", ViewDirection::Front,
+                                         Vec2{150.0, 150.0});
+    ASSERT_TRUE(drawing.recompute().success) << front.diagnostic();
+    ASSERT_TRUE(drawing.staleViews().empty());
+
+    // No sleep. Whatever the clock does, the CONTENT changed.
+    WriteBlockPart(file.path, 250.0, 40.0, 10.0);
+    EXPECT_EQ(drawing.staleViews().size(), 1u)
+        << "a model rewritten inside one clock tick was not noticed";
+}
+
+TEST(OcctDrawingViewTest, M32_STALE_005_RewritingTheSameContentIsNOTAChange) {
+    // The other half, and the reason this is a content hash rather than a
+    // counter: saving a file without editing it should not send every view on
+    // the sheet back through hidden-line removal.
+    OcctGeometryKernel kernel;
+    ScratchPart file{"same.ep3d"};
+    WriteBlockPart(file.path, 100.0, 40.0, 10.0);
+
+    DrawingDocument drawing{"Plate"};
+    drawing.setGeometryKernel(&kernel);
+    DrawingView& front = drawing.addView("Front", file.path, "Block", ViewDirection::Front,
+                                         Vec2{150.0, 150.0});
+    ASSERT_TRUE(drawing.recompute().success) << front.diagnostic();
+
+    // WRITTEN BACK BYTE FOR BYTE. Calling WriteBlockPart again would NOT do
+    // it: a fresh PartDocument takes fresh ObjectIds, so the same part saved
+    // twice is genuinely two different files -- which this test discovered by
+    // failing, and which is worth knowing about the format.
+    std::string bytes;
+    {
+        std::ifstream in(file.path, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    {
+        std::ofstream out(file.path, std::ios::binary | std::ios::trunc);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+    EXPECT_TRUE(drawing.staleViews().empty())
+        << "re-saving an unchanged model marked every view out of date";
 }

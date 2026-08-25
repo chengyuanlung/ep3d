@@ -52,17 +52,30 @@ SourceShapeResult ResolveSourceShape(
 // Is this file an assembly? Asked of the header, not the extension.
 bool IsAssemblySourceFile(const std::string& path);
 
-// WHEN THAT FILE WAS LAST WRITTEN, as an opaque number, or 0 when it cannot
-// be read.
+// WHAT IS IN THAT FILE, as one number, or 0 when it cannot be read.
 //
 // A drawing view holds this so the shell can say WHICH views are behind their
 // models rather than offering "Update" against everything. It is a fact about
 // the disk, not about the document, so it is never serialized: a stamp written
 // to a file would describe a previous session and could only mislead.
 //
-// ZERO IS "UNKNOWN", not "very old". A missing file compares unequal to
-// everything including itself, which is the honest answer -- a view whose
-// model has been deleted is out of step in a way no timestamp captures.
+// THE CONTENT, NOT THE MODIFICATION TIME, and this is not belt-and-braces.
+//
+// The first version hashed `last_write_time` and it was FLAKY -- it passed
+// alone and failed in a full run. The cause is not the test: two saves that
+// land inside one filesystem timestamp tick are indistinguishable by mtime,
+// so a user who edits and saves quickly gets a drawing that says it is up to
+// date and shows the old part. That is precisely the failure this whole block
+// exists to prevent, and a check that can produce it is worse than no check,
+// because it is believed.
+//
+// The cost is a file read per view per ASK -- not per recompute. The resolver
+// already re-reads and rebuilds the whole model on every pass (ADR-M22-003),
+// so this is small beside what it guards.
+//
+// ZERO IS "UNKNOWN", not "empty". A missing file compares unequal to a stamp
+// taken from a real one, which is the honest answer -- a view whose model has
+// been deleted is out of step in a way no comparison of contents captures.
 long long SourceFileStamp(const std::string& path);
 
 } // namespace paramcad

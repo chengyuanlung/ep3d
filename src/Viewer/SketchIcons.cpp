@@ -417,6 +417,86 @@ void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
         p.drawRect(QRectF(10.0, 8.5, 4.0, 8.0));
         break;
     }
+    case SketchIcon::NewDrawing: {
+        // A blank sheet with a folded corner: the universal "new document",
+        // and the fold is what stops it reading as a plain rectangle.
+        Stroke(p, ink.stroke, 1.4);
+        p.setBrush(Qt::NoBrush);
+        const QPointF page[5] = {QPointF(5.0, 3.0), QPointF(15.0, 3.0), QPointF(19.0, 7.0),
+                                 QPointF(19.0, 21.0), QPointF(5.0, 21.0)};
+        p.drawPolygon(page, 5);
+        Stroke(p, ink.accent, 1.3);
+        p.drawLine(QPointF(15.0, 3.0), QPointF(15.0, 7.0));
+        p.drawLine(QPointF(15.0, 7.0), QPointF(19.0, 7.0));
+        break;
+    }
+    case SketchIcon::BaseView: {
+        // A SHEET with one view on it. The sheet is the outline, the view is
+        // the filled block -- the same "a part is a filled block" rule the
+        // assembly set uses, so a part reads as a part in both.
+        Stroke(p, ink.subdue, 1.2);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(2.5, 4.0, 19.0, 16.0));
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        p.drawRect(QRectF(6.0, 8.0, 8.0, 8.0));
+        break;
+    }
+    case SketchIcon::ProjectedView: {
+        // TWO views, one above the other, with the ALIGNMENT drawn as the
+        // dashed line between them -- because the alignment is the whole point
+        // and a picture of two blocks side by side would not say it.
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        p.drawRect(QRectF(3.0, 13.5, 8.0, 7.0));
+        p.setBrush(ink.subdue);
+        p.drawRect(QRectF(3.0, 3.5, 8.0, 7.0));
+        Stroke(p, ink.subdue, 1.0, Qt::DashLine);
+        p.drawLine(QPointF(3.0, 12.0), QPointF(19.0, 12.0));
+        p.drawLine(QPointF(11.0, 2.0), QPointF(11.0, 22.0));
+        break;
+    }
+    case SketchIcon::UpdateViews: {
+        // A sheet with a REFRESH arrow over it: the model moved on and the
+        // paper has not caught up.
+        Stroke(p, ink.subdue, 1.2);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(2.5, 4.0, 15.0, 16.0));
+        Stroke(p, ink.accent, 1.6);
+        p.drawArc(QRectF(8.0, 7.0, 13.0, 13.0), 30 * 16, 260 * 16);
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink.accent);
+        const QPointF head[3] = {QPointF(21.5, 10.5), QPointF(16.5, 11.5),
+                                 QPointF(19.5, 6.5)};
+        p.drawPolygon(head, 3);
+        break;
+    }
+    case SketchIcon::SheetSetup: {
+        // The sheet, with its SIZE called out -- two dimension ticks on the
+        // edges, which is how paper is talked about.
+        Stroke(p, ink.stroke, 1.3);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(4.0, 6.0, 16.0, 12.0));
+        Stroke(p, ink.accent, 1.2);
+        p.drawLine(QPointF(4.0, 3.0), QPointF(20.0, 3.0));
+        p.drawLine(QPointF(4.0, 1.5), QPointF(4.0, 4.5));
+        p.drawLine(QPointF(20.0, 1.5), QPointF(20.0, 4.5));
+        break;
+    }
+    case SketchIcon::DrawingLayer: {
+        // STACKED sheets. A layer is not a thing on the paper, it is one of
+        // several papers the drawing is spread over -- which is exactly what
+        // the stack says.
+        Stroke(p, ink.subdue, 1.2);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(3.0, 3.0, 15.0, 11.0));
+        p.drawRect(QRectF(5.0, 6.0, 15.0, 11.0));
+        Stroke(p, ink.accent, 1.4);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(7.0, 9.0, 15.0, 11.0));
+        break;
+    }
+
     case SketchIcon::AddRelation: {
         // TWO TOOTHED WHEELS, meshing. The teeth are what make it a gear
         // rather than two circles, and the mesh is what makes it a relation
@@ -1170,6 +1250,12 @@ const char* SketchIconName(SketchIcon icon) noexcept {
     case SketchIcon::ExplodeView: return "ExplodeView";
     case SketchIcon::Interference: return "Interference";
     case SketchIcon::AddRelation: return "AddRelation";
+    case SketchIcon::NewDrawing: return "NewDrawing";
+    case SketchIcon::BaseView: return "BaseView";
+    case SketchIcon::ProjectedView: return "ProjectedView";
+    case SketchIcon::UpdateViews: return "UpdateViews";
+    case SketchIcon::SheetSetup: return "SheetSetup";
+    case SketchIcon::DrawingLayer: return "DrawingLayer";
     case SketchIcon::HVDistance: return "HVDistance";
     case SketchIcon::PointLineDistance: return "PointLineDistance";
     case SketchIcon::Offset: return "Offset";

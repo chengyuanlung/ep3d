@@ -48,6 +48,9 @@ enum class OutlineKind {
     // the row has to say which of the two it is, because deleting a mate
     // takes its relations with it and deleting a relation takes nothing.
     Relation,
+    // M32: what a DRAWING's tree is made of. Same vocabulary again, third
+    // builder -- the widget, the state markers and the selection are shared.
+    Drawing, DrawingView, Layer, Linetype,
     Other
 };
 

@@ -4390,6 +4390,167 @@ int main(int argc, char** argv) {
                     fail("a relation outlived the mate whose freedom it reads");
             }
 
+            // --- M32's GATE: a drawing, on the screen ------------------------
+            //
+            // Everything below is reachable only here. The Core suite proves a
+            // drawing is a DOCUMENT and the kernel suite proves a view
+            // PROJECTS; nothing but starting the program can prove that the
+            // paper is drawn, that the curves reach the canvas, and that the
+            // shell swaps to the right bar and the right page.
+            {
+                const QString partFile =
+                    QDir::tempPath() + QStringLiteral("/ep3d-selftest/m32-block.ep3d");
+                {
+                    const QString script =
+                        QDir::tempPath() + QStringLiteral("/ep3d-selftest/m32-block.ep3ds");
+                    QFile out(script);
+                    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                        fail("could not write M32's part script");
+                    out.write(("sketch S\ntool rect\nclick 0 0\nclick 80 30\n"
+                               "pad Block 20 as BlockT\nsolve\nsave " +
+                               partFile.toStdString() + "\n")
+                                  .c_str());
+                    out.close();
+                    window.newDocumentCommand();
+                    const QString made = window.runScriptFile(script);
+                    if (made.contains(QStringLiteral("stopped")))
+                        fail(("M32's part did not build: " + made.toStdString()).c_str());
+                }
+
+                window.adoptDrawingForTesting("M32Sheet");
+                if (window.openedDocumentType() != DocumentType::Drawing)
+                    fail("the window did not adopt a drawing");
+                if (!window.drawingCanvasVisibleForTesting())
+                    fail("a drawing is open and the 3D view is still on screen");
+                if (!window.drawingToolbarVisible())
+                    fail("a drawing does not show the drawing toolbar");
+                if (window.modelToolbarVisible() || window.assemblyToolbarVisible())
+                    fail("a drawing is showing another document type's toolbar");
+
+                // A VIEW OF A REAL FILE, and it has to DRAW.
+                const QString added = window.addBaseViewCommand(
+                    partFile, QStringLiteral("Block"), ViewDirection::Front, Vec2{150.0, 150.0});
+                if (!added.contains(QStringLiteral("curves")))
+                    fail(("the base view would not draw: " + added.toStdString()).c_str());
+                if (window.drawingViewCountForTesting() != 1)
+                    fail("the view was not created");
+
+                // ...AND THE CURVES REACHED THE CANVAS. "The document holds
+                // them" and "they are on screen" are two claims, and the gap
+                // between them is the M6.14 defect class this shell exists to
+                // catch.
+                window.repaint();
+                if (window.drawnCurveCountForTesting() == 0)
+                    fail("the view holds curves and the canvas drew none of them");
+
+                // A PROJECTED VIEW, off the selected one, LINED UP.
+                window.selectDrawingViewForTesting(QStringLiteral("Front"));
+                const QString projected =
+                    window.addProjectedViewCommand(ViewDirection::Top, 70.0);
+                if (!projected.contains(QStringLiteral("angle")))
+                    fail(("the projected view did not say which convention it used: " +
+                          projected.toStdString())
+                             .c_str());
+                if (window.drawingViewCountForTesting() != 2)
+                    fail("the projected view was not created");
+
+                // THE TREE SHOWS THEM, NESTED -- a projected view IS under the
+                // one it came from, and a flat list would hide the
+                // relationship that decides where half the drawing sits.
+                {
+                    const OutlineNode tree = window.probeOutline();
+                    std::size_t viewRows = 0;
+                    std::size_t nested = 0;
+                    const std::function<void(const OutlineNode&, bool)> walk =
+                        [&](const OutlineNode& node, bool underView) {
+                            if (node.kind == OutlineKind::DrawingView) {
+                                ++viewRows;
+                                if (underView) ++nested;
+                            }
+                            for (const OutlineNode& child : node.children)
+                                walk(child, node.kind == OutlineKind::DrawingView);
+                        };
+                    walk(tree, false);
+                    if (viewRows != 2) fail("the drawing tree does not show its two views");
+                    if (nested != 1)
+                        fail("the projected view is not shown under the one it came from");
+                    if (tree.kind != OutlineKind::Drawing)
+                        fail("the drawing's root row does not say it is a drawing");
+                }
+
+                // THE SHEET ANSWERS ON THE ROOT ROW. Selecting it is how a
+                // user asks "what size is this paper", and a root that showed
+                // nothing would send them hunting for a dialog.
+                window.selectObject(window.probeOutline().id);
+                if (window.propertyRowValue("Size").empty())
+                    fail("selecting the sheet says nothing about the paper");
+
+                // SHEET SETUP IS ONE UNDO STEP for what was one dialog.
+                const std::size_t undoBefore = window.undoDepthForTesting();
+                const QString sheet = window.setSheetCommand(SheetSize::A2,
+                                                             SheetOrientation::Portrait,
+                                                             QStringLiteral("1:2"),
+                                                             ProjectionAngle::Third);
+                if (!sheet.contains(QStringLiteral("A2")))
+                    fail(("the sheet command said nothing useful: " + sheet.toStdString())
+                             .c_str());
+                if (window.undoDepthForTesting() != undoBefore + 1)
+                    fail("a sheet setup was more than one undo step");
+
+                // --- THE DRAWING TOOLBAR ----------------------------------------
+                {
+                    const int buttons = window.drawingToolbarButtonCount();
+                    if (buttons < 5) fail("the drawing toolbar is missing commands");
+                    std::vector<unsigned long long> prints;
+                    for (int i = 0; i < buttons; ++i) {
+                        const unsigned long long print =
+                            window.drawingToolbarIconFingerprint(i);
+                        if (print == 0) fail("a drawing toolbar icon rendered as nothing");
+                        for (std::size_t j = 0; j < prints.size(); ++j)
+                            if (prints[j] == print)
+                                fail("two drawing toolbar buttons carry the SAME icon");
+                        prints.push_back(print);
+                    }
+                    for (const char* wanted :
+                         {"View", "Project", "Update", "Sheet", "Layer"}) {
+                        bool found = false;
+                        for (int i = 0; i < buttons; ++i)
+                            if (window.drawingToolbarLabel(i).find(wanted) != std::string::npos)
+                                found = true;
+                        if (!found) {
+                            std::string message = "the drawing toolbar has no ";
+                            message += wanted;
+                            message += " button";
+                            fail(message.c_str());
+                        }
+                    }
+                }
+
+                // A PICTURE OF THE DRAWING SHELL, beside the part and assembly
+                // ones -- for the reason M31 added the second: every
+                // screenshot this project takes should be of a shell somebody
+                // will actually look at.
+                if (screenshotPath != nullptr) {
+                    std::string beside = screenshotPath;
+                    const std::size_t dot = beside.rfind('.');
+                    beside = dot == std::string::npos
+                                 ? beside + "-drawing"
+                                 : beside.substr(0, dot) + "-drawing" + beside.substr(dot);
+                    if (!window.grab().save(QString::fromStdString(beside)))
+                        fail("could not write the drawing screenshot");
+                }
+
+                // DELETING A VIEW TAKES THE ONES PROJECTED OFF IT, and says so.
+                window.selectDrawingViewForTesting(QStringLiteral("Front"));
+                const QString deleted = window.deleteSelectedDrawingObject();
+                if (!deleted.contains(QStringLiteral("projected from it")))
+                    fail(("deleting a base view did not say what went with it: " +
+                          deleted.toStdString())
+                             .c_str());
+                if (window.drawingViewCountForTesting() != 0)
+                    fail("a projected view outlived its parent");
+            }
+
             window.newDocumentCommand();
             if (window.openedDocumentType() != DocumentType::Part)
                 fail("the self test did not get back to a part document");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Assembly/Mate.h"
+#include "Core/Drawing/DrawingDocument.h"
 #include "Core/Assembly/Relation.h"
 #include "Core/Document/CadDocument.h"
 #include "Core/Document/ObjectId.h"
@@ -39,6 +40,7 @@ class PartDocument;
 class DocumentPresenter;
 class OcctViewWidget;
 class SketchCanvasWidget;
+class DrawingCanvasWidget;
 
 // The CAD application shell (UI spec 5): menu, toolbar, left Model Tree,
 // dominant central 3D viewer, right Property Panel, status bar.
@@ -115,6 +117,10 @@ public:
     // which is the split onImportDxfRequested already established.
     // A fresh, empty document -- adopted the same way an opened one is.
     QString newDocumentCommand();
+    // A NEW DRAWING. Its own command rather than a flag on the one above,
+    // because "new" has to say WHAT -- and a dialog that asked afterwards
+    // would be a question with an obvious answer at every other call site.
+    QString newDrawingCommand();
     // Deletes whatever is selected in the model tree: a feature, or a sketch.
     QString deleteSelectedObjectCommand();
 
@@ -222,6 +228,36 @@ public:
     QString setSelectedRelationRatio(double ratio);
     QString reverseSelectedRelation();
     QString deleteSelectedRelation();
+
+    // --- Drawing (M32.4, roadmap §24) ----------------------------------------
+    //
+    // The same split every other command family in this shell follows: each
+    // takes its inputs as arguments and returns what the user was told, so the
+    // whole workflow is reachable without a dialog -- which is the only reason
+    // any of it is testable.
+    QString addBaseViewCommand(const QString& sourcePath, const QString& bodyName,
+                               ViewDirection direction, Vec2 positionMm);
+    QString addProjectedViewCommand(ViewDirection direction, double offsetMm);
+    // Reprojects every view that is behind its model, and says how many.
+    QString updateDrawingViewsCommand();
+    QString setSheetCommand(SheetSize size, SheetOrientation orientation,
+                            const QString& scale, ProjectionAngle angle);
+    QString addDrawingLayerCommand(const QString& name, int color);
+    QString deleteSelectedDrawingObject();
+
+    ObjectId selectedDrawingView() const;
+
+    // --- Readbacks -----------------------------------------------------------
+    std::size_t drawingViewCountForTesting() const;
+    std::size_t drawnCurveCountForTesting() const;
+    std::size_t staleViewCountForTesting() const;
+    bool drawingCanvasVisibleForTesting() const;
+    bool drawingToolbarVisible() const;
+    int drawingToolbarButtonCount() const;
+    std::string drawingToolbarLabel(int index) const;
+    unsigned long long drawingToolbarIconFingerprint(int index) const;
+    void selectDrawingViewForTesting(const QString& name);
+    void adoptDrawingForTesting(const QString& name);
 
     // --- Assembly state: the three mechanisms of §49 (M30) -------------------
     //
@@ -658,6 +694,13 @@ private slots:
     void onRelationRatioRequested();
     void onReverseRelationRequested();
     void onDeleteRelationRequested();
+    void onNewDrawingRequested();
+    void onAddBaseViewRequested();
+    void onAddProjectedViewRequested();
+    void onUpdateViewsRequested();
+    void onSheetSetupRequested();
+    void onAddDrawingLayerRequested();
+    void onDeleteDrawingObjectRequested();
     void onCaptureNamedPositionRequested();
     void onApplyNamedPositionRequested();
     void onAddExplodeViewRequested();
@@ -831,6 +874,7 @@ private:
     QStackedWidget* centralStack_ = nullptr;
     OcctViewWidget* viewer_ = nullptr;
     SketchCanvasWidget* sketchCanvas_ = nullptr;
+    DrawingCanvasWidget* drawingCanvas_ = nullptr;
     // What a dress command will act on, and what to say about it.
     struct DressSelection {
         EdgeSelection selection;
@@ -884,6 +928,19 @@ private:
     // The ASSEMBLY toolbar (M30.2). Shown only for an assembly, with the part
     // toolbar hidden then -- see refreshCommandStates.
     QToolBar* assemblyToolBar_ = nullptr;
+    // The DRAWING toolbar (M32.4), shown only for a drawing -- the same rule
+    // the assembly bar follows, and for the same reason: a toolbar is always
+    // in view, so a drawing showing seventeen greyed part buttons is what a
+    // screenshot of it would actually look like.
+    QToolBar* drawingToolBar_ = nullptr;
+    QMenu* drawingMenu_ = nullptr;
+    QAction* newDrawingAction_ = nullptr;
+    QAction* addBaseViewAction_ = nullptr;
+    QAction* addProjectedViewAction_ = nullptr;
+    QAction* updateViewsAction_ = nullptr;
+    QAction* sheetSetupAction_ = nullptr;
+    QAction* addLayerAction_ = nullptr;
+    QAction* deleteDrawingObjectAction_ = nullptr;
     // The Assembly menu's actions, enabled only when the document is one.
     QAction* insertInstanceAction_ = nullptr;
     QAction* groundInstanceAction_ = nullptr;

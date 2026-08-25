@@ -132,6 +132,13 @@ inline QString kindTag(OutlineKind kind) {
         case OutlineKind::NamedPosition: return QStringLiteral("[Pos]");
         case OutlineKind::ExplodeView: return QStringLiteral("[Exp]");
         case OutlineKind::Relation: return QStringLiteral("[Rel]");
+        // M32, drawings. [Dwg] for the sheet, [Vue] for a projected view --
+        // not [Viw], because a reader scanning a column of tags needs them to
+        // differ by more than one letter.
+        case OutlineKind::Drawing: return QStringLiteral("[Dwg]");
+        case OutlineKind::DrawingView: return QStringLiteral("[Vue]");
+        case OutlineKind::Layer: return QStringLiteral("[Lay]");
+        case OutlineKind::Linetype: return QStringLiteral("[Ltp]");
         default: return QStringLiteral("[   ]");
     }
 }

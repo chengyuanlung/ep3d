@@ -17,6 +17,9 @@
 #include "Core/Serialization/AssemblyDocumentSerializer.h"
 #include "Core/Serialization/DocumentJson.h"
 #include "Viewer/AssemblyOutline.h"
+#include "Core/Serialization/DrawingDocumentSerializer.h"
+#include "Viewer/DrawingOutline.h"
+#include "Viewer/DrawingCanvas.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Physics/MassProperties.h"
 #include "Viewer/DesignTokens.h"
@@ -99,7 +102,9 @@ MainWindow::MainWindow(PartDocument& document, DocumentPresenter& presenter, QWi
     viewer_->setPresenter(presenter_);
     sketchCanvas_ = new SketchCanvasWidget(this);
     centralStack_->addWidget(viewer_);
+    drawingCanvas_ = new DrawingCanvasWidget(this);
     centralStack_->addWidget(sketchCanvas_);
+    centralStack_->addWidget(drawingCanvas_);
     centralStack_->setCurrentWidget(viewer_);
     setCentralWidget(centralStack_);
 
@@ -262,6 +267,59 @@ void MainWindow::buildMenus() {
                        "solve's again."));
     connect(deleteRelationAction_, &QAction::triggered, this,
             &MainWindow::onDeleteRelationRequested);
+
+    // --- Drawings (M32.4, §24) ----------------------------------------------
+    //
+    // ITS OWN MENU, beside Assembly. A drawing is a third document type, not a
+    // mode of either of the others -- and a menu that buried its commands
+    // under "Model" would be saying otherwise.
+    drawingMenu_ = menuBar()->addMenu(QStringLiteral("&Drawing"));
+    newDrawingAction_ = drawingMenu_->addAction(QStringLiteral("&New Drawing"));
+    newDrawingAction_->setToolTip(
+        QStringLiteral("Start a drawing: a sheet of paper to put views of a model on."));
+    connect(newDrawingAction_, &QAction::triggered, this, &MainWindow::onNewDrawingRequested);
+
+    drawingMenu_->addSeparator();
+    addBaseViewAction_ = drawingMenu_->addAction(QStringLiteral("Add &View..."));
+    addBaseViewAction_->setToolTip(
+        QStringLiteral("Put a view of a model on the sheet.\n"
+                       "Hidden lines are worked out; the view stays a view of that FILE, so "
+                       "editing the model updates it."));
+    connect(addBaseViewAction_, &QAction::triggered, this, &MainWindow::onAddBaseViewRequested);
+
+    addProjectedViewAction_ = drawingMenu_->addAction(QStringLiteral("&Project View..."));
+    addProjectedViewAction_->setToolTip(
+        QStringLiteral("Project another side off the selected view.\n"
+                       "It stays LINED UP with its parent, which is what lets a reader carry "
+                       "a measurement between them."));
+    connect(addProjectedViewAction_, &QAction::triggered, this,
+            &MainWindow::onAddProjectedViewRequested);
+
+    updateViewsAction_ = drawingMenu_->addAction(QStringLiteral("&Update Views"));
+    updateViewsAction_->setToolTip(
+        QStringLiteral("Redraw the views whose models have changed.\n"
+                       "Only those -- redrawing the rest would re-run hidden-line removal for "
+                       "nothing."));
+    connect(updateViewsAction_, &QAction::triggered, this, &MainWindow::onUpdateViewsRequested);
+
+    drawingMenu_->addSeparator();
+    sheetSetupAction_ = drawingMenu_->addAction(QStringLiteral("&Sheet..."));
+    sheetSetupAction_->setToolTip(
+        QStringLiteral("Paper size, which way round, scale, and the projection angle.\n"
+                       "The angle decides which side every projected view falls on."));
+    connect(sheetSetupAction_, &QAction::triggered, this, &MainWindow::onSheetSetupRequested);
+
+    addLayerAction_ = drawingMenu_->addAction(QStringLiteral("Add &Layer..."));
+    addLayerAction_->setToolTip(QStringLiteral("A new layer, with a colour and a linetype."));
+    connect(addLayerAction_, &QAction::triggered, this, &MainWindow::onAddDrawingLayerRequested);
+
+    drawingMenu_->addSeparator();
+    deleteDrawingObjectAction_ = drawingMenu_->addAction(QStringLiteral("&Delete"));
+    deleteDrawingObjectAction_->setToolTip(
+        QStringLiteral("Delete the selected view or layer.\n"
+                       "Deleting a view takes the views projected off it -- in one undo step."));
+    connect(deleteDrawingObjectAction_, &QAction::triggered, this,
+            &MainWindow::onDeleteDrawingObjectRequested);
 
     // --- The three state mechanisms (M30, §49) ------------------------------
     //
@@ -683,6 +741,31 @@ void MainWindow::buildToolbar() {
     assembly->addSeparator();
     addAssembly(interferenceAction_, ui::SketchIcon::Interference, "Interference");
     assemblyToolBar_ = assembly;
+
+    // --- The DRAWING toolbar (M32.4) ----------------------------------------
+    //
+    // A third bar for the same reason there is a second: a toolbar is always
+    // in view, and a drawing showing the part bar would be seventeen greyed
+    // buttons and none of the ones that work.
+    addToolBarBreak();
+    QToolBar* drawing = addToolBar(QStringLiteral("Drawing"));
+    drawing->setIconSize(QSize(ui::size::kToolbarIcon, ui::size::kToolbarIcon));
+    drawing->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    drawing->setMovable(false);
+    const auto addDrawing = [&](QAction* action, ui::SketchIcon which, const char* shortLabel) {
+        if (action == nullptr) return;
+        action->setIcon(icon(which));
+        action->setIconText(QString::fromLatin1(shortLabel));
+        drawing->addAction(action);
+    };
+    addDrawing(addBaseViewAction_, ui::SketchIcon::BaseView, "View");
+    addDrawing(addProjectedViewAction_, ui::SketchIcon::ProjectedView, "Project");
+    addDrawing(updateViewsAction_, ui::SketchIcon::UpdateViews, "Update");
+    drawing->addSeparator();
+    addDrawing(sheetSetupAction_, ui::SketchIcon::SheetSetup, "Sheet");
+    addDrawing(addLayerAction_, ui::SketchIcon::DrawingLayer, "Layer");
+    drawingToolBar_ = drawing;
+    drawingToolBar_->setVisible(false);
     // Hidden until an assembly is open, as the sketch bar is hidden until a
     // sketch is.
     assemblyToolBar_->setVisible(false);
@@ -764,9 +847,19 @@ void MainWindow::buildDocks() {
 }
 
 OutlineNode MainWindow::buildOutline() const {
+    // THREE BUILDERS, ONE TREE. The widget, the state markers, the selection
+    // and the property panel are shared; only what goes into the nodes
+    // differs -- which is what P3 bought and why a third document type costs
+    // a builder rather than a second tree.
     if (const auto* assembly = dynamic_cast<const AssemblyDocument*>(document_))
         return AssemblyOutline(*assembly).build(hiddenIds());
+    if (const auto* drawing = dynamic_cast<const DrawingDocument*>(document_))
+        return DrawingOutline(*drawing).build(hiddenIds());
     return DocumentOutline(part()).build(hiddenIds());
+}
+
+DrawingDocument* AsDrawing(DocumentBase* document) noexcept {
+    return dynamic_cast<DrawingDocument*>(document);
 }
 
 // =============================================================================
@@ -2157,6 +2250,15 @@ void MainWindow::rebuildProperties() {
         showPropertyRows(AssemblyOutline(*assembly).propertiesOf(selectedId_));
         return;
     }
+    // ...AND A DRAWING'S. A view, a layer and a linetype are described by
+    // DrawingOutline. THE SHEET ITSELF ANSWERS TOO, under the document's own
+    // id -- selecting the root row is how a user asks "what size is this
+    // paper", and a root row that showed nothing would send them hunting for a
+    // dialog.
+    if (const auto* drawing = dynamic_cast<const DrawingDocument*>(document_)) {
+        showPropertyRows(DrawingOutline(*drawing).propertiesOf(selectedId_));
+        return;
+    }
     const DocumentOutline outline(part());
 
     // WHAT THE CANVAS HAS PICKED WINS while a sketch is open (M26.7).
@@ -2435,7 +2537,36 @@ void MainWindow::updateStatus() {
                                   .arg(mates == 1 ? "" : "s"));
         return;
     }
-    const MassProperties& mp = part().massProperties();
+    // A DRAWING COUNTS SHEETS AND VIEWS, not volume. What a status bar says
+    // is per document type, and it is the one place in this shell that is
+    // behind no menu at all -- so a type it does not know must DEGRADE, never
+    // throw.
+    //
+    // The third type found this the way the second did: `part()` throws, the
+    // exception escapes a refresh path, and the program aborts with no message
+    // (M27.3). The fix then was to bail at the top of refreshCommandStates;
+    // the fix now is that this function no longer calls `part()` at all.
+    if (const auto* drawing = dynamic_cast<const DrawingDocument*>(document_)) {
+        const std::size_t views = drawing->views().size();
+        const std::size_t stale = drawing->staleViews().size();
+        QString text = QStringLiteral("%1   %2   %3 view%4")
+                           .arg(QString::fromUtf8(
+                               std::string(toString(drawing->sheet().size())).c_str()))
+                           .arg(QString::fromStdString(drawing->sheet().scale().toString()))
+                           .arg(views)
+                           .arg(views == 1 ? "" : "s");
+        // OUT OF DATE IS WORTH SAYING WITHOUT BEING ASKED. A drawing that
+        // quietly shows an old part is the failure this whole block is for.
+        if (stale != 0) text += QStringLiteral("   %1 out of date").arg(stale);
+        statusRight_->setText(text);
+        return;
+    }
+    const PartDocument* asPart = partOrNull();
+    if (asPart == nullptr) {
+        statusRight_->clear();
+        return;
+    }
+    const MassProperties& mp = asPart->massProperties();
     if (mp.valid) {
         statusRight_->setText(
             QStringLiteral("Volume %1 mm^3   Mass %2 kg   COM (%3, %4, %5) mm")
@@ -2804,7 +2935,8 @@ void MainWindow::refreshCommandStates() {
     // selected in it, and offering them with nothing selected would be a
     // command that refuses after the click.
     {
-        const bool isAssembly = partOrNull() == nullptr && document_ != nullptr;
+        const bool isDrawing = AsDrawing(document_) != nullptr;
+        const bool isAssembly = partOrNull() == nullptr && document_ != nullptr && !isDrawing;
         // ONE BAR OR THE OTHER, never both and never neither -- AND NEITHER
         // WHILE A SKETCH IS OPEN.
         //
@@ -2816,7 +2948,42 @@ void MainWindow::refreshCommandStates() {
         const bool sketching = inSketchMode();
         if (assemblyToolBar_ != nullptr)
             assemblyToolBar_->setVisible(isAssembly && !sketching);
-        if (modelToolBar_ != nullptr) modelToolBar_->setVisible(!isAssembly && !sketching);
+        if (drawingToolBar_ != nullptr) drawingToolBar_->setVisible(isDrawing && !sketching);
+        if (modelToolBar_ != nullptr)
+            modelToolBar_->setVisible(!isAssembly && !isDrawing && !sketching);
+
+        // THE CANVAS FOLLOWS THE DOCUMENT. A drawing is looked at as a piece
+        // of paper -- no orbit, no perspective -- so it gets its own page in
+        // the stack rather than sharing the 3D view's gestures.
+        if (drawingCanvas_ != nullptr && centralStack_ != nullptr && !sketching) {
+            drawingCanvas_->setDocument(AsDrawing(document_));
+            if (isDrawing && centralStack_->currentWidget() != drawingCanvas_)
+                centralStack_->setCurrentWidget(drawingCanvas_);
+            else if (!isDrawing && centralStack_->currentWidget() == drawingCanvas_)
+                centralStack_->setCurrentWidget(viewer_);
+            if (isDrawing) drawingCanvas_->update();
+        }
+
+        // THE MENU STAYS REACHABLE FROM EVERY DOCUMENT, because "New Drawing"
+        // lives in it -- a Drawing menu greyed out on a part is a menu you can
+        // never use to make your first drawing. The ITEMS are gated instead.
+        //
+        // Written out because the first draft said `isDrawing || newDrawingAction_`,
+        // which is a pointer in a boolean and therefore always true: the right
+        // behaviour by accident, and the next person to read it would have
+        // "fixed" it.
+        if (drawingMenu_ != nullptr) drawingMenu_->setEnabled(true);
+        if (newDrawingAction_ != nullptr) newDrawingAction_->setEnabled(true);
+        const bool haveDrawingView = isDrawing && selectedDrawingView() != kInvalidObjectId;
+        if (addBaseViewAction_ != nullptr) addBaseViewAction_->setEnabled(isDrawing);
+        if (addProjectedViewAction_ != nullptr)
+            addProjectedViewAction_->setEnabled(haveDrawingView);
+        if (updateViewsAction_ != nullptr)
+            updateViewsAction_->setEnabled(isDrawing && staleViewCountForTesting() != 0);
+        if (sheetSetupAction_ != nullptr) sheetSetupAction_->setEnabled(isDrawing);
+        if (addLayerAction_ != nullptr) addLayerAction_->setEnabled(isDrawing);
+        if (deleteDrawingObjectAction_ != nullptr)
+            deleteDrawingObjectAction_->setEnabled(isDrawing && selectedId_ != kInvalidObjectId);
         const bool haveInstance = selectedInstance() != kInvalidObjectId;
         if (assemblyMenu_ != nullptr) assemblyMenu_->setEnabled(isAssembly);
         if (insertInstanceAction_ != nullptr) insertInstanceAction_->setEnabled(isAssembly);
@@ -3858,6 +4025,417 @@ void MainWindow::onDeleteObjectRequested() {
     statusLeft_->setText(deleteSelectedObjectCommand());
 }
 
+// =============================================================================
+// Drawing commands (M32.4, roadmap §24)
+// =============================================================================
+
+ObjectId MainWindow::selectedDrawingView() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return kInvalidObjectId;
+    return drawing->findView(selectedId_) != nullptr ? selectedId_ : kInvalidObjectId;
+}
+
+QString MainWindow::addBaseViewCommand(const QString& sourcePath, const QString& bodyName,
+                                       ViewDirection direction, Vec2 positionMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Views belong to a drawing."));
+    if (sourcePath.isEmpty()) return say(QStringLiteral("A view needs a model file."));
+    if (const std::string why = drawing->whyViewCannotSitAt(positionMm); !why.empty())
+        return say(QString::fromStdString(why));
+
+    const std::string name =
+        document_->unusedNameLike(std::string(toString(direction)));
+    document_->beginTransaction("Add view");
+    DrawingView* made = nullptr;
+    try {
+        made = &drawing->addView(name, sourcePath.toStdString(), bodyName.toStdString(),
+                                 direction, positionMm);
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That view was refused: %1").arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction()) return say(QStringLiteral("That view was refused."));
+    (void)document_->recompute();
+    selectedId_ = made->id();
+    refreshAll();
+
+    // WHETHER IT DREW ANYTHING is the thing worth reporting. A view that was
+    // created and could not project is a row in the tree over blank paper, and
+    // the message is where the reason belongs.
+    if (made->currentState() != ComputeState::Valid)
+        return say(QStringLiteral("%1 added, but it will not draw: %2")
+                       .arg(QString::fromStdString(made->name()),
+                            QString::fromStdString(made->diagnostic())));
+    return say(QStringLiteral("%1 view of %2 -- %3 curves")
+                   .arg(QString::fromStdString(made->name()), sourcePath)
+                   .arg(made->projected().curves.size()));
+}
+
+QString MainWindow::addProjectedViewCommand(ViewDirection direction, double offsetMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    const ObjectId parent = selectedDrawingView();
+    if (drawing == nullptr || parent == kInvalidObjectId)
+        return say(QStringLiteral("Select the view to project from."));
+    if (const std::string why = drawing->whyViewCannotBeProjectedFrom(parent, direction);
+        !why.empty())
+        return say(QString::fromStdString(why));
+
+    const std::string name = document_->unusedNameLike(std::string(toString(direction)));
+    document_->beginTransaction("Project view");
+    DrawingView* made = nullptr;
+    try {
+        made = &drawing->addProjectedView(name, parent, direction, offsetMm);
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That view was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction()) return say(QStringLiteral("That view was refused."));
+    (void)document_->recompute();
+    selectedId_ = made->id();
+    refreshAll();
+    // WHICH SIDE IT WENT, because that is the convention the reader has to
+    // know and the one thing they cannot infer from the button they pressed.
+    return say(QStringLiteral("%1 projected from %2 (%3 angle)")
+                   .arg(QString::fromStdString(made->name()),
+                        QString::fromStdString(drawing->findView(parent)->name()),
+                        QString::fromUtf8(
+                            std::string(toString(drawing->sheet().projectionAngle())).c_str())));
+}
+
+QString MainWindow::updateDrawingViewsCommand() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Only a drawing has views to update."));
+    const std::vector<ObjectId> behind = drawing->staleViews();
+    if (behind.empty()) return say(QStringLiteral("Every view is up to date."));
+
+    // ONLY THE ONES THAT ARE BEHIND. Rebuilding everything would re-run
+    // hidden-line removal on views nobody's model has touched, which on a
+    // sheet of six views is five wasted solves.
+    for (const ObjectId one : behind) drawing->markDirty(one);
+    (void)document_->recompute();
+    refreshAll();
+    const std::size_t stillBehind = drawing->staleViews().size();
+    if (stillBehind != 0)
+        return say(QStringLiteral("Updated %1 view(s); %2 still will not build")
+                       .arg(behind.size() - stillBehind)
+                       .arg(stillBehind));
+    return say(QStringLiteral("Updated %1 view(s)").arg(behind.size()));
+}
+
+QString MainWindow::setSheetCommand(SheetSize size, SheetOrientation orientation,
+                                    const QString& scale, ProjectionAngle angle) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Only a drawing has a sheet."));
+    DrawingScale parsed;
+    if (!ParseDrawingScale(scale.toStdString(), parsed))
+        return say(QStringLiteral("'%1' is not a scale like 1:2").arg(scale));
+
+    // ONE UNDO STEP for what the user experienced as one dialog.
+    document_->beginTransaction("Sheet setup");
+    drawing->setSheetSize(size);
+    drawing->setSheetOrientation(orientation);
+    drawing->setSheetScale(parsed);
+    drawing->setSheetProjectionAngle(angle);
+    if (!document_->commitTransaction()) return say(QStringLiteral("That was refused."));
+
+    // A VIEW MAY NOW BE OFF THE PAPER. Said rather than silently moved: where
+    // a view sits is the user's, and shuffling it would lose a layout they
+    // chose.
+    QStringList offSheet;
+    for (const DrawingView* view : drawing->views())
+        if (!drawing->whyViewCannotSitAt(drawing->viewPositionMm(view->id())).empty())
+            offSheet << QString::fromStdString(view->name());
+    if (drawingCanvas_ != nullptr) drawingCanvas_->fitSheet();
+    refreshAll();
+    if (!offSheet.isEmpty())
+        return say(QStringLiteral("%1 %2, %3 angle -- but %4 now sits off the paper")
+                       .arg(QString::fromUtf8(std::string(toString(size)).c_str()),
+                            QString::fromUtf8(std::string(toString(orientation)).c_str()),
+                            QString::fromUtf8(std::string(toString(angle)).c_str()),
+                            offSheet.join(QStringLiteral(", "))));
+    return say(QStringLiteral("%1 %2 at %3, %4 angle")
+                   .arg(QString::fromUtf8(std::string(toString(size)).c_str()),
+                        QString::fromUtf8(std::string(toString(orientation)).c_str()),
+                        QString::fromStdString(parsed.toString()),
+                        QString::fromUtf8(std::string(toString(angle)).c_str())));
+}
+
+QString MainWindow::addDrawingLayerCommand(const QString& name, int color) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Only a drawing has layers."));
+    document_->beginTransaction("Add layer");
+    Layer* made = nullptr;
+    try {
+        made = &drawing->addLayer(name.toStdString(), color);
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That layer was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction()) return say(QStringLiteral("That layer was refused."));
+    selectedId_ = made->id();
+    refreshAll();
+    return say(QStringLiteral("Added layer %1").arg(name));
+}
+
+QString MainWindow::deleteSelectedDrawingObject() {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || selectedId_ == kInvalidObjectId)
+        return say(QStringLiteral("Select something to delete."));
+    const QString name = QString::fromStdString(document_->objectName(selectedId_));
+    // WHAT ELSE GOES, counted BEFORE the deletion, because afterwards there is
+    // nothing left to count.
+    std::size_t children = 0;
+    for (const DrawingView* view : drawing->views())
+        if (view->parentViewId() == selectedId_) ++children;
+
+    if (!document_->removeObject(selectedId_))
+        return say(QStringLiteral("%1 cannot be deleted.").arg(name));
+    (void)document_->recompute();
+    selectedId_ = kInvalidObjectId;
+    refreshAll();
+    if (children != 0)
+        return say(QStringLiteral("Deleted %1 and the %2 view(s) projected from it")
+                       .arg(name)
+                       .arg(children));
+    return say(QStringLiteral("Deleted %1").arg(name));
+}
+
+// --- Readbacks ---------------------------------------------------------------
+
+std::size_t MainWindow::drawingViewCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->views().size();
+}
+
+std::size_t MainWindow::drawnCurveCountForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnCurveCountForTesting();
+}
+
+std::size_t MainWindow::staleViewCountForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0u : drawing->staleViews().size();
+}
+
+bool MainWindow::drawingCanvasVisibleForTesting() const {
+    return drawingCanvas_ != nullptr && centralStack_ != nullptr &&
+           centralStack_->currentWidget() == drawingCanvas_;
+}
+
+bool MainWindow::drawingToolbarVisible() const {
+    return drawingToolBar_ != nullptr && drawingToolBar_->isVisible();
+}
+
+void MainWindow::selectDrawingViewForTesting(const QString& name) {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    if (const DrawingView* view = drawing->findViewNamed(name.toStdString()))
+        selectObject(view->id());
+}
+
+void MainWindow::adoptDrawingForTesting(const QString& name) {
+    auto fresh = std::make_unique<DrawingDocument>(name.toStdString());
+    fresh->setGeometryKernel(document_->geometryKernel());
+    fresh->setSketchSolver(document_->sketchSolver());
+    ownedDocument_ = std::move(fresh);
+    document_ = ownedDocument_.get();
+    presenter_->setDocument(*document_);
+    selectedId_ = kInvalidObjectId;
+    documentPath_.clear();
+    refreshAll();
+}
+
+// --- Slots -------------------------------------------------------------------
+
+void MainWindow::onNewDrawingRequested() { newDrawingCommand(); }
+
+void MainWindow::onAddBaseViewRequested() {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Model to draw"), QString(),
+        QStringLiteral("EP3D documents (*.ep3d *.ep3da);;All files (*)"));
+    if (path.isEmpty()) return;
+
+    static const struct { const char* label; ViewDirection direction; } kDirections[] = {
+        {"Front", ViewDirection::Front}, {"Top", ViewDirection::Top},
+        {"Right", ViewDirection::Right}, {"Left", ViewDirection::Left},
+        {"Back", ViewDirection::Back},   {"Bottom", ViewDirection::Bottom},
+        {"Isometric", ViewDirection::Isometric},
+    };
+    QStringList labels;
+    for (const auto& one : kDirections) labels << QString::fromLatin1(one.label);
+    bool chose = false;
+    const QString picked =
+        QInputDialog::getItem(this, QStringLiteral("Add View"), QStringLiteral("Seen from:"),
+                              labels, 0, false, &chose);
+    if (!chose) return;
+    const int which = labels.indexOf(picked);
+    if (which < 0) return;
+
+    // PLACED IN THE MIDDLE OF THE PAPER by default, which is where a first
+    // view belongs and what saves the user a drag they did not ask for.
+    const Vec2 middle{drawing->sheet().widthMm() / 2.0, drawing->sheet().heightMm() / 2.0};
+    addBaseViewCommand(path, QString(), kDirections[which].direction, middle);
+}
+
+void MainWindow::onAddProjectedViewRequested() {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    const ObjectId parent = selectedDrawingView();
+    if (drawing == nullptr || parent == kInvalidObjectId) return;
+
+    // ONLY THE DIRECTIONS THAT ACTUALLY LINE UP with the selected view. An
+    // isometric is not square to a front view, and offering it would be
+    // offering a command that refuses itself.
+    static const ViewDirection kAll[] = {ViewDirection::Front, ViewDirection::Back,
+                                         ViewDirection::Left,  ViewDirection::Right,
+                                         ViewDirection::Top,   ViewDirection::Bottom};
+    QStringList labels;
+    std::vector<ViewDirection> offered;
+    for (const ViewDirection one : kAll) {
+        if (!drawing->whyViewCannotBeProjectedFrom(parent, one).empty()) continue;
+        labels << QString::fromUtf8(std::string(toString(one)).c_str());
+        offered.push_back(one);
+    }
+    if (offered.empty()) return;
+
+    bool chose = false;
+    const QString picked = QInputDialog::getItem(this, QStringLiteral("Project View"),
+                                                 QStringLiteral("Seen from:"), labels, 0, false,
+                                                 &chose);
+    if (!chose) return;
+    const int which = labels.indexOf(picked);
+    if (which < 0) return;
+
+    bool ok = false;
+    const double offset = QInputDialog::getDouble(
+        this, QStringLiteral("Project View"), QStringLiteral("How far from it (mm):"), 80.0, 1.0,
+        10000.0, 1, &ok);
+    if (!ok) return;
+    addProjectedViewCommand(offered[static_cast<std::size_t>(which)], offset);
+}
+
+void MainWindow::onUpdateViewsRequested() { updateDrawingViewsCommand(); }
+
+void MainWindow::onSheetSetupRequested() {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+
+    static const struct { const char* label; SheetSize size; } kSizes[] = {
+        {"A0", SheetSize::A0}, {"A1", SheetSize::A1}, {"A2", SheetSize::A2},
+        {"A3", SheetSize::A3}, {"A4", SheetSize::A4},
+    };
+    QStringList sizes;
+    for (const auto& one : kSizes) sizes << QString::fromLatin1(one.label);
+    bool chose = false;
+    const QString pickedSize =
+        QInputDialog::getItem(this, QStringLiteral("Sheet"), QStringLiteral("Paper:"), sizes,
+                              sizes.indexOf(QString::fromUtf8(
+                                  std::string(toString(drawing->sheet().size())).c_str())),
+                              false, &chose);
+    if (!chose) return;
+    const int sizeIndex = sizes.indexOf(pickedSize);
+    if (sizeIndex < 0) return;
+
+    const QStringList orientations{QStringLiteral("Landscape"), QStringLiteral("Portrait")};
+    const QString pickedOrientation = QInputDialog::getItem(
+        this, QStringLiteral("Sheet"), QStringLiteral("Which way round:"), orientations,
+        drawing->sheet().orientation() == SheetOrientation::Portrait ? 1 : 0, false, &chose);
+    if (!chose) return;
+
+    const QString scale = QInputDialog::getText(
+        this, QStringLiteral("Sheet"), QStringLiteral("Scale (like 1:2):"), QLineEdit::Normal,
+        QString::fromStdString(drawing->sheet().scale().toString()), &chose);
+    if (!chose) return;
+
+    // THE PROJECTION ANGLE IS ASKED, never defaulted quietly. A reader who
+    // cannot tell which convention a drawing is in cannot read it, and the
+    // two conventions put every view on opposite sides.
+    const QStringList angles{QStringLiteral("First"), QStringLiteral("Third")};
+    const QString pickedAngle = QInputDialog::getItem(
+        this, QStringLiteral("Sheet"), QStringLiteral("Projection angle:"), angles,
+        drawing->sheet().projectionAngle() == ProjectionAngle::Third ? 1 : 0, false, &chose);
+    if (!chose) return;
+
+    setSheetCommand(kSizes[sizeIndex].size,
+                    pickedOrientation == QStringLiteral("Portrait") ? SheetOrientation::Portrait
+                                                                    : SheetOrientation::Landscape,
+                    scale,
+                    pickedAngle == QStringLiteral("Third") ? ProjectionAngle::Third
+                                                           : ProjectionAngle::First);
+}
+
+void MainWindow::onAddDrawingLayerRequested() {
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, QStringLiteral("Add Layer"),
+                                               QStringLiteral("Name:"), QLineEdit::Normal,
+                                               QString(), &ok);
+    if (!ok || name.isEmpty()) return;
+    const int color = QInputDialog::getInt(this, QStringLiteral("Add Layer"),
+                                           QStringLiteral("Colour (ACI 1-255):"), 7, 1, 255, 1,
+                                           &ok);
+    if (!ok) return;
+    addDrawingLayerCommand(name, color);
+}
+
+void MainWindow::onDeleteDrawingObjectRequested() { deleteSelectedDrawingObject(); }
+
+QString MainWindow::newDrawingCommand() {
+    if (document_ == nullptr) return QStringLiteral("No document");
+    if (inSketchMode()) finishSketchCommand();
+
+    auto fresh = std::make_unique<DrawingDocument>("Untitled");
+    // The kernel is the APPLICATION'S (ADR-M3-003) and a new document arrives
+    // without one. A DRAWING needs it more directly than a part does: every
+    // view projects through it, so a drawing with no kernel is a drawing that
+    // can hold views and draw none of them.
+    fresh->setGeometryKernel(document_->geometryKernel());
+    fresh->setSketchSolver(document_->sketchSolver());
+
+    ownedDocument_ = std::move(fresh);
+    document_ = ownedDocument_.get();
+    presenter_->setDocument(*document_);
+    if (sketchCanvas_ != nullptr) sketchCanvas_->setSketch(partOrNull(), kInvalidObjectId);
+    selectedId_ = kInvalidObjectId;
+    documentPath_.clear();
+    setWindowTitle(QStringLiteral("EP3D - Untitled drawing"));
+
+    onRecomputeRequested();
+    refreshAll();
+    return QStringLiteral("New drawing");
+}
+
 QString MainWindow::newDocumentCommand() {
     if (document_ == nullptr) return QStringLiteral("No document");
     if (inSketchMode()) finishSketchCommand();
@@ -4029,8 +4607,16 @@ QString MainWindow::openDocumentFile(const QString& path) {
     // lies about what it is gets refused by name rather than half-loaded.
     std::unique_ptr<DocumentBase> adopted;
     std::string failure;
-    if (docjson::documentTypeOfFile(path.toStdString()) == DocumentType::Assembly) {
+    const std::optional<DocumentType> kind = docjson::documentTypeOfFile(path.toStdString());
+    if (kind == DocumentType::Assembly) {
         AssemblyLoadResult loaded = loadAssemblyDocumentFromFile(path.toStdString());
+        if (loaded) adopted = std::move(loaded.document);
+        else failure = loaded.message;
+    } else if (kind == DocumentType::Drawing) {
+        // ASKED OF THE FILE'S OWN HEADER, not of its extension -- the same
+        // rule an instance follows about what is in a file it names. A drawing
+        // saved as `.ep3d` by hand still opens as a drawing.
+        DrawingLoadResult loaded = loadDrawingDocumentFromFile(path.toStdString());
         if (loaded) adopted = std::move(loaded.document);
         else failure = loaded.message;
     } else {
@@ -5277,22 +5863,62 @@ bool MainWindow::assemblyToolbarButtonEnabled(int index) const {
     if (index < 0 || index >= static_cast<int>(buttons.size())) return false;
     return buttons[static_cast<std::size_t>(index)]->isEnabled();
 }
-unsigned long long MainWindow::assemblyToolbarIconFingerprint(int index) const {
-    const std::vector<QAction*> buttons = ToolbarButtons(assemblyToolBar_);
-    if (index < 0 || index >= static_cast<int>(buttons.size())) return 0;
-    const QIcon shown = buttons[static_cast<std::size_t>(index)]->icon();
-    if (shown.isNull()) return 0;
-    const QImage image = shown.pixmap(QSize(ui::size::kToolbarIcon, ui::size::kToolbarIcon))
+int MainWindow::drawingToolbarButtonCount() const {
+    return static_cast<int>(ToolbarButtons(drawingToolBar_).size());
+}
+
+std::string MainWindow::drawingToolbarLabel(int index) const {
+    const std::vector<QAction*> buttons = ToolbarButtons(drawingToolBar_);
+    if (index < 0 || index >= static_cast<int>(buttons.size())) return {};
+    return buttons[static_cast<std::size_t>(index)]->iconText().toStdString();
+}
+
+namespace {
+
+// WHAT AN ICON ACTUALLY LOOKS LIKE, as one number (M26.1).
+//
+// Used to prove no two buttons on a bar carry the SAME picture -- "every
+// button has an icon" is satisfied by giving them all one, which is exactly
+// what a copy-paste slip produces.
+//
+// ONE COPY, and it was four VARIANTS before M32.4 was about to make it five:
+// two hashed pixel by pixel and two byte by byte, at two different sizes.
+// Four copies of a hash is bad; four DIFFERENT hashes of one idea is worse,
+// because two bars then cannot be compared at all and nothing says so.
+//
+// Rendered at a size, then hashed. Hashing the QIcon itself would compare
+// handles rather than pictures, and two different handles can carry the same
+// drawing.
+unsigned long long IconFingerprint(const QIcon& icon, int sizePx) {
+    if (icon.isNull()) return 0;
+    const QImage image = icon.pixmap(QSize(sizePx, sizePx))
                              .toImage()
                              .convertToFormat(QImage::Format_RGBA8888);
     unsigned long long hash = 1469598103934665603ULL; // FNV-1a
     for (int y = 0; y < image.height(); ++y) {
-        for (int x = 0; x < image.width(); ++x) {
-            const QRgb pixel = image.pixel(x, y);
-            hash = (hash ^ static_cast<unsigned long long>(pixel)) * 1099511628211ULL;
+        const uchar* line = image.constScanLine(y);
+        for (int x = 0; x < image.bytesPerLine(); ++x) {
+            hash ^= static_cast<unsigned long long>(line[x]);
+            hash *= 1099511628211ULL;
         }
     }
     return hash;
+}
+
+} // namespace
+
+unsigned long long MainWindow::drawingToolbarIconFingerprint(int index) const {
+    const std::vector<QAction*> buttons = ToolbarButtons(drawingToolBar_);
+    if (index < 0 || index >= static_cast<int>(buttons.size())) return 0;
+    return IconFingerprint(buttons[static_cast<std::size_t>(index)]->icon(),
+                           ui::size::kToolbarIcon);
+}
+
+unsigned long long MainWindow::assemblyToolbarIconFingerprint(int index) const {
+    const std::vector<QAction*> buttons = ToolbarButtons(assemblyToolBar_);
+    if (index < 0 || index >= static_cast<int>(buttons.size())) return 0;
+    return IconFingerprint(buttons[static_cast<std::size_t>(index)]->icon(),
+                           ui::size::kToolbarIcon);
 }
 bool MainWindow::assemblyToolbarVisible() const {
     return assemblyToolBar_ != nullptr && assemblyToolBar_->isVisible();
@@ -5325,20 +5951,8 @@ bool MainWindow::modelToolbarButtonEnabled(int index) const {
 unsigned long long MainWindow::modelToolbarIconFingerprint(int index) const {
     const std::vector<QAction*> buttons = ToolbarButtons(modelToolBar_);
     if (index < 0 || index >= static_cast<int>(buttons.size())) return 0;
-    const QIcon icon = buttons[static_cast<std::size_t>(index)]->icon();
-    if (icon.isNull()) return 0;
-    const QImage image = icon.pixmap(QSize(ui::size::kToolbarIcon, ui::size::kToolbarIcon))
-                             .toImage()
-                             .convertToFormat(QImage::Format_RGBA8888);
-    unsigned long long hash = 1469598103934665603ULL; // FNV-1a
-    for (int y = 0; y < image.height(); ++y) {
-        const uchar* line = image.constScanLine(y);
-        for (int x = 0; x < image.bytesPerLine(); ++x) {
-            hash ^= static_cast<unsigned long long>(line[x]);
-            hash *= 1099511628211ULL;
-        }
-    }
-    return hash;
+    return IconFingerprint(buttons[static_cast<std::size_t>(index)]->icon(),
+                           ui::size::kToolbarIcon);
 }
 
 int MainWindow::mainToolbarButtonCount() const {
@@ -5358,20 +5972,8 @@ std::string MainWindow::mainToolbarLabel(int index) const {
 unsigned long long MainWindow::mainToolbarIconFingerprint(int index) const {
     const std::vector<QAction*> buttons = ToolbarButtons(mainToolBar_);
     if (index < 0 || index >= static_cast<int>(buttons.size())) return 0;
-    const QIcon icon = buttons[static_cast<std::size_t>(index)]->icon();
-    if (icon.isNull()) return 0;
-    const QImage image = icon.pixmap(QSize(ui::size::kToolbarIcon, ui::size::kToolbarIcon))
-                             .toImage()
-                             .convertToFormat(QImage::Format_RGBA8888);
-    unsigned long long hash = 1469598103934665603ULL; // FNV-1a
-    for (int y = 0; y < image.height(); ++y) {
-        const uchar* line = image.constScanLine(y);
-        for (int x = 0; x < image.bytesPerLine(); ++x) {
-            hash ^= static_cast<unsigned long long>(line[x]);
-            hash *= 1099511628211ULL;
-        }
-    }
-    return hash;
+    return IconFingerprint(buttons[static_cast<std::size_t>(index)]->icon(),
+                           ui::size::kToolbarIcon);
 }
 
 std::string MainWindow::checkedSketchToolLabel() const {
@@ -5408,25 +6010,8 @@ int MainWindow::sketchToolbarButtonsWithIcons() const {
 unsigned long long MainWindow::sketchToolbarIconFingerprint(int index) const {
     const std::vector<QAction*> buttons = sketchToolbarButtons();
     if (index < 0 || index >= static_cast<int>(buttons.size())) return 0;
-    const QIcon icon = buttons[static_cast<std::size_t>(index)]->icon();
-    if (icon.isNull()) return 0;
-
-    // Rendered at a SIZE, then hashed. Hashing the QIcon itself would compare
-    // handles rather than pictures, and two different handles can carry the
-    // same drawing.
-    const QImage image =
-        icon.pixmap(QSize(ui::size::kSketchToolbarIcon, ui::size::kSketchToolbarIcon))
-            .toImage()
-            .convertToFormat(QImage::Format_RGBA8888);
-    unsigned long long hash = 1469598103934665603ULL; // FNV-1a
-    for (int y = 0; y < image.height(); ++y) {
-        const uchar* line = image.constScanLine(y);
-        for (int x = 0; x < image.bytesPerLine(); ++x) {
-            hash ^= static_cast<unsigned long long>(line[x]);
-            hash *= 1099511628211ULL;
-        }
-    }
-    return hash;
+    return IconFingerprint(buttons[static_cast<std::size_t>(index)]->icon(),
+                           ui::size::kSketchToolbarIcon);
 }
 
 std::string MainWindow::sketchToolbarTooltip(int index) const {

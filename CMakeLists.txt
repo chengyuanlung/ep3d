@@ -233,6 +233,7 @@ add_library(ParametricCADViewerCore
     src/Viewer/DocumentPresenter.cpp
     src/Viewer/DocumentOutline.cpp
     src/Viewer/AssemblyOutline.cpp
+    src/Viewer/DrawingOutline.cpp
     src/Viewer/PropertyEditing.cpp
     src/Viewer/SketchCanvas.cpp
     src/Viewer/SketchCommands.cpp
@@ -306,6 +307,7 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
         src/Viewer/MainWindow.cpp
         src/Viewer/OcctViewWidget.cpp
         src/Viewer/SketchCanvasWidget.cpp
+        src/Viewer/DrawingCanvas.cpp
         src/Viewer/SketchIcons.cpp
         src/Viewer/ScriptServer.cpp
     )
