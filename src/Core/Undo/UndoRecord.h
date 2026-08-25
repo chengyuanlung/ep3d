@@ -476,6 +476,34 @@ struct BomExistenceEdit {
     bool addedByTheEdit = false;
 };
 
+// M39.4. A hole table is a thing on the paper: added, moved, deleted.
+//
+// It carries the VIEW it belongs to rather than a file path, because that is
+// what it is: a table whose own source path could name a different part from
+// the view its tags are drawn on is two answers to one question.
+struct HoleTableExistenceEdit {
+    ObjectId tableId = kInvalidObjectId;
+    std::string name;
+    ObjectId viewId = kInvalidObjectId;
+    double xMm = 0.0;
+    double yMm = 0.0;
+    double datumXMm = 0.0;
+    double datumYMm = 0.0;
+    bool addedByTheEdit = false;
+};
+
+struct HoleTableEdit {
+    ObjectId tableId = kInvalidObjectId;
+    double beforeXMm = 0.0;
+    double beforeYMm = 0.0;
+    double afterXMm = 0.0;
+    double afterYMm = 0.0;
+    double beforeDatumXMm = 0.0;
+    double beforeDatumYMm = 0.0;
+    double afterDatumXMm = 0.0;
+    double afterDatumYMm = 0.0;
+};
+
 struct BomEdit {
     ObjectId tableId = kInvalidObjectId;
     double beforeXMm = 0.0;
@@ -805,7 +833,7 @@ using UndoDelta =
                  CurrentDimensionStyleEdit, TitleBlockEdit, SheetFrameEdit,
                  BomExistenceEdit, BomEdit, SymbolExistenceEdit, SymbolPlacementEdit,
                  WireExistenceEdit, WireEdit, DimensionToleranceEdit,
-                 GeneralToleranceEdit>;
+                 GeneralToleranceEdit, HoleTableExistenceEdit, HoleTableEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly

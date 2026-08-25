@@ -93,6 +93,8 @@ FeatureSnapshot SnapshotFeature(const Feature& feature) {
         snapshot.sketchId = hole->sketchId();
         snapshot.diameterParameterId = hole->diameterParameterId();
         snapshot.holeDepthParameterId = hole->depthParameterId();
+        snapshot.holeKind = hole->kind();
+        snapshot.holeScrew = hole->screw();
         snapshot.materialId = hole->materialId();
     } else if (const auto* dress = dynamic_cast<const EdgeDressFeature*>(&feature)) {
         snapshot.baseFeatureId = dress->baseFeatureId();
@@ -175,11 +177,15 @@ Feature& RestoreFeatureFromSnapshot(PartDocument& document, Body& body,
                                             snapshot.baseFeatureId, snapshot.faceSelection,
                                             snapshot.neutralFace, snapshot.sizeParameterId,
                                             snapshot.materialId);
-    if (type == "Hole")
-        return document.restoreHoleFeature(body, snapshot.id, snapshot.name, snapshot.state,
-                                           snapshot.baseFeatureId, snapshot.sketchId,
-                                           snapshot.diameterParameterId,
-                                           snapshot.holeDepthParameterId, snapshot.materialId);
+    if (type == "Hole") {
+        HoleFeature& hole = document.restoreHoleFeature(
+            body, snapshot.id, snapshot.name, snapshot.state, snapshot.baseFeatureId,
+            snapshot.sketchId, snapshot.diameterParameterId, snapshot.holeDepthParameterId,
+            snapshot.materialId);
+        hole.setKind(snapshot.holeKind);
+        hole.setScrew(snapshot.holeScrew);
+        return hole;
+    }
     if (type == "Sweep")
         return document.restoreSweepFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                             snapshot.sketchId, snapshot.pathSketchId,

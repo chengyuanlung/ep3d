@@ -214,6 +214,21 @@ SaveResult validateSaveable(const DrawingDocument& document) {
                               "a wire is on a layer that is not in this document"};
     }
 
+    // v43 (M39). A HOLE TABLE IS A TABLE OF A VIEW'S HOLES, so that view has
+    // to be here. Checked at save because the loader checks it: a drawing that
+    // wrote a table pointing at nothing would save cleanly and then refuse to
+    // reopen, which is the named worst case (ADR-M3-008).
+    for (const HoleTable* table : document.holeTables()) {
+        if (const SaveResult bad = claim(table->id(), "hole table"); !bad) return bad;
+        bool sawTheView = false;
+        for (const DrawingView* view : document.views())
+            if (view->id() == table->viewId()) sawTheView = true;
+        if (!sawTheView)
+            return SaveResult{SerializationError::UnknownDependencyId,
+                              "hole table '" + table->name() +
+                                  "' is a table of a view that is not in this drawing"};
+    }
+
     // v39 (M35.6). A parts list is a view of an assembly: it must name one,
     // and its columns must be a real, distinct set -- checked HERE because the
     // loader checks the same, and a document that saves cleanly and then
@@ -596,6 +611,29 @@ JsonValue toJson(const DrawingDocument& document) {
         tables.add(std::move(item));
     }
     root.set("bomTables", std::move(tables));
+
+    // v43 (M39). A HOLE TABLE STORES ONE SENTENCE: which view's holes, where
+    // the table sits, and which corner the positions are measured from. Not a
+    // single row -- rows are counted from the part when anybody asks, so a
+    // table can never state hole positions the part no longer has.
+    JsonValue holeTables = JsonValue::makeArray();
+    for (const HoleTable* table : document.holeTables()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(table->id())));
+        item.set("name", JsonValue::makeString(table->name()));
+        item.set("viewId", JsonValue::makeString(idToString(table->viewId())));
+        item.set("xMm", JsonValue::makeNumber(table->positionMm().x));
+        item.set("yMm", JsonValue::makeNumber(table->positionMm().y));
+        item.set("datumXMm", JsonValue::makeNumber(table->datumMm().x));
+        item.set("datumYMm", JsonValue::makeNumber(table->datumMm().y));
+        item.set("rowHeightMm", JsonValue::makeNumber(table->rowHeightMm()));
+        JsonValue columns = JsonValue::makeArray();
+        for (const HoleColumn column : table->columns())
+            columns.add(JsonValue::makeString(std::string(toString(column))));
+        item.set("columns", std::move(columns));
+        holeTables.add(std::move(item));
+    }
+    root.set("holeTables", std::move(holeTables));
 
     // v40 (M36). A component stores a SENTENCE -- which symbol, where, which
     // way round -- and not the geometry (ADR-M22-003): copying the shapes in
@@ -1738,7 +1776,106 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         bool growsUpward = true;
         long long sourceStamp = 0;
     };
+    struct HoleTableData {
+        ObjectId id = kInvalidObjectId;
+        std::string name;
+        ObjectId viewId = kInvalidObjectId;
+        Vec2 positionMm{};
+        Vec2 datumMm{};
+        std::vector<HoleColumn> columns;
+        double rowHeightMm = 7.0;
+    };
+    std::vector<HoleTableData> holeTableData;
     std::vector<BomData> bomData;
+    if (const JsonValue* field = root.find("holeTables")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'holeTables' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "holeTables[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            HoleTableData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            if (name->asString().empty())
+                return loadFailure(SerializationError::MissingField,
+                                   context + ": a hole table has no name");
+            one.name = name->asString();
+
+            const JsonValue* viewField =
+                requireField(entry, "viewId", JsonType::String, context, err);
+            if (viewField == nullptr) return loadFailure(err.error, err.message);
+            const auto viewId = idFromString(viewField->asString());
+            if (!viewId.has_value() || *viewId == kInvalidObjectId || *viewId > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'viewId' is not a valid ObjectId");
+            one.viewId = *viewId;
+
+            const JsonValue* x = requireField(entry, "xMm", JsonType::Number, context, err);
+            const JsonValue* y = requireField(entry, "yMm", JsonType::Number, context, err);
+            if (x == nullptr || y == nullptr) return loadFailure(err.error, err.message);
+            one.positionMm = Vec2{x->asNumber(), y->asNumber()};
+
+            const JsonValue* datumX =
+                requireField(entry, "datumXMm", JsonType::Number, context, err);
+            const JsonValue* datumY =
+                requireField(entry, "datumYMm", JsonType::Number, context, err);
+            if (datumX == nullptr || datumY == nullptr)
+                return loadFailure(err.error, err.message);
+            one.datumMm = Vec2{datumX->asNumber(), datumY->asNumber()};
+
+            if (const JsonValue* height = entry.find("rowHeightMm")) {
+                if (height->type() != JsonType::Number)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'rowHeightMm' is not a number");
+                one.rowHeightMm = height->asNumber();
+                if (!(one.rowHeightMm > 0.0))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a row of no height would draw every hole "
+                                                 "on one line");
+            }
+
+            const JsonValue* columns =
+                requireField(entry, "columns", JsonType::Array, context, err);
+            if (columns == nullptr) return loadFailure(err.error, err.message);
+            if (columns->items().empty())
+                return loadFailure(SerializationError::MissingField,
+                                   context + ": a hole table with no columns is a rectangle");
+            for (const JsonValue& column : columns->items()) {
+                if (column.type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a column is not a string");
+                HoleColumn which = HoleColumn::Tag;
+                // REFUSED. A column this build does not know would otherwise
+                // become the tag column, and a table whose X turned into a
+                // repeated tag is one somebody drills from.
+                if (!ParseHoleColumn(column.asString(), which))
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       context + ": unknown hole table column '" +
+                                           column.asString() + "'");
+                for (const HoleColumn already : one.columns)
+                    if (already == which)
+                        return loadFailure(SerializationError::DuplicateId,
+                                           context + ": the column '" + column.asString() +
+                                               "' appears twice");
+                one.columns.push_back(which);
+            }
+            holeTableData.push_back(std::move(one));
+        }
+    }
+
     if (const JsonValue* field = root.find("bomTables")) {
         if (field->type() != JsonType::Array)
             return loadFailure(SerializationError::InvalidFieldType,
@@ -2126,6 +2263,19 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     for (auto& one : wireData)
         document->restoreWire(one.id, std::move(one.pointsMm), one.layerId,
                               std::move(one.label));
+    for (auto& one : holeTableData) {
+        // THE VIEW HAS TO BE HERE, and it is by now -- views are restored
+        // first. A table pointing at nothing would come back as an empty box
+        // on the paper with no way for a reader to tell what it was meant to
+        // list, which is worse than a file that says why it will not open.
+        if (document->findView(one.viewId) == nullptr)
+            return loadFailure(SerializationError::UnknownDependencyId,
+                               "hole table '" + one.name +
+                                   "' is a table of a view that is not in this drawing");
+    }
+    for (auto& one : holeTableData)
+        document->restoreHoleTable(one.id, std::move(one.name), one.viewId, one.positionMm,
+                                   one.datumMm, std::move(one.columns), one.rowHeightMm);
     for (auto& one : bomData)
         document->restoreBomTable(one.id, std::move(one.name), std::move(one.sourcePath),
                                   one.positionMm, one.depth, std::move(one.columns),

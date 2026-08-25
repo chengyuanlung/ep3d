@@ -496,6 +496,20 @@ JsonValue toJson(const PartDocument& document) {
                                  JsonValue::makeString(idToString(hole->diameterParameterId())));
                 featureEntry.set("depthParameterId",
                                  JsonValue::makeString(idToString(hole->depthParameterId())));
+                // v43 (M39). THE SENTENCE, not the numbers it stands for. The
+                // drill size is looked up from the designation every time it
+                // is needed, so writing 6.8 as well would put a second answer
+                // in the file -- one that goes stale the moment a table is
+                // corrected, and that nothing would ever compare.
+                featureEntry.set("holeKind", JsonValue::makeString(NameOfHoleKind(hole->kind())));
+                if (hole->screw().named()) {
+                    JsonValue screw = JsonValue::makeObject();
+                    screw.set("designation",
+                              JsonValue::makeString(hole->screw().designation));
+                    screw.set("tapped", JsonValue::makeBool(hole->screw().tapped));
+                    screw.set("fit", JsonValue::makeString(NameOf(hole->screw().fit)));
+                    featureEntry.set("screw", std::move(screw));
+                }
                 featureEntry.set("materialId",
                                  JsonValue::makeString(idToString(hole->materialId())));
             } else if (const auto* sweep = dynamic_cast<const SweepFeature*>(feature.get())) {
@@ -1517,6 +1531,15 @@ SaveResult validateSaveable(const PartDocument& document) {
                                           idToString(draft->angleParameterId()) +
                                           " is not a parameter in this document"};
             } else if (const auto* hole = dynamic_cast<const HoleFeature*>(feature.get())) {
+                // v43 (M39). VALIDATED AT SAVE BECAUSE THE LOADER CHECKS IT
+                // (ADR-M3-008). A document that writes a designation its own
+                // loader will reject is the named worst case: it saves
+                // cleanly and will not reopen.
+                if (hole->screw().named() && !MetricCoarseThread(hole->screw().designation))
+                    return SaveResult{SerializationError::InvalidFieldType,
+                                      "feature " + idToString(hole->id()) + " (" + hole->name() +
+                                          "): '" + hole->screw().designation +
+                                          "' is not a thread this build has numbers for"};
                 if (sketchIds.count(hole->sketchId()) == 0)
                     return SaveResult{SerializationError::UnknownDependencyId,
                                       "feature " + idToString(hole->id()) + " (" + hole->name() +
@@ -2323,6 +2346,63 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.diameterParameterId = *boreRef;
                 featureData.holeDepthParameterId = *deepRef;
                 featureData.materialId = *holeMaterialId;
+
+                // v43 (M39), and BOTH ARE OPTIONAL: a file written before M39
+                // has neither, and a plain hole is exactly what it should come
+                // back as. A missing field here is an older file, not a
+                // damaged one.
+                if (const JsonValue* kindField = featureEntry.find("holeKind")) {
+                    if (kindField->type() != JsonType::String)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext + ": holeKind is not a string");
+                    const std::optional<HoleKind> kind = HoleKindNamed(kindField->asString());
+                    if (!kind)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext + ": '" + kindField->asString() +
+                                               "' is not a hole shape this build knows");
+                    featureData.holeKind = *kind;
+                }
+                if (const JsonValue* screwField = featureEntry.find("screw")) {
+                    if (screwField->type() != JsonType::Object)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext + ": screw is not an object");
+                    const JsonValue* designation = requireField(*screwField, "designation",
+                                                                JsonType::String,
+                                                                featureContext, err);
+                    if (designation == nullptr) return loadFailure(err.error, err.message);
+                    // A DESIGNATION THIS BUILD CANNOT SIZE IS REFUSED AT LOAD.
+                    //
+                    // ADR-M3-008: what the saver will not write, the loader
+                    // will not read. Accepted here, it would come back as a
+                    // hole that cannot recompute -- a document that opens and
+                    // then fails, which is harder to explain than one that
+                    // says why it will not open.
+                    if (!MetricCoarseThread(designation->asString()))
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext + ": '" + designation->asString() +
+                                               "' is not a thread this build has numbers for");
+                    HoleScrew screw;
+                    screw.designation = designation->asString();
+                    if (const JsonValue* tapped = screwField->find("tapped")) {
+                        if (tapped->type() != JsonType::Bool)
+                            return loadFailure(SerializationError::InvalidFieldType,
+                                               featureContext + ": tapped is not a boolean");
+                        screw.tapped = tapped->asBool();
+                    }
+                    if (const JsonValue* fit = screwField->find("fit")) {
+                        if (fit->type() != JsonType::String)
+                            return loadFailure(SerializationError::InvalidFieldType,
+                                               featureContext + ": fit is not a string");
+                        const std::optional<ClearanceFit> named =
+                            ClearanceFitNamed(fit->asString());
+                        if (!named)
+                            return loadFailure(SerializationError::InvalidFieldType,
+                                               featureContext + ": '" + fit->asString() +
+                                                   "' is not a clearance fit");
+                        screw.fit = *named;
+                    }
+                    featureData.holeScrew = std::move(screw);
+                }
             } else if (featureData.typeName == "Sweep") {
                 const JsonValue* sectionField = requireField(featureEntry, "sketchId",
                                                              JsonType::String, featureContext, err);

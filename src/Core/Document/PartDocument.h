@@ -40,6 +40,7 @@ class LoftFeature;
 class ShellFeature;
 class DraftFeature;
 class HoleFeature;
+// M39: a hole names a screw, and the names live in one header.
 class BooleanFeature;
 class ImportFeature;
 class CircularPatternFeature;
@@ -499,6 +500,20 @@ public:
     bool setDrivenParameterValue(ObjectId parameterId, double value);
 
     bool setFeatureEdgeSelection(ObjectId featureId, EdgeSelection selection);
+
+    // WHAT SCREW A HOLE IS FOR, AND WHAT SHAPE ITS MOUTH IS (M39).
+    //
+    // Both mark the feature dirty for the same reason setFeatureEdgeSelection
+    // does: the shape this feature produces has changed even though no
+    // parameter did. Saying "M8, tapped" over a hole that was 12 mm across
+    // redrills it to 6.8.
+    //
+    // REFUSED HERE if the designation is one this build has no numbers for, so
+    // the document never holds a hole that cannot recompute. The alternative
+    // is a hole that goes red the next time anything is edited, pointing at a
+    // thread the user typed some while ago.
+    bool setHoleKind(ObjectId featureId, HoleKind kind);
+    bool setHoleScrew(ObjectId featureId, HoleScrew screw);
 
     // Makes a sketch TRACK a face instead of sitting on a frozen plane
     // (M17.14, ADR-M17-036), and adds the graph edge that makes it true.

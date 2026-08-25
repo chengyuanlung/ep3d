@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Document/ObjectId.h"
+#include "Core/Feature/HoleStandards.h"
 #include "Core/Kernel/EdgeQuery.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Feature/BooleanFeature.h"
@@ -83,6 +84,13 @@ struct FeatureSnapshot {
     // these two say how big and how deep.
     ObjectId diameterParameterId = kInvalidObjectId;
     ObjectId holeDepthParameterId = kInvalidObjectId;
+    // ...and M39's two: what shape the mouth is and what screw it is for. A
+    // snapshot that carried the ids but not these would give back a hole that
+    // rebuilds at a DIFFERENT DIAMETER after an undo -- the tapped 6.8 becomes
+    // whatever the diameter parameter says -- and nothing on the screen would
+    // mark the moment it changed.
+    HoleKind holeKind = HoleKind::Simple;
+    HoleScrew holeScrew;
     // Boolean (M21): `baseFeatureId` above is the TARGET, and this is the tool.
     // `frameId` is unused here -- a boolean has no frame.
     ObjectId toolFeatureId = kInvalidObjectId;

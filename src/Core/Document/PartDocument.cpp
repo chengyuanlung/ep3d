@@ -1441,6 +1441,44 @@ bool PartDocument::setFeatureEdgeSelection(ObjectId featureId, EdgeSelection sel
     return false;
 }
 
+namespace {
+
+// One walk, so the two setters below cannot disagree about what "a hole in
+// this document" means.
+template <typename Bodies>
+HoleFeature* FindHoleForEdit(Bodies& bodies, ObjectId featureId) {
+    for (const auto& body : bodies)
+        for (const auto& feature : body->features()) {
+            if (feature->id() != featureId) continue;
+            return dynamic_cast<HoleFeature*>(feature.get());
+        }
+    return nullptr;
+}
+
+} // namespace
+
+bool PartDocument::setHoleKind(ObjectId featureId, HoleKind kind) {
+    HoleFeature* hole = FindHoleForEdit(bodies_, featureId);
+    if (hole == nullptr) return false;
+    hole->setKind(kind);
+    graph_.markDirty(featureId);
+    syncFeatureStatesFromGraph();
+    return true;
+}
+
+bool PartDocument::setHoleScrew(ObjectId featureId, HoleScrew screw) {
+    HoleFeature* hole = FindHoleForEdit(bodies_, featureId);
+    if (hole == nullptr) return false;
+    // A DESIGNATION THIS BUILD CANNOT SIZE IS REFUSED NOW, not at the next
+    // recompute. Taken silently, it would leave a hole that goes red some time
+    // later, pointing at a thread the user has stopped thinking about.
+    if (screw.named() && !MetricCoarseThread(screw.designation)) return false;
+    hole->setScrew(std::move(screw));
+    graph_.markDirty(featureId);
+    syncFeatureStatesFromGraph();
+    return true;
+}
+
 std::size_t PartDocument::addSketchReferences(ObjectId sketchId,
                                              const std::vector<SketchGeometry>& geometry) {
     Sketch* sketch = findSketchForEdit(sketchId);

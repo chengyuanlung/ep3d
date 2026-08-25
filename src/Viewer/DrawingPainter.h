@@ -100,6 +100,16 @@ struct DrawnTally {
     std::size_t hatchLines = 0;
     std::size_t unhatchedSections = 0;
     std::size_t sectionArrows = 0;
+    // M39.4. Rows drawn, and TAGS drawn in the view beside the holes they
+    // name. Counted apart because they are the pair that has to agree: a table
+    // with six rows and five tags on the paper is a drawing where one hole is
+    // described and not marked, and neither number alone would show it.
+    std::size_t holeTableRows = 0;
+    std::size_t holeTags = 0;
+    // Tables whose part could not be read. Counted separately for the reason
+    // bomUncounted is: a table that came back empty looks exactly like a part
+    // with no holes in it.
+    std::size_t uncountedHoleTables = 0;
 };
 
 DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,

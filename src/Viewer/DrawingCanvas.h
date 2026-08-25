@@ -79,6 +79,9 @@ public:
     std::size_t drawnUnknownSymbolsForTesting() const noexcept { return drawnUnknown_; }
     std::size_t drawnJunctionsForTesting() const noexcept { return drawnJunctions_; }
     Box2D drawnSymbolExtentForTesting() const noexcept { return drawnSymbolExtent_; }
+    std::size_t drawnHoleRowsForTesting() const noexcept { return drawnHoleRows_; }
+    std::size_t drawnHoleTagsForTesting() const noexcept { return drawnHoleTags_; }
+    std::size_t uncountedHoleTablesForTesting() const noexcept { return uncountedHoleTables_; }
     std::size_t drawnHatchLinesForTesting() const noexcept { return drawnHatch_; }
     std::size_t drawnSectionArrowsForTesting() const noexcept { return drawnArrows_; }
     std::size_t unhatchedSectionsForTesting() const noexcept { return unhatched_; }
@@ -97,6 +100,13 @@ public:
     // says where in the drawing rather than where on somebody's monitor.
     void pickForTesting(Vec2 sheetMm);
     Vec2 toSheetForTesting(QPointF widgetPx) const { return toSheet(widgetPx); }
+    // WHERE THE POINTER IS, in sheet millimetres (M40).
+    //
+    // Every editing tool has two equally valid answers -- which piece of a
+    // trimmed line goes, which side an offset lands on -- and the pick point
+    // is the only thing that distinguishes them. It is why those tools live on
+    // shortcuts: the pointer has to still be over the piece you mean.
+    Vec2 pointerSheetMm() const noexcept { return cursorMm_; }
 
 signals:
     // A tool collected everything it needs. The WINDOW makes the geometry --
@@ -162,6 +172,9 @@ private:
     std::size_t drawnJunctions_ = 0;
     Box2D drawnSymbolExtent_;
     std::size_t drawnHatch_ = 0;
+    std::size_t drawnHoleRows_ = 0;
+    std::size_t drawnHoleTags_ = 0;
+    std::size_t uncountedHoleTables_ = 0;
     std::size_t drawnArrows_ = 0;
     std::size_t unhatched_ = 0;
 

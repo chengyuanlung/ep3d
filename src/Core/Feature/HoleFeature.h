@@ -6,10 +6,12 @@
 #include "Core/Feature/IParameterisedFeature.h"
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISketchConsuming.h"
+#include "Core/Feature/HoleStandards.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Recompute/IRecomputable.h"
 #include <string>
+#include <utility>
 #include <vector>
 #include <string_view>
 
@@ -73,6 +75,31 @@ public:
     ObjectId diameterParameterId() const noexcept { return diameterParameterId_; }
     ObjectId depthParameterId() const noexcept { return depthParameterId_; }
 
+    // WHAT SCREW THIS HOLE IS FOR, AND WHAT SHAPE ITS MOUTH IS (M39).
+    //
+    // The screw is a SENTENCE -- "M8x1.25, tapped" -- and every number that
+    // follows from it is looked up at recompute rather than stored. A hole
+    // that carried both a designation and a drilled diameter would be two
+    // answers to one question, and the way anybody would find out they
+    // disagreed is a part that came back untappable (see HoleStandards.h).
+    //
+    // WHAT IS NOT MODELLED IS THE THREAD ITSELF. A tapped hole is a plain
+    // cylinder at the tap drill size with a thread written on it, which is
+    // what every CAD system worth using does: modelled helices make files
+    // enormous, sections unreadable and booleans fragile, and the drawing --
+    // which is what the shop works from -- says M8x1.25 either way.
+    HoleKind kind() const noexcept { return kind_; }
+    void setKind(HoleKind kind) noexcept { kind_ = kind; }
+    const HoleScrew& screw() const noexcept { return screw_; }
+    void setScrew(HoleScrew screw) { screw_ = std::move(screw); }
+
+    // Every number this hole is cut from and the sentence a drawing writes
+    // over it, from ONE call -- so the cut and the callout cannot disagree.
+    // `typedDiameterMm` and `depthMm` are the parameters' current values.
+    HoleSizes sizes(double typedDiameterMm, double depthMm) const {
+        return SizeAHole(screw_, kind_, typedDiameterMm, depthMm);
+    }
+
     ObjectId materialId() const noexcept override { return materialId_; }
     void clearMaterialReference() noexcept override { materialId_ = kInvalidObjectId; }
     void setMaterialReference(ObjectId materialId) noexcept override {
@@ -95,6 +122,8 @@ private:
     ObjectId diameterParameterId_;
     ObjectId depthParameterId_;
     ObjectId materialId_;
+    HoleKind kind_ = HoleKind::Simple;
+    HoleScrew screw_;
     KernelShape currentShape_;
 };
 

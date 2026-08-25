@@ -1069,6 +1069,39 @@ DrawingEntity* DrawingDocument::findEntityForEdit(ObjectId id) noexcept {
     return nullptr;
 }
 
+std::vector<ObjectId> DrawingDocument::applySheetEdit(const std::vector<ObjectId>& consumed,
+                                                     const SheetEditResult& made,
+                                                     const std::string& label,
+                                                     std::string* why) {
+    const auto refuse = [&](const std::string& message) {
+        if (why != nullptr) *why = message;
+        return std::vector<ObjectId>{};
+    };
+    if (!made.ok) return refuse(made.why);
+    // EVERY ID HAS TO BE REAL BEFORE ANYTHING IS TOUCHED. Half-applied, the
+    // edit would delete two of three lines and then stop, and the undo step
+    // would be labelled as though it had worked.
+    for (const ObjectId id : consumed)
+        if (findEntity(id) == nullptr)
+            return refuse("one of the objects this edit was to replace is no longer here");
+
+    const bool ownsStep = !isTransactionOpen() && !applyingHistory();
+    if (ownsStep) beginTransaction(label);
+
+    std::vector<ObjectId> arrived;
+    arrived.reserve(made.shapes.size());
+    // ADDED FIRST, THEN THE OLD ONES REMOVED.
+    //
+    // The other way round, a trim that consumes its only line leaves the
+    // drawing momentarily empty, and anything watching -- a selection, a
+    // canvas mid-paint -- sees a state the user never asked for.
+    for (const DrawShape& shape : made.shapes) arrived.push_back(addEntity(shape).id());
+    for (const ObjectId id : consumed) removeObject(id);
+
+    if (ownsStep && !commitTransaction()) return refuse("that edit was refused");
+    return arrived;
+}
+
 bool DrawingDocument::transformEntities(const std::vector<ObjectId>& ids,
                                         const Matrix2D& transform) {
     // ONE UNDO STEP FOR THE WHOLE SELECTION. Moving forty lines is one thing
@@ -1870,6 +1903,128 @@ void SnapshotBomInto(const BomTable& table, BomEdit& edit) {
 
 } // namespace
 
+HoleTable& DrawingDocument::addHoleTable(std::string name, ObjectId viewId, Vec2 positionMm,
+                                         Vec2 datumMm) {
+    if (name.empty()) throw std::invalid_argument("addHoleTable: a hole table needs a name");
+    if (nameIsTaken(name, kInvalidObjectId))
+        throw std::invalid_argument("addHoleTable: this drawing already has something called " +
+                                    name);
+    // A TABLE OF WHICH VIEW'S HOLES. Without one it has nothing to read and no
+    // page to measure positions on, and would sit on the paper as an empty box
+    // nobody could explain.
+    if (findView(viewId) == nullptr)
+        throw std::invalid_argument("addHoleTable: a hole table is a table of a view's holes, "
+                                    "and that view is not in this drawing");
+
+    auto item = std::make_unique<HoleTable>(std::move(name), viewId, positionMm);
+    auto& ref = *item;
+    ref.setDatumMm(datumMm);
+    HoleTableExistenceEdit edit;
+    edit.tableId = ref.id();
+    edit.name = ref.name();
+    edit.viewId = viewId;
+    edit.xMm = positionMm.x;
+    edit.yMm = positionMm.y;
+    edit.datumXMm = datumMm.x;
+    edit.datumYMm = datumMm.y;
+    edit.addedByTheEdit = true;
+    holeTables_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    recordDelta(edit, "Add hole table " + ref.name());
+    return ref;
+}
+
+HoleTable& DrawingDocument::restoreHoleTable(ObjectId id, std::string name, ObjectId viewId,
+                                             Vec2 positionMm, Vec2 datumMm,
+                                             std::vector<HoleColumn> columns,
+                                             double rowHeightMm) {
+    auto item = std::make_unique<HoleTable>(id, std::move(name), viewId, positionMm);
+    auto& ref = *item;
+    ref.setDatumMm(datumMm);
+    if (!columns.empty()) ref.setColumns(std::move(columns));
+    ref.setRowHeightMm(rowHeightMm);
+    holeTables_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const HoleTable*> DrawingDocument::holeTables() const {
+    std::vector<const HoleTable*> out;
+    out.reserve(holeTables_.size());
+    for (const std::unique_ptr<HoleTable>& one : holeTables_) out.push_back(one.get());
+    return out;
+}
+
+const HoleTable* DrawingDocument::findHoleTable(ObjectId id) const noexcept {
+    for (const std::unique_ptr<HoleTable>& one : holeTables_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+HoleTable* DrawingDocument::findHoleTableForEdit(ObjectId id) noexcept {
+    for (const std::unique_ptr<HoleTable>& one : holeTables_)
+        if (one->id() == id) return one.get();
+    return nullptr;
+}
+
+bool DrawingDocument::setHoleTablePosition(ObjectId id, Vec2 positionMm) {
+    HoleTable* table = findHoleTableForEdit(id);
+    if (table == nullptr) return false;
+    HoleTableEdit edit;
+    edit.tableId = id;
+    edit.beforeXMm = table->positionMm().x;
+    edit.beforeYMm = table->positionMm().y;
+    edit.beforeDatumXMm = edit.afterDatumXMm = table->datumMm().x;
+    edit.beforeDatumYMm = edit.afterDatumYMm = table->datumMm().y;
+    edit.afterXMm = positionMm.x;
+    edit.afterYMm = positionMm.y;
+    table->setPositionMm(positionMm);
+    recordDelta(edit, "Move the hole table");
+    return true;
+}
+
+bool DrawingDocument::setHoleTableDatum(ObjectId id, Vec2 datumMm) {
+    HoleTable* table = findHoleTableForEdit(id);
+    if (table == nullptr) return false;
+    HoleTableEdit edit;
+    edit.tableId = id;
+    edit.beforeXMm = edit.afterXMm = table->positionMm().x;
+    edit.beforeYMm = edit.afterYMm = table->positionMm().y;
+    edit.beforeDatumXMm = table->datumMm().x;
+    edit.beforeDatumYMm = table->datumMm().y;
+    edit.afterDatumXMm = datumMm.x;
+    edit.afterDatumYMm = datumMm.y;
+    table->setDatumMm(datumMm);
+    // MOVING THE DATUM REWRITES EVERY ROW, because every position is measured
+    // from it. Nothing is stored, so nothing has to be recomputed -- the rows
+    // are counted the next time anybody asks.
+    recordDelta(edit, "Move the hole table's datum");
+    return true;
+}
+
+bool DrawingDocument::removeHoleTable(ObjectId id) {
+    // ONE DELETION PATH. Written twice -- here and in removeOwnObject -- the
+    // two would drift, and a table deleted through the menu would record a
+    // different undo step from one deleted with the key. That is the shape of
+    // defect this project keeps closing, so this is a name for the other one.
+    if (findHoleTable(id) == nullptr) return false;
+    return removeObject(id);
+}
+
+HoleTableContents DrawingDocument::holesOf(const HoleTable& table) const {
+    const DrawingView* view = findView(table.viewId());
+    if (view == nullptr) {
+        HoleTableContents out;
+        out.why = "this hole table's view is no longer in the drawing";
+        return out;
+    }
+    // THE VIEW'S FILE AND THE VIEW'S DIRECTION, asked for rather than stored.
+    // A table that kept its own copy of either could describe a part the view
+    // is not of, and every row in it would still be a correct row about
+    // something.
+    return HolesOfPart(view->sourcePath(), view->direction(), table.datumMm());
+}
+
 BomTable& DrawingDocument::addBomTable(std::string name, std::string sourcePath,
                                        Vec2 positionMm) {
     if (name.empty()) throw std::invalid_argument("addBomTable: a parts list needs a name");
@@ -2652,6 +2807,28 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
 
     // A PARTS LIST: nothing reads it, and its rows were never stored, so
     // there is nothing to cascade -- deleting one takes only itself.
+    if (const HoleTable* table = findHoleTable(id)) {
+        if (!applyingHistory()) {
+            HoleTableExistenceEdit edit;
+            edit.tableId = id;
+            edit.name = table->name();
+            edit.viewId = table->viewId();
+            edit.xMm = table->positionMm().x;
+            edit.yMm = table->positionMm().y;
+            edit.datumXMm = table->datumMm().x;
+            edit.datumYMm = table->datumMm().y;
+            edit.addedByTheEdit = false;
+            recordDelta(edit, "Delete hole table " + table->name());
+        }
+        for (auto it = holeTables_.begin(); it != holeTables_.end(); ++it) {
+            if ((*it)->id() != id) continue;
+            registry_.unregisterObject(id);
+            holeTables_.erase(it);
+            return true;
+        }
+        return false;
+    }
+
     if (const BomTable* table = findBomTable(id)) {
         if (!applyingHistory()) {
             BomExistenceEdit edit;
@@ -2675,6 +2852,20 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
     // A VIEW: nothing owns it and nothing else reads it yet. Annotation that
     // measures it arrives in M34, and that is when this grows a cascade.
     if (const DrawingView* view = findView(id)) {
+        // ...AND ITS HOLE TABLES (M39.4). A table reads its view's file and
+        // measures on its view's page; with the view gone it has nothing to
+        // read and no page to measure on, and the drawing would refuse to save
+        // -- a document that cannot be saved because of a delete the user was
+        // never warned about is the worst of the three outcomes.
+        for (bool again = true; again;) {
+            again = false;
+            for (const std::unique_ptr<HoleTable>& one : holeTables_) {
+                if (one->viewId() != id) continue;
+                removeObject(one->id());
+                again = true;
+                break;
+            }
+        }
         // ...EXCEPT ITS CHILDREN. A projected view's place is composed from
         // its parent's, so a child whose parent is gone has nowhere to be.
         // Taken FIRST so each records its own delta and one undo puts the
@@ -3023,6 +3214,34 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         wire->setPointsMm(UnflattenPoints(forward ? edit->afterPointsXY
                                                   : edit->beforePointsXY));
         wire->setLabel(forward ? edit->afterLabel : edit->beforeLabel);
+        return;
+    }
+
+    if (const auto* edit = std::get_if<HoleTableExistenceEdit>(&delta)) {
+        const bool wanted = forward == edit->addedByTheEdit;
+        if (wanted) {
+            if (findHoleTable(edit->tableId) == nullptr)
+                restoreHoleTable(edit->tableId, edit->name, edit->viewId,
+                                 Vec2{edit->xMm, edit->yMm},
+                                 Vec2{edit->datumXMm, edit->datumYMm}, {}, 7.0);
+        } else {
+            for (auto it = holeTables_.begin(); it != holeTables_.end(); ++it) {
+                if ((*it)->id() != edit->tableId) continue;
+                registry_.unregisterObject(edit->tableId);
+                holeTables_.erase(it);
+                break;
+            }
+        }
+        return;
+    }
+
+    if (const auto* edit = std::get_if<HoleTableEdit>(&delta)) {
+        HoleTable* table = findHoleTableForEdit(edit->tableId);
+        if (table == nullptr) return;
+        table->setPositionMm(forward ? Vec2{edit->afterXMm, edit->afterYMm}
+                                     : Vec2{edit->beforeXMm, edit->beforeYMm});
+        table->setDatumMm(forward ? Vec2{edit->afterDatumXMm, edit->afterDatumYMm}
+                                  : Vec2{edit->beforeDatumXMm, edit->beforeDatumYMm});
         return;
     }
 

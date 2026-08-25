@@ -2,6 +2,7 @@
 
 #include "Core/Assembly/Mate.h"
 #include "Core/Drawing/DrawingDocument.h"
+#include "Core/Feature/HoleStandards.h"
 #include "Core/Assembly/Relation.h"
 #include "Core/Document/CadDocument.h"
 #include "Core/Document/ObjectId.h"
@@ -343,9 +344,30 @@ public:
     // --- Section views (M38) --------------------------------------------------
     QString addSectionViewCommand(const QString& name, Vec2 fromMm, Vec2 toMm, int arrowSide,
                                   double offsetMm);
+    // THE COMMANDS, separate from the dialogs that call them, so the self test
+    // can drive them without a mouse -- the same split every command in this
+    // window has had since M12.
+    QString setHoleStandardCommand(ObjectId featureId, const QString& designation, bool tapped,
+                                   ClearanceFit fit, HoleKind kind);
+    QString addHoleTableCommand(const QString& name, Vec2 positionMm, Vec2 datumMm);
+    // THE IDS AND THE PICK ARE ARGUMENTS, not read off a selection.
+    //
+    // The last id is the object being edited and the rest are what it is
+    // edited against, which is the rule every draughtsman already has in their
+    // fingers. Passed in rather than taken from the window so a script and the
+    // self test can drive these without a pointer -- the same split every
+    // command here has had since M12.
+    QString sheetEditCommand(const QString& what, const std::vector<ObjectId>& ids, Vec2 pickAt,
+                             double first, double second, int count);
     std::size_t drawnHatchLinesForTesting() const;
     std::size_t drawnSectionArrowsForTesting() const;
     std::size_t unhatchedSectionsForTesting() const;
+    // M39: rows drawn, and TAGS drawn beside the holes they name. Two numbers
+    // rather than one because they are the pair that has to agree -- a table
+    // with six rows and five tags describes a hole it never marks.
+    std::size_t drawnHoleRowsForTesting() const;
+    std::size_t drawnHoleTagsForTesting() const;
+    std::size_t uncountedHoleTablesForTesting() const;
     QString sectionLetterForTesting(ObjectId viewId) const;
     // The tag a new component of this kind would get: the symbol's prefix plus
     // the next free number. ONE answer, so the menu and a script agree.
@@ -843,6 +865,17 @@ private slots:
     void onToleranceRequested();
     void onGeneralToleranceRequested();
     void onSectionViewRequested();
+    // M39: what screw a hole is for, and the table that lists them all.
+    void onHoleStandardRequested();
+    void onHoleTableRequested();
+    // M40: the sheet editing tools. One handler each, one command each --
+    // every one of them a thin shell over a pure function in SheetEdits.h.
+    void onSheetTrimRequested();
+    void onSheetExtendRequested();
+    void onSheetFilletRequested();
+    void onSheetChamferRequested();
+    void onSheetOffsetRequested();
+    void onSheetArrayRequested();
     void onTitleBlockRequested();
     void onFrameRequested();
     void onPlotPdfRequested();
@@ -1101,6 +1134,14 @@ private:
     QAction* toleranceAction_ = nullptr;
     QAction* generalToleranceAction_ = nullptr;
     QAction* sectionViewAction_ = nullptr;
+    QAction* holeStandardAction_ = nullptr;
+    QAction* holeTableAction_ = nullptr;
+    QAction* sheetTrimAction_ = nullptr;
+    QAction* sheetExtendAction_ = nullptr;
+    QAction* sheetFilletAction_ = nullptr;
+    QAction* sheetChamferAction_ = nullptr;
+    QAction* sheetOffsetAction_ = nullptr;
+    QAction* sheetArrayAction_ = nullptr;
     QAction* drawLineAction_ = nullptr;
     QAction* drawCircleAction_ = nullptr;
     QAction* drawRectangleAction_ = nullptr;

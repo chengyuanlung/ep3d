@@ -4424,8 +4424,16 @@ int main(int argc, char** argv) {
                     QFile out(script);
                     if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
                         fail("could not write M32's part script");
+                    // ...WITH HOLES IN IT (M39). A block with none makes the
+                    // hole-table gate below assert nothing at all: an empty
+                    // table has as many rows as tags, and "0 == 0" is a check
+                    // that can never fail. ADR-M26-009 in the small -- a
+                    // fingerprint that always matches is not evidence.
                     out.write(("sketch S\ntool rect\nclick 0 0\nclick 80 30\n"
-                               "pad Block 20 as BlockT\nsolve\nsave " +
+                               "pad Block 20 as BlockT\n"
+                               "sketch H\ntool point\nclick 15 8\nclick 65 8\n"
+                               "click 15 22\n"
+                               "hole Block H 6.6\nsolve\nsave " +
                                partFile.toStdString() + "\n")
                                   .c_str());
                     out.close();
@@ -4817,6 +4825,131 @@ int main(int argc, char** argv) {
                             if (!shoot(window, QString::fromStdString(beside)))
                                 fail("could not write the section screenshot");
                         }
+                    }
+
+                    // --- M39's GATE: a hole table on the paper ----------------
+                    //
+                    // The Core suite proves the rows are counted right and the
+                    // kernel suite proves the holes come out the size the
+                    // standard says. Only starting the program can prove a
+                    // user can put the table on a sheet and that the TAGS
+                    // reach the view -- and it is the pair that matters: rows
+                    // nobody can find on the drawing describe an unmarked
+                    // part.
+                    {
+                        window.selectDrawingViewForTesting(QStringLiteral("Top"));
+                        const QString made = window.addHoleTableCommand(
+                            // CLEAR OF EVERYTHING ELSE. The first run put it
+                            // over the circle and the 60 mm dimension in the
+                            // corner -- legible in the tally, unreadable on
+                            // the paper, which is the whole reason a
+                            // screenshot is taken as well as a count.
+                            QStringLiteral("Holes"), Vec2{30.0, 390.0}, Vec2{0.0, 0.0});
+                        if (made.contains(QStringLiteral("refused")))
+                            fail(("the hole table was refused: " + made.toStdString()).c_str());
+                        if (made.contains(QStringLiteral("could not be read")))
+                            fail(("the hole table could not read its part: " +
+                                  made.toStdString())
+                                     .c_str());
+
+                        window.repaintDrawingForTesting();
+                        if (window.uncountedHoleTablesForTesting() != 0)
+                            fail("a hole table on the sheet could not count its part");
+                        // EVERY ROW HAS A TAG AND EVERY TAG HAS A ROW. Counted
+                        // apart on purpose: either number alone looks healthy
+                        // when the two disagree, and what the reader gets is a
+                        // hole described in a table and marked nowhere.
+                        if (window.drawnHoleRowsForTesting() !=
+                            window.drawnHoleTagsForTesting())
+                            fail("the hole table drew a different number of rows and tags");
+                        // AND THERE HAS TO BE SOMETHING IN IT. Without this the
+                        // check above is "0 == 0" -- a fingerprint that always
+                        // matches, which is not evidence of anything
+                        // (ADR-M26-009). The part this view is of has three
+                        // holes drilled into it.
+                        if (window.drawnHoleRowsForTesting() != 3)
+                            fail("the hole table did not draw the part's three holes");
+
+                        // A PICTURE OF IT. Whether a hole table READS -- the
+                        // columns wide enough for their callouts, the tags
+                        // findable beside the holes, the rows lined up --
+                        // is a judgement no assertion makes (ADR-M26-009).
+                        if (screenshotPath != nullptr) {
+                            std::string beside = screenshotPath;
+                            const std::size_t dot = beside.rfind('.');
+                            beside = dot == std::string::npos
+                                         ? beside + "-holes"
+                                         : beside.substr(0, dot) + "-holes" +
+                                               beside.substr(dot);
+                            if (!shoot(window, QString::fromStdString(beside)))
+                                fail("could not write the hole table screenshot");
+                        }
+                    }
+
+                    // --- M40's GATE: the editing tools -----------------------
+                    //
+                    // Every one of these does something PLAUSIBLE to the wrong
+                    // piece when it is wrong, so what the gate checks is not
+                    // that a command succeeded: it is that the count of things
+                    // on the sheet moved the way the tool says it does.
+                    {
+                        window.setDrawingToolCommand(DrawingTool::Line);
+                        window.pickOnSheetForTesting(Vec2{20.0, 40.0});
+                        window.pickOnSheetForTesting(Vec2{120.0, 40.0});
+                        const std::size_t afterFirst = window.drawingEntityCountForTesting();
+                        const ObjectId across =
+                            window.drawingEntityIdForTesting(afterFirst - 1);
+                        window.setDrawingToolCommand(DrawingTool::Line);
+                        window.pickOnSheetForTesting(Vec2{70.0, 10.0});
+                        window.pickOnSheetForTesting(Vec2{70.0, 70.0});
+                        const std::size_t afterBoth = window.drawingEntityCountForTesting();
+                        const ObjectId upright = window.drawingEntityIdForTesting(afterBoth - 1);
+                        if (afterBoth != afterFirst + 1)
+                            fail("the gate could not draw the two lines it needs");
+
+                        // TRIM: cut the long line where the upright crosses it
+                        // and throw away the piece the pick is on. One line in,
+                        // one line out -- and the count does not move.
+                        const QString trimmed = window.sheetEditCommand(
+                            QStringLiteral("Trim"), {upright, across}, Vec2{100.0, 40.0}, 0.0,
+                            0.0, 0);
+                        if (!trimmed.contains(QStringLiteral("1 object")))
+                            fail(("trim did not leave one line: " + trimmed.toStdString())
+                                     .c_str());
+                        if (window.drawingEntityCountForTesting() != afterBoth)
+                            fail("trim did not replace the line it cut");
+
+                        // OFFSET KEEPS ITS ORIGINAL: it is a copy, not a move,
+                        // which is the difference between offsetting a wall and
+                        // dragging it.
+                        const QString offset = window.sheetEditCommand(
+                            QStringLiteral("Offset"), {upright}, Vec2{90.0, 40.0}, 10.0, 0.0,
+                            0);
+                        if (!offset.contains(QStringLiteral("1 object")))
+                            fail(("offset did not make a copy: " + offset.toStdString())
+                                     .c_str());
+                        if (window.drawingEntityCountForTesting() != afterBoth + 1)
+                            fail("offset consumed the line it was copying");
+
+                        // ARRAY INCLUDES THE ORIGINAL as its first copy, so
+                        // four across replaces one line with four.
+                        const QString arrayed = window.sheetEditCommand(
+                            QStringLiteral("Array"), {upright}, Vec2{}, 25.0, 0.0, 4);
+                        if (!arrayed.contains(QStringLiteral("4 object")))
+                            fail(("array did not make four: " + arrayed.toStdString()).c_str());
+                        const std::size_t afterArray = window.drawingEntityCountForTesting();
+                        if (afterArray != afterBoth + 4)
+                            fail("array did not replace its original with four copies");
+
+                        // ...AND ONE UNDO TAKES THE WHOLE EDIT BACK. Half-
+                        // undone, an array leaves three strangers on the sheet
+                        // and the original still missing.
+                        window.undoCommand();
+                        if (window.drawingEntityCountForTesting() != afterBoth + 1)
+                            fail("undoing an array did not take all of it back");
+                        window.redoCommand();
+                        if (window.drawingEntityCountForTesting() != afterArray)
+                            fail("redoing an array did not put it back in one step");
                     }
 
                     // --- THE TOOLBAR CARRIES THEM -----------------------------

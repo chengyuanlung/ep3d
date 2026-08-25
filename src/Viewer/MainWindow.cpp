@@ -482,6 +482,44 @@ void MainWindow::buildMenus() {
     connect(sectionViewAction_, &QAction::triggered, this,
             &MainWindow::onSectionViewRequested);
 
+    holeTableAction_ = drawingMenu_->addAction(QStringLiteral("&Hole Table..."));
+    holeTableAction_->setToolTip(
+        QStringLiteral("Every hole in the selected view's part, tagged and measured from a "
+                       "datum.\n"
+                       "The rows are counted from the part each time, so the table can "
+                       "never describe holes the part no longer has."));
+    connect(holeTableAction_, &QAction::triggered, this, &MainWindow::onHoleTableRequested);
+
+    QMenu* editMenu = drawingMenu_->addMenu(QStringLiteral("&Modify"));
+    sheetTrimAction_ = editMenu->addAction(QStringLiteral("&Trim"));
+    sheetTrimAction_->setToolTip(
+        QStringLiteral("Cuts the LAST selected object where the others cross it, and throws "
+                       "away the piece nearest the point you picked."));
+    connect(sheetTrimAction_, &QAction::triggered, this, &MainWindow::onSheetTrimRequested);
+    sheetExtendAction_ = editMenu->addAction(QStringLiteral("&Extend"));
+    sheetExtendAction_->setToolTip(
+        QStringLiteral("Lengthens the end of the LAST selected line nearest your pick until "
+                       "it reaches one of the others."));
+    connect(sheetExtendAction_, &QAction::triggered, this, &MainWindow::onSheetExtendRequested);
+    sheetFilletAction_ = editMenu->addAction(QStringLiteral("&Fillet..."));
+    sheetFilletAction_->setToolTip(
+        QStringLiteral("Rounds the corner between two selected lines.\n"
+                       "A radius of zero brings them to a sharp corner instead."));
+    connect(sheetFilletAction_, &QAction::triggered, this, &MainWindow::onSheetFilletRequested);
+    sheetChamferAction_ = editMenu->addAction(QStringLiteral("&Chamfer..."));
+    sheetChamferAction_->setToolTip(
+        QStringLiteral("Cuts across the corner between two selected lines."));
+    connect(sheetChamferAction_, &QAction::triggered, this,
+            &MainWindow::onSheetChamferRequested);
+    sheetOffsetAction_ = editMenu->addAction(QStringLiteral("&Offset..."));
+    sheetOffsetAction_->setToolTip(
+        QStringLiteral("A parallel copy of the selected object, on the side you picked."));
+    connect(sheetOffsetAction_, &QAction::triggered, this, &MainWindow::onSheetOffsetRequested);
+    sheetArrayAction_ = editMenu->addAction(QStringLiteral("&Array..."));
+    sheetArrayAction_->setToolTip(
+        QStringLiteral("Rows and columns of the selection. The original is the first copy."));
+    connect(sheetArrayAction_, &QAction::triggered, this, &MainWindow::onSheetArrayRequested);
+
     toleranceAction_ = drawingMenu_->addAction(QStringLiteral("T&olerance..."));
     toleranceAction_->setToolTip(
         QStringLiteral("How close the size has to be held.\n"
@@ -668,6 +706,14 @@ void MainWindow::buildMenus() {
     connect(insertShellAction_, &QAction::triggered, this, &MainWindow::onInsertShellRequested);
     insertHoleAction_ = insert->addAction(QStringLiteral("&Hole at Selected Sketch Points"));
     connect(insertHoleAction_, &QAction::triggered, this, &MainWindow::onInsertHoleRequested);
+    holeStandardAction_ = insert->addAction(QStringLiteral("Hole &Standard..."));
+    holeStandardAction_->setToolTip(
+        QStringLiteral("What screw the selected hole is for.\n"
+                       "An M8 tapped hole is drilled 6.8 and an M8 clearance hole 9.0 -- the "
+                       "size follows from the thread, and the drawing says the same thing "
+                       "the cut was made from."));
+    connect(holeStandardAction_, &QAction::triggered, this,
+            &MainWindow::onHoleStandardRequested);
     insert->addSeparator();
     insertUnionAction_ = insert->addAction(QStringLiteral("&Union the Two Solids"));
     connect(insertUnionAction_, &QAction::triggered, this, &MainWindow::onInsertUnionRequested);
@@ -5028,10 +5074,350 @@ QString MainWindow::addSectionViewCommand(const QString& name, Vec2 fromMm, Vec2
                    .arg(QString::fromStdString(drawing->sectionLetterOf(madeId))));
 }
 
+QString MainWindow::setHoleStandardCommand(ObjectId featureId, const QString& designation,
+                                          bool tapped, ClearanceFit fit, HoleKind kind) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    PartDocument* part = partOrNull();
+    if (part == nullptr) return say(QStringLiteral("Holes belong to a part."));
+
+    HoleScrew screw;
+    screw.designation = designation.toStdString();
+    screw.tapped = tapped;
+    screw.fit = fit;
+    // REFUSED BEFORE ANYTHING CHANGES. A designation this build has no numbers
+    // for would otherwise be taken, and the hole would go red at the next
+    // recompute pointing at a decision the user has stopped thinking about.
+    if (!part->setHoleScrew(featureId, screw))
+        return say(QStringLiteral("'%1' is not a thread this build has numbers for.")
+                       .arg(designation));
+    if (!part->setHoleKind(featureId, kind))
+        return say(QStringLiteral("That hole is no longer here."));
+    onRecomputeRequested();
+    refreshAll();
+
+    // WHAT IT SAYS BACK IS WHAT THE DRAWING WILL SAY. Asked of the same
+    // function the cut is made from, so the status bar cannot report a hole
+    // different from the one the kernel drilled.
+    const HoleFeature* hole = nullptr;
+    for (const std::unique_ptr<Body>& body : part->bodies())
+        for (const std::unique_ptr<Feature>& feature : body->features())
+            if (feature->id() == featureId)
+                hole = dynamic_cast<const HoleFeature*>(feature.get());
+    if (hole == nullptr) return say(QStringLiteral("That hole is no longer here."));
+    const HoleSizes sizes = hole->sizes(0.0, 0.0);
+    if (!sizes.ok)
+        return say(QStringLiteral("That hole was refused: %1")
+                       .arg(QString::fromStdString(sizes.why)));
+    return say(QStringLiteral("%1 -- drilled %2")
+                   .arg(QString::fromStdString(sizes.callout))
+                   .arg(sizes.drillDiameterMm));
+}
+
+QString MainWindow::addHoleTableCommand(const QString& name, Vec2 positionMm, Vec2 datumMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Hole tables belong to a drawing."));
+    const ObjectId view = selectedDrawingView();
+    if (view == kInvalidObjectId)
+        return say(QStringLiteral("Select the view whose holes to list first."));
+
+    HoleTable* made = nullptr;
+    try {
+        made = &drawing->addHoleTable(name.toStdString(), view, positionMm, datumMm);
+    } catch (const std::exception& error) {
+        return say(QStringLiteral("That hole table was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    const HoleTableContents rows = drawing->holesOf(*made);
+    selectedId_ = made->id();
+    refreshAll();
+    // AN UNREADABLE PART IS SAID OUT LOUD. An empty table is what a part with
+    // no holes gives, and on the paper the two look identical.
+    if (!rows.ok)
+        return say(QStringLiteral("The table is there, but its part could not be read: %1")
+                       .arg(QString::fromStdString(rows.why)));
+    return say(QStringLiteral("Hole table: %1 hole(s)").arg(rows.rows.size()));
+}
+
+QString MainWindow::sheetEditCommand(const QString& what, const std::vector<ObjectId>& ids,
+                                    Vec2 pickAt, double first, double second, int count) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("These tools edit drawing geometry."));
+
+    // EVERY ID HAS TO BE A REAL OBJECT, checked before anything is touched.
+    std::vector<ObjectId> picked;
+    for (const ObjectId id : ids)
+        if (drawing->findEntity(id) != nullptr) picked.push_back(id);
+    if (picked.size() != ids.size())
+        return say(QStringLiteral("One of those objects is not on this sheet."));
+    if (picked.empty()) return say(QStringLiteral("Select something to edit first."));
+
+    const auto shapeOf = [&](ObjectId id) { return drawing->findEntity(id)->shape(); };
+    const DrawShape victim = shapeOf(picked.back());
+    std::vector<DrawShape> others;
+    for (std::size_t i = 0; i + 1 < picked.size(); ++i) others.push_back(shapeOf(picked[i]));
+
+    const Vec2 pick = pickAt;
+
+    SheetEditResult made;
+    std::vector<ObjectId> consumed{picked.back()};
+    QString label = what;
+    if (what == QStringLiteral("Trim")) {
+        made = TrimShape(victim, others, pick);
+    } else if (what == QStringLiteral("Extend")) {
+        made = ExtendShape(victim, others, pick);
+    } else if (what == QStringLiteral("Fillet") || what == QStringLiteral("Chamfer")) {
+        if (picked.size() < 2) return say(QStringLiteral("%1 joins two lines.").arg(what));
+        const DrawShape firstShape = shapeOf(picked[picked.size() - 2]);
+        // The picks that say WHICH corner: the midpoint of each line, which is
+        // the side of the crossing that line was drawn on.
+        const auto middleOf = [](const DrawShape& shape) {
+            const auto* line = std::get_if<DrawLine>(&shape);
+            return line == nullptr ? Vec2{0.0, 0.0}
+                                   : Vec2{(line->a.x + line->b.x) / 2.0,
+                                          (line->a.y + line->b.y) / 2.0};
+        };
+        made = what == QStringLiteral("Fillet")
+                   ? FilletLines(firstShape, victim, middleOf(firstShape), middleOf(victim),
+                                 first)
+                   : ChamferLines(firstShape, victim, middleOf(firstShape), middleOf(victim),
+                                  first);
+        consumed = {picked[picked.size() - 2], picked.back()};
+    } else if (what == QStringLiteral("Offset")) {
+        made = OffsetShape(victim, first, pick);
+        // AN OFFSET KEEPS ITS ORIGINAL. It is a copy, not a move -- which is
+        // the difference between offsetting a wall and dragging it.
+        consumed.clear();
+    } else if (what == QStringLiteral("Array")) {
+        std::vector<DrawShape> all;
+        for (const ObjectId id : picked) all.push_back(shapeOf(id));
+        made = RectangularArray(all, count, count > 0 ? 1 : 0, Vec2{first, second});
+        consumed = picked;
+    } else {
+        return say(QStringLiteral("%1 is not a tool this build has.").arg(what));
+    }
+
+    std::string why;
+    const std::vector<ObjectId> arrived =
+        drawing->applySheetEdit(consumed, made, label.toStdString(), &why);
+    if (arrived.empty() && !made.shapes.empty())
+        return say(QStringLiteral("%1 was refused: %2").arg(what, QString::fromStdString(why)));
+    if (!made.ok)
+        return say(QStringLiteral("%1 was refused: %2")
+                       .arg(what, QString::fromStdString(made.why)));
+    selectedId_ = arrived.empty() ? kInvalidObjectId : arrived.front();
+    refreshAll();
+    return say(QStringLiteral("%1: %2 object(s)").arg(what).arg(arrived.size()));
+}
+
+namespace {
+
+// WHICH OBJECTS A ONE-PICK MENU CAN MEAN.
+//
+// The canvas holds one selection, so a tool that wants "this one, against
+// those" has to say what "those" is. For trim and extend it is everything else
+// on the sheet, which is what a draughtsman means by trimming to what is
+// drawn. Named here rather than repeated in four handlers.
+std::vector<ObjectId> EverythingElseThen(const DrawingDocument& drawing, ObjectId last) {
+    std::vector<ObjectId> ids;
+    for (const DrawingEntity* entity : drawing.entities())
+        if (entity->id() != last && drawing.isEntityVisible(*entity)) ids.push_back(entity->id());
+    ids.push_back(last);
+    return ids;
+}
+
+} // namespace
+
+void MainWindow::onSheetTrimRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || drawing->findEntity(selectedId_) == nullptr) return;
+    sheetEditCommand(QStringLiteral("Trim"), EverythingElseThen(*drawing, selectedId_),
+                     drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{},
+                     0.0, 0.0, 0);
+}
+
+void MainWindow::onSheetExtendRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || drawing->findEntity(selectedId_) == nullptr) return;
+    sheetEditCommand(QStringLiteral("Extend"), EverythingElseThen(*drawing, selectedId_),
+                     drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{},
+                     0.0, 0.0, 0);
+}
+
+namespace {
+
+// The other line a two-line tool joins to, when the window can only hold one
+// selection: the one NEAREST THE POINTER. That is the second pick -- the user
+// is hovering the line they mean -- and it degrades honestly rather than
+// picking for them.
+ObjectId NearestOtherLine(const DrawingDocument& drawing, ObjectId notThis, Vec2 pointer) {
+    ObjectId best = kInvalidObjectId;
+    double bestDistance = 0.0;
+    for (const DrawingEntity* entity : drawing.entities()) {
+        if (entity->id() == notThis || !drawing.isEntityVisible(*entity)) continue;
+        const auto* line = std::get_if<DrawLine>(&entity->shape());
+        if (line == nullptr) continue;
+        const double distance = DistancePointToSegment(pointer, line->a, line->b);
+        if (best == kInvalidObjectId || distance < bestDistance) {
+            best = entity->id();
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+void MainWindow::onSheetFilletRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || drawing->findEntity(selectedId_) == nullptr) return;
+    const Vec2 pointer = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
+    const ObjectId other = NearestOtherLine(*drawing, selectedId_, pointer);
+    if (other == kInvalidObjectId) {
+        statusLeft_->setText(QStringLiteral("A fillet joins two lines -- there is no other "
+                                            "line on this sheet."));
+        return;
+    }
+    bool ok = false;
+    const double radius = QInputDialog::getDouble(
+        this, QStringLiteral("Fillet"), QStringLiteral("Radius (mm), 0 for a sharp corner:"),
+        5.0, 0.0, 100000.0, 3, &ok);
+    if (!ok) return;
+    sheetEditCommand(QStringLiteral("Fillet"), {other, selectedId_}, pointer, radius, 0.0, 0);
+}
+
+void MainWindow::onSheetChamferRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || drawing->findEntity(selectedId_) == nullptr) return;
+    const Vec2 pointer = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
+    const ObjectId other = NearestOtherLine(*drawing, selectedId_, pointer);
+    if (other == kInvalidObjectId) {
+        statusLeft_->setText(QStringLiteral("A chamfer joins two lines -- there is no other "
+                                            "line on this sheet."));
+        return;
+    }
+    bool ok = false;
+    const double setback = QInputDialog::getDouble(
+        this, QStringLiteral("Chamfer"), QStringLiteral("Setback along each line (mm):"), 3.0,
+        0.001, 100000.0, 3, &ok);
+    if (!ok) return;
+    sheetEditCommand(QStringLiteral("Chamfer"), {other, selectedId_}, pointer, setback, 0.0, 0);
+}
+
+void MainWindow::onSheetOffsetRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || drawing->findEntity(selectedId_) == nullptr) return;
+    bool ok = false;
+    const double distance = QInputDialog::getDouble(
+        this, QStringLiteral("Offset"), QStringLiteral("Distance (mm):"), 5.0, 0.001, 100000.0,
+        3, &ok);
+    if (!ok) return;
+    sheetEditCommand(QStringLiteral("Offset"), {selectedId_},
+                     drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{},
+                     distance, 0.0, 0);
+}
+
+void MainWindow::onSheetArrayRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || drawing->findEntity(selectedId_) == nullptr) return;
+    bool ok = false;
+    const int count = QInputDialog::getInt(this, QStringLiteral("Array"),
+                                           QStringLiteral("How many across:"), 3, 1, 1000, 1,
+                                           &ok);
+    if (!ok) return;
+    const double pitch = QInputDialog::getDouble(this, QStringLiteral("Array"),
+                                                 QStringLiteral("Spacing (mm):"), 20.0,
+                                                 -100000.0, 100000.0, 3, &ok);
+    if (!ok) return;
+    sheetEditCommand(QStringLiteral("Array"), {selectedId_},
+                     drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{},
+                     pitch, 0.0, count);
+}
+
+void MainWindow::onHoleTableRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const ObjectId view = selectedDrawingView();
+    if (view == kInvalidObjectId) {
+        statusLeft_->setText(QStringLiteral("Select the view whose holes to list first."));
+        return;
+    }
+    bool ok = false;
+    const double datumX = QInputDialog::getDouble(
+        this, QStringLiteral("Hole Table"),
+        QStringLiteral("Datum X on the view (mm) -- the corner every position is measured "
+                       "from:"),
+        0.0, -100000.0, 100000.0, 3, &ok);
+    if (!ok) return;
+    const double datumY = QInputDialog::getDouble(this, QStringLiteral("Hole Table"),
+                                                  QStringLiteral("Datum Y on the view (mm):"),
+                                                  0.0, -100000.0, 100000.0, 3, &ok);
+    if (!ok) return;
+    addHoleTableCommand(QStringLiteral("Holes%1").arg(drawing->holeTables().size() + 1),
+                        Vec2{30.0, 90.0}, Vec2{datumX, datumY});
+}
+
+void MainWindow::onHoleStandardRequested() {
+    PartDocument* part = partOrNull();
+    if (part == nullptr) return;
+    const ObjectId featureId = selectedId_;
+    bool ok = false;
+    const QString designation = QInputDialog::getText(
+        this, QStringLiteral("Hole Standard"),
+        QStringLiteral("Thread, e.g. M8 (blank for a plain hole):"), QLineEdit::Normal,
+        QStringLiteral("M8"), &ok);
+    if (!ok) return;
+    const QStringList kinds{QStringLiteral("Tapped"), QStringLiteral("Clearance, close"),
+                            QStringLiteral("Clearance, normal"),
+                            QStringLiteral("Clearance, loose")};
+    const QString kind = QInputDialog::getItem(this, QStringLiteral("Hole Standard"),
+                                               QStringLiteral("Drilled for:"), kinds, 0, false,
+                                               &ok);
+    if (!ok) return;
+    const QStringList mouths{QStringLiteral("Plain"), QStringLiteral("Counterbore"),
+                             QStringLiteral("Countersink")};
+    const QString mouth = QInputDialog::getItem(this, QStringLiteral("Hole Standard"),
+                                                QStringLiteral("Mouth:"), mouths, 0, false, &ok);
+    if (!ok) return;
+
+    ClearanceFit fit = ClearanceFit::Normal;
+    if (kind == kinds[1]) fit = ClearanceFit::Close;
+    if (kind == kinds[3]) fit = ClearanceFit::Loose;
+    HoleKind shape = HoleKind::Simple;
+    if (mouth == mouths[1]) shape = HoleKind::Counterbore;
+    if (mouth == mouths[2]) shape = HoleKind::Countersink;
+    setHoleStandardCommand(featureId, designation, kind == kinds[0], fit, shape);
+}
+
 QString MainWindow::sectionLetterForTesting(ObjectId viewId) const {
     const DrawingDocument* drawing = AsDrawing(document_);
     return drawing == nullptr ? QString()
                               : QString::fromStdString(drawing->sectionLetterOf(viewId));
+}
+
+std::size_t MainWindow::drawnHoleRowsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnHoleRowsForTesting();
+}
+
+std::size_t MainWindow::drawnHoleTagsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnHoleTagsForTesting();
+}
+
+std::size_t MainWindow::uncountedHoleTablesForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->uncountedHoleTablesForTesting();
 }
 
 std::size_t MainWindow::drawnHatchLinesForTesting() const {

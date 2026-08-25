@@ -2,6 +2,8 @@
 
 #include "Core/Document/DocumentBase.h"
 #include "Core/Drawing/BomTable.h"
+#include "Core/Drawing/HoleTable.h"
+#include "Core/Drawing/SheetEdits.h"
 #include "Core/Electrical/SchematicObjects.h"
 #include "Core/Drawing/DimensionStyle.h"
 #include "Core/Drawing/DrawingDimension.h"
@@ -238,6 +240,24 @@ public:
     // are. EasyCad had five commands over one `ApplyTransform`, and so does
     // this: what differs is the matrix the shell builds, not what happens to
     // the geometry.
+    // TRIM, EXTEND, FILLET, CHAMFER, OFFSET, ARRAY -- all one operation here,
+    // for the same reason move and copy are (M40).
+    //
+    // What each of them produces is: some entities go, some shapes arrive.
+    // Written as six document methods they would be six copies of the same
+    // remove-and-add, each with its own idea of which layer the new geometry
+    // lands on and whether the whole thing is one undo step -- and the way
+    // anybody would find out they disagreed is an undo that half-worked.
+    //
+    // ONE UNDO STEP. A trim that could be half-undone would leave a drawing
+    // with the old line back and the new pieces still there, sitting exactly
+    // on top of each other.
+    //
+    // Returns the ids of what was made; empty on refusal, with `why` set.
+    std::vector<ObjectId> applySheetEdit(const std::vector<ObjectId>& consumed,
+                                         const SheetEditResult& made, const std::string& label,
+                                         std::string* why = nullptr);
+
     bool transformEntities(const std::vector<ObjectId>& ids, const Matrix2D& transform);
     // ...and the copying half, which is the same transform applied to clones.
     std::vector<ObjectId> copyEntities(const std::vector<ObjectId>& ids,
@@ -342,6 +362,26 @@ public:
     // for -- THE one counter, so the canvas, a plot and a DXF write cannot
     // disagree about how many bolts there are.
     BomContents countBom(const BomTable& table) const;
+
+    // --- THE HOLE TABLE (M39.4) ---------------------------------------------
+    //
+    // Every hole in the part a view is of, tagged and measured from a datum
+    // the drawing states. Added against a VIEW rather than a file, so the
+    // table and the tags drawn in the view cannot describe different parts.
+    HoleTable& addHoleTable(std::string name, ObjectId viewId, Vec2 positionMm, Vec2 datumMm);
+    HoleTable& restoreHoleTable(ObjectId id, std::string name, ObjectId viewId, Vec2 positionMm,
+                                Vec2 datumMm, std::vector<HoleColumn> columns,
+                                double rowHeightMm);
+    std::vector<const HoleTable*> holeTables() const;
+    const HoleTable* findHoleTable(ObjectId id) const noexcept;
+    bool setHoleTablePosition(ObjectId id, Vec2 positionMm);
+    bool setHoleTableDatum(ObjectId id, Vec2 datumMm);
+    bool removeHoleTable(ObjectId id);
+
+    // THE ROWS, COUNTED NOW. Never stored, for the reason a parts list's
+    // quantities are not: a table holding its own copy is a drawing stating
+    // hole positions the part no longer has.
+    HoleTableContents holesOf(const HoleTable& table) const;
     // Which lists are counting a file that has changed since. The same
     // question a view answers, through the same content hash (M32.4).
     std::vector<ObjectId> staleBomTables() const;
@@ -506,6 +546,7 @@ private:
     DrawingEntity* findEntityForEdit(ObjectId id) noexcept;
     DrawingDimension* findDimensionForEdit(ObjectId id) noexcept;
     BomTable* findBomTableForEdit(ObjectId id) noexcept;
+    HoleTable* findHoleTableForEdit(ObjectId id) noexcept;
     SymbolPlacement* findSymbolForEdit(ObjectId id) noexcept;
     WireEntity* findWireForEdit(ObjectId id) noexcept;
     DimensionStyle* findDimensionStyleForEdit(ObjectId id) noexcept;
@@ -533,6 +574,7 @@ private:
     std::vector<std::unique_ptr<DrawingDimension>> dimensions_;
     ObjectId currentStyleId_{kInvalidObjectId};
     std::vector<std::unique_ptr<BomTable>> bomTables_;
+    std::vector<std::unique_ptr<HoleTable>> holeTables_;
     std::vector<std::unique_ptr<SymbolPlacement>> symbols_;
     std::vector<std::unique_ptr<WireEntity>> wires_;
     TitleBlock titleBlock_;

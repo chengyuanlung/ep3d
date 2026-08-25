@@ -518,6 +518,74 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
         ++tally.curves;
     }
 
+    // --- THE HOLE TABLES, AND THE TAGS IN THE VIEW (M39.4) -------------------
+    //
+    // Drawn from ONE reading of the part. The row says A1 at (10, 40) and the
+    // tag is placed at exactly that point -- worked out from the same numbers,
+    // so a tag cannot end up beside a hole other than the one its row
+    // describes. Two readings is precisely the shape of defect this project
+    // keeps closing.
+    for (const HoleTable* table : document.holeTables()) {
+        const HoleTableContents holes = document.holesOf(*table);
+        if (!holes.ok) {
+            // THE ALARM HAS TO REACH THE SCREEN. An empty table is what a part
+            // with no holes gives, and the reader cannot tell the two apart.
+            ++tally.uncountedHoleTables;
+            painter.setPen(QPen(QColor(190, 60, 40)));
+            painter.drawText(page.toScreen(table->positionMm()),
+                             QStringLiteral("%1: %2")
+                                 .arg(QString::fromStdString(table->name()),
+                                      QString::fromStdString(holes.why)));
+            continue;
+        }
+
+        const Vec2 corner = table->positionMm();
+        const double width = table->widthMm();
+        const std::size_t lines = holes.rows.size() + 1; // the heading is a row
+        QFont cell = painter.font();
+        cell.setPixelSize(std::max(5, static_cast<int>(2.2 * page.pixelsPerMm)));
+        painter.setFont(cell);
+
+        for (std::size_t line = 0; line < lines; ++line) {
+            const double top = corner.y + table->rowBottomMm(line, lines) +
+                               table->rowHeightMm();
+            const double bottom = corner.y + table->rowBottomMm(line, lines);
+            painter.setPen(QPen(ink, 0.9));
+            painter.drawLine(page.toScreen(Vec2{corner.x, bottom}),
+                             page.toScreen(Vec2{corner.x + width, bottom}));
+
+            double x = corner.x;
+            for (const HoleColumn column : table->columns()) {
+                const double columnWidth = table->columnWidthMm(column);
+                painter.drawLine(page.toScreen(Vec2{x, top}),
+                                 page.toScreen(Vec2{x, bottom}));
+                const QString text =
+                    line == 0 ? QString::fromStdString(std::string(HeadingOf(column)))
+                              : QString::fromStdString(CellOf(holes.rows[line - 1], column));
+                const QPointF at = page.toScreen(Vec2{x + 1.0, bottom + 1.5});
+                painter.drawText(at, text);
+                x += columnWidth;
+            }
+            painter.drawLine(page.toScreen(Vec2{x, top}), page.toScreen(Vec2{x, bottom}));
+            if (line > 0) ++tally.holeTableRows;
+        }
+        // ...and the top rule, which the loop above draws only bottoms of.
+        painter.drawLine(page.toScreen(Vec2{corner.x, corner.y}),
+                         page.toScreen(Vec2{corner.x + width, corner.y}));
+
+        // THE TAG GOES WHERE THE ROW SAYS THE HOLE IS -- datum plus offset,
+        // through the view's own scale, which is the one conversion (M35).
+        for (const HoleTableRow& row : holes.rows) {
+            const Vec2 inView{table->datumMm().x + row.atMm.x,
+                              table->datumMm().y + row.atMm.y};
+            const QPointF at =
+                page.toScreen(document.viewPointToSheetMm(table->viewId(), inView));
+            painter.setPen(QPen(ink));
+            painter.drawText(at + QPointF(3.0, -3.0), QString::fromStdString(row.tag));
+            ++tally.holeTags;
+        }
+    }
+
     // --- THE VIEWS -----------------------------------------------------------
     for (const DrawingView* view : document.views()) {
         if (view->currentState() != ComputeState::Valid) continue;

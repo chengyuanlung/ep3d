@@ -26,6 +26,9 @@ add_library(ParametricCADCore
     src/Core/Drawing/Hatch.cpp
     src/Core/Drawing/Tolerance.cpp
     src/Core/Drawing/BomTable.cpp
+    src/Core/Drawing/HoleTable.cpp
+    src/Core/Drawing/SheetEdits.cpp
+    src/Core/Feature/HoleStandards.cpp
     src/Core/Electrical/SchematicObjects.cpp
     src/Core/Electrical/SymbolLibrary.cpp
     src/Core/Electrical/Netlist.cpp
@@ -554,6 +557,9 @@ if(PARAMCAD_BUILD_TESTS)
         tests/DrawingDimensionTests.cpp
         tests/HatchTests.cpp
         tests/ToleranceTests.cpp
+        tests/HoleStandardsTests.cpp
+        tests/HoleTableTests.cpp
+        tests/SheetEditTests.cpp
         tests/BomTableTests.cpp
         tests/NetlistTests.cpp
         tests/SheetFrameTests.cpp
@@ -696,6 +702,7 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Kernel/OcctSketchWireframeTests.cpp
             tests/Kernel/OcctDrawingProjectionTests.cpp
         tests/Kernel/OcctDrawingViewTests.cpp
+        tests/Kernel/OcctHoleStandardTests.cpp
         tests/Kernel/OcctEdgeQueryTests.cpp
             tests/Kernel/OcctBooleanTests.cpp
             tests/Kernel/OcctRevolveTests.cpp
