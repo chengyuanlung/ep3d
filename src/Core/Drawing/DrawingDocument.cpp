@@ -1330,6 +1330,164 @@ std::optional<Vec2> DrawingDocument::resolveAnchor(const DimensionAnchor& anchor
     return Vec2{at.x + bestModelPoint->x * factor, at.y + bestModelPoint->y * factor};
 }
 
+// =============================================================================
+// The frame and the title block (M35)
+// =============================================================================
+
+namespace {
+
+std::vector<TitleBlockFieldRecord> RecordOf(const TitleBlock& block) {
+    std::vector<TitleBlockFieldRecord> out;
+    out.reserve(block.fields().size());
+    for (const TitleBlockField& field : block.fields())
+        out.push_back(TitleBlockFieldRecord{field.label, field.value,
+                                            static_cast<int>(field.source)});
+    return out;
+}
+
+} // namespace
+
+SheetFrameGeometry DrawingDocument::frame() const noexcept {
+    // COMPUTED, EVERY TIME. There is nothing to keep in step because there is
+    // nothing kept.
+    return FrameOf(sheet_, frameMargins_, zoneTargetMm_);
+}
+
+Vec2 DrawingDocument::titleBlockOriginMm() const noexcept {
+    const SheetFrameGeometry border = frame();
+    // WITHOUT A FRAME, hard against the paper's own bottom-right corner. A
+    // title block that vanished because the margins were wrong would take the
+    // drawing's identity with it.
+    const Vec2 corner = border.ok ? border.innerMaxMm
+                                  : Vec2{sheet_.widthMm(), 0.0};
+    const double bottom = border.ok ? border.innerMinMm.y : 0.0;
+    return Vec2{corner.x - titleBlock_.widthMm(), bottom};
+}
+
+bool DrawingDocument::setTitleBlockField(const std::string& label, std::string value) {
+    TitleBlockEdit edit;
+    edit.before = RecordOf(titleBlock_);
+    edit.beforeWidthMm = edit.afterWidthMm = titleBlock_.widthMm();
+    edit.beforeRowHeightMm = edit.afterRowHeightMm = titleBlock_.rowHeightMm();
+    edit.beforeVisible = edit.afterVisible = titleBlock_.isVisible();
+    // REFUSED FOR A DERIVED FIELD, by the block itself -- and nothing is
+    // recorded, so the undo history does not fill with edits that changed
+    // nothing.
+    if (!titleBlock_.setField(label, std::move(value))) return false;
+    edit.after = RecordOf(titleBlock_);
+    recordDelta(edit, "Title block");
+    return true;
+}
+
+bool DrawingDocument::addTitleBlockField(std::string label, TitleBlockSource source) {
+    TitleBlockEdit edit;
+    edit.before = RecordOf(titleBlock_);
+    edit.beforeWidthMm = edit.afterWidthMm = titleBlock_.widthMm();
+    edit.beforeRowHeightMm = edit.afterRowHeightMm = titleBlock_.rowHeightMm();
+    edit.beforeVisible = edit.afterVisible = titleBlock_.isVisible();
+    if (!titleBlock_.addField(std::move(label), source)) return false;
+    edit.after = RecordOf(titleBlock_);
+    recordDelta(edit, "Title block");
+    return true;
+}
+
+bool DrawingDocument::removeTitleBlockField(const std::string& label) {
+    TitleBlockEdit edit;
+    edit.before = RecordOf(titleBlock_);
+    edit.beforeWidthMm = edit.afterWidthMm = titleBlock_.widthMm();
+    edit.beforeRowHeightMm = edit.afterRowHeightMm = titleBlock_.rowHeightMm();
+    edit.beforeVisible = edit.afterVisible = titleBlock_.isVisible();
+    if (!titleBlock_.removeField(label)) return false;
+    edit.after = RecordOf(titleBlock_);
+    recordDelta(edit, "Title block");
+    return true;
+}
+
+bool DrawingDocument::setTitleBlockSize(double widthMm, double rowHeightMm) {
+    TitleBlockEdit edit;
+    edit.before = edit.after = RecordOf(titleBlock_);
+    edit.beforeWidthMm = titleBlock_.widthMm();
+    edit.beforeRowHeightMm = titleBlock_.rowHeightMm();
+    edit.beforeVisible = edit.afterVisible = titleBlock_.isVisible();
+    // BOTH OR NEITHER. A block that took the new width and kept the old row
+    // height would draw a box whose lines do not meet, and the half that
+    // failed would be the half nobody looked at.
+    if (!titleBlock_.setWidthMm(widthMm)) return false;
+    if (!titleBlock_.setRowHeightMm(rowHeightMm)) {
+        titleBlock_.setWidthMm(edit.beforeWidthMm);
+        return false;
+    }
+    edit.afterWidthMm = titleBlock_.widthMm();
+    edit.afterRowHeightMm = titleBlock_.rowHeightMm();
+    recordDelta(edit, "Title block size");
+    return true;
+}
+
+bool DrawingDocument::setTitleBlockVisible(bool visible) {
+    if (titleBlock_.isVisible() == visible) return false;
+    TitleBlockEdit edit;
+    edit.before = edit.after = RecordOf(titleBlock_);
+    edit.beforeWidthMm = edit.afterWidthMm = titleBlock_.widthMm();
+    edit.beforeRowHeightMm = edit.afterRowHeightMm = titleBlock_.rowHeightMm();
+    edit.beforeVisible = titleBlock_.isVisible();
+    titleBlock_.setVisible(visible);
+    edit.afterVisible = visible;
+    recordDelta(edit, "Title block");
+    return true;
+}
+
+bool DrawingDocument::setFrameMargins(const FrameMargins& margins) {
+    // REFUSED WHEN THEY DO NOT FIT, here rather than at draw time. A margin
+    // wider than the paper leaves no inside, and finding that out when the
+    // frame silently stops drawing is finding it out too late.
+    if (!margins.fitsOn(sheet_.widthMm(), sheet_.heightMm())) return false;
+    SheetFrameEdit edit;
+    edit.beforeBindingMm = frameMargins_.bindingMm;
+    edit.beforeOtherMm = frameMargins_.otherMm;
+    edit.afterBindingMm = margins.bindingMm;
+    edit.afterOtherMm = margins.otherMm;
+    edit.beforeZoneTargetMm = edit.afterZoneTargetMm = zoneTargetMm_;
+    edit.beforeVisible = edit.afterVisible = frameVisible_;
+    frameMargins_ = margins;
+    recordDelta(edit, "Frame");
+    return true;
+}
+
+bool DrawingDocument::setFrameZoneTargetMm(double zoneTargetMm) {
+    if (!(zoneTargetMm > 0.0)) return false;
+    SheetFrameEdit edit;
+    edit.beforeBindingMm = edit.afterBindingMm = frameMargins_.bindingMm;
+    edit.beforeOtherMm = edit.afterOtherMm = frameMargins_.otherMm;
+    edit.beforeZoneTargetMm = zoneTargetMm_;
+    edit.afterZoneTargetMm = zoneTargetMm;
+    edit.beforeVisible = edit.afterVisible = frameVisible_;
+    zoneTargetMm_ = zoneTargetMm;
+    recordDelta(edit, "Frame zones");
+    return true;
+}
+
+bool DrawingDocument::setFrameVisible(bool visible) {
+    if (frameVisible_ == visible) return false;
+    SheetFrameEdit edit;
+    edit.beforeBindingMm = edit.afterBindingMm = frameMargins_.bindingMm;
+    edit.beforeOtherMm = edit.afterOtherMm = frameMargins_.otherMm;
+    edit.beforeZoneTargetMm = edit.afterZoneTargetMm = zoneTargetMm_;
+    edit.beforeVisible = frameVisible_;
+    edit.afterVisible = visible;
+    frameVisible_ = visible;
+    recordDelta(edit, "Frame");
+    return true;
+}
+
+void DrawingDocument::restoreTitleBlock(TitleBlock block) { titleBlock_ = std::move(block); }
+
+void DrawingDocument::restoreFrame(const FrameMargins& margins, double zoneTargetMm,
+                                   bool visible) {
+    frameMargins_ = margins;
+    if (zoneTargetMm > 0.0) zoneTargetMm_ = zoneTargetMm;
+    frameVisible_ = visible;
+}
+
 DrawingDocument::DimensionProposal DrawingDocument::proposeDimension(
     DimensionKind kind, const std::vector<ObjectId>& entityIds) const {
     DimensionProposal out;
@@ -1848,6 +2006,35 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         currentStyleId_ = forward ? edit->after : edit->before;
         return;
     }
+    if (const auto* edit = std::get_if<TitleBlockEdit>(&delta)) {
+        // THE WHOLE BLOCK, REPLACED. Rebuilt from the record rather than
+        // patched field by field, so there is no state in which half of it is
+        // the old one.
+        const std::vector<TitleBlockFieldRecord>& want = forward ? edit->after : edit->before;
+        std::vector<TitleBlockField> fields;
+        fields.reserve(want.size());
+        for (const TitleBlockFieldRecord& field : want)
+            fields.push_back(TitleBlockField{field.label, field.value,
+                                             static_cast<TitleBlockSource>(field.source)});
+        // Through the RAW path, not the guarded one: rebuilding through
+        // addField/removeField cannot express "these exact rows", because the
+        // guards keep Title and Drawing No. and would leave them behind. See
+        // TitleBlock::restoreFields.
+        titleBlock_.restoreFields(std::move(fields));
+        titleBlock_.restoreSize(forward ? edit->afterWidthMm : edit->beforeWidthMm,
+                                forward ? edit->afterRowHeightMm : edit->beforeRowHeightMm);
+        titleBlock_.setVisible(forward ? edit->afterVisible : edit->beforeVisible);
+        return;
+    }
+
+    if (const auto* edit = std::get_if<SheetFrameEdit>(&delta)) {
+        frameMargins_.bindingMm = forward ? edit->afterBindingMm : edit->beforeBindingMm;
+        frameMargins_.otherMm = forward ? edit->afterOtherMm : edit->beforeOtherMm;
+        zoneTargetMm_ = forward ? edit->afterZoneTargetMm : edit->beforeZoneTargetMm;
+        frameVisible_ = forward ? edit->afterVisible : edit->beforeVisible;
+        return;
+    }
+
     if (const auto* edit = std::get_if<SheetEdit>(&delta)) {
         const int size = forward ? edit->afterSize : edit->beforeSize;
         const int orientation = forward ? edit->afterOrientation : edit->beforeOrientation;

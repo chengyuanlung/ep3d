@@ -4,6 +4,8 @@
 #include "Core/Drawing/DimensionStyle.h"
 #include "Core/Drawing/DrawingDimension.h"
 #include "Core/Drawing/DrawingEntity.h"
+#include "Core/Drawing/SheetFrame.h"
+#include "Core/Drawing/TitleBlock.h"
 #include "Core/Drawing/DrawingTables.h"
 #include "Core/Drawing/DrawingView.h"
 #include "Core/Drawing/Sheet.h"
@@ -221,6 +223,42 @@ public:
     int resolvedColorOfDimension(const DrawingDimension& dimension) const;
     bool isDimensionVisible(const DrawingDimension& dimension) const;
 
+    // --- The frame and the title block (M35) ---------------------------------
+    //
+    // BOTH ARE DERIVED FROM THE SHEET WHERE THEY CAN BE. The frame is two
+    // rectangles and a ring of zone labels, all of them a function of the
+    // paper; the title block's scale, size and projection rows are read from
+    // the sheet and cannot be typed. What is stored is only what a user
+    // actually decides: the margins, and the text of the free fields.
+    //
+    // If either were entities on the paper, resizing the sheet would leave the
+    // old border and the old size printed in the corner -- and it would look
+    // completely plausible.
+    const TitleBlock& titleBlock() const noexcept { return titleBlock_; }
+    const FrameMargins& frameMargins() const noexcept { return frameMargins_; }
+    double frameZoneTargetMm() const noexcept { return zoneTargetMm_; }
+    bool isFrameVisible() const noexcept { return frameVisible_; }
+
+    // WHERE THE FRAME IS, right now, on this paper. Asked for, never stored.
+    SheetFrameGeometry frame() const noexcept;
+    // The title block's bottom-left corner: hard against the frame's
+    // bottom-right, which is where ISO 7200 puts it and where a reader's eye
+    // goes first. Derived, so a resize moves it.
+    Vec2 titleBlockOriginMm() const noexcept;
+
+    bool setTitleBlockField(const std::string& label, std::string value);
+    bool addTitleBlockField(std::string label, TitleBlockSource source);
+    bool removeTitleBlockField(const std::string& label);
+    bool setTitleBlockSize(double widthMm, double rowHeightMm);
+    bool setTitleBlockVisible(bool visible);
+    bool setFrameMargins(const FrameMargins& margins);
+    bool setFrameZoneTargetMm(double zoneTargetMm);
+    bool setFrameVisible(bool visible);
+    // The loader's raw path, like every other restore here: no undo record,
+    // no validation, because the loader has already done both.
+    void restoreTitleBlock(TitleBlock block);
+    void restoreFrame(const FrameMargins& margins, double zoneTargetMm, bool visible);
+
     // --- Dimension styles (M34) ----------------------------------------------
     //
     // Every drawing has ISO-25 from the moment it is constructed and it cannot
@@ -323,6 +361,10 @@ private:
     std::vector<std::unique_ptr<DimensionStyle>> dimensionStyles_;
     std::vector<std::unique_ptr<DrawingDimension>> dimensions_;
     ObjectId currentStyleId_{kInvalidObjectId};
+    TitleBlock titleBlock_;
+    FrameMargins frameMargins_;
+    double zoneTargetMm_ = 100.0;
+    bool frameVisible_ = true;
     ObjectId currentLayerId_{kInvalidObjectId};
 };
 

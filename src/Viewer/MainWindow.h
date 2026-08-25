@@ -268,6 +268,20 @@ public:
     void pickOnSheetForTesting(Vec2 sheetMm);
     std::size_t drawingEntityCountForTesting() const;
     QString moveDimensionCommand(ObjectId id, Vec2 toMm);
+
+    // --- The frame and the title block (M35) ---------------------------------
+    QString setTitleBlockFieldCommand(const QString& label, const QString& value);
+    QString setFrameMarginsCommand(double bindingMm, double otherMm);
+    QString setFrameVisibleCommand(bool visible);
+    QString setTitleBlockVisibleCommand(bool visible);
+    // TRUE SIZE, through the same painter the screen uses -- see DrawingPlot.h
+    // for why there is no second renderer.
+    QString plotToPdfCommand(const QString& path);
+    // What the block PRINTS for a row -- asked of the same reader the painter
+    // uses, so a test that reads this is reading what is on the paper.
+    QString titleBlockValueForTesting(const QString& label) const;
+    std::size_t drawnFrameLinesForTesting() const;
+    std::size_t drawnTitleBlockRowsForTesting() const;
     // BY POSITION, in document order -- so a self test can say "the first line
     // I drew" without knowing what id it got.
     ObjectId drawingEntityIdForTesting(std::size_t index) const;
@@ -753,6 +767,9 @@ private slots:
     void onAddDimensionRequested(DimensionKind kind, LinearDirection direction);
     void onDimensionTextRequested();
     void onDimensionStyleRequested();
+    void onTitleBlockRequested();
+    void onFrameRequested();
+    void onPlotPdfRequested();
     void onDeleteDrawingObjectRequested();
     void onCaptureNamedPositionRequested();
     void onApplyNamedPositionRequested();
@@ -1005,6 +1022,9 @@ private:
     QAction* drawLineAction_ = nullptr;
     QAction* drawCircleAction_ = nullptr;
     QAction* drawRectangleAction_ = nullptr;
+    QAction* titleBlockAction_ = nullptr;
+    QAction* frameAction_ = nullptr;
+    QAction* plotPdfAction_ = nullptr;
     // The Assembly menu's actions, enabled only when the document is one.
     QAction* insertInstanceAction_ = nullptr;
     QAction* groundInstanceAction_ = nullptr;

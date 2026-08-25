@@ -2,6 +2,7 @@
 
 #include "Core/Drawing/DrawingDocument.h"
 #include "Core/Drawing/ObjectSnap.h"
+#include "Viewer/DrawingPainter.h"
 
 #include <QWidget>
 
@@ -69,6 +70,8 @@ public:
     // than trusting that the document knowing is the same as the reader
     // seeing.
     std::size_t danglingDrawnForTesting() const noexcept { return danglingDrawn_; }
+    std::size_t drawnFrameLinesForTesting() const noexcept { return drawnFrameLines_; }
+    std::size_t drawnTitleBlockRowsForTesting() const noexcept { return drawnTitleRows_; }
     // The sheet's rectangle in WIDGET pixels, so a test can check the paper is
     // actually inside the window after a fit.
     QRectF sheetRectForTesting() const;
@@ -112,9 +115,12 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    // Sheet millimetres to widget pixels. ONE conversion, so the paper, the
-    // views and the frame cannot end up on three different grids.
-    QPointF toScreen(Vec2 sheetMm) const;
+    // The pan and the zoom, as the shared painter wants them. THE widget's
+    // whole contribution to how a drawing looks: everything else about the
+    // picture is the same on screen as it is on a page, which is why it lives
+    // in DrawingPainter and not here.
+    DrawingTransform transform() const noexcept { return DrawingTransform{originPx_, zoom_}; }
+    QPointF toScreen(Vec2 sheetMm) const { return transform().toScreen(sheetMm); }
     // ...and back. The INVERSE of toScreen and nothing else -- a second
     // hand-written conversion is exactly the defect this project keeps
     // finding, and here it would put a click a few millimetres from where the
@@ -136,6 +142,8 @@ private:
     std::size_t drawnHidden_ = 0;
     std::size_t drawnDimensions_ = 0;
     std::size_t danglingDrawn_ = 0;
+    std::size_t drawnFrameLines_ = 0;
+    std::size_t drawnTitleRows_ = 0;
 
     DrawingTool tool_ = DrawingTool::None;
     std::vector<Vec2> picked_;

@@ -161,6 +161,41 @@ SaveResult validateSaveable(const DrawingDocument& document) {
             return SaveResult{SerializationError::UnknownDependencyId,
                               "a dimension is on a layer that is not in this document"};
     }
+    // v38 (M35). The title block must still be able to identify the drawing,
+    // and the frame must still fit the paper -- both checked HERE, because the
+    // loader checks both, and a document that saves cleanly and then refuses
+    // to load is the named worst case (ADR-M3-008).
+    if (document.titleBlock().findField(kTitleBlockTitleLabel) == nullptr ||
+        document.titleBlock().findField(kTitleBlockNumberLabel) == nullptr)
+        return SaveResult{SerializationError::MissingField,
+                          "this drawing's title block has lost the rows that identify it"};
+    if (!(document.titleBlock().widthMm() > 0.0) ||
+        !(document.titleBlock().rowHeightMm() > 0.0))
+        return SaveResult{SerializationError::InvalidFieldType,
+                          "a title block with no width or no row height draws nothing "
+                          "anybody can read"};
+    {
+        std::vector<std::string> seenLabels;
+        for (const TitleBlockField& field : document.titleBlock().fields()) {
+            if (field.label.empty())
+                return SaveResult{SerializationError::MissingField,
+                                  "a title block row has no label"};
+            for (const std::string& already : seenLabels)
+                if (already == field.label)
+                    return SaveResult{SerializationError::DuplicateId,
+                                      "two title block rows are both called '" + field.label +
+                                          "'"};
+            seenLabels.push_back(field.label);
+        }
+    }
+    if (!document.frameMargins().fitsOn(document.sheet().widthMm(),
+                                        document.sheet().heightMm()))
+        return SaveResult{SerializationError::InvalidFieldType,
+                          "this drawing's margins are wider than its paper, so there is no "
+                          "inside left to draw in"};
+    if (!(document.frameZoneTargetMm() > 0.0))
+        return SaveResult{SerializationError::InvalidFieldType,
+                          "a zone size of zero divides the border into nothing"};
     if (!document.sheet().scale().valid())
         return SaveResult{SerializationError::InvalidFieldType,
                           "the sheet scale is not a ratio"};
@@ -388,6 +423,37 @@ JsonValue toJson(const DrawingDocument& document) {
         dimensions.add(std::move(item));
     }
     root.set("dimensions", std::move(dimensions));
+
+    // v38 (M35). ONLY WHAT A USER DECIDED.
+    //
+    // The frame's rectangle, its zone labels, and the scale/size/projection
+    // rows of the title block are all DERIVED from the sheet and none of them
+    // is written. A file carrying them would come back holding an A3 border on
+    // a sheet somebody has since made A2 -- and it would look right.
+    JsonValue frame = JsonValue::makeObject();
+    frame.set("bindingMm", JsonValue::makeNumber(document.frameMargins().bindingMm));
+    frame.set("otherMm", JsonValue::makeNumber(document.frameMargins().otherMm));
+    frame.set("zoneTargetMm", JsonValue::makeNumber(document.frameZoneTargetMm()));
+    frame.set("visible", JsonValue::makeBool(document.isFrameVisible()));
+    root.set("frame", std::move(frame));
+
+    JsonValue titleBlock = JsonValue::makeObject();
+    titleBlock.set("widthMm", JsonValue::makeNumber(document.titleBlock().widthMm()));
+    titleBlock.set("rowHeightMm", JsonValue::makeNumber(document.titleBlock().rowHeightMm()));
+    titleBlock.set("visible", JsonValue::makeBool(document.titleBlock().isVisible()));
+    JsonValue rows = JsonValue::makeArray();
+    for (const TitleBlockField& field : document.titleBlock().fields()) {
+        JsonValue row = JsonValue::makeObject();
+        row.set("label", JsonValue::makeString(field.label));
+        row.set("source", JsonValue::makeString(std::string(toString(field.source))));
+        // A DERIVED ROW WRITES NO VALUE. There is nothing to write: what it
+        // prints is fetched from the sheet at draw time, and a value beside it
+        // in the file would be a second answer waiting to go stale.
+        if (!field.isDerived()) row.set("value", JsonValue::makeString(field.value));
+        rows.add(std::move(row));
+    }
+    titleBlock.set("fields", std::move(rows));
+    root.set("titleBlock", std::move(titleBlock));
     return root;
 }
 
@@ -1225,6 +1291,134 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         }
     }
 
+    FrameMargins margins;
+    double zoneTargetMm = 100.0;
+    bool frameVisible = true;
+    if (const JsonValue* field = root.find("frame")) {
+        if (field->type() != JsonType::Object)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'frame' is not an object");
+        const auto readNumber = [&](const char* key, double& into) -> bool {
+            const JsonValue* value = field->find(key);
+            if (value == nullptr) return true;
+            if (value->type() != JsonType::Number) return false;
+            into = value->asNumber();
+            return true;
+        };
+        if (!readNumber("bindingMm", margins.bindingMm) ||
+            !readNumber("otherMm", margins.otherMm) ||
+            !readNumber("zoneTargetMm", zoneTargetMm))
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "frame: a margin is not a number");
+        if (!(zoneTargetMm > 0.0))
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "frame: a zone size of zero divides the border into nothing");
+        if (const JsonValue* visible = field->find("visible")) {
+            if (visible->type() != JsonType::Bool)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   "frame: field 'visible' is not a boolean");
+            frameVisible = visible->asBool();
+        }
+    }
+
+    bool haveTitleBlock = false;
+    TitleBlock titleBlock;
+    if (const JsonValue* field = root.find("titleBlock")) {
+        if (field->type() != JsonType::Object)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'titleBlock' is not an object");
+        haveTitleBlock = true;
+        double widthMm = titleBlock.widthMm();
+        double rowHeightMm = titleBlock.rowHeightMm();
+        if (const JsonValue* value = field->find("widthMm")) {
+            if (value->type() != JsonType::Number)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   "titleBlock: field 'widthMm' is not a number");
+            widthMm = value->asNumber();
+        }
+        if (const JsonValue* value = field->find("rowHeightMm")) {
+            if (value->type() != JsonType::Number)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   "titleBlock: field 'rowHeightMm' is not a number");
+            rowHeightMm = value->asNumber();
+        }
+        if (!(widthMm > 0.0) || !(rowHeightMm > 0.0))
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "titleBlock: a block with no width or no row height draws "
+                               "nothing anybody can read");
+        titleBlock.restoreSize(widthMm, rowHeightMm);
+        if (const JsonValue* value = field->find("visible")) {
+            if (value->type() != JsonType::Bool)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   "titleBlock: field 'visible' is not a boolean");
+            titleBlock.setVisible(value->asBool());
+        }
+
+        const JsonValue* rows = field->find("fields");
+        if (rows != nullptr) {
+            if (rows->type() != JsonType::Array)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   "titleBlock: field 'fields' is not an array");
+            std::vector<TitleBlockField> read;
+            for (std::size_t i = 0; i < rows->items().size(); ++i) {
+                const JsonValue& entry = rows->items()[i];
+                const std::string context = "titleBlock.fields[" + std::to_string(i) + "]";
+                if (entry.type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": entry is not an object");
+                const JsonValue* label =
+                    requireField(entry, "label", JsonType::String, context, err);
+                if (label == nullptr) return loadFailure(err.error, err.message);
+                if (label->asString().empty())
+                    return loadFailure(SerializationError::MissingField,
+                                       context + ": a title block row has no label");
+                for (const TitleBlockField& already : read)
+                    if (already.label == label->asString())
+                        return loadFailure(SerializationError::DuplicateId,
+                                           context + ": two rows are both called '" +
+                                               label->asString() + "'");
+
+                TitleBlockField one;
+                one.label = label->asString();
+                const JsonValue* source =
+                    requireField(entry, "source", JsonType::String, context, err);
+                if (source == nullptr) return loadFailure(err.error, err.message);
+                // REFUSED, not defaulted to Free. A source this build does not
+                // know, read from a newer file, would turn a derived row into
+                // a typed one holding whatever string was beside it -- which
+                // is how a title block starts stating a scale nothing was
+                // plotted at.
+                if (!ParseTitleBlockSource(source->asString(), one.source))
+                    return loadFailure(SerializationError::InvalidEnumValue,
+                                       context + ": unknown title block source '" +
+                                           source->asString() + "'");
+                if (const JsonValue* value = entry.find("value")) {
+                    if (value->type() != JsonType::String)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'value' is not a string");
+                    if (one.isDerived() && !value->asString().empty())
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": a derived row carries a typed value, "
+                                                     "which is a second answer about the "
+                                                     "sheet waiting to go stale");
+                    one.value = value->asString();
+                }
+                read.push_back(std::move(one));
+            }
+            bool sawTitle = false;
+            bool sawNumber = false;
+            for (const TitleBlockField& one : read) {
+                if (one.label == kTitleBlockTitleLabel) sawTitle = true;
+                if (one.label == kTitleBlockNumberLabel) sawNumber = true;
+            }
+            if (!sawTitle || !sawNumber)
+                return loadFailure(SerializationError::MissingField,
+                                   "titleBlock: the rows that identify this drawing are "
+                                   "missing");
+            titleBlock.restoreFields(std::move(read));
+        }
+    }
+
     ObjectId currentStyleId = kInvalidObjectId;
     if (const JsonValue* field = root.find("currentDimensionStyleId")) {
         if (field->type() != JsonType::String)
@@ -1345,6 +1539,12 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                    std::move(one.textOverride));
     if (currentStyleId != kInvalidObjectId)
         document->restoreCurrentDimensionStyle(currentStyleId);
+    document->restoreFrame(margins, zoneTargetMm, frameVisible);
+    // A FILE WITHOUT A TITLE BLOCK KEEPS THE SEEDED ONE, rather than being
+    // given an empty box -- an older file predates the block, and a drawing
+    // with nowhere to put its number is not an improvement on one with the
+    // standard rows.
+    if (haveTitleBlock) document->restoreTitleBlock(std::move(titleBlock));
     if (currentLayerId != kInvalidObjectId) document->restoreCurrentLayer(currentLayerId);
 
     // A loaded document starts with an EMPTY history (ADR-M9-001).

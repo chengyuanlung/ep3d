@@ -569,6 +569,22 @@ void PaintIcon(QPainter& p, SketchIcon icon, const Ink& ink) {
         break;
     }
 
+    case SketchIcon::TitleBlock: {
+        // A SHEET WITH A FILLED BOX IN ITS BOTTOM-RIGHT CORNER, which is
+        // exactly where a reader's eye goes and exactly where the block is.
+        Stroke(p, ink.subdue, 1.2);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(3.0, 4.0, 18.0, 16.0));
+        Stroke(p, ink.accent, 1.2);
+        p.setBrush(QBrush(ink.accent));
+        p.drawRect(QRectF(11.0, 14.0, 10.0, 6.0));
+        // Two rules across it, so the box reads as a TABLE and not a blob.
+        Stroke(p, ink.stroke, 0.8);
+        p.drawLine(QPointF(11.0, 16.0), QPointF(21.0, 16.0));
+        p.drawLine(QPointF(11.0, 18.0), QPointF(21.0, 18.0));
+        break;
+    }
+
     case SketchIcon::AddRelation: {
         // TWO TOOTHED WHEELS, meshing. The teeth are what make it a gear
         // rather than two circles, and the mesh is what makes it a relation
@@ -1333,6 +1349,7 @@ const char* SketchIconName(SketchIcon icon) noexcept {
     case SketchIcon::DiameterDimension: return "DiameterDimension";
     case SketchIcon::AngularDimension: return "AngularDimension";
     case SketchIcon::DimensionStyleIcon: return "DimensionStyleIcon";
+    case SketchIcon::TitleBlock: return "TitleBlock";
     case SketchIcon::HVDistance: return "HVDistance";
     case SketchIcon::PointLineDistance: return "PointLineDistance";
     case SketchIcon::Offset: return "Offset";

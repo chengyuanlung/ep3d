@@ -20,6 +20,7 @@
 #include "Core/Serialization/DrawingDocumentSerializer.h"
 #include "Viewer/DrawingOutline.h"
 #include "Viewer/DrawingCanvas.h"
+#include "Viewer/DrawingPlot.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Physics/MassProperties.h"
 #include "Viewer/DesignTokens.h"
@@ -328,6 +329,25 @@ void MainWindow::buildMenus() {
     addLayerAction_ = drawingMenu_->addAction(QStringLiteral("Add &Layer..."));
     addLayerAction_->setToolTip(QStringLiteral("A new layer, with a colour and a linetype."));
     connect(addLayerAction_, &QAction::triggered, this, &MainWindow::onAddDrawingLayerRequested);
+
+    // --- The frame and the title block (M35) --------------------------------
+    titleBlockAction_ = drawingMenu_->addAction(QStringLiteral("&Title Block..."));
+    titleBlockAction_->setToolTip(
+        QStringLiteral("What this drawing IS: its title, its number, who drew it.\n"
+                       "The scale, the size and the projection are filled in from the "
+                       "sheet and cannot be typed."));
+    connect(titleBlockAction_, &QAction::triggered, this, &MainWindow::onTitleBlockRequested);
+    frameAction_ = drawingMenu_->addAction(QStringLiteral("&Frame..."));
+    frameAction_->setToolTip(
+        QStringLiteral("The border and its margins, in millimetres.\n"
+                       "The binding edge is wider because that is the edge it is filed on."));
+    connect(frameAction_, &QAction::triggered, this, &MainWindow::onFrameRequested);
+
+    plotPdfAction_ = drawingMenu_->addAction(QStringLiteral("&Plot to PDF..."));
+    plotPdfAction_->setToolTip(
+        QStringLiteral("One page, at TRUE SIZE: a printed A3 measures A3 under a rule.\n"
+                       "The drawing's scale is already in the views, so the page is 1:1."));
+    connect(plotPdfAction_, &QAction::triggered, this, &MainWindow::onPlotPdfRequested);
 
     // --- Sheet geometry (M33) -----------------------------------------------
     //
@@ -862,6 +882,7 @@ void MainWindow::buildToolbar() {
     addDrawing(updateViewsAction_, ui::SketchIcon::UpdateViews, "Update");
     drawing->addSeparator();
     addDrawing(sheetSetupAction_, ui::SketchIcon::SheetSetup, "Sheet");
+    addDrawing(titleBlockAction_, ui::SketchIcon::TitleBlock, "Title");
     addDrawing(addLayerAction_, ui::SketchIcon::DrawingLayer, "Layer");
     drawing->addSeparator();
     addDrawing(drawLineAction_, ui::SketchIcon::Line, "Line");
@@ -2699,9 +2720,17 @@ void MainWindow::showScriptPort(quint16 port) {
     // save files should be visible for as long as it is open.
     setWindowTitle(windowTitle() +
                    QStringLiteral("  [script socket 127.0.0.1:%1]").arg(port));
-    statusBar()->showMessage(
-        QStringLiteral("Listening for scripts on 127.0.0.1:%1 -- loopback only").arg(port),
-        8000);
+    // NOT a temporary status message.
+    //
+    // showMessage() writes over the same strip statusLeft_ owns, so for eight
+    // seconds after start-up two things were drawing in one place -- and every
+    // golden screenshot taken in that window came out with the lines
+    // superimposed and unreadable. Two writers to one place is this project's
+    // recurring defect in its smallest form; the title bar above already keeps
+    // the socket visible for as long as it is open, which is the stronger
+    // guarantee anyway.
+    statusLeft_->setText(
+        QStringLiteral("Listening for scripts on 127.0.0.1:%1 -- loopback only").arg(port));
 }
 
 void MainWindow::refreshAll() {
@@ -3117,7 +3146,8 @@ void MainWindow::refreshCommandStates() {
         if (dimensionTextAction_ != nullptr)
             dimensionTextAction_->setEnabled(selectedDimension() != kInvalidObjectId);
         if (dimensionStyleAction_ != nullptr) dimensionStyleAction_->setEnabled(isDrawing);
-        for (QAction* tool : {drawLineAction_, drawCircleAction_, drawRectangleAction_})
+        for (QAction* tool : {drawLineAction_, drawCircleAction_, drawRectangleAction_,
+                              titleBlockAction_, frameAction_, plotPdfAction_})
             if (tool != nullptr) tool->setEnabled(isDrawing);
         const bool haveInstance = selectedInstance() != kInvalidObjectId;
         if (assemblyMenu_ != nullptr) assemblyMenu_->setEnabled(isAssembly);
@@ -4562,6 +4592,107 @@ bool MainWindow::scaleEntityForTesting(ObjectId id, Vec2 aboutMm, double factor)
     return changed;
 }
 
+QString MainWindow::setTitleBlockFieldCommand(const QString& label, const QString& value) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Only a drawing has a title block."));
+    if (!drawing->setTitleBlockField(label.toStdString(), value.toStdString())) {
+        const TitleBlockField* field = drawing->titleBlock().findField(label.toStdString());
+        if (field != nullptr && field->isDerived())
+            // SAID, not silently ignored. The row is filled from the sheet, and
+            // a user who typed into it needs to know why what they typed did
+            // not stick.
+            return say(QStringLiteral("%1 is filled in from the sheet -- change the sheet "
+                                      "and this follows.")
+                           .arg(label));
+        return say(QStringLiteral("There is no %1 row in this title block.").arg(label));
+    }
+    refreshAll();
+    return say(QStringLiteral("%1: %2").arg(label, value));
+}
+
+QString MainWindow::setFrameMarginsCommand(double bindingMm, double otherMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Only a drawing has a frame."));
+    FrameMargins margins;
+    margins.bindingMm = bindingMm;
+    margins.otherMm = otherMm;
+    if (!drawing->setFrameMargins(margins))
+        return say(QStringLiteral("Those margins are wider than the paper, so there would be "
+                                  "no inside left to draw in."));
+    refreshAll();
+    return say(QStringLiteral("Frame: %1 mm on the binding edge, %2 mm elsewhere")
+                   .arg(bindingMm)
+                   .arg(otherMm));
+}
+
+QString MainWindow::setFrameVisibleCommand(bool visible) {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    if (!drawing->setFrameVisible(visible)) return {};
+    refreshAll();
+    const QString said = visible ? QStringLiteral("Frame shown") : QStringLiteral("Frame hidden");
+    statusLeft_->setText(said);
+    return said;
+}
+
+QString MainWindow::setTitleBlockVisibleCommand(bool visible) {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    if (!drawing->setTitleBlockVisible(visible)) return {};
+    refreshAll();
+    const QString said =
+        visible ? QStringLiteral("Title block shown") : QStringLiteral("Title block hidden");
+    statusLeft_->setText(said);
+    return said;
+}
+
+QString MainWindow::plotToPdfCommand(const QString& path) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Only a drawing can be plotted."));
+    const PlotResult plotted = PlotDrawingToPdf(*drawing, path);
+    if (!plotted)
+        return say(QStringLiteral("Nothing was plotted: %1.")
+                       .arg(QString::fromStdString(plotted.why)));
+    // THE SIZE IS SAID OUT LOUD, because true size is the whole promise a plot
+    // makes: every dimension on the sheet is checkable against a rule only if
+    // the paper came out the size it claims.
+    return say(QStringLiteral("Plotted %1 x %2 mm at 1:1 to %3")
+                   .arg(plotted.widthMm)
+                   .arg(plotted.heightMm)
+                   .arg(QFileInfo(path).fileName()));
+}
+
+QString MainWindow::titleBlockValueForTesting(const QString& label) const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const TitleBlockField* field = drawing->titleBlock().findField(label.toStdString());
+    if (field == nullptr) return {};
+    return QString::fromStdString(drawing->titleBlock().valueOf(*field, drawing->sheet()));
+}
+
+std::size_t MainWindow::drawnFrameLinesForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnFrameLinesForTesting();
+}
+
+std::size_t MainWindow::drawnTitleBlockRowsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnTitleBlockRowsForTesting();
+}
+
 QString MainWindow::addDimensionStyleCommand(const QString& name) {
     const auto say = [this](const QString& message) {
         statusLeft_->setText(message);
@@ -4877,6 +5008,47 @@ void MainWindow::onDimensionStyleRequested() {
         QLineEdit::Normal, QString::fromStdString(style->suffix()), &ok);
     if (!ok) return;
     editDimensionStyleCommand(height, arrow, decimals, suffix);
+}
+
+void MainWindow::onTitleBlockRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    // ONE PROMPT PER TYPED ROW, and none for the derived ones -- a dialog that
+    // asked for a scale it would then discard would be teaching the user that
+    // the program ignores them.
+    for (const TitleBlockField& field : drawing->titleBlock().fields()) {
+        if (field.isDerived()) continue;
+        bool ok = false;
+        const QString value = QInputDialog::getText(
+            this, QStringLiteral("Title Block"),
+            QStringLiteral("%1:").arg(QString::fromStdString(field.label)), QLineEdit::Normal,
+            QString::fromStdString(field.value), &ok);
+        if (!ok) return;
+        setTitleBlockFieldCommand(QString::fromStdString(field.label), value);
+    }
+}
+
+void MainWindow::onFrameRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    bool ok = false;
+    const double binding = QInputDialog::getDouble(
+        this, QStringLiteral("Frame"), QStringLiteral("Binding edge margin (mm):"),
+        drawing->frameMargins().bindingMm, 0.0, 200.0, 1, &ok);
+    if (!ok) return;
+    const double other = QInputDialog::getDouble(
+        this, QStringLiteral("Frame"), QStringLiteral("Other margins (mm):"),
+        drawing->frameMargins().otherMm, 0.0, 200.0, 1, &ok);
+    if (!ok) return;
+    setFrameMarginsCommand(binding, other);
+}
+
+void MainWindow::onPlotPdfRequested() {
+    if (AsDrawing(document_) == nullptr) return;
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Plot to PDF"), QString(), QStringLiteral("PDF (*.pdf)"));
+    if (path.isEmpty()) return;
+    plotToPdfCommand(path);
 }
 
 void MainWindow::onAddDrawingLayerRequested() {

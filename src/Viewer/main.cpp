@@ -18,6 +18,7 @@
 #include "Kernel/Occt/OcctGeometryKernel.h"
 #include "Solver/GaussNewtonSketchSolver.h"
 #include "Viewer/DocumentOutline.h"
+#include "Viewer/DrawingPlot.h"
 #include "Viewer/DocumentPresenter.h"
 #include "Viewer/MainWindow.h"
 #include "Viewer/ScriptServer.h"
@@ -4702,7 +4703,7 @@ int main(int argc, char** argv) {
 
                     // --- THE TOOLBAR CARRIES THEM -----------------------------
                     for (const char* wanted : {"Line", "Circle", "Rect", "Dim", "Dia",
-                                               "Angle", "Style"}) {
+                                               "Angle", "Style", "Title"}) {
                         bool found = false;
                         const int buttons = window.drawingToolbarButtonCount();
                         for (int i = 0; i < buttons; ++i)
@@ -4715,6 +4716,175 @@ int main(int argc, char** argv) {
                             message += " button";
                             fail(message.c_str());
                         }
+                    }
+
+                    // --- M35's GATE: the frame and the title block -----------
+                    //
+                    // The Core suite proves the frame is DERIVED and the block
+                    // cannot be typed into. Only starting the program can
+                    // prove they reach the paper.
+                    if (window.drawnFrameLinesForTesting() == 0)
+                        fail("the drawing has a frame and the canvas drew none of it");
+                    if (window.drawnTitleBlockRowsForTesting() == 0)
+                        fail("the drawing has a title block and the canvas drew no rows");
+
+                    // WHAT IT SAYS IS WHAT THE SHEET SAYS. The sheet was set
+                    // to A2 at 1:2 in third angle further up; the corner has to
+                    // agree, and there is no code path that could make it
+                    // disagree.
+                    if (window.titleBlockValueForTesting(QStringLiteral("Scale")) !=
+                        QStringLiteral("1:2"))
+                        fail(("the title block says the scale is " +
+                              window.titleBlockValueForTesting(QStringLiteral("Scale"))
+                                  .toStdString() +
+                              " and the sheet is at 1:2")
+                                 .c_str());
+                    if (window.titleBlockValueForTesting(QStringLiteral("Size")) !=
+                        QStringLiteral("A2"))
+                        fail("the title block and the sheet disagree about the paper size");
+
+                    // TYPING INTO A DERIVED ROW IS REFUSED, AND SAYS SO. A
+                    // dialog that quietly discarded what was typed would teach
+                    // the user the program ignores them.
+                    const QString refused =
+                        window.setTitleBlockFieldCommand(QStringLiteral("Scale"),
+                                                         QStringLiteral("1:99"));
+                    if (!refused.contains(QStringLiteral("from the sheet")))
+                        fail(("typing a scale into the title block said: " +
+                              refused.toStdString())
+                                 .c_str());
+                    if (window.titleBlockValueForTesting(QStringLiteral("Scale")) !=
+                        QStringLiteral("1:2"))
+                        fail("a scale was typed into the title block after all");
+
+                    // ...and a TYPED row takes what it is given, and shows it.
+                    window.setTitleBlockFieldCommand(QStringLiteral("Title"),
+                                                     QStringLiteral("Bearing Housing"));
+                    if (window.titleBlockValueForTesting(QStringLiteral("Title")) !=
+                        QStringLiteral("Bearing Housing"))
+                        fail("the title did not reach the title block");
+
+                    // THE FRAME FOLLOWS THE PAPER. Resizing the sheet has to
+                    // move the border and the block with it -- a frame made of
+                    // entities would stay A2 sized on an A4 sheet and look
+                    // completely plausible.
+                    {
+                        const OutlineNode before = window.probeOutline();
+                        (void)before;
+                        window.setSheetCommand(SheetSize::A4, SheetOrientation::Portrait,
+                                               QStringLiteral("1:2"), ProjectionAngle::Third);
+                        window.repaint();
+                        if (window.drawnFrameLinesForTesting() == 0)
+                            fail("the sheet was resized and the frame stopped drawing");
+                        if (window.titleBlockValueForTesting(QStringLiteral("Size")) !=
+                            QStringLiteral("A4"))
+                            fail("the sheet is A4 and its title block still says otherwise");
+                        // ...and back, so the screenshot below is of the sheet
+                        // the rest of this gate built.
+                        window.undoCommand();
+                        window.repaint();
+                    }
+
+                    // TURNING THE FRAME OFF TURNS IT OFF (M35-22). A
+                    // "hidden" thing that still draws is a checkbox that lies,
+                    // and the user finds out by plotting.
+                    {
+                        window.setFrameVisibleCommand(false);
+                        window.repaint();
+                        if (window.drawnFrameLinesForTesting() != 0)
+                            fail("the frame was hidden and the canvas drew it anyway");
+                        window.setTitleBlockVisibleCommand(false);
+                        window.repaint();
+                        if (window.drawnTitleBlockRowsForTesting() != 0)
+                            fail("the title block was hidden and the canvas drew its rows");
+                        window.setFrameVisibleCommand(true);
+                        window.setTitleBlockVisibleCommand(true);
+                        window.repaint();
+                        if (window.drawnFrameLinesForTesting() == 0 ||
+                            window.drawnTitleBlockRowsForTesting() == 0)
+                            fail("turning the frame and the title block back on did nothing");
+                    }
+
+                    // MARGINS WIDER THAN THE PAPER ARE REFUSED, LOUDLY. A
+                    // frame that quietly stopped drawing would be found by
+                    // somebody holding a plot with no border.
+                    {
+                        const QString tooWide = window.setFrameMarginsCommand(400.0, 400.0);
+                        if (!tooWide.contains(QStringLiteral("wider than the paper")))
+                            fail(("absurd margins were accepted: " + tooWide.toStdString())
+                                     .c_str());
+                        window.repaint();
+                        if (window.drawnFrameLinesForTesting() == 0)
+                            fail("a refused margin took the frame with it");
+                    }
+
+                    // --- M35.4's GATE: the plot ------------------------------
+                    //
+                    // "A file appeared" is not a plot. What has to be true is
+                    // that the PAGE IS THE SHEET'S SIZE -- true size is the
+                    // whole promise a drawing makes, and a page that came out
+                    // A4 with an A2 drawing shrunk onto it makes every
+                    // dimension on it a lie a reader can check with a rule.
+                    {
+                        const QString pdf =
+                            QDir::tempPath() + QStringLiteral("/ep3d-selftest/m35-plot.pdf");
+                        QFile::remove(pdf);
+                        const QString plotted = window.plotToPdfCommand(pdf);
+                        if (!plotted.contains(QStringLiteral("1:1")))
+                            fail(("the plot did not report true size: " + plotted.toStdString())
+                                     .c_str());
+                        if (!QFile::exists(pdf)) fail("the plot said it wrote a file and did not");
+                        if (QFileInfo(pdf).size() < 1000)
+                            fail("the plot wrote a file with nothing in it");
+
+                        // THE PAGE SIZE, READ BACK OUT OF THE FILE. A PDF
+                        // states its MediaBox in points; A2 is 420 x 594 mm,
+                        // which is 1190.55 x 1683.78 pt. Asserting the command
+                        // said "A2" would only be asserting the report.
+                        QFile file(pdf);
+                        if (!file.open(QIODevice::ReadOnly)) fail("the plot cannot be read back");
+                        const QByteArray bytes = file.readAll();
+                        file.close();
+                        const int box = bytes.indexOf("/MediaBox");
+                        if (box < 0) fail("the plot has no page size in it at all");
+                        const QByteArray media = bytes.mid(box, 64);
+                        // 1190 and 1683, to the point -- loose enough for
+                        // rounding, tight enough that A3 or A4 would fail.
+                        if (!media.contains("119") || !media.contains("168"))
+                            fail(("the plotted page is not A2: " + std::string(media.constData()))
+                                     .c_str());
+                        // THE DRAWING ON THE PAGE IS TRUE SIZE TOO.
+                        //
+                        // M35-18 survived the first mutation run: halving the
+                        // plot's scale left the MediaBox untouched, so a page
+                        // that came out A2 with the drawing on it at half
+                        // size passed every check above. That is the failure a
+                        // reader finds with a rule, after the drawing has been
+                        // sent out -- so the transform is asserted directly.
+                        {
+                            const DrawingTransform page = PageTransformFor(594.0, 600);
+                            const double perMm = 600.0 / 25.4;
+                            if (std::fabs(page.pixelsPerMm - perMm) > 1e-9)
+                                fail("a plotted millimetre is not a millimetre");
+                            // Sheet (0, 0) is the page's BOTTOM-left, and the
+                            // sheet's top-left is the page's (0, 0).
+                            const QPointF bottomLeft = page.toScreen(Vec2{0.0, 0.0});
+                            const QPointF topLeft = page.toScreen(Vec2{0.0, 594.0});
+                            if (std::fabs(bottomLeft.y() - 594.0 * perMm) > 1e-6)
+                                fail("the plot puts the sheet's bottom edge in the wrong place");
+                            if (std::fabs(topLeft.y()) > 1e-6)
+                                fail("the plot puts the sheet's top edge off the page");
+                            // ...and 100 mm across the sheet is 100 mm across
+                            // the page, which is the whole promise.
+                            const QPointF hundred = page.toScreen(Vec2{100.0, 0.0});
+                            if (std::fabs(hundred.x() - bottomLeft.x() - 100.0 * perMm) > 1e-6)
+                                fail("100 mm on the sheet is not 100 mm on the page");
+                        }
+
+                        // KEPT, not removed: it sits beside the golden
+                        // screenshots so a person can open the plot and look
+                        // at it. A byte check can say the page is A2 and still
+                        // not say whether the drawing on it reads.
                     }
 
                     // A PICTURE OF A DRAWING WITH SIZES ON IT. Dimension
@@ -4742,6 +4912,26 @@ int main(int argc, char** argv) {
                              .c_str());
                 if (window.drawingViewCountForTesting() != 0)
                     fail("a projected view outlived its parent");
+
+                // AN EMPTY SHEET IS NOT HANDED OVER AS A FINISHED PLOT
+                // (M35-20). A blank page a program said it wrote is the worst
+                // of both: nobody looks at it until it matters.
+                //
+                // LAST, because it replaces the document -- everything above
+                // needs the drawing this gate built, and a check that quietly
+                // swapped it out from under them would break them in ways that
+                // look like their own failures.
+                {
+                    window.adoptDrawingForTesting("Blank");
+                    window.setFrameVisibleCommand(false);
+                    window.setTitleBlockVisibleCommand(false);
+                    const QString empty = window.plotToPdfCommand(
+                        QDir::tempPath() + QStringLiteral("/ep3d-selftest/m35-blank.pdf"));
+                    if (!empty.contains(QStringLiteral("nothing on this sheet")))
+                        fail(("an empty sheet plotted as if it were a drawing: " +
+                              empty.toStdString())
+                                 .c_str());
+                }
             }
 
             window.newDocumentCommand();

@@ -21,6 +21,8 @@ add_library(ParametricCADCore
     src/Core/Drawing/ObjectSnap.cpp
     src/Core/Drawing/DimensionStyle.cpp
     src/Core/Drawing/DrawingDimension.cpp
+    src/Core/Drawing/SheetFrame.cpp
+    src/Core/Drawing/TitleBlock.cpp
     src/Core/Drawing/DrawingView.cpp
     src/Core/Drawing/DrawingDocument.cpp
     src/Core/Assembly/Mate.cpp
@@ -312,6 +314,8 @@ if(PARAMCAD_BUILD_VIEWER AND Qt6_FOUND AND TARGET ParametricCADKernelOcct)
         src/Viewer/MainWindow.cpp
         src/Viewer/OcctViewWidget.cpp
         src/Viewer/SketchCanvasWidget.cpp
+        src/Viewer/DrawingPainter.cpp
+        src/Viewer/DrawingPlot.cpp
         src/Viewer/DrawingCanvas.cpp
         src/Viewer/SketchIcons.cpp
         src/Viewer/ScriptServer.cpp
@@ -541,6 +545,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/AssemblyOutlineTests.cpp
         tests/DrawingAlignmentTests.cpp
         tests/DrawingDimensionTests.cpp
+        tests/SheetFrameTests.cpp
         tests/DrawingEntityTests.cpp
         tests/DrawingDocumentTests.cpp
         tests/NamedObjectTests.cpp

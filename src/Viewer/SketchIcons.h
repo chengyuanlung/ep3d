@@ -163,6 +163,11 @@ enum class SketchIcon {
     AngularDimension,
     DimensionStyleIcon,
 
+    // M35. Back to the sheet-outline rule the M32 group follows, because a
+    // title block IS about the paper -- it is the one thing on a drawing that
+    // describes the drawing rather than the part.
+    TitleBlock,
+
     Count
 };
 

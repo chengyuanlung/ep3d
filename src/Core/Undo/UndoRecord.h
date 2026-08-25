@@ -434,6 +434,45 @@ struct SheetEdit {
     int afterAngle = 0;
 };
 
+// --- The frame and the title block (M35) -------------------------------------
+//
+// ONE DELTA EACH, carrying the WHOLE value on both sides.
+//
+// A delta per field would be a dozen near-identical types, and the day a
+// thirteenth field is added, twelve are right. It also makes a half-restored
+// title block impossible -- one that came back with the new width and the old
+// rows would draw a box whose lines do not meet, and nothing would say so.
+//
+// The field list is a handful of short strings, so copying it twice per edit
+// costs nothing worth the risk of the alternative.
+struct TitleBlockFieldRecord {
+    std::string label;
+    std::string value;
+    int source = 0; // TitleBlockSource, as its underlying value
+};
+
+struct TitleBlockEdit {
+    std::vector<TitleBlockFieldRecord> before;
+    std::vector<TitleBlockFieldRecord> after;
+    double beforeWidthMm = 180.0;
+    double afterWidthMm = 180.0;
+    double beforeRowHeightMm = 8.0;
+    double afterRowHeightMm = 8.0;
+    bool beforeVisible = true;
+    bool afterVisible = true;
+};
+
+struct SheetFrameEdit {
+    double beforeBindingMm = 20.0;
+    double afterBindingMm = 20.0;
+    double beforeOtherMm = 10.0;
+    double afterOtherMm = 10.0;
+    double beforeZoneTargetMm = 100.0;
+    double afterZoneTargetMm = 100.0;
+    bool beforeVisible = true;
+    bool afterVisible = true;
+};
+
 struct LayerExistenceEdit {
     ObjectId layerId = kInvalidObjectId;
     std::string name;
@@ -639,7 +678,7 @@ using UndoDelta =
                  DrawingViewPlacementEdit, DrawingEntityExistenceEdit,
                  DrawingEntityShapeEdit, DrawingEntityPropertyEdit, DimensionExistenceEdit,
                  DimensionEdit, DimensionStyleExistenceEdit, DimensionStyleEdit,
-                 CurrentDimensionStyleEdit>;
+                 CurrentDimensionStyleEdit, TitleBlockEdit, SheetFrameEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in
 // reverse order, so a transaction that changed three things comes back exactly
