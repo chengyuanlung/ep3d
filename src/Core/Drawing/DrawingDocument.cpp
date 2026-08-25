@@ -128,11 +128,11 @@ bool DrawingDocument::setSheetScale(const DrawingScale& scale) {
     edit.afterWidthMm = after.widthMm;
     edit.afterHeightMm = after.heightMm;
     recordDelta(edit, "Sheet scale");
-    // EVERY VIEW IS DRAWN AT A SCALE, and the ones with no opinion of their
-    // own just changed. Dirtied so the projection is redone at the new size
-    // rather than left as a picture at the old one.
-    for (const std::unique_ptr<DrawingView>& view : views_)
-        if (!view->hasOwnScale()) graph_.markDirty(view->id());
+    // NOTHING IS REPROJECTED. The curves are in MODEL millimetres (see
+    // ProjectedGeometry.h), so the scale changes how much paper a view takes
+    // and not what it contains. Dirtying here would re-run hidden-line removal
+    // -- the expensive operation in this whole block -- to arrive at exactly
+    // the geometry already held.
     return true;
 }
 
@@ -434,7 +434,12 @@ DrawingView& DrawingDocument::addView(std::string name, std::string sourcePath,
                                               std::move(bodyName), direction, positionMm);
     auto& ref = *item;
     views_.push_back(std::move(item));
-    registry_.registerObject(ref.id(), &ref);
+    // ONE CALL, NOT TWO. `addRecomputableNode` registers the object AND makes
+    // the graph node; registering first makes the second registration fail,
+    // and it fails by returning NodeAlreadyExists rather than by saying
+    // anything -- so the graph node is silently never created and the engine
+    // never runs the view. It reports success over blank paper, which is
+    // exactly the failure this view's own diagnostic exists to prevent.
     addRecomputableNode(ref);
 
     DrawingViewExistenceEdit edit;
@@ -448,6 +453,8 @@ DrawingView& DrawingDocument::addView(std::string name, std::string sourcePath,
     edit.scaleNumerator = ref.scale().numerator;
     edit.scaleDenominator = ref.scale().denominator;
     edit.ownScale = ref.hasOwnScale();
+    edit.showHidden = ref.showsHiddenLines();
+    edit.showTangent = ref.showsTangentEdges();
     edit.addedByTheEdit = true;
     recordDelta(edit, "Add view " + ref.name());
     return ref;
@@ -456,14 +463,14 @@ DrawingView& DrawingDocument::addView(std::string name, std::string sourcePath,
 DrawingView& DrawingDocument::restoreView(ObjectId id, std::string name, ComputeState state,
                                           std::string sourcePath, std::string bodyName,
                                           ViewDirection direction, Vec2 positionMm,
-                                          DrawingScale scale, bool ownScale) {
+                                          DrawingScale scale, bool ownScale, bool showHidden,
+                                          bool showTangent) {
     requireUnusedId(id, "restoreView");
     auto item = std::make_unique<DrawingView>(id, std::move(name), state, std::move(sourcePath),
                                               std::move(bodyName), direction, positionMm, scale,
-                                              ownScale);
+                                              ownScale, showHidden, showTangent);
     auto& ref = *item;
     views_.push_back(std::move(item));
-    registry_.registerObject(ref.id(), &ref);
     addRecomputableNode(ref);
     return ref;
 }
@@ -508,6 +515,10 @@ void SnapshotViewInto(const DrawingView& view, DrawingViewPlacementEdit& edit) {
     edit.afterScaleDenominator = view.scale().denominator;
     edit.beforeOwnScale = view.hasOwnScale();
     edit.afterOwnScale = view.hasOwnScale();
+    edit.beforeShowHidden = view.showsHiddenLines();
+    edit.afterShowHidden = view.showsHiddenLines();
+    edit.beforeShowTangent = view.showsTangentEdges();
+    edit.afterShowTangent = view.showsTangentEdges();
 }
 } // namespace
 
@@ -549,6 +560,35 @@ bool DrawingDocument::setViewScale(ObjectId viewId, const DrawingScale& scale) {
     edit.afterOwnScale = true;
     view->setScale(scale);
     recordDelta(edit, "Scale " + view->name());
+    // NOT DIRTIED, for the reason setSheetScale gives: the curves are in
+    // model millimetres and a scale does not change them.
+    return true;
+}
+
+bool DrawingDocument::setViewShowsHiddenLines(ObjectId viewId, bool show) {
+    DrawingView* view = findViewForEdit(viewId);
+    if (view == nullptr) return false;
+    DrawingViewPlacementEdit edit;
+    SnapshotViewInto(*view, edit);
+    edit.afterShowHidden = show;
+    view->setShowsHiddenLines(show);
+    recordDelta(edit, (show ? "Show hidden lines on " : "Hide hidden lines on ") + view->name());
+    // THIS ONE DOES REPROJECT. Unlike the scale, it changes which edges are
+    // computed at all -- the request asks the projector for them, so the
+    // curves have to be built again.
+    graph_.markDirty(viewId);
+    return true;
+}
+
+bool DrawingDocument::setViewShowsTangentEdges(ObjectId viewId, bool show) {
+    DrawingView* view = findViewForEdit(viewId);
+    if (view == nullptr) return false;
+    DrawingViewPlacementEdit edit;
+    SnapshotViewInto(*view, edit);
+    edit.afterShowTangent = show;
+    view->setShowsTangentEdges(show);
+    recordDelta(edit,
+                (show ? "Show tangent edges on " : "Hide tangent edges on ") + view->name());
     graph_.markDirty(viewId);
     return true;
 }
@@ -561,7 +601,6 @@ bool DrawingDocument::clearViewScale(ObjectId viewId) {
     edit.afterOwnScale = false;
     view->clearScale();
     recordDelta(edit, view->name() + " follows the sheet");
-    graph_.markDirty(viewId);
     return true;
 }
 
@@ -612,6 +651,8 @@ bool DrawingDocument::removeObject(ObjectId id) {
             edit.scaleNumerator = view->scale().numerator;
             edit.scaleDenominator = view->scale().denominator;
             edit.ownScale = view->hasOwnScale();
+            edit.showHidden = view->showsHiddenLines();
+            edit.showTangent = view->showsTangentEdges();
             edit.addedByTheEdit = false;
             recordDelta(edit, "Delete " + view->name());
         }
@@ -719,8 +760,6 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         // AFTER setCustomSize, which forces the size to Custom as a side
         // effect -- the same ordering restoreSheet has to observe.
         sheet_.setSize(static_cast<SheetSize>(size));
-        for (const std::unique_ptr<DrawingView>& view : views_)
-            if (!view->hasOwnScale()) graph_.markDirty(view->id());
         return;
     }
     if (const auto* edit = std::get_if<LayerExistenceEdit>(&delta)) {
@@ -768,7 +807,7 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
                         edit->bodyName, static_cast<ViewDirection>(edit->direction),
                         Vec2{edit->positionXMm, edit->positionYMm},
                         DrawingScale{edit->scaleNumerator, edit->scaleDenominator},
-                        edit->ownScale);
+                        edit->ownScale, edit->showHidden, edit->showTangent);
         else
             removeObject(edit->viewId);
         return;
@@ -786,6 +825,8 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
                 forward ? edit->afterScaleDenominator : edit->beforeScaleDenominator});
         else
             view->clearScale();
+        view->setShowsHiddenLines(forward ? edit->afterShowHidden : edit->beforeShowHidden);
+        view->setShowsTangentEdges(forward ? edit->afterShowTangent : edit->beforeShowTangent);
         graph_.markDirty(edit->viewId);
         return;
     }

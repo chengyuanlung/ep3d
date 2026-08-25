@@ -108,7 +108,6 @@ private:
     // assembly. Separate because it is a different sentence -- "everything in
     // that assembly, where it put them" rather than "that body" -- and not a
     // different TYPE, because a mate does not care which it got.
-    RecomputeResult recomputeSubAssembly(const RecomputeContext& context);
 
     void setName(std::string name) { name_ = std::move(name); }
 

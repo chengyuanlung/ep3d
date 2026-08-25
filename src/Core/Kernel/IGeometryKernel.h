@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include "Core/Geometry/MathTypes.h"
+#include "Core/Kernel/DrawingProjection.h"
 #include "Core/Kernel/KernelShape.h"
 #include "Core/Kernel/KernelTypes.h"
 #include "Core/Kernel/ProfileDefinition.h"
@@ -199,6 +200,29 @@ public:
         (void)shape;
         (void)query;
         return FaceQueryResult{false, "this kernel cannot find faces", {}};
+    }
+
+    // --- Drawing projection (M32.2, roadmap 24) ------------------------------
+    //
+    // FLATTENS A SOLID INTO THE 2D CURVES A DRAWING VIEW SHOWS, with hidden
+    // lines worked out. This is hidden-line removal, and it is a KERNEL job
+    // for the reason every other geometry question is: Core carries no
+    // topology.
+    //
+    // The result is in MODEL MILLIMETRES, in the projection plane, with the
+    // camera's `up` running up the page. The paper scale is applied later and
+    // elsewhere -- see ProjectedGeometry.h for why the measurement must not
+    // carry it.
+    //
+    // DEFAULTED TO A REFUSAL, not to an empty drawing. A kernel that cannot
+    // project must say so: an empty result is indistinguishable from a part
+    // with nothing in it, and the caller's next move -- put a dimension on
+    // it -- would then be made against blank paper.
+    virtual DrawingProjectionResult projectForDrawing(const KernelShape& shape,
+                                                      const DrawingProjectionRequest& request) {
+        (void)shape;
+        (void)request;
+        return DrawingProjectionResult{false, "this kernel cannot project a drawing view", {}};
     }
 
     virtual KernelShape tagCreatedFaces(const KernelShape& result, const KernelShape& base,

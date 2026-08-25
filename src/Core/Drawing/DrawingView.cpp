@@ -1,5 +1,7 @@
 #include "Core/Drawing/DrawingView.h"
 
+#include "Core/Document/SourceShapeResolver.h"
+#include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Recompute/RecomputeContext.h"
 
 #include <utility>
@@ -66,7 +68,8 @@ DrawingView::DrawingView(std::string name, std::string sourcePath, std::string b
 
 DrawingView::DrawingView(ObjectId id, std::string name, ComputeState state,
                          std::string sourcePath, std::string bodyName, ViewDirection direction,
-                         Vec2 positionMm, DrawingScale scale, bool ownScale)
+                         Vec2 positionMm, DrawingScale scale, bool ownScale, bool showHidden,
+                         bool showTangent)
     : id_(RestoreObjectId(id)),
       name_(std::move(name)),
       sourcePath_(std::move(sourcePath)),
@@ -75,7 +78,17 @@ DrawingView::DrawingView(ObjectId id, std::string name, ComputeState state,
       positionMm_(positionMm),
       scale_(scale),
       ownScale_(ownScale),
+      showHidden_(showHidden),
+      showTangent_(showTangent),
       state_(state) {}
+
+double DrawingView::paperWidthMm(const DrawingScale& sheetScale) const noexcept {
+    return projected_.extent.widthMm() * effectiveScale(sheetScale).factor();
+}
+
+double DrawingView::paperHeightMm(const DrawingScale& sheetScale) const noexcept {
+    return projected_.extent.heightMm() * effectiveScale(sheetScale).factor();
+}
 
 void DrawingView::setScale(const DrawingScale& scale) {
     if (!scale.valid()) return;
@@ -88,17 +101,42 @@ DrawingScale DrawingView::effectiveScale(const DrawingScale& sheetScale) const n
 }
 
 RecomputeResult DrawingView::recompute(const RecomputeContext& context) {
-    (void)context;
-    // M32.1 BUILDS NOTHING, and says so rather than reporting success.
-    //
-    // A view that answered Success while producing no geometry would be a node
-    // the tree shows as up to date over an empty patch of paper -- and the
-    // next milestone would have to work out whether the projector was broken
-    // or had never been called. The projection arrives in M32.2; until then
-    // this is an honest "not yet".
-    state_ = ComputeState::Failed;
-    diagnostic_ = "this view has nothing projected into it yet (M32.2)";
-    return RecomputeResult{RecomputeStatus::Failed, diagnostic_};
+    const auto fail = [this](std::string message) {
+        // THE OLD CURVES GO. A view that failed while still holding what it
+        // drew last time is a drawing that shows a part which no longer
+        // builds -- and the tree says "failed" over a picture that looks
+        // fine, which is the worst of both.
+        projected_ = ProjectedDrawing{};
+        state_ = ComputeState::Failed;
+        diagnostic_ = message;
+        return RecomputeResult{RecomputeStatus::Failed, std::move(message)};
+    };
+
+    if (context.kernel == nullptr) return fail("no geometry kernel configured");
+
+    // "THAT BODY, IN THAT FILE" -- the same resolver an instance uses, so a
+    // view and an instance of the same file cannot disagree about what is in
+    // it (M32.2).
+    const SourceShapeResult resolved = ResolveSourceShape(sourcePath_, bodyName_, context);
+    if (!resolved) return fail(resolved.message);
+
+    // THE CAMERA COMES FROM THE ONE TABLE (CameraFor), so the projector never
+    // decides which way up this view is.
+    const ViewCamera camera = CameraFor(direction_);
+    DrawingProjectionRequest request;
+    request.towards = camera.towards;
+    request.up = camera.up;
+    request.includeHidden = showHidden_;
+    request.includeSmooth = showTangent_;
+
+    DrawingProjectionResult projection = context.kernel->projectForDrawing(resolved.shape,
+                                                                          request);
+    if (!projection) return fail(projection.message);
+
+    projected_ = std::move(projection.drawing);
+    state_ = ComputeState::Valid;
+    diagnostic_.clear();
+    return {RecomputeStatus::Success, {}};
 }
 
 } // namespace paramcad

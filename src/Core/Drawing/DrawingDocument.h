@@ -116,7 +116,7 @@ public:
     DrawingView& restoreView(ObjectId id, std::string name, ComputeState state,
                              std::string sourcePath, std::string bodyName,
                              ViewDirection direction, Vec2 positionMm, DrawingScale scale,
-                             bool ownScale);
+                             bool ownScale, bool showHidden, bool showTangent);
     std::vector<const DrawingView*> views() const;
     const DrawingView* findView(ObjectId id) const noexcept;
     const DrawingView* findViewNamed(const std::string& name) const noexcept;
@@ -125,6 +125,8 @@ public:
     bool setViewDirection(ObjectId viewId, ViewDirection direction);
     bool setViewScale(ObjectId viewId, const DrawingScale& scale);
     bool clearViewScale(ObjectId viewId);
+    bool setViewShowsHiddenLines(ObjectId viewId, bool show);
+    bool setViewShowsTangentEdges(ObjectId viewId, bool show);
 
     // Why this view cannot be placed there, or empty when it can. The sheet
     // is a finite piece of paper and a view outside it is a view nobody

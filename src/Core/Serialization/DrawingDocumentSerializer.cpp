@@ -209,6 +209,10 @@ JsonValue toJson(const DrawingDocument& document) {
         // the sheet" survives the sheet later being changed.
         entry.set("ownScale", JsonValue::makeBool(view->hasOwnScale()));
         entry.set("scale", JsonValue::makeString(view->scale().toString()));
+        // DRAWING CONVENTIONS, on the view: two views of the same part on one
+        // sheet may reasonably differ about them.
+        entry.set("showHiddenLines", JsonValue::makeBool(view->showsHiddenLines()));
+        entry.set("showTangentEdges", JsonValue::makeBool(view->showsTangentEdges()));
         views.add(std::move(entry));
     }
     root.set("views", std::move(views));
@@ -242,6 +246,8 @@ struct ViewData {
     Vec2 positionMm{};
     DrawingScale scale{1, 1};
     bool ownScale = false;
+    bool showHidden = true;
+    bool showTangent = false;
 };
 
 } // namespace
@@ -543,6 +549,17 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                 one.positionMm.x > paper.widthMm() || one.positionMm.y > paper.heightMm())
                 return loadFailure(SerializationError::InvalidFieldType,
                                    context + ": this view sits off the sheet");
+            const auto readViewFlag = [&](const char* key, bool& into) -> bool {
+                const JsonValue* flag = entry.find(key);
+                if (flag == nullptr) return true; // absent keeps the default
+                if (flag->type() != JsonType::Bool) return false;
+                into = flag->asBool();
+                return true;
+            };
+            if (!readViewFlag("showHiddenLines", one.showHidden) ||
+                !readViewFlag("showTangentEdges", one.showTangent))
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": a view flag is not a boolean");
             viewData.push_back(std::move(one));
         }
     }
@@ -597,7 +614,8 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
     for (auto& one : viewData)
         document->restoreView(one.id, std::move(one.name), ComputeState::Dirty,
                               std::move(one.sourcePath), std::move(one.bodyName), one.direction,
-                              one.positionMm, one.scale, one.ownScale);
+                              one.positionMm, one.scale, one.ownScale, one.showHidden,
+                              one.showTangent);
     if (currentLayerId != kInvalidObjectId) document->restoreCurrentLayer(currentLayerId);
 
     // A loaded document starts with an EMPTY history (ADR-M9-001).

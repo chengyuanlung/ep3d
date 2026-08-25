@@ -482,6 +482,8 @@ struct DrawingViewExistenceEdit {
     int scaleNumerator = 1;
     int scaleDenominator = 1;
     bool ownScale = false;
+    bool showHidden = true;
+    bool showTangent = false;
     bool addedByTheEdit = false;
 };
 
@@ -501,6 +503,10 @@ struct DrawingViewPlacementEdit {
     int afterScaleDenominator = 1;
     bool beforeOwnScale = false;
     bool afterOwnScale = false;
+    bool beforeShowHidden = true;
+    bool afterShowHidden = true;
+    bool beforeShowTangent = false;
+    bool afterShowTangent = false;
 };
 
 using UndoDelta =

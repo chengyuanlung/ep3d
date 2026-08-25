@@ -22,6 +22,8 @@ public:
     ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
                                const Vec3& axisDirection, double angleRad) override;
     FaceQueryResult resolveFace(const KernelShape& shape, const FaceQuery& query) override;
+    DrawingProjectionResult projectForDrawing(const KernelShape& shape,
+                                              const DrawingProjectionRequest& request) override;
 
     KernelShape tagCreatedFaces(const KernelShape& result, const KernelShape& base,
                                 std::uint64_t tag) override;

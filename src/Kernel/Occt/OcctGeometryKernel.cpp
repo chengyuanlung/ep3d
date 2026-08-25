@@ -7,6 +7,7 @@
 #include "Kernel/Occt/OcctFaceQueryTopology.h"
 #include "Kernel/Occt/OcctProvenance.h"
 #include "Core/Kernel/EdgeQuery.h"
+#include "Kernel/Occt/OcctDrawingProjection.h"
 #include "Kernel/Occt/OcctShape.h"
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -938,6 +939,11 @@ std::set<int> SelectedEdgeIndices(const TopoDS_Shape& shape, const KernelShape& 
 FaceQueryResult OcctGeometryKernel::resolveFace(const KernelShape& shape,
                                                const FaceQuery& query) {
     return ResolveFaceQuery(shape, query);
+}
+
+DrawingProjectionResult OcctGeometryKernel::projectForDrawing(
+    const KernelShape& shape, const DrawingProjectionRequest& request) {
+    return ProjectShapeForDrawing(shape, request);
 }
 
 KernelShape OcctGeometryKernel::tagCreatedFaces(const KernelShape& result,

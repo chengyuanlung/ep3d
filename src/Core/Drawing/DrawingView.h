@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/Drawing/ProjectedGeometry.h"
 #include "Core/Drawing/Sheet.h"
 #include "Core/Feature/ComputeState.h"
 #include "Core/Geometry/MathTypes.h"
@@ -69,7 +70,7 @@ public:
                 ViewDirection direction, Vec2 positionMm);
     DrawingView(ObjectId id, std::string name, ComputeState state, std::string sourcePath,
                 std::string bodyName, ViewDirection direction, Vec2 positionMm,
-                DrawingScale scale, bool ownScale);
+                DrawingScale scale, bool ownScale, bool showHidden, bool showTangent);
 
     ObjectId id() const noexcept override { return id_; }
     static std::string_view typeName() noexcept { return "DrawingView"; }
@@ -108,6 +109,28 @@ public:
     // and the projector cannot disagree about what this view is drawn at.
     DrawingScale effectiveScale(const DrawingScale& sheetScale) const noexcept;
 
+    // --- What this view draws, and the conventions it draws it by -----------
+    //
+    // THE DRAWING'S CHOICE, NOT THE PROJECTOR'S. Hidden lines dashed is
+    // standard on a mechanical view and wrong on a presentation view; tangent
+    // edges are conventionally absent. Both live on the VIEW because two views
+    // of the same part on one sheet may reasonably differ.
+    bool showsHiddenLines() const noexcept { return showHidden_; }
+    bool showsTangentEdges() const noexcept { return showTangent_; }
+    void setShowsHiddenLines(bool show) noexcept { showHidden_ = show; }
+    void setShowsTangentEdges(bool show) noexcept { showTangent_ = show; }
+
+    // THE CURVES, IN MODEL MILLIMETRES (see ProjectedGeometry.h). Derived:
+    // no ObjectId, not registered, not undoable, thrown away and rebuilt
+    // whenever the model changes.
+    const ProjectedDrawing& projected() const noexcept { return projected_; }
+
+    // How much PAPER this view takes at a given scale. Model extent times the
+    // scale, in one place -- a caller that multiplied for itself would be the
+    // second place the scale is applied, and the first place to get it wrong.
+    double paperWidthMm(const DrawingScale& sheetScale) const noexcept;
+    double paperHeightMm(const DrawingScale& sheetScale) const noexcept;
+
     ComputeState currentState() const noexcept { return state_; }
     const std::string& diagnostic() const noexcept { return diagnostic_; }
 
@@ -123,6 +146,9 @@ private:
     Vec2 positionMm_{0.0, 0.0};
     DrawingScale scale_{1, 1};
     bool ownScale_{false};
+    bool showHidden_{true};
+    bool showTangent_{false};
+    ProjectedDrawing projected_;
     ComputeState state_{ComputeState::Dirty};
     std::string diagnostic_;
 };

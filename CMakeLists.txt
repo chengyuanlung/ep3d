@@ -12,7 +12,9 @@ add_library(ParametricCADCore
     src/Core/Document/CadDocument.cpp
     src/Core/Document/ObjectRegistry.cpp
     src/Core/Assembly/AssemblyDocument.cpp
+    src/Core/Document/SourceShapeResolver.cpp
     src/Core/Drawing/Sheet.cpp
+    src/Core/Drawing/ProjectedGeometry.cpp
     src/Core/Drawing/DrawingTables.cpp
     src/Core/Drawing/DrawingView.cpp
     src/Core/Drawing/DrawingDocument.cpp
@@ -117,6 +119,7 @@ endif()
 if(PARAMCAD_BUILD_KERNEL_OCCT AND OpenCASCADE_FOUND)
     add_library(ParametricCADKernelOcct
         src/Kernel/Occt/OcctGeometryKernel.cpp
+    src/Kernel/Occt/OcctDrawingProjection.cpp
         src/Kernel/Occt/OcctFaceQuery.cpp
         src/Kernel/Occt/OcctSketchWireframe.cpp
         src/Kernel/Occt/OcctSplineCurve.cpp
@@ -665,7 +668,9 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Kernel/OcctExtrudeTests.cpp
             tests/Kernel/OcctFaceQueryTests.cpp
             tests/Kernel/OcctSketchWireframeTests.cpp
-            tests/Kernel/OcctEdgeQueryTests.cpp
+            tests/Kernel/OcctDrawingProjectionTests.cpp
+        tests/Kernel/OcctDrawingViewTests.cpp
+        tests/Kernel/OcctEdgeQueryTests.cpp
             tests/Kernel/OcctBooleanTests.cpp
             tests/Kernel/OcctRevolveTests.cpp
             tests/Kernel/OcctFilletChamferTests.cpp
