@@ -260,14 +260,12 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
     // --- THE VIEWS -----------------------------------------------------------
     for (const DrawingView* view : document.views()) {
         if (view->currentState() != ComputeState::Valid) continue;
-        const Vec2 at = document.viewPositionMm(view->id());
-        // MODEL MILLIMETRES TIMES THE SCALE, here and only here. The curves
-        // never carry the scale (see ProjectedGeometry.h), so this is the one
-        // multiplication -- and it is also why a dimension can read the true
-        // size straight off the curve.
-        const double factor = view->effectiveScale(document.sheet().scale()).factor();
+        // MODEL MILLIMETRES TO SHEET MILLIMETRES, through the document -- the
+        // curves never carry the scale (see ProjectedGeometry.h), and
+        // viewPointToSheetMm is the one place it is applied.
+        const double factor = document.viewScaleFactor(view->id());
         const auto place = [&](Vec2 modelMm) {
-            return page.toScreen(Vec2{at.x + modelMm.x * factor, at.y + modelMm.y * factor});
+            return page.toScreen(document.viewPointToSheetMm(view->id(), modelMm));
         };
 
         for (const ProjectedCurve& curve : view->projected().curves) {

@@ -299,6 +299,25 @@ public:
     // measurement through its style.
     std::string dimensionText(const DrawingDimension& dimension) const;
 
+    // A POINT INSIDE A VIEW, PUT ON THE PAPER (M35).
+    //
+    // THE one multiplication. Projected curves are in MODEL millimetres
+    // (ProjectedGeometry.h) and everything that draws or exports them needs
+    // them in SHEET millimetres, which is the view's position plus the model
+    // point times the effective scale.
+    //
+    // It was written out three times before this existed -- in the canvas, in
+    // resolveAnchor, and in the DXF writer -- which is the shape of defect
+    // this project keeps finding: several places doing the same arithmetic,
+    // each correct on its own, and nothing that makes them agree. It is also
+    // why a dimension can read true size: the multiplication happens here and
+    // `measure` divides this exact factor back out.
+    //
+    // An unknown view gives the point back unchanged, because a caller with no
+    // view has a sheet point already.
+    Vec2 viewPointToSheetMm(ObjectId viewId, Vec2 modelMm) const noexcept;
+    double viewScaleFactor(ObjectId viewId) const noexcept;
+
     // WHAT A DIMENSION ON THIS SELECTION WOULD MEASURE (M34).
     //
     // ONE rule about which snap points a pick turns into anchors, so the menu,

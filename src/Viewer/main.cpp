@@ -4881,6 +4881,139 @@ int main(int argc, char** argv) {
                                 fail("100 mm on the sheet is not 100 mm on the page");
                         }
 
+                        // --- M35.5's GATE: the DXF -----------------------
+                        //
+                        // A DXF of the drawing this gate built -- which has a
+                        // projected VIEW in it, and that is the part no Core
+                        // test can reach: the writer flattens a view into
+                        // place, and a view needs the kernel to have anything
+                        // to flatten.
+                        {
+                            const QString dxf =
+                                QDir::tempPath() + QStringLiteral("/ep3d-selftest/m35.dxf");
+                            QFile::remove(dxf);
+                            const QString exported = window.exportDxfCommand(dxf);
+                            if (!exported.contains(QStringLiteral("Exported")))
+                                fail(("the DXF export failed: " + exported.toStdString())
+                                         .c_str());
+                            if (!QFile::exists(dxf)) fail("the DXF said it wrote a file and did not");
+
+                            // WHAT IS IN IT, read as text -- the viewer cannot
+                            // link the GPL reader (ADR-M6-001), so this checks
+                            // the file rather than parsing it. The round trip
+                            // through the real parser is the import suite's
+                            // job; what only this can check is that a VIEW's
+                            // curves came out at all.
+                            QFile file(dxf);
+                            if (!file.open(QIODevice::ReadOnly))
+                                fail("the DXF cannot be read back");
+                            const QByteArray bytes = file.readAll();
+                            file.close();
+                            if (!bytes.contains("AC1009"))
+                                fail("the DXF does not say which version it is");
+                            if (!bytes.contains("$INSUNITS"))
+                                fail("the DXF does not say its numbers are millimetres");
+                            if (!bytes.contains("\nLINE\n"))
+                                fail("the DXF has no geometry in it at all");
+                            // THE VIEW'S OWN LAYER. A recipient who wants the
+                            // hidden detail off needs a switch, and
+                            // "everything on layer 0" is not one.
+                            if (!bytes.contains("Front"))
+                                fail("the projected view did not get a layer of its own");
+                            // ...and the drawn circle, at the size it was
+                            // drawn: 20 mm radius, written with six decimals.
+                            if (!bytes.contains("\n40\n20.000000"))
+                                fail("the circle did not reach the DXF at the size it was drawn");
+
+                            // NO ENTITY NAMES A TABLE ENTRY THE FILE DOES NOT
+                            // DECLARE.
+                            //
+                            // This SHIPPED once. Views went out on a layer
+                            // named after the view and hidden edges on a
+                            // linetype called HIDDEN, and neither was in
+                            // either table -- while the comment claiming that
+                            // could not happen sat right above the code that
+                            // did it. Found by reading the file back and
+                            // looking at it.
+                            //
+                            // It is checked HERE and not in the import suite
+                            // because the case that broke needs a real
+                            // projected view, which needs a model file and a
+                            // kernel.
+                            {
+                                const QList<QByteArray> lines = bytes.split('\n');
+                                QList<QByteArray> declaredLayers;
+                                QList<QByteArray> declaredLinetypes;
+                                QList<QByteArray> usedLayers;
+                                QList<QByteArray> usedLinetypes;
+                                QByteArray table;
+                                for (int i = 0; i + 3 < lines.size(); ++i) {
+                                    const QByteArray code = lines[i].trimmed();
+                                    const QByteArray value = lines[i + 1].trimmed();
+                                    if (code == "0" && value == "TABLE")
+                                        table = lines[i + 3].trimmed();
+                                    if (code == "0" && value == "ENDTAB") table.clear();
+                                    if (code == "0" && value == "LAYER" && table == "LAYER" &&
+                                        lines[i + 2].trimmed() == "2")
+                                        declaredLayers << lines[i + 3].trimmed();
+                                    if (code == "0" && value == "LTYPE" && table == "LTYPE" &&
+                                        lines[i + 2].trimmed() == "2")
+                                        declaredLinetypes << lines[i + 3].trimmed();
+                                    if (table.isEmpty()) {
+                                        if (code == "8") usedLayers << value;
+                                        if (code == "6") usedLinetypes << value;
+                                    }
+                                }
+                                for (const QByteArray& name : usedLayers)
+                                    if (!declaredLayers.contains(name))
+                                        fail(("an entity is on layer '" +
+                                              std::string(name.constData()) +
+                                              "', which the DXF never declares")
+                                                 .c_str());
+                                for (const QByteArray& name : usedLinetypes)
+                                    if (!declaredLinetypes.contains(name))
+                                        fail(("an entity uses linetype '" +
+                                              std::string(name.constData()) +
+                                              "', which the DXF never declares")
+                                                 .c_str());
+                                // ...and the view's layer really is one of
+                                // them, so this is not passing because nothing
+                                // used a layer at all.
+                                if (!declaredLayers.contains(QByteArray("Front")))
+                                    fail("the projected view's layer is not in the DXF's "
+                                         "layer table");
+
+                                // HIDDEN HAS TO HAVE DASHES IN IT.
+                                //
+                                // A DXF has no flag for "this edge is hidden";
+                                // the LINETYPE is the meaning. Declared with
+                                // an empty pattern it plots SOLID, and the
+                                // drawing then says the opposite of what it
+                                // means -- an edge behind the part drawn as
+                                // one in front of it.
+                                //
+                                // Checked here because the drawing never
+                                // declares HIDDEN itself: the writer supplies
+                                // it for a view's hidden edges, and a view
+                                // needs the kernel.
+                                if (declaredLinetypes.contains(QByteArray("HIDDEN"))) {
+                                    int segments = -1;
+                                    for (int i = 0; i + 3 < lines.size(); ++i) {
+                                        if (lines[i].trimmed() != "2" ||
+                                            lines[i + 1].trimmed() != "HIDDEN")
+                                            continue;
+                                        for (int j = i; j + 1 < lines.size() && j < i + 12; ++j)
+                                            if (lines[j].trimmed() == "73")
+                                                segments = lines[j + 1].trimmed().toInt();
+                                        break;
+                                    }
+                                    if (segments <= 0)
+                                        fail("HIDDEN went out with no dashes, so every hidden "
+                                             "edge in this drawing plots solid");
+                                }
+                            }
+                        }
+
                         // KEPT, not removed: it sits beside the golden
                         // screenshots so a person can open the plot and look
                         // at it. A byte check can say the page is A2 and still

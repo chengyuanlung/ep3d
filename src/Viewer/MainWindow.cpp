@@ -20,6 +20,7 @@
 #include "Core/Serialization/DrawingDocumentSerializer.h"
 #include "Viewer/DrawingOutline.h"
 #include "Viewer/DrawingCanvas.h"
+#include "Core/Export/DxfWriter.h"
 #include "Viewer/DrawingPlot.h"
 #include "Core/Document/PartDocument.h"
 #include "Core/Physics/MassProperties.h"
@@ -56,6 +57,7 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QMenuBar>
+#include <QMessageBox>
 #include <QStatusBar>
 #include <QPushButton>
 #include <QTableWidget>
@@ -342,6 +344,14 @@ void MainWindow::buildMenus() {
         QStringLiteral("The border and its margins, in millimetres.\n"
                        "The binding edge is wider because that is the edge it is filed on."));
     connect(frameAction_, &QAction::triggered, this, &MainWindow::onFrameRequested);
+
+    exportDxfAction_ = drawingMenu_->addAction(QStringLiteral("&Export DXF..."));
+    exportDxfAction_->setToolTip(
+        QStringLiteral("R12, which every CAD program reads.\n"
+                       "Views are flattened -- the curves go out where they sit on the "
+                       "paper and stop following the model. Anything the format cannot "
+                       "carry is listed after the export."));
+    connect(exportDxfAction_, &QAction::triggered, this, &MainWindow::onExportDxfRequested);
 
     plotPdfAction_ = drawingMenu_->addAction(QStringLiteral("&Plot to PDF..."));
     plotPdfAction_->setToolTip(
@@ -3147,7 +3157,8 @@ void MainWindow::refreshCommandStates() {
             dimensionTextAction_->setEnabled(selectedDimension() != kInvalidObjectId);
         if (dimensionStyleAction_ != nullptr) dimensionStyleAction_->setEnabled(isDrawing);
         for (QAction* tool : {drawLineAction_, drawCircleAction_, drawRectangleAction_,
-                              titleBlockAction_, frameAction_, plotPdfAction_})
+                              titleBlockAction_, frameAction_, plotPdfAction_,
+                              exportDxfAction_})
             if (tool != nullptr) tool->setEnabled(isDrawing);
         const bool haveInstance = selectedInstance() != kInvalidObjectId;
         if (assemblyMenu_ != nullptr) assemblyMenu_->setEnabled(isAssembly);
@@ -4677,6 +4688,32 @@ QString MainWindow::plotToPdfCommand(const QString& path) {
                    .arg(QFileInfo(path).fileName()));
 }
 
+QString MainWindow::exportDxfCommand(const QString& path) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Only a drawing exports to DXF."));
+    const DxfWriteResult written = WriteDxfFile(*drawing, path.toStdString());
+    if (!written)
+        return say(QStringLiteral("Nothing was exported: %1.")
+                       .arg(QString::fromStdString(written.why)));
+
+    QString said = QStringLiteral("Exported %1 entities to %2")
+                       .arg(written.entities)
+                       .arg(QFileInfo(path).fileName());
+    // EVERY LOSS, NAMED. Not a count and not a warning icon: a user who is
+    // about to send this to a supplier needs to know which parts of their
+    // drawing the file cannot carry.
+    for (const DxfWriteLoss& loss : written.losses)
+        said += QStringLiteral("\n%1: %2")
+                    .arg(QString::fromStdString(loss.what),
+                         QString::fromStdString(loss.detail));
+    return say(said);
+}
+
 QString MainWindow::titleBlockValueForTesting(const QString& label) const {
     const DrawingDocument* drawing = AsDrawing(document_);
     if (drawing == nullptr) return {};
@@ -5049,6 +5086,19 @@ void MainWindow::onPlotPdfRequested() {
         this, QStringLiteral("Plot to PDF"), QString(), QStringLiteral("PDF (*.pdf)"));
     if (path.isEmpty()) return;
     plotToPdfCommand(path);
+}
+
+void MainWindow::onExportDxfRequested() {
+    if (AsDrawing(document_) == nullptr) return;
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Export DXF"), QString(), QStringLiteral("DXF R12 (*.dxf)"));
+    if (path.isEmpty()) return;
+    const QString said = exportDxfCommand(path);
+    // A LOSS GETS A DIALOG, not just a status line. The status bar is where a
+    // user looks when they are wondering what happened; a loss is something
+    // they have to be told before they send the file on.
+    if (said.contains(QLatin1Char('\n')))
+        QMessageBox::information(this, QStringLiteral("Export DXF"), said);
 }
 
 void MainWindow::onAddDrawingLayerRequested() {

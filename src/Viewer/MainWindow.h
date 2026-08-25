@@ -277,6 +277,10 @@ public:
     // TRUE SIZE, through the same painter the screen uses -- see DrawingPlot.h
     // for why there is no second renderer.
     QString plotToPdfCommand(const QString& path);
+    // WHAT COULD NOT BE SAID EXACTLY comes back in the message, because a DXF
+    // that opened cleanly and is subtly not the drawing is worse than one that
+    // failed -- nobody re-checks a file that opened.
+    QString exportDxfCommand(const QString& path);
     // What the block PRINTS for a row -- asked of the same reader the painter
     // uses, so a test that reads this is reading what is on the paper.
     QString titleBlockValueForTesting(const QString& label) const;
@@ -770,6 +774,7 @@ private slots:
     void onTitleBlockRequested();
     void onFrameRequested();
     void onPlotPdfRequested();
+    void onExportDxfRequested();
     void onDeleteDrawingObjectRequested();
     void onCaptureNamedPositionRequested();
     void onApplyNamedPositionRequested();
@@ -1025,6 +1030,7 @@ private:
     QAction* titleBlockAction_ = nullptr;
     QAction* frameAction_ = nullptr;
     QAction* plotPdfAction_ = nullptr;
+    QAction* exportDxfAction_ = nullptr;
     // The Assembly menu's actions, enabled only when the document is one.
     QAction* insertInstanceAction_ = nullptr;
     QAction* groundInstanceAction_ = nullptr;

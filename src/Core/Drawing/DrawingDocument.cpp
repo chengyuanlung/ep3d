@@ -1322,12 +1322,11 @@ std::optional<Vec2> DrawingDocument::resolveAnchor(const DimensionAnchor& anchor
     }
     if (!bestModelPoint.has_value()) return std::nullopt;
 
-    // MODEL MILLIMETRES TIMES THE SCALE, plus where the view sits. The same
-    // one multiplication the canvas does -- and the reason the MEASUREMENT
-    // below is taken in model space, before this.
-    const Vec2 at = viewPositionMm(anchor.viewId);
-    const double factor = view->effectiveScale(sheet_.scale()).factor();
-    return Vec2{at.x + bestModelPoint->x * factor, at.y + bestModelPoint->y * factor};
+    // MODEL MILLIMETRES TIMES THE SCALE, plus where the view sits -- through
+    // viewPointToSheetMm, which is now the only place that multiplication
+    // happens, and the reason the MEASUREMENT below is taken in model space
+    // before this.
+    return viewPointToSheetMm(anchor.viewId, *bestModelPoint);
 }
 
 // =============================================================================
@@ -1346,6 +1345,42 @@ std::vector<TitleBlockFieldRecord> RecordOf(const TitleBlock& block) {
 }
 
 } // namespace
+
+double DrawingDocument::viewScaleFactor(ObjectId viewId) const noexcept {
+    const DrawingView* view = findView(viewId);
+    if (view == nullptr) return 1.0;
+    // NO SECOND GUARD HERE.
+    //
+    // A factor of zero would collapse the view to a point and a negative one
+    // would mirror it -- but DrawingScale::factor() already answers 1.0 for
+    // any scale that is not valid(), so it cannot hand back either. A first
+    // draft repeated the check anyway; a mutation deleting it survived, which
+    // is what dead defensive code looks like from the outside. Two guards
+    // where one is unreachable is the same "kept by hand, tested apart" shape
+    // this project keeps closing, one size down.
+    //
+    // What an impossible scale actually does is pinned by M35_DXF_013.
+    return view->effectiveScale(sheet_.scale()).factor();
+}
+
+Vec2 DrawingDocument::viewPointToSheetMm(ObjectId viewId, Vec2 modelMm) const noexcept {
+    const DrawingView* view = findView(viewId);
+    // AN EQUIVALENT GUARD, kept on purpose and recorded as such (M35-42).
+    //
+    // Deleting this line changes nothing today: viewPositionMm answers {0, 0}
+    // for an unknown view and viewScaleFactor answers 1, so the arithmetic
+    // below already gives the point back unchanged. A mutation removing it
+    // survives, and that is the honest result rather than a gap -- contriving
+    // a test that could only pass would be measuring nothing.
+    //
+    // It stays because it says what the function means for a caller who has no
+    // view, and because it stops that meaning depending on two other
+    // functions' fallbacks staying what they are.
+    if (view == nullptr) return modelMm;
+    const Vec2 at = viewPositionMm(viewId);
+    const double factor = viewScaleFactor(viewId);
+    return Vec2{at.x + modelMm.x * factor, at.y + modelMm.y * factor};
+}
 
 SheetFrameGeometry DrawingDocument::frame() const noexcept {
     // COMPUTED, EVERY TIME. There is nothing to keep in step because there is
@@ -1615,13 +1650,11 @@ DimensionMeasurement DrawingDocument::measure(const DrawingDimension& dimension)
     // out. That division is here and nowhere else, which is the whole reason
     // ProjectedGeometry keeps model units: one multiplication to draw, one
     // division to measure, and no third place to get it wrong.
-    double factor = 1.0;
     const ObjectId viewId = dimension.first().kind == DimensionAnchorKind::InView
                                 ? dimension.first().viewId
                                 : dimension.second().viewId;
-    if (const DrawingView* view = findView(viewId))
-        factor = view->effectiveScale(sheet_.scale()).factor();
-    if (!(factor > 0.0)) factor = 1.0;
+    // THE SAME READER the multiplication above uses, so the two cannot drift.
+    const double factor = viewScaleFactor(viewId);
 
     const double dx = (second->x - first->x) / factor;
     const double dy = (second->y - first->y) / factor;

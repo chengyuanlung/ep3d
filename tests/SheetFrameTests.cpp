@@ -504,3 +504,33 @@ TEST(SheetFrameTest, M35_DOC_009_ATitleBlockThatCannotIdentifyTheDrawingIsREFUSE
     EXPECT_FALSE(saved) << "a drawing that cannot be identified saved cleanly";
     EXPECT_EQ(saved.error, SerializationError::MissingField);
 }
+
+TEST(SheetFrameTest, M35_VIEWPOINT_001_ThereIsONEPlaceAViewsScaleIsApplied) {
+    // It was written out three times -- the canvas, resolveAnchor, and the DXF
+    // writer -- each correct on its own, with nothing making them agree. This
+    // pins the one function they all now ask.
+    DrawingDocument document{"Sheet"};
+    ASSERT_TRUE(document.setSheetScale(DrawingScale{1, 2}));
+    // A path, because a view must name a model file -- it is never recomputed
+    // here, and does not need to be: where a point LANDS depends on the view's
+    // position and scale, not on what it draws.
+    DrawingView& view = document.addView("Front", "unbuilt.ep3d", "Block",
+                                         ViewDirection::Front, Vec2{100.0, 100.0});
+
+    EXPECT_NEAR(document.viewScaleFactor(view.id()), 0.5, 1e-12);
+    // 80 mm of model at 1:2 is 40 mm of paper, from the view's own position.
+    const Vec2 onPaper = document.viewPointToSheetMm(view.id(), Vec2{80.0, 20.0});
+    EXPECT_NEAR(onPaper.x, 140.0, 1e-9);
+    EXPECT_NEAR(onPaper.y, 110.0, 1e-9);
+    // The view's own origin is where the view sits.
+    const Vec2 origin = document.viewPointToSheetMm(view.id(), Vec2{0.0, 0.0});
+    EXPECT_NEAR(origin.x, 100.0, 1e-9);
+    EXPECT_NEAR(origin.y, 100.0, 1e-9);
+
+    // NO VIEW MEANS THE POINT IS ALREADY ON THE SHEET, rather than being
+    // silently scaled by whatever the last view used.
+    const Vec2 plain = document.viewPointToSheetMm(kInvalidObjectId, Vec2{7.0, 9.0});
+    EXPECT_NEAR(plain.x, 7.0, 1e-9);
+    EXPECT_NEAR(plain.y, 9.0, 1e-9);
+    EXPECT_NEAR(document.viewScaleFactor(kInvalidObjectId), 1.0, 1e-12);
+}

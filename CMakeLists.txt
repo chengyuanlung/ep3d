@@ -23,6 +23,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/DrawingDimension.cpp
     src/Core/Drawing/SheetFrame.cpp
     src/Core/Drawing/TitleBlock.cpp
+    src/Core/Export/DxfWriter.cpp
     src/Core/Drawing/DrawingView.cpp
     src/Core/Drawing/DrawingDocument.cpp
     src/Core/Assembly/Mate.cpp
@@ -725,7 +726,8 @@ if(PARAMCAD_BUILD_TESTS)
     if(TARGET ParametricCADImportDxf)
         add_executable(ParametricCADImportTests
             tests/Import/DxfImportTests.cpp
-            tests/Import/DxfDimensionTests.cpp)
+            tests/Import/DxfDimensionTests.cpp
+            tests/Import/DxfWriterTests.cpp)
         target_link_libraries(ParametricCADImportTests
             PRIVATE ParametricCADCore ParametricCADImportDxf GTest::gtest_main
         )
