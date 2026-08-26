@@ -4852,6 +4852,77 @@ int main(int argc, char** argv) {
                         }
                     }
 
+                    // --- M49's GATE: a detail view ---------------------------
+                    //
+                    // The Core suite proves the crop keeps a hole a hole and
+                    // that the letters share one sequence. Only starting the
+                    // program can prove a user gets a detail onto the sheet at
+                    // all, that the circle reaches the PARENT -- a detail
+                    // nobody can locate on the view it came from is a picture
+                    // of nowhere -- and that its letter carries on from the
+                    // section made just above rather than starting again at A.
+                    {
+                        window.selectDrawingViewForTesting(QStringLiteral("Top"));
+                        // OVER THE HOLES, not over the edge. The first run
+                        // centred this on the part's bottom edge at y = 0:
+                        // legal, refused by nothing, and what came out was a
+                        // single straight line stretched across the sheet.
+                        // The tally could not see it; the screenshot could.
+                        const QString made = window.addDetailViewCommand(
+                            QStringLiteral("DetailB"), Vec2{16.0, 15.0}, 13.0, 2, 70.0);
+                        if (made.contains(QStringLiteral("refused")))
+                            fail(("the detail was refused: " + made.toStdString()).c_str());
+                        if (made.contains(QStringLiteral("nothing in it")))
+                            fail(("the detail circle was over nothing: " + made.toStdString())
+                                     .c_str());
+                        // B, NOT A. The section above already took A, and two
+                        // pools of letters would put a SECTION A-A and a
+                        // DETAIL A on one sheet -- a line and a circle on the
+                        // same parent both marked A.
+                        if (!made.contains(QStringLiteral("detail B")))
+                            fail(("the detail did not carry on from the section's letter: " +
+                                  made.toStdString())
+                                     .c_str());
+                        // AND THE CAPTION STATES THE SCALE. Without it the
+                        // reader measures an enlargement with the sheet's
+                        // ruler and is wrong by exactly the enlargement.
+                        if (!made.contains(QStringLiteral("2:1")))
+                            fail(("the detail caption left out its scale: " +
+                                  made.toStdString())
+                                     .c_str());
+
+                        window.repaintDrawingForTesting();
+                        if (window.drawnDetailCirclesForTesting() != 1)
+                            fail("the detail circle never reached the parent view");
+                        // AND IT CAUGHT SOMETHING WITH TWO DIMENSIONS TO IT. A
+                        // crop that keeps one straight edge passes every count
+                        // in this gate -- it is not empty, the circle is on the
+                        // parent, the caption is right -- and draws a bare line
+                        // across the paper.
+                        const QString cropped = window.viewExtentForTesting(
+                            QStringLiteral("DetailB"));
+                        if (cropped.contains(QStringLiteral("y 0..0")))
+                            fail(("the detail cropped to a flat line: " +
+                                  cropped.toStdString())
+                                     .c_str());
+
+                        // A PICTURE OF A DETAIL. Whether it READS -- whether
+                        // the circle is findable on the parent, whether the
+                        // letter sits where a reader looks, whether the
+                        // enlargement is obviously an enlargement -- is a
+                        // judgement no assertion makes (ADR-M26-009).
+                        if (screenshotPath != nullptr) {
+                            std::string beside = screenshotPath;
+                            const std::size_t dot = beside.rfind('.');
+                            beside = dot == std::string::npos
+                                         ? beside + "-detail"
+                                         : beside.substr(0, dot) + "-detail" +
+                                               beside.substr(dot);
+                            if (!shoot(window, QString::fromStdString(beside)))
+                                fail("could not write the detail screenshot");
+                        }
+                    }
+
                     // --- M39's GATE: a hole table on the paper ----------------
                     //
                     // The Core suite proves the rows are counted right and the

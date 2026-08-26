@@ -105,6 +105,7 @@ struct DrawnTally {
     // with six rows and five tags on the paper is a drawing where one hole is
     // described and not marked, and neither number alone would show it.
     std::size_t holeTableRows = 0;
+    std::size_t detailCircles = 0;
     std::size_t revisionTables = 0;
     std::size_t revisionRows = 0;
     std::size_t holeTags = 0;

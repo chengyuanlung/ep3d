@@ -493,6 +493,15 @@ void MainWindow::buildMenus() {
                        "removed."));
     connect(sectionViewAction_, &QAction::triggered, this,
             &MainWindow::onSectionViewRequested);
+    detailViewAction_ = drawingMenu_->addAction(QStringLiteral("&Detail View..."));
+    detailViewAction_->setToolTip(
+        QStringLiteral("A circle on the selected view, enlarged beside it.\n"
+                       "Its LETTER carries on from the sections: one sheet never has both a "
+                       "SECTION A-A and a DETAIL A.\n"
+                       "The caption always states the scale, because measuring an "
+                       "enlargement with the sheet's ruler is wrong by exactly the "
+                       "enlargement."));
+    connect(detailViewAction_, &QAction::triggered, this, &MainWindow::onDetailViewRequested);
 
     holeTableAction_ = drawingMenu_->addAction(QStringLiteral("&Hole Table..."));
     holeTableAction_->setToolTip(
@@ -5185,6 +5194,82 @@ QString MainWindow::addSectionViewCommand(const QString& name, Vec2 fromMm, Vec2
                    .arg(QString::fromStdString(drawing->sectionLetterOf(madeId))));
 }
 
+QString MainWindow::addDetailViewCommand(const QString& name, Vec2 centreMm,
+                                        double radiusMm, int enlargement, double offsetMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Details belong to a drawing."));
+    const ObjectId parent = selectedDrawingView();
+    if (parent == kInvalidObjectId)
+        return say(QStringLiteral("Select the view to take the detail from first."));
+
+    document_->beginTransaction("Add detail view");
+    DrawingView* made = nullptr;
+    try {
+        made = &drawing->addDetailView(name.toStdString(), parent, centreMm, radiusMm,
+                                       DrawingScale{enlargement, 1}, offsetMm);
+    } catch (const std::exception& error) {
+        document_->abortTransaction();
+        return say(QStringLiteral("That detail was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    if (!document_->commitTransaction()) return say(QStringLiteral("That detail was refused."));
+    const ObjectId madeId = made->id();
+    onRecomputeRequested();
+    selectedId_ = madeId;
+    refreshAll();
+    const DrawingView* back = drawing->findView(madeId);
+    // A DETAIL OF NOTHING FAILS RATHER THAN DRAWING AN EMPTY RING. Said here,
+    // with the reason, because an empty circle with a caption under it reads
+    // as "this area is featureless" rather than as a mistake.
+    if (back != nullptr && back->currentState() == ComputeState::Failed)
+        return say(QStringLiteral("Detail %1 has nothing in it: %2")
+                       .arg(QString::fromStdString(drawing->viewLetterOf(madeId)),
+                            QString::fromStdString(back->diagnostic())));
+    return say(QStringLiteral("Added detail %1 (%2)")
+                   .arg(QString::fromStdString(drawing->viewLetterOf(madeId)),
+                        QString::fromStdString(drawing->viewLabelText(madeId))));
+}
+
+void MainWindow::onDetailViewRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || selectedDrawingView() == kInvalidObjectId) return;
+    const DrawingView* parent = drawing->findView(selectedDrawingView());
+    if (parent == nullptr) return;
+    const ProjectedExtent extent = parent->projected().extent;
+    const double middleX = (extent.min.x + extent.max.x) / 2.0;
+    const double middleY = (extent.min.y + extent.max.y) / 2.0;
+    const double span = std::max(extent.max.x - extent.min.x, extent.max.y - extent.min.y);
+
+    bool ok = false;
+    const double x = QInputDialog::getDouble(this, QStringLiteral("Detail View"),
+                                             QStringLiteral("Circle centre X (mm across the "
+                                                            "view):"),
+                                             middleX, middleX - 10000.0, middleX + 10000.0, 2,
+                                             &ok);
+    if (!ok) return;
+    const double y = QInputDialog::getDouble(this, QStringLiteral("Detail View"),
+                                             QStringLiteral("Circle centre Y:"), middleY,
+                                             middleY - 10000.0, middleY + 10000.0, 2, &ok);
+    if (!ok) return;
+    const double radius = QInputDialog::getDouble(
+        this, QStringLiteral("Detail View"), QStringLiteral("Circle radius (mm):"),
+        std::max(1.0, span * 0.15), 0.01, 10000.0, 2, &ok);
+    if (!ok) return;
+    // THE ENLARGEMENT IS ASKED FOR AND NOT DEFAULTED TO THE SHEET'S. A detail
+    // at its parent's scale is a copy of a bit of the view, not a detail.
+    const int times = QInputDialog::getInt(this, QStringLiteral("Detail View"),
+                                           QStringLiteral("Enlarged (times):"), 2, 2, 50, 1,
+                                           &ok);
+    if (!ok) return;
+    addDetailViewCommand(QStringLiteral("Detail%1").arg(drawing->views().size()),
+                         Vec2{x, y}, radius, times, 80.0);
+}
+
 QString MainWindow::setHoleStandardCommand(ObjectId featureId, const QString& designation,
                                           bool tapped, ClearanceFit fit, HoleKind kind) {
     const auto say = [this](const QString& message) {
@@ -6080,6 +6165,10 @@ std::size_t MainWindow::drawnRevisionRowsForTesting() const {
     return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnRevisionRowsForTesting();
 }
 
+std::size_t MainWindow::drawnDetailCirclesForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnDetailCirclesForTesting();
+}
+
 std::size_t MainWindow::drawnSymbolCountForTesting() const {
     return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnSymbolCountForTesting();
 }
@@ -6430,6 +6519,16 @@ bool MainWindow::drawingCanvasVisibleForTesting() const {
 
 bool MainWindow::drawingToolbarVisible() const {
     return drawingToolBar_ != nullptr && drawingToolBar_->isVisible();
+}
+
+QString MainWindow::viewExtentForTesting(const QString& name) const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return {};
+    const DrawingView* view = drawing->findViewNamed(name.toStdString());
+    if (view == nullptr) return {};
+    const ProjectedExtent& extent = view->projected().extent;
+    return QStringLiteral("x %1..%2 y %3..%4")
+        .arg(extent.min.x).arg(extent.max.x).arg(extent.min.y).arg(extent.max.y);
 }
 
 void MainWindow::selectDrawingViewForTesting(const QString& name) {

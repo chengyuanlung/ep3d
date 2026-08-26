@@ -516,6 +516,53 @@ void SnapshotLayerInto(const Layer& layer, LayerPropertyEdit& edit) {
     edit.beforeLineweight = layer.lineweight();
     edit.afterLineweight = layer.lineweight();
 }
+// WHAT A VIEW IS, FOR THE RECORD THAT MAKES IT EXIST AGAIN (M49).
+//
+// Five places built this by hand: adding a base view, projecting one, cutting
+// a section, taking a detail, and DELETING any of them. The four adding ones
+// each filled in what they had just been given; the deleting one filled in
+// what it could see -- and it could not see the section cut or the detail
+// circle, because nobody had added them to it.
+//
+// So undoing the delete of a section restored a view with no cut line, which
+// projects the WHOLE part and looks entirely reasonable. That has been true
+// since M38. The header of DrawingViewExistenceEdit even says it must not be:
+// "A SECTION'S CUT COMES BACK WITH IT. Without this, undoing the delete of a
+// section view would restore a view with no cut line." The field existed. The
+// delete path never wrote it.
+//
+// Nobody had deleted a section and pressed undo. M49's gate did, because it
+// asked the same question about a detail.
+//
+// One reader now, taken FROM THE VIEW, so what comes back is what was there
+// rather than what a caller remembered to mention.
+void SnapshotViewExistence(const DrawingView& view, DrawingViewExistenceEdit& edit) {
+    edit.viewId = view.id();
+    edit.name = view.name();
+    edit.sourcePath = view.sourcePath();
+    edit.bodyName = view.bodyName();
+    edit.direction = static_cast<int>(view.direction());
+    edit.positionXMm = view.positionMm().x;
+    edit.positionYMm = view.positionMm().y;
+    edit.scaleNumerator = view.scale().numerator;
+    edit.scaleDenominator = view.scale().denominator;
+    edit.ownScale = view.hasOwnScale();
+    edit.showHidden = view.showsHiddenLines();
+    edit.showTangent = view.showsTangentEdges();
+    edit.parentViewId = view.parentViewId();
+    edit.alignmentOffsetMm = view.alignmentOffsetMm();
+    edit.sectionActive = view.sectionCut().active;
+    edit.sectionFromXMm = view.sectionCut().fromMm.x;
+    edit.sectionFromYMm = view.sectionCut().fromMm.y;
+    edit.sectionToXMm = view.sectionCut().toMm.x;
+    edit.sectionToYMm = view.sectionCut().toMm.y;
+    edit.sectionArrowSide = view.sectionCut().arrowSide;
+    edit.detailActive = view.detailFrame().active;
+    edit.detailCentreXMm = view.detailFrame().centreMm.x;
+    edit.detailCentreYMm = view.detailFrame().centreMm.y;
+    edit.detailRadiusMm = view.detailFrame().radiusMm;
+}
+
 } // namespace
 
 bool DrawingDocument::setLayerColor(ObjectId layerId, int color) {
@@ -682,18 +729,7 @@ DrawingView& DrawingDocument::addView(std::string name, std::string sourcePath,
     addRecomputableNode(ref);
 
     DrawingViewExistenceEdit edit;
-    edit.viewId = ref.id();
-    edit.name = ref.name();
-    edit.sourcePath = ref.sourcePath();
-    edit.bodyName = ref.bodyName();
-    edit.direction = static_cast<int>(ref.direction());
-    edit.positionXMm = ref.positionMm().x;
-    edit.positionYMm = ref.positionMm().y;
-    edit.scaleNumerator = ref.scale().numerator;
-    edit.scaleDenominator = ref.scale().denominator;
-    edit.ownScale = ref.hasOwnScale();
-    edit.showHidden = ref.showsHiddenLines();
-    edit.showTangent = ref.showsTangentEdges();
+    SnapshotViewExistence(ref, edit);
     edit.addedByTheEdit = true;
     recordDelta(edit, "Add view " + ref.name());
     return ref;
@@ -742,20 +778,7 @@ DrawingView& DrawingDocument::addProjectedView(std::string name, ObjectId parent
     addDependency(ref.id(), parentViewId);
 
     DrawingViewExistenceEdit edit;
-    edit.viewId = ref.id();
-    edit.name = ref.name();
-    edit.sourcePath = ref.sourcePath();
-    edit.bodyName = ref.bodyName();
-    edit.direction = static_cast<int>(ref.direction());
-    edit.positionXMm = 0.0;
-    edit.positionYMm = 0.0;
-    edit.scaleNumerator = ref.scale().numerator;
-    edit.scaleDenominator = ref.scale().denominator;
-    edit.ownScale = ref.hasOwnScale();
-    edit.showHidden = ref.showsHiddenLines();
-    edit.showTangent = ref.showsTangentEdges();
-    edit.parentViewId = parentViewId;
-    edit.alignmentOffsetMm = offsetMm;
+    SnapshotViewExistence(ref, edit);
     edit.addedByTheEdit = true;
     recordDelta(edit, "Project " + ref.name());
     return ref;
@@ -802,6 +825,36 @@ Vec2 DrawingDocument::viewPositionMm(ObjectId viewId) const {
                 place.x += dy / run * side * walk->alignmentOffsetMm();
                 place.y += -dx / run * side * walk->alignmentOffsetMm();
             }
+            walk = parent;
+            continue;
+        }
+        // A DETAIL IS NOT ALIGNED TO ANYTHING EITHER, and for the same reason:
+        // its direction IS its parent's, so AlignmentOf compares a direction
+        // with itself, finds no relationship, and leaves the enlargement
+        // sitting ON TOP OF the view it came from. The section above learned
+        // this from a screenshot; the detail learned it from the next one.
+        //
+        // Where it belongs is out along the line from the middle of the parent
+        // THROUGH the circle -- so the enlargement lands on the side of the
+        // view it magnifies, which is where a reader's eye goes next. Derived
+        // from the circle rather than asked for, so a detail cannot be placed
+        // on the opposite side from the thing it is about.
+        if (walk->isDetail() && walk->detailFrame().usable()) {
+            const ProjectedExtent& span = parent->projected().extent;
+            const Vec2 middle{0.5 * (span.min.x + span.max.x), 0.5 * (span.min.y + span.max.y)};
+            double dx = walk->detailFrame().centreMm.x - middle.x;
+            double dy = walk->detailFrame().centreMm.y - middle.y;
+            double run = std::hypot(dx, dy);
+            if (run <= 1e-9) {
+                // A CIRCLE ON THE MIDDLE HAS NO SIDE. Straight out to the
+                // right is arbitrary and is said to be: what it must not do is
+                // stay at zero, which puts the detail back on its parent.
+                dx = 1.0;
+                dy = 0.0;
+                run = 1.0;
+            }
+            place.x += dx / run * walk->alignmentOffsetMm();
+            place.y += dy / run * walk->alignmentOffsetMm();
             walk = parent;
             continue;
         }
@@ -931,6 +984,12 @@ void SnapshotViewInto(const DrawingView& view, DrawingViewPlacementEdit& edit) {
     edit.afterShowTangent = view.showsTangentEdges();
     edit.beforeAlignmentOffsetMm = view.alignmentOffsetMm();
     edit.afterAlignmentOffsetMm = view.alignmentOffsetMm();
+    // The circle, both sides, so an edit that does not touch it puts it back
+    // exactly -- the same contract the cut above has.
+    edit.beforeDetailActive = edit.afterDetailActive = view.detailFrame().active;
+    edit.beforeDetailCentreXMm = edit.afterDetailCentreXMm = view.detailFrame().centreMm.x;
+    edit.beforeDetailCentreYMm = edit.afterDetailCentreYMm = view.detailFrame().centreMm.y;
+    edit.beforeDetailRadiusMm = edit.afterDetailRadiusMm = view.detailFrame().radiusMm;
 }
 } // namespace
 
@@ -998,24 +1057,7 @@ DrawingView& DrawingDocument::addSectionView(std::string name, ObjectId parentVi
     addDependency(ref.id(), parentViewId);
 
     DrawingViewExistenceEdit edit;
-    edit.viewId = ref.id();
-    edit.name = ref.name();
-    edit.sourcePath = ref.sourcePath();
-    edit.bodyName = ref.bodyName();
-    edit.direction = static_cast<int>(ref.direction());
-    edit.scaleNumerator = ref.scale().numerator;
-    edit.scaleDenominator = ref.scale().denominator;
-    edit.ownScale = ref.hasOwnScale();
-    edit.showHidden = ref.showsHiddenLines();
-    edit.showTangent = ref.showsTangentEdges();
-    edit.parentViewId = parentViewId;
-    edit.alignmentOffsetMm = offsetMm;
-    edit.sectionActive = true;
-    edit.sectionFromXMm = fromMm.x;
-    edit.sectionFromYMm = fromMm.y;
-    edit.sectionToXMm = toMm.x;
-    edit.sectionToYMm = toMm.y;
-    edit.sectionArrowSide = ref.sectionCut().arrowSide;
+    SnapshotViewExistence(ref, edit);
     edit.addedByTheEdit = true;
     recordDelta(edit, "Section " + ref.name());
     if (ownsStep) commitTransaction();
@@ -1048,7 +1090,92 @@ bool DrawingDocument::setSectionCut(ObjectId viewId, Vec2 fromMm, Vec2 toMm, int
     return true;
 }
 
+DrawingView& DrawingDocument::addDetailView(std::string name, ObjectId parentViewId,
+                                            Vec2 centreMm, double radiusMm,
+                                            DrawingScale scale, double offsetMm) {
+    const DrawingView* parent = findView(parentViewId);
+    if (parent == nullptr)
+        throw std::invalid_argument("addDetailView: a detail is taken from a view, and that "
+                                    "view is not in this drawing");
+    if (parent->isDetail())
+        throw std::invalid_argument("addDetailView: a detail of a detail is not supported "
+                                    "yet -- take it from the view that is not already a "
+                                    "detail");
+    if (!(radiusMm > 1e-9))
+        throw std::invalid_argument("addDetailView: a circle of no size encloses nothing to "
+                                    "enlarge");
+    if (name.empty()) throw std::invalid_argument("addDetailView: a view needs a name");
+    if (nameIsTaken(name, kInvalidObjectId))
+        throw std::invalid_argument("addDetailView: '" + name + "' is already taken");
+
+    const bool ownsStep = !isTransactionOpen() && !applyingHistory();
+    if (ownsStep) beginTransaction("Add detail view");
+
+    // THE SAME MODEL AS ITS PARENT, and the parent's direction -- which the
+    // recompute reads again every time, so this is only what it starts from.
+    auto item = std::make_unique<DrawingView>(name, parent->sourcePath(), parent->bodyName(),
+                                              parent->direction(), Vec2{0.0, 0.0});
+    auto& ref = *item;
+    ref.setParentViewId(parentViewId);
+    ref.setAlignmentOffsetMm(offsetMm);
+    DrawingView::DetailFrame frame;
+    frame.active = true;
+    frame.centreMm = centreMm;
+    frame.radiusMm = radiusMm;
+    ref.setDetailFrame(frame);
+    // A DETAIL HAS ITS OWN SCALE, always. Following the sheet it would be the
+    // same size as the thing it magnifies, which is not a detail view -- and a
+    // detail that followed a later rescale would stop being an enlargement
+    // without anybody touching it.
+    ref.setScale(scale);
+    ref.setSheetId(currentPageId_);
+    views_.push_back(std::move(item));
+    addRecomputableNode(ref);
+    // THE PLACEMENT EDGE, as a section has: a detail is positioned relative to
+    // the view it was taken from.
+    addDependency(ref.id(), parentViewId);
+
+    DrawingViewExistenceEdit edit;
+    SnapshotViewExistence(ref, edit);
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Detail " + ref.name());
+    if (ownsStep) commitTransaction();
+    return ref;
+}
+
+bool DrawingDocument::setDetailFrame(ObjectId viewId, Vec2 centreMm, double radiusMm) {
+    DrawingView* view = findViewForEdit(viewId);
+    if (view == nullptr) return false;
+    // A CIRCLE OF NO SIZE ENCLOSES NOTHING, and a detail of nothing draws an
+    // empty ring with a caption -- which reads as "this area is featureless".
+    if (!(radiusMm > 1e-9)) return false;
+    DrawingViewPlacementEdit edit;
+    SnapshotViewInto(*view, edit);
+    edit.afterDetailActive = true;
+    edit.afterDetailCentreXMm = centreMm.x;
+    edit.afterDetailCentreYMm = centreMm.y;
+    edit.afterDetailRadiusMm = radiusMm;
+    DrawingView::DetailFrame frame;
+    frame.active = true;
+    frame.centreMm = centreMm;
+    frame.radiusMm = radiusMm;
+    view->setDetailFrame(frame);
+    recordDelta(edit, "Move the detail circle");
+    // THE VIEW IS NOW OUT OF DATE. Moving the circle changes what is drawn,
+    // and a detail that kept its old curves would be a picture of somewhere
+    // nobody is pointing at.
+    markDirty(viewId);
+    return true;
+}
+
 std::string DrawingDocument::sectionLetterOf(ObjectId viewId) const {
+    // A SECTION'S LETTER IS A VIEW'S LETTER -- one sequence, see viewLetterOf.
+    const DrawingView* asked = findView(viewId);
+    if (asked == nullptr || !asked->isSection()) return {};
+    return viewLetterOf(viewId);
+}
+
+std::string DrawingDocument::viewLetterOf(ObjectId viewId) const {
     const DrawingView* asked = findView(viewId);
     // The `!isSection()` half of this is an EARLY-OUT, not a guard, and a
     // mutation deleting it survives: the walk below skips every view that is
@@ -1056,13 +1183,16 @@ std::string DrawingDocument::sectionLetterOf(ObjectId viewId) const {
     // same empty string either way. It stays because every caption on the
     // sheet asks this question of every view, and because the contract reads
     // better stated at the top than inferred from a loop three lines down.
-    if (asked == nullptr || !asked->isSection()) return {};
-    // IN DOCUMENT ORDER, so the first section made is A. Derived rather than
-    // stored: the line on the parent and the title under the section both ask
+    // ONE SEQUENCE FOR SECTIONS AND DETAILS TOGETHER. Two pools would put a
+    // "SECTION A-A" and a "DETAIL A" on the same sheet, and a reader looking
+    // up A would find whichever they saw first.
+    if (asked == nullptr || !(asked->isSection() || asked->isDetail())) return {};
+    // IN DOCUMENT ORDER, so the first one made is A. Derived rather than
+    // stored: the mark on the parent and the title under the view both ask
     // here, so they cannot end up carrying different letters.
     int index = 0;
     for (const std::unique_ptr<DrawingView>& one : views_) {
-        if (!one->isSection()) continue;
+        if (!(one->isSection() || one->isDetail())) continue;
         if (one->id() == viewId) {
             std::string letter;
             int number = index + 1;
@@ -1083,11 +1213,18 @@ std::string DrawingDocument::viewLabelText(ObjectId viewId) const {
     if (view == nullptr) return {};
     // A SECTION IS TITLED BY ITS LETTER, not by its name: "A-A" is what a
     // reader looks for under it, and it has to match the line drawn on the
-    // parent -- so neither is typed and both come from sectionLetterOf.
-    const std::string letter = sectionLetterOf(viewId);
-    std::string label = letter.empty() ? view->name() : letter + "-" + letter;
+    // parent -- so neither is typed and both come from viewLetterOf.
+    //
+    // A DETAIL IS TITLED "DETAIL A", not "A-A". The two are different
+    // instructions about where to look on the parent -- one says "a line
+    // crosses the view here", the other "a circle is drawn round this" -- and
+    // a detail captioned A-A sends the reader hunting for a cut line.
+    const std::string letter = viewLetterOf(viewId);
+    std::string label = view->name();
+    if (!letter.empty())
+        label = view->isDetail() ? "DETAIL " + letter : letter + "-" + letter;
     // The scale is written only when it is NOT the sheet's. Written always, it
-    // is noise; written never, a detail view at 2:1 is read as full size.
+    // is noise.
     if (view->hasOwnScale()) label += "  (" + view->scale().toString() + ")";
     return label;
 }
@@ -3550,20 +3687,7 @@ bool DrawingDocument::removeOwnObject(ObjectId id) {
         }
         if (!applyingHistory()) {
             DrawingViewExistenceEdit edit;
-            edit.viewId = id;
-            edit.name = view->name();
-            edit.sourcePath = view->sourcePath();
-            edit.bodyName = view->bodyName();
-            edit.direction = static_cast<int>(view->direction());
-            edit.positionXMm = view->positionMm().x;
-            edit.positionYMm = view->positionMm().y;
-            edit.scaleNumerator = view->scale().numerator;
-            edit.scaleDenominator = view->scale().denominator;
-            edit.ownScale = view->hasOwnScale();
-            edit.showHidden = view->showsHiddenLines();
-            edit.showTangent = view->showsTangentEdges();
-            edit.parentViewId = view->parentViewId();
-            edit.alignmentOffsetMm = view->alignmentOffsetMm();
+            SnapshotViewExistence(*view, edit);
             edit.addedByTheEdit = false;
             recordDelta(edit, "Delete " + view->name());
         }
@@ -4127,6 +4251,16 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
                 cut.arrowSide = edit->sectionArrowSide;
                 back.setSectionCut(cut);
             }
+            // ...AND SO DOES THE CIRCLE (M49). A restored detail with no
+            // circle projects the WHOLE part at the enlarged scale, and looks
+            // like a view somebody put there on purpose.
+            if (edit->detailActive) {
+                DrawingView::DetailFrame frame;
+                frame.active = true;
+                frame.centreMm = Vec2{edit->detailCentreXMm, edit->detailCentreYMm};
+                frame.radiusMm = edit->detailRadiusMm;
+                back.setDetailFrame(frame);
+            }
         }
         else
             removeObject(edit->viewId);
@@ -4157,6 +4291,12 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
                         forward ? edit->afterSectionToYMm : edit->beforeSectionToYMm};
         cut.arrowSide = forward ? edit->afterSectionArrowSide : edit->beforeSectionArrowSide;
         view->setSectionCut(cut);
+        DrawingView::DetailFrame frame;
+        frame.active = forward ? edit->afterDetailActive : edit->beforeDetailActive;
+        frame.centreMm = Vec2{forward ? edit->afterDetailCentreXMm : edit->beforeDetailCentreXMm,
+                              forward ? edit->afterDetailCentreYMm : edit->beforeDetailCentreYMm};
+        frame.radiusMm = forward ? edit->afterDetailRadiusMm : edit->beforeDetailRadiusMm;
+        view->setDetailFrame(frame);
         graph_.markDirty(edit->viewId);
         return;
     }

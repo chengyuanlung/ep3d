@@ -189,6 +189,7 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     drawnHoleRows_ = 0;
     drawnSymbols2_ = 0;
     drawnRevisionTables_ = 0;
+    drawnDetailCircles_ = 0;
     drawnRevisionRows_ = 0;
     danglingSymbols_ = 0;
     unreadableSymbols_ = 0;
@@ -221,6 +222,7 @@ void DrawingCanvasWidget::paintEvent(QPaintEvent* event) {
     drawnHoleRows_ = tally.holeTableRows;
     drawnSymbols2_ = tally.symbols;
     drawnRevisionTables_ = tally.revisionTables;
+    drawnDetailCircles_ = tally.detailCircles;
     drawnRevisionRows_ = tally.revisionRows;
     danglingSymbols_ = tally.danglingSymbols;
     unreadableSymbols_ = tally.unreadableSymbols;

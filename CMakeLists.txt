@@ -31,6 +31,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/Annotation.cpp
     src/Core/Drawing/WeldSymbol.cpp
     src/Core/Drawing/Revision.cpp
+    src/Core/Drawing/DetailClip.cpp
     src/Core/Text/NumberText.cpp
     src/Core/Drawing/HoleTable.cpp
     src/Core/Drawing/SheetEdits.cpp
@@ -568,6 +569,8 @@ if(PARAMCAD_BUILD_TESTS)
         tests/WeldDocumentTests.cpp
         tests/RevisionTests.cpp
         tests/RevisionDocumentTests.cpp
+        tests/DetailClipTests.cpp
+        tests/DetailViewTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp
@@ -717,6 +720,7 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Kernel/OcctSketchWireframeTests.cpp
             tests/Kernel/OcctDrawingProjectionTests.cpp
         tests/Kernel/OcctDrawingViewTests.cpp
+        tests/Kernel/OcctDetailViewTests.cpp
         tests/Kernel/OcctHoleStandardTests.cpp
         tests/Kernel/OcctStandardPartTests.cpp
         tests/Kernel/InterferenceStalenessTests.cpp

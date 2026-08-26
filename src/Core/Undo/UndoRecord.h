@@ -668,6 +668,14 @@ struct DrawingViewExistenceEdit {
     double sectionToYMm = 0.0;
     int sectionArrowSide = 1;
 
+    // M49. AND A DETAIL'S CIRCLE COMES BACK WITH IT, for the same reason: a
+    // detail restored without its circle projects the WHOLE part, at the
+    // enlarged scale, and looks like a view somebody put there on purpose.
+    bool detailActive = false;
+    double detailCentreXMm = 0.0;
+    double detailCentreYMm = 0.0;
+    double detailRadiusMm = 0.0;
+
     ObjectId viewId = kInvalidObjectId;
     std::string name;
     std::string sourcePath;
@@ -723,6 +731,18 @@ struct DrawingViewPlacementEdit {
     double afterSectionToXMm = 0.0;
     double afterSectionToYMm = 0.0;
     int afterSectionArrowSide = 1;
+    // WHERE THE MAGNIFYING GLASS WENT (M49). Part of the placement for the
+    // reason the cut is: moving a detail circle is the same kind of edit as
+    // moving the view, and splitting them would leave a detail whose circle
+    // came back while its position did not.
+    bool beforeDetailActive = false;
+    bool afterDetailActive = false;
+    double beforeDetailCentreXMm = 0.0;
+    double beforeDetailCentreYMm = 0.0;
+    double beforeDetailRadiusMm = 0.0;
+    double afterDetailCentreXMm = 0.0;
+    double afterDetailCentreYMm = 0.0;
+    double afterDetailRadiusMm = 0.0;
 };
 
 // --- Authored drawing geometry (M33) -----------------------------------------

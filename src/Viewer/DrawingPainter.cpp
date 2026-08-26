@@ -978,6 +978,69 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             }
         }
 
+        // --- THE DETAIL CIRCLE ON THE PARENT (M49) ---------------------------
+        //
+        // Drawn on the view the detail was taken FROM, with its letter beside
+        // it. The letter comes from the document -- the same call the caption
+        // under the detail makes -- so the circle here and the title there
+        // cannot end up carrying different ones.
+        for (const DrawingView* child : document.views()) {
+            if (child->parentViewId() != view->id() || !child->isDetail()) continue;
+            const std::string letter = document.viewLetterOf(child->id());
+            const Vec2 centre =
+                document.viewPointToSheetMm(view->id(), child->detailFrame().centreMm);
+            // THE RADIUS GOES THROUGH THE SAME SCALE THE POINT DID. Drawn at
+            // its model size on a view at 1:2, the circle would be twice as
+            // wide as the region it stands for -- and a reader would look for
+            // the detail's contents in the wrong place.
+            const Vec2 edge = document.viewPointToSheetMm(
+                view->id(), Vec2{child->detailFrame().centreMm.x + child->detailFrame().radiusMm,
+                                 child->detailFrame().centreMm.y});
+            const double radiusMm = std::hypot(edge.x - centre.x, edge.y - centre.y);
+
+            QPen ringPen(ScreenColorOf(1, ink));   // red, as the cut line is
+            ringPen.setWidthF(std::max(1.0, 0.5 * page.pixelsPerMm));
+            QList<qreal> ringDashes;
+            ringDashes << 6.0 << 3.0;
+            ringPen.setDashPattern(ringDashes);
+            painter.setPen(ringPen);
+            painter.setBrush(Qt::NoBrush);
+            const QPointF at = page.toScreen(centre);
+            const double radiusPx = radiusMm * page.pixelsPerMm;
+            painter.drawEllipse(at, radiusPx, radiusPx);
+
+            QFont letterFont = painter.font();
+            letterFont.setPixelSize(std::max(6, static_cast<int>(4.0 * page.pixelsPerMm)));
+            painter.setFont(letterFont);
+            QPen solid(ScreenColorOf(1, ink));
+            solid.setWidthF(std::max(1.0, 0.7 * page.pixelsPerMm));
+            painter.setPen(solid);
+            painter.drawText(at + QPointF(radiusPx + 3.0, -radiusPx),
+                             QString::fromStdString(letter));
+            ++tally.detailCircles;
+        }
+
+        // --- AND THE DETAIL'S OWN BOUNDARY -----------------------------------
+        //
+        // Drawn on the detail itself, round the same region at the enlarged
+        // size. Without it the crop's edge is wherever the geometry happened to
+        // stop, and a reader has no way to tell "the part ends here" from "the
+        // detail ends here" -- which are opposite statements about the part.
+        if (view->isDetail() && view->detailFrame().usable()) {
+            const Vec2 centre =
+                document.viewPointToSheetMm(view->id(), view->detailFrame().centreMm);
+            const Vec2 edge = document.viewPointToSheetMm(
+                view->id(), Vec2{view->detailFrame().centreMm.x + view->detailFrame().radiusMm,
+                                 view->detailFrame().centreMm.y});
+            const double radiusPx =
+                std::hypot(edge.x - centre.x, edge.y - centre.y) * page.pixelsPerMm;
+            QPen edgePen(QColor(ink.red(), ink.green(), ink.blue(), 150));
+            edgePen.setWidthF(std::max(1.0, 0.35 * page.pixelsPerMm));
+            painter.setPen(edgePen);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(page.toScreen(centre), radiusPx, radiusPx);
+        }
+
         // WHAT GOES UNDER A VIEW is the document's answer, not one composed
         // here: the letter has to match the cut line drawn on the parent, and
         // a caption typed in the renderer is a caption no test can read.

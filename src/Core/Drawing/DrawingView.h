@@ -203,6 +203,29 @@ public:
     void setSectionCut(SectionCut cut) noexcept { section_ = cut; }
     bool isSection() const noexcept { return section_.active; }
 
+    // WHERE THE MAGNIFYING GLASS WENT (M49).
+    //
+    // A circle on the PARENT, in the parent's model millimetres -- the same
+    // kind of sentence a section's cut line is, and for the same reason: the
+    // detail is re-cropped from the parent's own projection at every
+    // recompute, so a parent that changed carries its detail with it.
+    //
+    // THE DIRECTION IS NOT HERE. A detail is its parent's view enlarged, not a
+    // new camera, so it is READ FROM THE PARENT at every recompute rather than
+    // stored. Stored, it would sit still while the parent was turned, and the
+    // detail would go on showing a face that is no longer there -- correctly
+    // drawn, correctly labelled, and of nothing on this drawing.
+    struct DetailFrame {
+        bool active = false;
+        Vec2 centreMm{};
+        double radiusMm = 0.0;
+
+        bool usable() const noexcept { return active && radiusMm > 1e-9; }
+    };
+    const DetailFrame& detailFrame() const noexcept { return detail_; }
+    void setDetailFrame(DetailFrame frame) noexcept { detail_ = frame; }
+    bool isDetail() const noexcept { return detail_.active; }
+
     // THE CURVES, IN MODEL MILLIMETRES (see ProjectedGeometry.h). Derived:
     // no ObjectId, not registered, not undoable, thrown away and rebuilt
     // whenever the model changes.
@@ -259,6 +282,7 @@ private:
     bool showTangent_{false};
     ProjectedDrawing projected_;
     SectionCut section_;
+    DetailFrame detail_;
     // M44. Set when the object is added, from whichever page was current.
     ObjectId sheetId_ = kInvalidObjectId;
     ComputeState state_{ComputeState::Dirty};

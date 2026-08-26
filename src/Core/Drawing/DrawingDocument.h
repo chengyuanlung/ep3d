@@ -224,12 +224,34 @@ public:
                                 Vec2 toMm, int arrowSide, double offsetMm);
     bool setSectionCut(ObjectId viewId, Vec2 fromMm, Vec2 toMm, int arrowSide);
 
-    // WHICH LETTER THIS SECTION IS: "A" for the first, "B" for the second.
+    // --- Detail views (M49) ---------------------------------------------------
     //
-    // DERIVED from the order the sections were made, and empty for a view that
-    // is not one. The line on the parent and the title under the section have
-    // to carry the SAME letter, and that is the classic "two things that must
-    // agree" trap -- so neither of them is typed and both ask here.
+    // A detail is the parent's own projection, cropped to a circle and drawn
+    // bigger. The circle is a SENTENCE on the parent -- a centre and a radius
+    // in the parent's model millimetres -- so turning or editing the parent
+    // carries the detail with it (see DrawingView::DetailFrame).
+    //
+    // The SCALE is asked for, because it is the whole point of the view.
+    DrawingView& addDetailView(std::string name, ObjectId parentViewId, Vec2 centreMm,
+                               double radiusMm, DrawingScale scale, double offsetMm);
+    bool setDetailFrame(ObjectId viewId, Vec2 centreMm, double radiusMm);
+
+    // WHICH LETTER THIS VIEW CARRIES: "A" for the first, "B" for the second.
+    //
+    // DERIVED from the order they were made, and empty for a view that is
+    // neither a section nor a detail. The mark on the parent and the title
+    // under the view have to carry the SAME letter, and that is the classic
+    // "two things that must agree" trap -- so neither is typed and both ask
+    // here.
+    //
+    // ONE SEQUENCE FOR BOTH KINDS (M49). Sections and details drawing from
+    // separate pools would put "SECTION A-A" and "DETAIL A" on one sheet: two
+    // things called A, a line and a circle on the parent both marked A, and a
+    // reader who looks up A finding whichever they see first. Nothing about
+    // either view looks wrong.
+    std::string viewLetterOf(ObjectId viewId) const;
+    // The same sequence, asked about a section -- which is what most callers
+    // want to know, and empty for anything else.
     std::string sectionLetterOf(ObjectId viewId) const;
 
     // WHAT IS WRITTEN UNDER A VIEW: "A-A" for a section, its name otherwise,

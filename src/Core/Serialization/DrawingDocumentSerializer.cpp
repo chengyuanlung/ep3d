@@ -669,6 +669,18 @@ JsonValue toJson(const DrawingDocument& document) {
                     JsonValue::makeNumber(static_cast<double>(view->sectionCut().arrowSide)));
             entry.set("section", std::move(cut));
         }
+        // v49 (M49). THE CIRCLE, AND NOT THE CURVES IT KEPT. What survives the
+        // crop is worked out from the parent's projection at every recompute,
+        // so writing the cropped geometry would be a second answer -- one that
+        // goes stale the moment the model changes, leaving a detail of a
+        // feature that has moved.
+        if (view->isDetail()) {
+            JsonValue circle = JsonValue::makeObject();
+            circle.set("centreXMm", JsonValue::makeNumber(view->detailFrame().centreMm.x));
+            circle.set("centreYMm", JsonValue::makeNumber(view->detailFrame().centreMm.y));
+            circle.set("radiusMm", JsonValue::makeNumber(view->detailFrame().radiusMm));
+            entry.set("detail", std::move(circle));
+        }
         // DRAWING CONVENTIONS, on the view: two views of the same part on one
         // sheet may reasonably differ about them.
         entry.set("showHiddenLines", JsonValue::makeBool(view->showsHiddenLines()));
@@ -1149,6 +1161,10 @@ struct ViewData {
     Vec2 sectionFromMm{};
     Vec2 sectionToMm{};
     int sectionArrowSide = 1;
+    // v49 (M49): the circle on the parent, for the same reason.
+    bool detailActive = false;
+    Vec2 detailCentreMm{};
+    double detailRadiusMm = 0.0;
     ObjectId parentViewId = kInvalidObjectId;
     double alignmentOffsetMm = 0.0;
 };
@@ -1506,6 +1522,36 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                     one.sectionArrowSide = side->asNumber() >= 0.0 ? 1 : -1;
                 }
                 one.sectionActive = true;
+            }
+            if (const JsonValue* circle = entry.find("detail")) {
+                if (circle->type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'detail' is not an object");
+                const JsonValue* cx =
+                    requireField(*circle, "centreXMm", JsonType::Number, context, err);
+                const JsonValue* cy =
+                    requireField(*circle, "centreYMm", JsonType::Number, context, err);
+                const JsonValue* r =
+                    requireField(*circle, "radiusMm", JsonType::Number, context, err);
+                if (cx == nullptr || cy == nullptr || r == nullptr)
+                    return loadFailure(err.error, err.message);
+                one.detailCentreMm = Vec2{cx->asNumber(), cy->asNumber()};
+                one.detailRadiusMm = r->asNumber();
+                // A CIRCLE OF NO SIZE ENCLOSES NOTHING, and a detail with one
+                // would project the whole part at the enlarged scale and look
+                // like a view somebody meant to put there. The saver refuses
+                // it, so the loader refuses it (ADR-M3-008).
+                if (!(one.detailRadiusMm > 1e-9))
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": this detail's circle has no size");
+                // AND IT IS NOT ALSO A SECTION. One view cannot be both: the
+                // recompute would cut and crop with two ideas of what its
+                // camera is, and the picture would be of neither.
+                if (one.sectionActive)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a view is either a section or a detail, "
+                                                 "not both");
+                one.detailActive = true;
             }
             viewData.push_back(std::move(one));
         }
@@ -3007,6 +3053,13 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
             cut.toMm = one.sectionToMm;
             cut.arrowSide = one.sectionArrowSide;
             made.setSectionCut(cut);
+        }
+        if (one.detailActive) {
+            DrawingView::DetailFrame frame;
+            frame.active = true;
+            frame.centreMm = one.detailCentreMm;
+            frame.radiusMm = one.detailRadiusMm;
+            made.setDetailFrame(frame);
         }
     }
     // ENTITIES AFTER THE TABLES, because each names a layer.

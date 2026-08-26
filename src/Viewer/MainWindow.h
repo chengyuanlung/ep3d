@@ -344,6 +344,8 @@ public:
     // --- Section views (M38) --------------------------------------------------
     QString addSectionViewCommand(const QString& name, Vec2 fromMm, Vec2 toMm, int arrowSide,
                                   double offsetMm);
+    QString addDetailViewCommand(const QString& name, Vec2 centreMm, double radiusMm,
+                                 int enlargement, double offsetMm);
     // THE COMMANDS, separate from the dialogs that call them, so the self test
     // can drive them without a mouse -- the same split every command in this
     // window has had since M12.
@@ -373,6 +375,7 @@ public:
     QString currentRevisionForTesting() const;
     std::size_t drawnRevisionTablesForTesting() const;
     std::size_t drawnRevisionRowsForTesting() const;
+    std::size_t drawnDetailCirclesForTesting() const;
     // THE IDS AND THE PICK ARE ARGUMENTS, not read off a selection.
     //
     // The last id is the object being edited and the rest are what it is
@@ -449,6 +452,7 @@ public:
     std::string drawingToolbarLabel(int index) const;
     unsigned long long drawingToolbarIconFingerprint(int index) const;
     void selectDrawingViewForTesting(const QString& name);
+    QString viewExtentForTesting(const QString& name) const;
     void adoptDrawingForTesting(const QString& name);
 
     // --- Assembly state: the three mechanisms of §49 (M30) -------------------
@@ -901,6 +905,7 @@ private slots:
     void onToleranceRequested();
     void onGeneralToleranceRequested();
     void onSectionViewRequested();
+    void onDetailViewRequested();
     // M39: what screw a hole is for, and the table that lists them all.
     void onHoleStandardRequested();
     void onHoleTableRequested();
@@ -1184,6 +1189,7 @@ private:
     QAction* toleranceAction_ = nullptr;
     QAction* generalToleranceAction_ = nullptr;
     QAction* sectionViewAction_ = nullptr;
+    QAction* detailViewAction_ = nullptr;
     QAction* holeStandardAction_ = nullptr;
     QAction* holeTableAction_ = nullptr;
     QAction* standardPartAction_ = nullptr;

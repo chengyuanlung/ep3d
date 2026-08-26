@@ -1,5 +1,7 @@
 #include "Core/Drawing/DrawingView.h"
 
+#include "Core/Drawing/DetailClip.h"
+
 #include "Core/Drawing/DrawingDocument.h"
 
 
@@ -201,6 +203,32 @@ RecomputeResult DrawingView::recompute(const RecomputeContext& context) {
     const SourceShapeResult resolved = ResolveSourceShape(sourcePath_, bodyName_, context);
     if (!resolved) return fail(resolved.message);
 
+    // --- A DETAIL IS ITS PARENT'S VIEW, ENLARGED (M49) ----------------------
+    //
+    // So the direction is READ FROM THE PARENT, here, every recompute -- not
+    // stored and not asked of the caller. A stored direction would sit still
+    // while somebody turned the parent, and the detail would go on showing a
+    // face that is no longer there: correctly drawn, correctly labelled, and
+    // of nothing on this drawing.
+    const DrawingView* detailParent = nullptr;
+    if (detail_.active) {
+        if (!detail_.usable())
+            return fail("this detail's circle has no size, so there is nothing to enlarge");
+        auto* owner = dynamic_cast<DrawingDocument*>(&context.document);
+        detailParent = owner != nullptr ? owner->findView(parentViewId_) : nullptr;
+        if (detailParent == nullptr)
+            return fail("a detail view is taken from another view, and this one has no "
+                        "parent");
+        // A DETAIL OF A DETAIL IS A REAL THING AND NOT THIS ONE. Its circle
+        // would be in coordinates that have already been cropped once, and the
+        // failure would be a view of somewhere nobody pointed at rather than a
+        // refusal.
+        if (detailParent->isDetail())
+            return fail("a detail of a detail is not supported yet -- take it from the view "
+                        "that is not already a detail");
+        direction_ = detailParent->direction();
+    }
+
     // THE CAMERA COMES FROM THE ONE TABLE (CameraFor), so the projector never
     // decides which way up this view is.
     ViewCamera camera = CameraFor(direction_);
@@ -276,6 +304,27 @@ RecomputeResult DrawingView::recompute(const RecomputeContext& context) {
 
     projected_ = std::move(projection.drawing);
     projected_.cutLoops = std::move(projection.cutLoops);
+
+    // ...AND THEN THE CROP (M49), on the curves the parent's camera produced.
+    //
+    // Not a second trip through the kernel: hidden-line removal is what costs
+    // here, and the answer for this camera is already in hand.
+    if (detail_.active) {
+        projected_.curves = ClipToCircle(projected_.curves, detail_.centreMm,
+                                         detail_.radiusMm);
+        // A DETAIL OF NOTHING IS REFUSED. An empty circle with a caption under
+        // it does not read as a mistake -- it reads as "this area is
+        // featureless", which is a statement about the part that nobody made.
+        if (projected_.curves.empty())
+            return fail("this detail's circle is not over anything -- move it onto the "
+                        "feature it is meant to enlarge");
+        // The cut faces belong to the parent's section, and a detail is not
+        // taken from one yet, so there is nothing to carry.
+        projected_.cutLoops.clear();
+        projected_.extent = ProjectedExtent{};
+        for (const ProjectedCurve& curve : projected_.curves)
+            GrowExtent(projected_.extent, curve);
+    }
     // WHEN THE MODEL WAS LAST WRITTEN, taken AFTER a successful projection.
     // Taken before, a failed build would still stamp the view as current and
     // the drawing would stop offering to update itself.
