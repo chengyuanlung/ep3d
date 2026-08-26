@@ -5,13 +5,19 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 
 namespace paramcad {
 
 namespace {
 
+// M47. Makes the "not handled" branch of a visit a COMPILE error rather than a
+// value.
+template <class>
+inline constexpr bool kNoSaverFor = false;
 
 using docjson::FieldError;
 using docjson::fieldError;
@@ -41,6 +47,90 @@ JsonValue WriteDimensionAnchor(const DimensionAnchor& anchor) {
     // which is the whole reason lifting it out of two lambdas was worth doing.
     out.set("role", JsonValue::makeString(std::string(toString(anchor.role))));
     return out;
+}
+
+// --- A WELD BEAD, BOTH WAYS (v47, M47) --------------------------------------
+//
+// ONE CODEC, for the reason the anchor has one: the arrow side and the other
+// side are the same struct written twice, and two readings of it would be two
+// chances for one side to learn a field the other does not. A weld whose far
+// side quietly lost its intermittent run is a drawing that reads as a
+// continuous weld -- and it is the side nobody looks at.
+JsonValue WriteWeldBead(const WeldBead& bead) {
+    JsonValue out = JsonValue::makeObject();
+    out.set("type", JsonValue::makeString(std::string(toString(bead.type))));
+    out.set("sizeMm", JsonValue::makeNumber(bead.sizeMm));
+    out.set("sizeKind", JsonValue::makeString(std::string(toString(bead.sizeKind))));
+    out.set("contour", JsonValue::makeString(std::string(toString(bead.contour))));
+    if (bead.run.has_value()) {
+        JsonValue run = JsonValue::makeObject();
+        run.set("count", JsonValue::makeNumber(static_cast<double>(bead.run->count)));
+        run.set("lengthMm", JsonValue::makeNumber(bead.run->lengthMm));
+        // THE GAP, under the name it has. Called "pitch" it would be read as
+        // the AWS number by the next person to open this file.
+        run.set("gapMm", JsonValue::makeNumber(bead.run->gapMm));
+        out.set("run", std::move(run));
+    }
+    return out;
+}
+
+bool ReadWeldBead(const JsonValue& entry, const std::string& context, FieldError& err,
+                  WeldBead& into) {
+    const JsonValue* type = requireField(entry, "type", JsonType::String, context, err);
+    if (type == nullptr) return false;
+    // REFUSED, NOT DEFAULTED. A type this build does not know would become a
+    // fillet, and a butt weld read as a fillet is a joint with no penetration.
+    if (!ParseWeldType(type->asString(), into.type)) {
+        err = fieldError(SerializationError::InvalidEnumValue,
+                         context + ": unknown weld type '" + type->asString() + "'");
+        return false;
+    }
+    const JsonValue* size = requireField(entry, "sizeMm", JsonType::Number, context, err);
+    if (size == nullptr) return false;
+    into.sizeMm = size->asNumber();
+    if (const JsonValue* kind = entry.find("sizeKind")) {
+        if (kind->type() != JsonType::String) {
+            err = fieldError(SerializationError::InvalidFieldType,
+                             context + ": field 'sizeKind' is not a string");
+            return false;
+        }
+        // THROAT AND LEG ARE DIFFERENT WELDS. Falling back to either one turns
+        // a5 into z5 or the other way about, and both print as one number.
+        if (!ParseFilletSizeKind(kind->asString(), into.sizeKind)) {
+            err = fieldError(SerializationError::InvalidEnumValue,
+                             context + ": unknown fillet size kind '" + kind->asString() + "'");
+            return false;
+        }
+    }
+    if (const JsonValue* contour = entry.find("contour")) {
+        if (contour->type() != JsonType::String) {
+            err = fieldError(SerializationError::InvalidFieldType,
+                             context + ": field 'contour' is not a string");
+            return false;
+        }
+        if (!ParseWeldContour(contour->asString(), into.contour)) {
+            err = fieldError(SerializationError::InvalidEnumValue,
+                             context + ": unknown weld contour '" + contour->asString() + "'");
+            return false;
+        }
+    }
+    if (const JsonValue* run = entry.find("run")) {
+        if (run->type() != JsonType::Object) {
+            err = fieldError(SerializationError::InvalidFieldType,
+                             context + ": field 'run' is not an object");
+            return false;
+        }
+        WeldRun into_run;
+        const JsonValue* count = requireField(*run, "count", JsonType::Number, context, err);
+        if (count == nullptr) return false;
+        into_run.count = static_cast<int>(count->asNumber());
+        if (const JsonValue* length = run->find("lengthMm"))
+            if (length->type() == JsonType::Number) into_run.lengthMm = length->asNumber();
+        if (const JsonValue* gap = run->find("gapMm"))
+            if (gap->type() == JsonType::Number) into_run.gapMm = gap->asNumber();
+        into.run = into_run;
+    }
+    return true;
 }
 
 // The other half of the same codec. Returns false with `err` filled for a
@@ -864,49 +954,82 @@ JsonValue toJson(const DrawingDocument& document) {
         item.set("layerId", JsonValue::makeString(idToString(annotation->layerId())));
         item.set("anchor", WriteDimensionAnchor(annotation->anchor()));
 
-        if (const auto* finish = std::get_if<SurfaceFinishSpec>(&annotation->body())) {
-            item.set("kind", JsonValue::makeString("surface-finish"));
-            item.set("symbol", JsonValue::makeString(std::string(toString(finish->symbol))));
-            item.set("raMicrometres", JsonValue::makeNumber(finish->raMicrometres));
-            item.set("raLowerMicrometres",
-                     JsonValue::makeNumber(finish->raLowerMicrometres));
-            item.set("process", JsonValue::makeString(finish->process));
-            item.set("lay", JsonValue::makeString(std::string(toString(finish->lay))));
-            item.set("machiningAllowanceMm",
-                     JsonValue::makeNumber(finish->machiningAllowanceMm));
-            item.set("allAround", JsonValue::makeBool(finish->allAround));
-        } else if (const auto* frame =
-                       std::get_if<FeatureControlFrameSpec>(&annotation->body())) {
-            item.set("kind", JsonValue::makeString("frame"));
-            item.set("characteristic",
-                     JsonValue::makeString(std::string(toString(frame->characteristic))));
-            item.set("toleranceMm", JsonValue::makeNumber(frame->toleranceMm));
-            item.set("diametricZone", JsonValue::makeBool(frame->diametricZone));
-            item.set("condition",
-                     JsonValue::makeString(std::string(toString(frame->condition))));
-            JsonValue datums = JsonValue::makeArray();
-            for (const DatumReference& reference : frame->datums) {
-                JsonValue one = JsonValue::makeObject();
-                one.set("datumId", JsonValue::makeString(idToString(reference.datumId)));
-                one.set("condition",
-                        JsonValue::makeString(std::string(toString(reference.condition))));
-                datums.add(std::move(one));
-            }
-            item.set("datums", std::move(datums));
-        } else if (const auto* balloon = std::get_if<BalloonSpec>(&annotation->body())) {
-            item.set("kind", JsonValue::makeString("balloon"));
-            // WHICH LIST AND WHICH ROW, and not the number the row currently
-            // carries -- the number is the list's answer and is asked for
-            // again on every repaint.
-            item.set("tableId", JsonValue::makeString(idToString(balloon->tableId)));
-            item.set("sourceFile", JsonValue::makeString(balloon->sourceFile));
-            item.set("partName", JsonValue::makeString(balloon->partName));
-        } else {
-            item.set("kind", JsonValue::makeString("datum"));
-            const auto* datum = std::get_if<DatumFeatureSpec>(&annotation->body());
-            item.set("note", JsonValue::makeString(datum != nullptr ? datum->note
-                                                                    : std::string{}));
-        }
+        // EVERY BODY, OR IT DOES NOT BUILD (M47).
+        //
+        // This was an if / else-if chain ending in "otherwise, write a datum".
+        // Adding a fifth body to the variant would have saved a weld symbol as
+        // a datum feature: a file that writes, loads and opens, with a welding
+        // instruction replaced by a letter. Nothing would have thrown, and the
+        // drawing would have looked finished.
+        //
+        // A visit with no default cannot do that. The next body added to
+        // AnnotationBody is a compile error here until somebody writes it
+        // down, which is the difference between a rule that is tested and a
+        // rule that cannot be broken.
+        std::visit(
+            [&item](const auto& body) {
+                using Body = std::decay_t<decltype(body)>;
+                if constexpr (std::is_same_v<Body, SurfaceFinishSpec>) {
+                    item.set("kind", JsonValue::makeString("surface-finish"));
+                    item.set("symbol",
+                             JsonValue::makeString(std::string(toString(body.symbol))));
+                    item.set("raMicrometres", JsonValue::makeNumber(body.raMicrometres));
+                    item.set("raLowerMicrometres",
+                             JsonValue::makeNumber(body.raLowerMicrometres));
+                    item.set("process", JsonValue::makeString(body.process));
+                    item.set("lay", JsonValue::makeString(std::string(toString(body.lay))));
+                    item.set("machiningAllowanceMm",
+                             JsonValue::makeNumber(body.machiningAllowanceMm));
+                    item.set("allAround", JsonValue::makeBool(body.allAround));
+                } else if constexpr (std::is_same_v<Body, FeatureControlFrameSpec>) {
+                    item.set("kind", JsonValue::makeString("frame"));
+                    item.set("characteristic",
+                             JsonValue::makeString(std::string(toString(body.characteristic))));
+                    item.set("toleranceMm", JsonValue::makeNumber(body.toleranceMm));
+                    item.set("diametricZone", JsonValue::makeBool(body.diametricZone));
+                    item.set("condition",
+                             JsonValue::makeString(std::string(toString(body.condition))));
+                    JsonValue datums = JsonValue::makeArray();
+                    for (const DatumReference& reference : body.datums) {
+                        JsonValue one = JsonValue::makeObject();
+                        one.set("datumId",
+                                JsonValue::makeString(idToString(reference.datumId)));
+                        one.set("condition", JsonValue::makeString(
+                                                 std::string(toString(reference.condition))));
+                        datums.add(std::move(one));
+                    }
+                    item.set("datums", std::move(datums));
+                } else if constexpr (std::is_same_v<Body, BalloonSpec>) {
+                    item.set("kind", JsonValue::makeString("balloon"));
+                    // WHICH LIST AND WHICH ROW, and not the number the row
+                    // currently carries -- the number is the list's answer,
+                    // asked for again on every repaint.
+                    item.set("tableId", JsonValue::makeString(idToString(body.tableId)));
+                    item.set("sourceFile", JsonValue::makeString(body.sourceFile));
+                    item.set("partName", JsonValue::makeString(body.partName));
+                } else if constexpr (std::is_same_v<Body, DatumFeatureSpec>) {
+                    item.set("kind", JsonValue::makeString("datum"));
+                    item.set("note", JsonValue::makeString(body.note));
+                } else if constexpr (std::is_same_v<Body, WeldSymbolSpec>) {
+                    item.set("kind", JsonValue::makeString("weld"));
+                    // THE SIDE IS THE STRUCTURE, on disk as in memory: a bead
+                    // is written under the name of the side it is on, and
+                    // there is no field that could name a different one.
+                    if (body.arrowSide.has_value())
+                        item.set("arrowSide", WriteWeldBead(*body.arrowSide));
+                    if (body.otherSide.has_value())
+                        item.set("otherSide", WriteWeldBead(*body.otherSide));
+                    item.set("allAround", JsonValue::makeBool(body.allAround));
+                    item.set("fieldWeld", JsonValue::makeBool(body.fieldWeld));
+                    item.set("staggered", JsonValue::makeBool(body.staggered));
+                    item.set("tail", JsonValue::makeString(body.tail));
+                } else {
+                    static_assert(kNoSaverFor<Body>,
+                                  "a new annotation body has to be written here -- a "
+                                  "fall-through would save it as something else");
+                }
+            },
+            annotation->body());
         symbols.add(std::move(item));
     }
     root.set("symbols", std::move(symbols));
@@ -2256,6 +2379,53 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                     if (partName->type() == JsonType::String)
                         balloon.partName = partName->asString();
                 one.body = std::move(balloon);
+            } else if (kind->asString() == "weld") {
+                WeldSymbolSpec weld;
+                // A SIDE IS PRESENT OR IT IS NOT. There is no field naming a
+                // side, so a file cannot say arrow and mean other -- the same
+                // property the type has in memory, kept across the disk.
+                if (const JsonValue* arrow = entry.find("arrowSide")) {
+                    if (arrow->type() != JsonType::Object)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'arrowSide' is not an object");
+                    WeldBead bead;
+                    if (!ReadWeldBead(*arrow, context + ".arrowSide", err, bead))
+                        return loadFailure(err.error, err.message);
+                    weld.arrowSide = bead;
+                }
+                if (const JsonValue* other = entry.find("otherSide")) {
+                    if (other->type() != JsonType::Object)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           context + ": field 'otherSide' is not an object");
+                    WeldBead bead;
+                    if (!ReadWeldBead(*other, context + ".otherSide", err, bead))
+                        return loadFailure(err.error, err.message);
+                    weld.otherSide = bead;
+                }
+                if (const JsonValue* around = entry.find("allAround"))
+                    if (around->type() == JsonType::Bool) weld.allAround = around->asBool();
+                if (const JsonValue* field = entry.find("fieldWeld"))
+                    if (field->type() == JsonType::Bool) weld.fieldWeld = field->asBool();
+                if (const JsonValue* staggered = entry.find("staggered"))
+                    if (staggered->type() == JsonType::Bool)
+                        weld.staggered = staggered->asBool();
+                if (const JsonValue* tail = entry.find("tail"))
+                    if (tail->type() == JsonType::String) weld.tail = tail->asString();
+                // NO REFUSAL CHECK HERE, ON PURPOSE.
+                //
+                // The first cut of M47 called WhyWeldRefused right at this
+                // point. The mutation gate found it survives being deleted,
+                // and the reason is the good one: the loader ALREADY asks
+                // whyAnnotationRefused of every symbol once they are all back
+                // (see the end of this file), and that is the same function
+                // the saver asks -- which is what ADR-M3-008 actually wants.
+                //
+                // A second copy here would be a second place stating one rule:
+                // it would pass today, and the day a weld rule learns to
+                // depend on something outside the spec, the two would answer
+                // differently and the file would be accepted by one and
+                // refused by the other.
+                one.body = std::move(weld);
             } else if (kind->asString() == "datum") {
                 DatumFeatureSpec datum;
                 if (const JsonValue* note = entry.find("note"))

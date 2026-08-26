@@ -1,4 +1,5 @@
 #include "Core/Feature/HoleStandards.h"
+#include "Core/Text/NumberText.h"
 
 #include <array>
 #include <cctype>
@@ -65,14 +66,6 @@ const Row* FindSize(double nominalMm) noexcept {
 
 // "1.25" from a double, without a trailing zero parade: a drawing says
 // M8x1.25 and M6x1, not M8x1.250000 and M6x1.000000.
-std::string ShortNumber(double value) {
-    char text[32];
-    std::snprintf(text, sizeof(text), "%.4f", value);
-    std::string out(text);
-    while (!out.empty() && out.back() == '0') out.pop_back();
-    if (!out.empty() && out.back() == '.') out.pop_back();
-    return out;
-}
 
 // Reads a run of digits and at most one point. Returns false on anything else,
 // INCLUDING an empty run -- "Mx1.25" is not a size.

@@ -29,6 +29,8 @@ add_library(ParametricCADCore
     src/Core/Drawing/Tolerance.cpp
     src/Core/Drawing/BomTable.cpp
     src/Core/Drawing/Annotation.cpp
+    src/Core/Drawing/WeldSymbol.cpp
+    src/Core/Text/NumberText.cpp
     src/Core/Drawing/HoleTable.cpp
     src/Core/Drawing/SheetEdits.cpp
     src/Core/Feature/HoleStandards.cpp
@@ -561,6 +563,8 @@ if(PARAMCAD_BUILD_TESTS)
         tests/HatchTests.cpp
         tests/ToleranceTests.cpp
         tests/AnnotationTests.cpp
+        tests/WeldSymbolTests.cpp
+        tests/WeldDocumentTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp

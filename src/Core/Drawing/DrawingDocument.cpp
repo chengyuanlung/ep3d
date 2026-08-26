@@ -1816,6 +1816,8 @@ std::string DrawingDocument::whyAnnotationRefused(ObjectId annotationId) const {
                 return {};
         return "this balloon names a part that is not in the parts list it reads";
     }
+    if (const auto* weld = std::get_if<WeldSymbolSpec>(&annotation->body()))
+        return WhyWeldRefused(*weld);
     return {};
 }
 
@@ -1848,6 +1850,8 @@ std::string DrawingDocument::annotationText(ObjectId annotationId) const {
                 return std::to_string(row.item);
         return {};
     }
+    if (const auto* weld = std::get_if<WeldSymbolSpec>(&annotation->body()))
+        return WeldSymbolText(*weld);
     return datumLetterOf(annotationId);
 }
 

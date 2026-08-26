@@ -1,24 +1,11 @@
 #include "Core/Drawing/Annotation.h"
+#include "Core/Text/NumberText.h"
 
 #include <cmath>
 #include <cstdio>
 #include <utility>
 
 namespace paramcad {
-
-namespace {
-
-// A measurement as a drawing writes it: 3.2, not 3.200000.
-std::string ShortNumber(double value) {
-    char text[32];
-    std::snprintf(text, sizeof(text), "%.4f", value);
-    std::string out(text);
-    while (!out.empty() && out.back() == '0') out.pop_back();
-    if (!out.empty() && out.back() == '.') out.pop_back();
-    return out;
-}
-
-} // namespace
 
 // --- surface finish ---------------------------------------------------------
 

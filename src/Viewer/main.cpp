@@ -5608,6 +5608,60 @@ int main(int argc, char** argv) {
                             fail("the balloon was drawn without a number in it");
                     }
 
+                    // --- M47's GATE: a weld symbol, and which side ----------
+                    //
+                    // The Core suite proves the ISO 2553 rules. Only starting
+                    // the program can prove a user gets a weld onto the sheet
+                    // at all -- and that the two sides do not draw the same,
+                    // which is the one thing about this symbol a reader cannot
+                    // check by looking at it twice.
+                    {
+                        const int before = window.drawnSymbolCountForTesting();
+
+                        WeldBead bead;
+                        bead.type = WeldType::Fillet;
+                        bead.sizeMm = 5.0;
+                        bead.sizeKind = FilletSizeKind::Throat;
+
+                        // NOT named near/far: those are still macros in the
+                        // Windows headers, and the error they give is about
+                        // punctuation two lines further down.
+                        WeldSymbolSpec nearSide;
+                        nearSide.arrowSide = bead;
+                        const QString saidNear =
+                            window.addSymbolCommand(nearSide, Vec2{60.0, 120.0},
+                                                    Vec2{70.0, 135.0});
+
+                        WeldSymbolSpec farSide;
+                        farSide.otherSide = bead;
+                        const QString saidFar =
+                            window.addSymbolCommand(farSide, Vec2{60.0, 100.0},
+                                                    Vec2{70.0, 115.0});
+
+                        // THE SAME WELD ON THE OTHER FACE IS NOT THE SAME
+                        // DRAWING. If these two ever say the same thing, the
+                        // side has stopped being carried and every weld on
+                        // every sheet is on whichever face the code guessed.
+                        if (saidNear == saidFar)
+                            fail(("a near-side and a far-side weld said the same thing: " +
+                                  saidNear.toStdString())
+                                     .c_str());
+                        if (!saidNear.contains(QStringLiteral("arrow")))
+                            fail(("a near-side weld did not say which side: " +
+                                  saidNear.toStdString())
+                                     .c_str());
+                        if (!saidFar.contains(QStringLiteral("other")))
+                            fail(("a far-side weld did not say which side: " +
+                                  saidFar.toStdString())
+                                     .c_str());
+
+                        window.repaintDrawingForTesting();
+                        if (window.drawnSymbolCountForTesting() != before + 2)
+                            fail("the weld symbols never reached the canvas");
+                        if (window.unreadableSymbolsForTesting() != 0)
+                            fail("a weld symbol was drawn with nothing in it");
+                    }
+
                     // A PICTURE OF A DRAWING WITH A PARTS LIST AND A BALLOON.
                     // Whether a table READS -- whether the columns are wide
                     // enough, whether the heading is where a reader expects,

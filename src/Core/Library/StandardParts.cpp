@@ -1,4 +1,5 @@
 #include "Core/Library/StandardParts.h"
+#include "Core/Text/NumberText.h"
 
 #include "Core/Document/PartDocument.h"
 #include "Core/Feature/HoleStandards.h"
@@ -46,14 +47,6 @@ const Row* FindSize(double threadMm) noexcept {
     return nullptr;
 }
 
-std::string ShortNumber(double value) {
-    char text[32];
-    std::snprintf(text, sizeof(text), "%.4f", value);
-    std::string out(text);
-    while (!out.empty() && out.back() == '0') out.pop_back();
-    if (!out.empty() && out.back() == '.') out.pop_back();
-    return out;
-}
 
 bool ReadNumber(std::string_view text, std::size_t& at, double& out) {
     const std::size_t start = at;

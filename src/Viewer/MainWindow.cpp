@@ -552,6 +552,15 @@ void MainWindow::buildMenus() {
                        "insert a part and every balloon renumbers with the list."));
     connect(balloonAction_, &QAction::triggered, this, &MainWindow::onBalloonRequested);
 
+    weldSymbolAction_ = symbolMenu->addAction(QStringLiteral("&Weld..."));
+    weldSymbolAction_->setToolTip(
+        QStringLiteral("An ISO 2553 weld symbol.\n"
+                       "WHICH SIDE is asked first and has no default: the same triangle on "
+                       "the other line is a weld on the face nobody can reach.\n"
+                       "A fillet size has to say throat (a) or leg (z) -- they are different "
+                       "welds and both draw as one number."));
+    connect(weldSymbolAction_, &QAction::triggered, this, &MainWindow::onWeldSymbolRequested);
+
     QMenu* editMenu = drawingMenu_->addMenu(QStringLiteral("&Modify"));
     sheetTrimAction_ = editMenu->addAction(QStringLiteral("&Trim"));
     sheetTrimAction_->setToolTip(
@@ -5676,6 +5685,83 @@ void MainWindow::onSurfaceFinishRequested() {
                                              series, 8, true, &ok);
     if (!ok) return;
     spec.raMicrometres = ra.toDouble();
+
+    const Vec2 at = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
+    addSymbolCommand(spec, at, Vec2{at.x + 10.0, at.y + 10.0});
+}
+
+void MainWindow::onWeldSymbolRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+
+    // THE SIDE IS ASKED FIRST, AND THERE IS NO REMEMBERED ANSWER. It is the
+    // one field on this symbol whose wrong value is invisible: the drawing is
+    // correct-looking either way, and the joint is welded on the face the
+    // fitter cannot get to. Everything else here can be seen to be wrong.
+    const QStringList sides{QStringLiteral("Arrow side (the face the leader touches)"),
+                            QStringLiteral("Other side (the far face)"),
+                            QStringLiteral("Both sides")};
+    bool ok = false;
+    const QString side = QInputDialog::getItem(this, QStringLiteral("Weld"),
+                                               QStringLiteral("Which side?"), sides, 0, false,
+                                               &ok);
+    if (!ok) return;
+
+    const QStringList types{QStringLiteral("Fillet"),        QStringLiteral("Square butt"),
+                            QStringLiteral("Single V"),      QStringLiteral("Single bevel"),
+                            QStringLiteral("Single U"),      QStringLiteral("Single J"),
+                            QStringLiteral("Plug"),          QStringLiteral("Spot"),
+                            QStringLiteral("Seam"),          QStringLiteral("Backing"),
+                            QStringLiteral("Surfacing"),     QStringLiteral("Edge")};
+    const QString type = QInputDialog::getItem(this, QStringLiteral("Weld"),
+                                               QStringLiteral("Preparation:"), types, 0, false,
+                                               &ok);
+    if (!ok) return;
+
+    WeldBead bead;
+    const WeldType kinds[] = {WeldType::Fillet,  WeldType::SquareButt, WeldType::SingleV,
+                              WeldType::SingleBevel, WeldType::SingleU, WeldType::SingleJ,
+                              WeldType::Plug,    WeldType::Spot,       WeldType::Seam,
+                              WeldType::Backing, WeldType::Surfacing,  WeldType::Edge};
+    bead.type = kinds[types.indexOf(type)];
+
+    if (bead.type == WeldType::Fillet) {
+        // THROAT OR LEG, ASKED OUT LOUD. z5 is a throat of 3.54 -- thirty per
+        // cent less metal than a5, and the drawing carries one number either
+        // way. Neither is offered as the default.
+        const QStringList sizing{QStringLiteral("Throat (a) -- the triangle inside the weld"),
+                                 QStringLiteral("Leg (z) -- how far it runs up the plate")};
+        const QString how = QInputDialog::getItem(this, QStringLiteral("Weld"),
+                                                  QStringLiteral("Size is:"), sizing, 0, false,
+                                                  &ok);
+        if (!ok) return;
+        bead.sizeKind = how == sizing[0] ? FilletSizeKind::Throat : FilletSizeKind::Leg;
+    }
+    const double size = QInputDialog::getDouble(this, QStringLiteral("Weld"),
+                                                QStringLiteral("Size (mm):"), 5.0, 0.0, 1000.0,
+                                                2, &ok);
+    if (!ok) return;
+    bead.sizeMm = size;
+
+    WeldSymbolSpec spec;
+    if (side == sides[0]) {
+        spec.arrowSide = bead;
+    } else if (side == sides[1]) {
+        spec.otherSide = bead;
+    } else {
+        spec.arrowSide = bead;
+        spec.otherSide = bead;
+    }
+
+    // REFUSED HERE, WITH THE REASON, rather than placed and left dangling.
+    const std::string why = WhyWeldRefused(spec);
+    if (!why.empty()) {
+        const QString message = QStringLiteral("That weld was refused: %1")
+                                    .arg(QString::fromStdString(why));
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return;
+    }
 
     const Vec2 at = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
     addSymbolCommand(spec, at, Vec2{at.x + 10.0, at.y + 10.0});

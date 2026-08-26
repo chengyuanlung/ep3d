@@ -2,6 +2,7 @@
 
 #include "Core/Document/ObjectId.h"
 #include "Core/Drawing/DrawingDimension.h"
+#include "Core/Drawing/WeldSymbol.h"
 #include "Core/Geometry/MathTypes.h"
 
 #include <optional>
@@ -208,8 +209,13 @@ struct BalloonSpec {
     std::string partName;
 };
 
+// --- WELD SYMBOL (M47) ------------------------------------------------------
+//
+// The fifth body, and it needed no new machinery: WeldSymbol.h holds the ISO
+// 2553 rules and this carries them on the same leader everything else uses.
+
 using AnnotationBody = std::variant<SurfaceFinishSpec, FeatureControlFrameSpec,
-                                    DatumFeatureSpec, BalloonSpec>;
+                                    DatumFeatureSpec, BalloonSpec, WeldSymbolSpec>;
 
 // THE ANNOTATION ITSELF: a body, a leader, and where the symbol sits.
 class Annotation {
@@ -254,6 +260,7 @@ public:
         return std::holds_alternative<SurfaceFinishSpec>(body_);
     }
     bool isBalloon() const noexcept { return std::holds_alternative<BalloonSpec>(body_); }
+    bool isWeld() const noexcept { return std::holds_alternative<WeldSymbolSpec>(body_); }
 
 private:
     ObjectId id_;

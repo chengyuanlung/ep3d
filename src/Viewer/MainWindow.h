@@ -906,6 +906,7 @@ private slots:
     void onFeatureControlFrameRequested();
     void onSurfaceFinishRequested();
     void onBalloonRequested();
+    void onWeldSymbolRequested();
     // M40: the sheet editing tools. One handler each, one command each --
     // every one of them a thin shell over a pure function in SheetEdits.h.
     void onSheetTrimRequested();
@@ -1182,6 +1183,7 @@ private:
     QAction* gdtFrameAction_ = nullptr;
     QAction* surfaceFinishAction_ = nullptr;
     QAction* balloonAction_ = nullptr;
+    QAction* weldSymbolAction_ = nullptr;
     QAction* sheetTrimAction_ = nullptr;
     QAction* sheetExtendAction_ = nullptr;
     QAction* sheetFilletAction_ = nullptr;

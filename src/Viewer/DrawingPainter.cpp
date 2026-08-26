@@ -604,6 +604,76 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
                 painter.drawPolygon(triangle);
                 painter.setBrush(Qt::NoBrush);
             }
+        } else if (annotation->isWeld()) {
+            // ISO 2553 SYSTEM A: A SOLID LINE AND A DASHED ONE.
+            //
+            // The screenshot after the first cut of M47 showed the two sides
+            // drawn IDENTICALLY, distinguished only by the words "arrow" and
+            // "other" in the text -- which is the exact ambiguity the type was
+            // built to remove, put straight back on the paper. A welder does
+            // not read the word; they read which line the symbol sits on.
+            //
+            // System A is used rather than the above/below convention because
+            // it is the one that cannot be misread: the ARROW side is always
+            // on the SOLID reference line and the OTHER side is always on the
+            // DASHED identification line, whichever way round the two lines
+            // are drawn. The same property the struct has, on paper.
+            const auto* weld = std::get_if<WeldSymbolSpec>(&annotation->body());
+            const QString arrowText =
+                weld != nullptr && weld->arrowSide.has_value()
+                    ? QString::fromStdString(WeldBeadText(*weld->arrowSide))
+                    : QString();
+            const QString otherText =
+                weld != nullptr && weld->otherSide.has_value()
+                    ? QString::fromStdString(WeldBeadText(*weld->otherSide))
+                    : QString();
+            const double tick = std::max(4.0, 2.5 * page.pixelsPerMm);
+            const double run = std::max({metrics.horizontalAdvance(arrowText),
+                                         metrics.horizontalAdvance(otherText), 6.0 * tick}) +
+                               8.0;
+            const QPointF root(corner.x(), corner.y());
+            const QPointF end(corner.x() + run, corner.y());
+
+            // THE REFERENCE LINE IS ALWAYS THERE, even when the weld is only
+            // on the far side: an identification line with nothing to identify
+            // against is not a weld symbol.
+            painter.drawLine(root, end);
+            if (!arrowText.isEmpty())
+                painter.drawText(QPointF(root.x() + 4.0, root.y() - 3.0), arrowText);
+
+            if (!otherText.isEmpty()) {
+                const double drop = height + 1.0;
+                painter.setPen(QPen(ink2, 1.0, Qt::DashLine));
+                painter.drawLine(QPointF(root.x(), root.y() + drop),
+                                 QPointF(end.x(), end.y() + drop));
+                painter.setPen(QPen(ink2, 1.0));
+                // BELOW the identification line, not through it. The first
+                // cut struck the dashes straight across the glyphs, which on
+                // the screenshot read as a crossed-out weld.
+                painter.drawText(QPointF(root.x() + 4.0, root.y() + drop + height),
+                                 otherText);
+            }
+
+            // THE CIRCLE AND THE FLAG SIT AT THE ELBOW, because they are about
+            // the whole instruction and not about one side of the joint.
+            if (weld != nullptr && weld->allAround)
+                painter.drawEllipse(root, tick * 0.35, tick * 0.35);
+            if (weld != nullptr && weld->fieldWeld) {
+                QPolygonF flag;
+                flag << root << QPointF(root.x(), root.y() - tick * 1.6)
+                     << QPointF(root.x() + tick * 0.9, root.y() - tick * 1.2)
+                     << QPointF(root.x(), root.y() - tick * 0.8);
+                painter.setBrush(QBrush(ink2));
+                painter.drawPolygon(flag);
+                painter.setBrush(Qt::NoBrush);
+            }
+            // THE TAIL: a fork at the far end, with the process in it.
+            if (weld != nullptr && !weld->tail.empty()) {
+                painter.drawLine(end, QPointF(end.x() + tick * 0.8, end.y() - tick * 0.6));
+                painter.drawLine(end, QPointF(end.x() + tick * 0.8, end.y() + tick * 0.6));
+                painter.drawText(QPointF(end.x() + tick * 1.1, end.y() + 3.0),
+                                 QString::fromStdString(weld->tail));
+            }
         } else {
             // THE ISO 1302 TICK. The bar across the top says material MUST be
             // removed and the circle in the vee says it must NOT -- which is

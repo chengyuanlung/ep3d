@@ -16,6 +16,14 @@ oracle turned out to be wrong for the THIRD time in this project's life:
     it was scored as a SURVIVOR. Two of them -- an assembly that contains
     itself, and a recursion chain that never grows -- both stack-overflow, and
     both looked like gaps in the tests when the tests were fine.
+  * M47: `unlock` renamed the VIEWER aside so the linker could overwrite it,
+    but not the five gtest suites. A suite executable that Windows still had
+    open -- the run that had just finished, or a scanner reading the freshly
+    written image -- failed to link, and the harness scored "did not compile",
+    which its oracle counts as a KILL. A run of twenty-nine mutations came back
+    twenty-nine kills, none of which had been measured at all. The tell was
+    that EVERY line said it, and "everything was caught" is the one result a
+    mutation run should never be believed about without looking.
   * M34: a mutation whose failure text carried a byte the console codepage
     (cp950 on this machine) cannot encode killed the HARNESS, on `print`, two
     thirds of the way through a run. Every mutation after it went unmeasured
@@ -89,6 +97,27 @@ SHELL_CHECKS = [
 SUITE_TIMEOUT_SECONDS = 900
 
 
+def say(text):
+    """Print, whatever the console's codepage thinks of the bytes.
+
+    A test's failure message is arbitrary text: it can carry a diameter sign, a
+    replacement character from a decode further up, or anything else somebody
+    typed. On a cp950 console `print` raises on those and the traceback ends
+    the run -- see M34 above. The report is worth more than the exact glyph, so
+    what the console cannot encode is replaced rather than thrown.
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, 'encoding', None) or 'ascii'
+        print(text.encode(encoding, 'replace').decode(encoding, 'replace'))
+    sys.stdout.flush()
+
+
+# Bumped for every rename so two aside-files never share a name (see unlock).
+_aside = [0]
+
+
 def unlock(target):
     """Renames a RUNNING executable aside so the linker can write a new one.
 
@@ -96,20 +125,53 @@ def unlock(target):
     refuses to overwrite a loaded image (LNK1168) -- which would score every
     mutation as 'did not compile', i.e. as a kill, for a reason that has
     nothing to do with the mutation. Renaming is allowed while it runs.
+
+    A UNIQUE NAME EVERY TIME (M47). This used one fixed name, `.busy`, and put
+    every rename there. The second rename in a run therefore had to overwrite
+    the first -- and the first is, by construction, the file Windows would not
+    let go of. `os.replace` raised, the `except` swallowed it, the executable
+    stayed exactly where it was, and the link failed anyway. Which the oracle
+    reads as a kill.
+
+    That is how a run comes back with every single mutation killed and nothing
+    measured: not one bug, but a lock the unlocker could not break because it
+    was aiming at a locked file.
     """
     path = 'build/Debug/%s.exe' % target
     if not os.path.exists(path):
         return
+    _aside[0] += 1
     try:
-        os.replace(path, path + '.busy')
-    except OSError:
-        pass
+        os.rename(path, '%s.aside-%d' % (path, _aside[0]))
+    except OSError as problem:
+        # SAID OUT LOUD. Silence here is what let the fixed name hide for six
+        # milestones: the build then fails for a reason the report calls a
+        # kill, and the run looks like good news.
+        say('could not move %s aside (%s) -- the next link will probably fail'
+            % (path, problem))
+
+
+def sweep_aside():
+    """Deletes the renamed executables that are no longer held."""
+    folder = 'build/Debug'
+    if not os.path.isdir(folder):
+        return
+    for entry in os.listdir(folder):
+        if '.exe.aside-' not in entry and not entry.endswith('.exe.busy'):
+            continue
+        try:
+            os.remove(os.path.join(folder, entry))
+        except OSError:
+            pass   # still held; the next run will get it
 
 
 def build():
     """Returns None on success, or the reason it failed."""
     targets = SUITES + sorted({name for name, _, _ in SHELL_CHECKS})
-    for name, _, _ in SHELL_CHECKS:
+    # EVERY TARGET, not just the shell (M47). A suite whose executable is still
+    # open links as LNK1168, and this harness reads a failed link as a kill --
+    # so one locked file turns a whole run green without measuring anything.
+    for name in targets:
         unlock(name)
     result = subprocess.run(
         ['cmake', '--build', 'build', '--config', 'Debug', '--target'] + targets,
@@ -167,23 +229,6 @@ def run_suites():
     return reasons
 
 
-def say(text):
-    """Print, whatever the console's codepage thinks of the bytes.
-
-    A test's failure message is arbitrary text: it can carry a diameter sign, a
-    replacement character from a decode further up, or anything else somebody
-    typed. On a cp950 console `print` raises on those and the traceback ends
-    the run -- see M34 above. The report is worth more than the exact glyph, so
-    what the console cannot encode is replaced rather than thrown.
-    """
-    try:
-        print(text)
-    except UnicodeEncodeError:
-        encoding = getattr(sys.stdout, 'encoding', None) or 'ascii'
-        print(text.encode(encoding, 'replace').decode(encoding, 'replace'))
-    sys.stdout.flush()
-
-
 def main(argv):
     if len(argv) != 2:
         sys.stderr.write('usage: mutate.py <mutations.json>\n')
@@ -218,6 +263,24 @@ def main(argv):
         say('%d file(s) were left mutated by an interrupted run and have been restored.\n'
             'Rebuilding before measuring anything.' % stray)
         subprocess.run(['cmake', '--build', 'build', '--config', 'Debug'], capture_output=True)
+
+    # THE BASELINE HAS TO BUILD, and it is checked before anything is changed.
+    #
+    # Every clause of this harness's oracle -- a red test, a crash, a failed
+    # build -- reads as "the mutation was noticed". None of them can tell that
+    # apart from "the tree was already broken", and a tree that does not build
+    # scores a perfect run: every mutation killed, nothing measured. That is
+    # ADR-M11-013's failure exactly, and it is the one that arrives looking
+    # like good news.
+    sweep_aside()
+    say('Building the tree as it stands, before changing anything.')
+    problem = build()
+    if problem is not None:
+        say('THE BASELINE DID NOT BUILD, so nothing below would have been measured.\n'
+            'Every mutation would have scored as killed for a reason that has nothing\n'
+            'to do with the mutation. Fix the build and run again.')
+        return 2
+    say('The baseline builds. Measuring %d mutation(s).\n' % len(mutations))
 
     survivors = []
     for mutation in mutations:
