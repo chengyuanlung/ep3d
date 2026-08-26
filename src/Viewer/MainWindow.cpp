@@ -12,6 +12,7 @@
 
 #include "Cli/SketchScript.h"
 #include "Core/Assembly/AssemblyDocument.h"
+#include "Core/Library/StandardParts.h"
 #include "Core/Assembly/AssemblyStates.h"
 #include "Core/Assembly/Instance.h"
 #include "Core/Assembly/Mate.h"
@@ -212,6 +213,15 @@ void MainWindow::buildMenus() {
                        "It is placed at the origin; move it, ground it, or mate it."));
     connect(insertInstanceAction_, &QAction::triggered, this,
             &MainWindow::onInsertInstanceRequested);
+    standardPartAction_ = assemblyMenu_->addAction(QStringLiteral("Insert &Standard Part..."));
+    standardPartAction_->setToolTip(
+        QStringLiteral("A fastener out of the catalogue: ISO 4762 screws, ISO 4032 nuts, "
+                       "ISO 7089 washers.\n"
+                       "There is no file -- the part is built from its designation every "
+                       "time, so there is no copy to go stale. A length nobody makes is "
+                       "refused rather than built."));
+    connect(standardPartAction_, &QAction::triggered, this,
+            &MainWindow::onInsertStandardPartRequested);
 
     assemblyMenu_->addSeparator();
     groundInstanceAction_ = assemblyMenu_->addAction(QStringLiteral("&Ground / Unground"));
@@ -5647,6 +5657,84 @@ void MainWindow::onSurfaceFinishRequested() {
 
     const Vec2 at = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
     addSymbolCommand(spec, at, Vec2{at.x + 10.0, at.y + 10.0});
+}
+
+QString MainWindow::insertStandardPartCommand(const QString& designation,
+                                             const QString& name) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr)
+        return say(QStringLiteral("Standard parts go into an assembly."));
+
+    // REFUSED HERE, WITH THE REASON. Placed first and refused at the next
+    // rebuild, the instance would sit in the tree as a part that will not
+    // build, pointing at a designation the user has stopped thinking about.
+    const std::optional<FastenerSpec> spec = LookUpFastener(designation.toStdString());
+    if (!spec)
+        return say(QStringLiteral("'%1' is not a part this library holds -- check the "
+                                  "standard, the size, and for a screw that the length is "
+                                  "one that is made.")
+                       .arg(designation));
+
+    Instance* placed = nullptr;
+    try {
+        placed = &assembly->addInstance(name.toStdString(), StandardPartPath(*spec), "");
+    } catch (const std::exception& error) {
+        return say(QStringLiteral("That part was refused: %1")
+                       .arg(QString::fromUtf8(error.what())));
+    }
+    onRecomputeRequested();
+    selectedId_ = placed->id();
+    refreshAll();
+    if (placed->currentState() == ComputeState::Failed)
+        return say(QStringLiteral("%1 did not build.")
+                       .arg(QString::fromStdString(spec->designation())));
+    return say(QStringLiteral("Placed %1").arg(QString::fromStdString(spec->designation())));
+}
+
+void MainWindow::onInsertStandardPartRequested() {
+    AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return;
+
+    const QStringList kinds{QStringLiteral("Socket head cap screw (ISO 4762)"),
+                            QStringLiteral("Hex nut (ISO 4032)"),
+                            QStringLiteral("Plain washer (ISO 7089)")};
+    bool ok = false;
+    const QString kind = QInputDialog::getItem(this, QStringLiteral("Standard Part"),
+                                               QStringLiteral("Part:"), kinds, 0, false, &ok);
+    if (!ok) return;
+
+    QStringList sizes;
+    for (const double size : {3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0})
+        sizes << QStringLiteral("M%1").arg(size);
+    const QString size = QInputDialog::getItem(this, QStringLiteral("Standard Part"),
+                                               QStringLiteral("Size:"), sizes, 4, false, &ok);
+    if (!ok) return;
+
+    QString designation;
+    if (kind == kinds[0]) {
+        // THE LENGTHS THAT ARE MADE, offered as a list rather than a box. A
+        // box invites 33, and 33 is not a screw.
+        QStringList lengths;
+        for (const double each : StandardScrewLengths()) lengths << QString::number(each);
+        const QString length = QInputDialog::getItem(this, QStringLiteral("Standard Part"),
+                                                     QStringLiteral("Length under the head "
+                                                                    "(mm):"),
+                                                     lengths, 8, false, &ok);
+        if (!ok) return;
+        designation = QStringLiteral("ISO 4762 %1x%2").arg(size, length);
+    } else if (kind == kinds[1]) {
+        designation = QStringLiteral("ISO 4032 %1").arg(size);
+    } else {
+        designation = QStringLiteral("ISO 7089 %1").arg(size);
+    }
+
+    insertStandardPartCommand(
+        designation, QStringLiteral("Part%1").arg(assembly->instances().size() + 1));
 }
 
 QString MainWindow::addSheetCommand(const QString& name) {

@@ -23,6 +23,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/DrawingDimension.cpp
     src/Core/Drawing/SheetFrame.cpp
     src/Core/Drawing/SheetPage.cpp
+    src/Core/Library/StandardParts.cpp
     src/Core/Drawing/TitleBlock.cpp
     src/Core/Drawing/Hatch.cpp
     src/Core/Drawing/Tolerance.cpp
@@ -710,6 +711,7 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Kernel/OcctDrawingProjectionTests.cpp
         tests/Kernel/OcctDrawingViewTests.cpp
         tests/Kernel/OcctHoleStandardTests.cpp
+        tests/Kernel/OcctStandardPartTests.cpp
         tests/Kernel/OcctEdgeQueryTests.cpp
             tests/Kernel/OcctBooleanTests.cpp
             tests/Kernel/OcctRevolveTests.cpp

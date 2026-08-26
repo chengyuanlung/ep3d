@@ -4408,6 +4408,31 @@ int main(int argc, char** argv) {
                     fail("a relation outlived the mate whose freedom it reads");
             }
 
+            // --- M45's GATE: a bolt out of the catalogue --------------------
+            //
+            // The kernel suite proves the solids are the size the standard
+            // publishes. Only starting the program can prove a user can put
+            // one in an assembly and that it BUILDS -- an instance that
+            // resolves to nothing looks exactly like a part nobody placed.
+            {
+                const QString placed = window.insertStandardPartCommand(
+                    QStringLiteral("ISO 4762 M8x30"), QStringLiteral("Screw1"));
+                if (!placed.contains(QStringLiteral("Placed ISO 4762 M8x30")))
+                    fail(("the catalogue screw was not placed: " + placed.toStdString())
+                             .c_str());
+                if (placed.contains(QStringLiteral("did not build")))
+                    fail("the catalogue screw did not build");
+
+                // A LENGTH NOBODY MAKES IS REFUSED, and the refusal reaches
+                // the user rather than becoming an instance that fails later.
+                const QString refused = window.insertStandardPartCommand(
+                    QStringLiteral("ISO 4762 M8x33"), QStringLiteral("Ghost"));
+                if (!refused.contains(QStringLiteral("not a part this library holds")))
+                    fail(("a screw in a length nobody makes was accepted: " +
+                          refused.toStdString())
+                             .c_str());
+            }
+
             // --- M32's GATE: a drawing, on the screen ------------------------
             //
             // Everything below is reachable only here. The Core suite proves a

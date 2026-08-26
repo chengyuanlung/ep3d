@@ -353,6 +353,10 @@ public:
     // ONE COMMAND FOR THE PAGES, because "which page am I on" is one question
     // and three commands answering it would be three places to forget the
     // repaint.
+    // The designation IS the argument, because it is what the part is. A
+    // command taking a kind and two numbers would be a second place that knows
+    // how a designation is spelled.
+    QString insertStandardPartCommand(const QString& designation, const QString& name);
     QString addSheetCommand(const QString& name);
     QString goToSheetCommand(ObjectId sheetId);
     QString deleteSheetCommand(ObjectId sheetId);
@@ -889,6 +893,8 @@ private slots:
     void onHoleStandardRequested();
     void onHoleTableRequested();
     // M44: the pages of a drawing.
+    // M45: a fastener out of the catalogue, into the assembly.
+    void onInsertStandardPartRequested();
     void onAddSheetRequested();
     void onNextSheetRequested();
     void onDeleteSheetRequested();
@@ -1165,6 +1171,7 @@ private:
     QAction* sectionViewAction_ = nullptr;
     QAction* holeStandardAction_ = nullptr;
     QAction* holeTableAction_ = nullptr;
+    QAction* standardPartAction_ = nullptr;
     QAction* addSheetAction_ = nullptr;
     QAction* nextSheetAction_ = nullptr;
     QAction* deleteSheetAction_ = nullptr;
