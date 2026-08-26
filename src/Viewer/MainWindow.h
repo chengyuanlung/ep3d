@@ -346,6 +346,7 @@ public:
                                   double offsetMm);
     QString addDetailViewCommand(const QString& name, Vec2 centreMm, double radiusMm,
                                  int enlargement, double offsetMm);
+    QString breakViewCommand(double fromMm, double toMm, bool horizontal, double gapMm);
     // THE COMMANDS, separate from the dialogs that call them, so the self test
     // can drive them without a mouse -- the same split every command in this
     // window has had since M12.
@@ -376,6 +377,8 @@ public:
     std::size_t drawnRevisionTablesForTesting() const;
     std::size_t drawnRevisionRowsForTesting() const;
     std::size_t drawnDetailCirclesForTesting() const;
+    std::size_t drawnBreakLinesForTesting() const;
+    double suggestedBreakGapForTesting() const;
     // THE IDS AND THE PICK ARE ARGUMENTS, not read off a selection.
     //
     // The last id is the object being edited and the rest are what it is
@@ -515,6 +518,9 @@ public:
     void selectNamedPositionForTesting(const QString& name);
     ObjectId selectedExplodeViewForTesting() const { return selectedExplodeView(); }
     std::size_t undoDepthForTesting() const;
+    // Presses Undo, the way the menu item does -- so the self test exercises
+    // the path a user takes rather than a shortcut past it.
+    void undoForTesting();
     void fitAllForTesting();
     std::vector<ObjectId> allInstancesForTesting() const;
     Vec3 instanceWorldPlaceForTesting(ObjectId instanceId) const;
@@ -906,6 +912,7 @@ private slots:
     void onGeneralToleranceRequested();
     void onSectionViewRequested();
     void onDetailViewRequested();
+    void onBreakViewRequested();
     // M39: what screw a hole is for, and the table that lists them all.
     void onHoleStandardRequested();
     void onHoleTableRequested();
@@ -1190,6 +1197,7 @@ private:
     QAction* generalToleranceAction_ = nullptr;
     QAction* sectionViewAction_ = nullptr;
     QAction* detailViewAction_ = nullptr;
+    QAction* breakViewAction_ = nullptr;
     QAction* holeStandardAction_ = nullptr;
     QAction* holeTableAction_ = nullptr;
     QAction* standardPartAction_ = nullptr;

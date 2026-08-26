@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/Drawing/BreakFold.h"
 #include "Core/Drawing/ProjectedGeometry.h"
 #include "Core/Drawing/Sheet.h"
 #include "Core/Feature/ComputeState.h"
@@ -226,6 +227,20 @@ public:
     void setDetailFrame(DetailFrame frame) noexcept { detail_ = frame; }
     bool isDetail() const noexcept { return detail_.active; }
 
+    // WHERE THE MIDDLE WENT (M50).
+    //
+    // NOT A KIND OF VIEW. Any view may be broken -- a base view, a projected
+    // one, a section -- because a break is not a way of looking at the part,
+    // it is a way of putting a long one on a short sheet.
+    //
+    // And it is NOT A CUT: nothing is removed from the projection. The span
+    // says how model millimetres map onto paper, the mapping has an inverse,
+    // and everything that measures goes through the inverse. See BreakFold.h
+    // for why that is the whole design.
+    const BreakSpan& breakSpan() const noexcept { return break_; }
+    void setBreakSpan(BreakSpan span) noexcept { break_ = span; }
+    bool isBroken() const noexcept { return break_.usable(); }
+
     // THE CURVES, IN MODEL MILLIMETRES (see ProjectedGeometry.h). Derived:
     // no ObjectId, not registered, not undoable, thrown away and rebuilt
     // whenever the model changes.
@@ -283,6 +298,7 @@ private:
     ProjectedDrawing projected_;
     SectionCut section_;
     DetailFrame detail_;
+    BreakSpan break_;
     // M44. Set when the object is added, from whichever page was current.
     ObjectId sheetId_ = kInvalidObjectId;
     ComputeState state_{ComputeState::Dirty};

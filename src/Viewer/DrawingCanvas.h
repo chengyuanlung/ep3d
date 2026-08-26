@@ -82,6 +82,7 @@ public:
     std::size_t drawnSymbolCountForTesting() const noexcept { return drawnSymbols2_; }
     std::size_t drawnRevisionTablesForTesting() const noexcept { return drawnRevisionTables_; }
     std::size_t drawnDetailCirclesForTesting() const noexcept { return drawnDetailCircles_; }
+    std::size_t drawnBreakLinesForTesting() const noexcept { return drawnBreakLines_; }
     std::size_t drawnRevisionRowsForTesting() const noexcept { return drawnRevisionRows_; }
     std::size_t danglingSymbolsForTesting() const noexcept { return danglingSymbols_; }
     std::size_t unreadableSymbolsForTesting() const noexcept { return unreadableSymbols_; }
@@ -184,6 +185,7 @@ private:
     std::size_t drawnSymbols2_ = 0;
     std::size_t drawnRevisionTables_ = 0;
     std::size_t drawnDetailCircles_ = 0;
+    std::size_t drawnBreakLines_ = 0;
     std::size_t drawnRevisionRows_ = 0;
     std::size_t danglingSymbols_ = 0;
     std::size_t unreadableSymbols_ = 0;

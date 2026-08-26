@@ -866,7 +866,10 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             }
         }
 
-        for (const ProjectedCurve& curve : view->projected().curves) {
+        // CUT AT THE BREAK'S LIPS (M50), through the document -- the same
+        // answer a test can ask for. Unbroken views come back unchanged, so
+        // there is one path here rather than two.
+        for (const ProjectedCurve& curve : document.drawableCurves(view->id())) {
             // A LAYER IS NOT CONSULTED YET: projected curves are derived and
             // belong to no layer (M33 gives authored geometry layers). What
             // decides how they are drawn is the DRAWING CONVENTION -- solid
@@ -976,6 +979,62 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
                     ++tally.sectionArrows;
                 }
             }
+        }
+
+        // --- THE BREAK SYMBOLS (M50) -----------------------------------------
+        //
+        // Two lines, one at each lip, at the SAME place on the paper -- the
+        // fold puts the far lip exactly a gap away from the near one, so this
+        // does not work either of them out for itself. A symbol drawn where a
+        // painter thought the break was, rather than where the mapping put it,
+        // is a mark that wanders off its own gap.
+        //
+        // Without them the two halves are just a part with a slot in it.
+        if (view->isBroken()) {
+            const BreakSpan& span = view->breakSpan();
+            const ProjectedExtent& reach = view->projected().extent;
+            const Vec2 nearLip = document.viewPointToSheetMm(
+                view->id(), span.horizontal ? Vec2{span.fromMm, reach.min.y}
+                                            : Vec2{reach.min.x, span.fromMm});
+            const Vec2 farLip = document.viewPointToSheetMm(
+                view->id(), span.horizontal ? Vec2{span.toMm, reach.max.y}
+                                            : Vec2{reach.max.x, span.toMm});
+            const Vec2 nearEnd = document.viewPointToSheetMm(
+                view->id(), span.horizontal ? Vec2{span.fromMm, reach.max.y}
+                                            : Vec2{reach.max.x, span.fromMm});
+            const Vec2 farStart = document.viewPointToSheetMm(
+                view->id(), span.horizontal ? Vec2{span.toMm, reach.min.y}
+                                            : Vec2{reach.min.x, span.toMm});
+
+            QPen breakPen(ink);
+            breakPen.setWidthF(std::max(1.0, 0.35 * page.pixelsPerMm));
+            painter.setPen(breakPen);
+            painter.setBrush(Qt::NoBrush);
+            // A ZIGZAG, which is what a broken view is drawn with: a straight
+            // line at the lip would read as an edge of the part.
+            const auto zigzag = [&](Vec2 a, Vec2 b) {
+                const QPointF from = page.toScreen(a);
+                const QPointF to = page.toScreen(b);
+                const double dx = to.x() - from.x();
+                const double dy = to.y() - from.y();
+                const double run = std::hypot(dx, dy);
+                if (run < 1e-6) return;
+                const QPointF across(-dy / run, dx / run);
+                const int teeth = 6;
+                QPainterPath path;
+                path.moveTo(from);
+                for (int i = 1; i < teeth; ++i) {
+                    const double t = static_cast<double>(i) / teeth;
+                    const double swing = (i % 2 == 0 ? 1.0 : -1.0) * 1.5 * page.pixelsPerMm;
+                    path.lineTo(QPointF(from.x() + dx * t + across.x() * swing,
+                                        from.y() + dy * t + across.y() * swing));
+                }
+                path.lineTo(to);
+                painter.drawPath(path);
+                ++tally.breakLines;
+            };
+            zigzag(nearLip, nearEnd);
+            zigzag(farStart, farLip);
         }
 
         // --- THE DETAIL CIRCLE ON THE PARENT (M49) ---------------------------

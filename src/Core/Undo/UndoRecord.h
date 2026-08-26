@@ -675,6 +675,13 @@ struct DrawingViewExistenceEdit {
     double detailCentreXMm = 0.0;
     double detailCentreYMm = 0.0;
     double detailRadiusMm = 0.0;
+    // M50. And the break, for the same reason again: a broken view restored
+    // without it comes back showing the whole three metres of bar.
+    bool breakActive = false;
+    double breakFromMm = 0.0;
+    double breakToMm = 0.0;
+    bool breakHorizontal = true;
+    double breakGapMm = 0.0;
 
     ObjectId viewId = kInvalidObjectId;
     std::string name;
@@ -743,6 +750,20 @@ struct DrawingViewPlacementEdit {
     double afterDetailCentreXMm = 0.0;
     double afterDetailCentreYMm = 0.0;
     double afterDetailRadiusMm = 0.0;
+    // WHERE THE MIDDLE WENT (M50). On the placement for the reason the cut and
+    // the circle are: breaking a view is a change to how it lands on the
+    // paper, and splitting it off would let the break come back while the
+    // position did not.
+    bool beforeBreakActive = false;
+    bool afterBreakActive = false;
+    double beforeBreakFromMm = 0.0;
+    double beforeBreakToMm = 0.0;
+    bool beforeBreakHorizontal = true;
+    double beforeBreakGapMm = 0.0;
+    double afterBreakFromMm = 0.0;
+    double afterBreakToMm = 0.0;
+    bool afterBreakHorizontal = true;
+    double afterBreakGapMm = 0.0;
 };
 
 // --- Authored drawing geometry (M33) -----------------------------------------

@@ -224,6 +224,42 @@ public:
                                 Vec2 toMm, int arrowSide, double offsetMm);
     bool setSectionCut(ObjectId viewId, Vec2 fromMm, Vec2 toMm, int arrowSide);
 
+    // --- Broken views (M50) ---------------------------------------------------
+    //
+    // A long part on a short sheet. NOT a kind of view and NOT a cut: the span
+    // is a mapping from model millimetres onto paper, applied in
+    // viewPointToSheetMm and undone in sheetPointToViewMm -- so a dimension
+    // across the break reads the true length by construction rather than by a
+    // rule somebody has to remember. See BreakFold.h.
+    bool setBreakSpan(ObjectId viewId, double fromMm, double toMm, bool horizontal,
+                      double gapMm);
+    bool clearBreakSpan(ObjectId viewId);
+    // Why this break cannot be drawn on this view, or empty when it can --
+    // asked against the view's own extent, so a break past the end of the part
+    // is refused rather than drawn across empty paper.
+    std::string whyBreakRefused(ObjectId viewId, const BreakSpan& span) const;
+    // HOW BIG A GAP TO LEAVE, in the MODEL millimetres BreakSpan is measured
+    // in, for this view's scale.
+    //
+    // The gap is a drafting artefact and not a feature of the part, so what
+    // matters is how wide it is ON THE PAPER -- about six millimetres, near
+    // enough to see and not so wide the two halves stop reading as one part.
+    // Left as a model-space number it is 1.5 mm of paper at 1:2 and 0.6 at
+    // 1:10, which is a break nobody can see, on exactly the long parts breaks
+    // are for.
+    //
+    // Derived here, where the scale is known, rather than folded into
+    // BreakFold -- which is arithmetic on the span alone and has no business
+    // knowing what a sheet is.
+    double suggestedBreakGapMm(ObjectId viewId) const noexcept;
+    // WHAT A VIEW ACTUALLY DRAWS: its curves, cut at the break's lips.
+    //
+    // ONE PATH, whether the view is broken or not -- a painter that asked
+    // "is it broken?" and took a different route would be the second place
+    // this decision lives, and the day the two disagree the drawing shows
+    // material the break removed.
+    std::vector<ProjectedCurve> drawableCurves(ObjectId viewId) const;
+
     // --- Detail views (M49) ---------------------------------------------------
     //
     // A detail is the parent's own projection, cropped to a circle and drawn
@@ -687,6 +723,15 @@ public:
     // An unknown view gives the point back unchanged, because a caller with no
     // view has a sheet point already.
     Vec2 viewPointToSheetMm(ObjectId viewId, Vec2 modelMm) const noexcept;
+    // THE OTHER HALF OF THE SAME MAPPING (M50). Sheet millimetres back to the
+    // view's own model millimetres: the position undone, the scale undone, and
+    // -- the part that matters -- the break UNFOLDED.
+    //
+    // Everything that MEASURES comes through here. Without it, measuring off
+    // the paper would give the folded length: a 600 mm bar broken in the
+    // middle would dimension as 203, and every other number on the drawing
+    // would agree with it.
+    Vec2 sheetPointToViewMm(ObjectId viewId, Vec2 sheetMm) const noexcept;
     double viewScaleFactor(ObjectId viewId) const noexcept;
 
     // WHAT A DIMENSION ON THIS SELECTION WOULD MEASURE (M34).

@@ -4923,6 +4923,64 @@ int main(int argc, char** argv) {
                         }
                     }
 
+                    // --- M50's GATE: a broken view --------------------------
+                    //
+                    // The Core suite proves the fold and its inverse are each
+                    // other's, and that a dimension across a break reads the
+                    // whole part. Only starting the program can prove the
+                    // BREAK SYMBOLS reach the paper -- without them the two
+                    // halves are a part with a slot in it -- and that the view
+                    // really did get shorter, which is the only reason to
+                    // break one.
+                    {
+                        window.selectDrawingViewForTesting(QStringLiteral("Front"));
+                        const QString wide = window.viewExtentForTesting(
+                            QStringLiteral("Front"));
+                        const QString made = window.breakViewCommand(
+                            30.0, 55.0, true, window.suggestedBreakGapForTesting());
+                        if (made.contains(QStringLiteral("refused")))
+                            fail(("the break was refused: " + made.toStdString()).c_str());
+                        if (!made.contains(QStringLiteral("whole part")))
+                            fail(("the break did not say the dimensions still read the "
+                                  "whole part: " +
+                                  made.toStdString())
+                                     .c_str());
+
+                        window.repaintDrawingForTesting();
+                        // TWO ZIGZAGS, one at each lip. A break with no symbols
+                        // is a part with a slot in it.
+                        if (window.drawnBreakLinesForTesting() != 2)
+                            fail("the break symbols never reached the paper");
+                        // ...AND THE PART IS STILL DRAWN. A break that cut
+                        // everything away leaves an empty view with two marks.
+                        if (window.drawnCurveCountForTesting() == 0)
+                            fail("the break left nothing drawn at all");
+                        // A PICTURE OF A BROKEN VIEW, taken BEFORE the undo
+                        // below -- whether the zigzags read as a break rather
+                        // than as a slot in the part is a judgement, and no
+                        // tally makes it (ADR-M26-009).
+                        if (screenshotPath != nullptr) {
+                            std::string beside = screenshotPath;
+                            const std::size_t dot = beside.rfind('.');
+                            beside = dot == std::string::npos
+                                         ? beside + "-break"
+                                         : beside.substr(0, dot) + "-break" +
+                                               beside.substr(dot);
+                            if (!shoot(window, QString::fromStdString(beside)))
+                                fail("could not write the break screenshot");
+                        }
+
+                        // Undoing puts it back, which is the check that the
+                        // break is an EDIT and not a reprojection.
+                        window.undoForTesting();
+                        window.repaintDrawingForTesting();
+                        if (window.drawnBreakLinesForTesting() != 0)
+                            fail("undo left the view broken");
+                        if (window.viewExtentForTesting(QStringLiteral("Front")) != wide)
+                            fail("undoing a break changed what the view projects, so the "
+                                 "break was not just a mapping");
+                    }
+
                     // --- M39's GATE: a hole table on the paper ----------------
                     //
                     // The Core suite proves the rows are counted right and the

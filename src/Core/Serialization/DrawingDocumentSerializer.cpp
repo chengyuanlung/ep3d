@@ -681,6 +681,18 @@ JsonValue toJson(const DrawingDocument& document) {
             circle.set("radiusMm", JsonValue::makeNumber(view->detailFrame().radiusMm));
             entry.set("detail", std::move(circle));
         }
+        // v50 (M50). WHERE THE MIDDLE WENT -- the span, not the shortened
+        // curves. The curves are the part's, and a file that stored them
+        // folded would be a drawing whose geometry is a length the part is
+        // not.
+        if (view->breakSpan().active) {
+            JsonValue span = JsonValue::makeObject();
+            span.set("fromMm", JsonValue::makeNumber(view->breakSpan().fromMm));
+            span.set("toMm", JsonValue::makeNumber(view->breakSpan().toMm));
+            span.set("horizontal", JsonValue::makeBool(view->breakSpan().horizontal));
+            span.set("gapMm", JsonValue::makeNumber(view->breakSpan().gapMm));
+            entry.set("break", std::move(span));
+        }
         // DRAWING CONVENTIONS, on the view: two views of the same part on one
         // sheet may reasonably differ about them.
         entry.set("showHiddenLines", JsonValue::makeBool(view->showsHiddenLines()));
@@ -1165,6 +1177,8 @@ struct ViewData {
     bool detailActive = false;
     Vec2 detailCentreMm{};
     double detailRadiusMm = 0.0;
+    // v50 (M50): the span, for the same reason.
+    BreakSpan breakSpan{};
     ObjectId parentViewId = kInvalidObjectId;
     double alignmentOffsetMm = 0.0;
 };
@@ -1552,6 +1566,33 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                                        context + ": a view is either a section or a detail, "
                                                  "not both");
                 one.detailActive = true;
+            }
+            if (const JsonValue* span = entry.find("break")) {
+                if (span->type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'break' is not an object");
+                const JsonValue* from =
+                    requireField(*span, "fromMm", JsonType::Number, context, err);
+                const JsonValue* to =
+                    requireField(*span, "toMm", JsonType::Number, context, err);
+                if (from == nullptr || to == nullptr) return loadFailure(err.error, err.message);
+                one.breakSpan.active = true;
+                one.breakSpan.fromMm = from->asNumber();
+                one.breakSpan.toMm = to->asNumber();
+                if (const JsonValue* horizontal = span->find("horizontal"))
+                    if (horizontal->type() == JsonType::Bool)
+                        one.breakSpan.horizontal = horizontal->asBool();
+                if (const JsonValue* gap = span->find("gapMm"))
+                    if (gap->type() == JsonType::Number) one.breakSpan.gapMm = gap->asNumber();
+                // WHAT THE SAVER REFUSES, THE LOADER REFUSES, by calling the
+                // same function (ADR-M3-008). The part's extent is not back
+                // yet -- the view has not been projected -- so this is the
+                // half of the rule that does not need it: a break that removes
+                // nothing, or leaves less than no gap.
+                const std::string why = WhyBreakRefused(one.breakSpan, 0.0, 0.0);
+                if (!why.empty())
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": " + why);
             }
             viewData.push_back(std::move(one));
         }
@@ -3061,6 +3102,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
             frame.radiusMm = one.detailRadiusMm;
             made.setDetailFrame(frame);
         }
+        if (one.breakSpan.active) made.setBreakSpan(one.breakSpan);
     }
     // ENTITIES AFTER THE TABLES, because each names a layer.
     for (auto& one : entityData)

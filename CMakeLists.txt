@@ -32,6 +32,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/WeldSymbol.cpp
     src/Core/Drawing/Revision.cpp
     src/Core/Drawing/DetailClip.cpp
+    src/Core/Drawing/BreakFold.cpp
     src/Core/Text/NumberText.cpp
     src/Core/Drawing/HoleTable.cpp
     src/Core/Drawing/SheetEdits.cpp
@@ -571,6 +572,8 @@ if(PARAMCAD_BUILD_TESTS)
         tests/RevisionDocumentTests.cpp
         tests/DetailClipTests.cpp
         tests/DetailViewTests.cpp
+        tests/BreakFoldTests.cpp
+        tests/BreakViewTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp

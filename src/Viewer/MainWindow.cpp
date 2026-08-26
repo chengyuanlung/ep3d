@@ -502,6 +502,14 @@ void MainWindow::buildMenus() {
                        "enlargement with the sheet's ruler is wrong by exactly the "
                        "enlargement."));
     connect(detailViewAction_, &QAction::triggered, this, &MainWindow::onDetailViewRequested);
+    breakViewAction_ = drawingMenu_->addAction(QStringLiteral("&Break View..."));
+    breakViewAction_->setToolTip(
+        QStringLiteral("Takes the middle out of a long view so it fits the sheet.\n"
+                       "NOTHING IS REMOVED FROM THE PART: the break is a mapping onto "
+                       "paper, so a dimension across it still reads the whole length.\n"
+                       "A break that is not over the part, or removes nothing, is "
+                       "refused."));
+    connect(breakViewAction_, &QAction::triggered, this, &MainWindow::onBreakViewRequested);
 
     holeTableAction_ = drawingMenu_->addAction(QStringLiteral("&Hole Table..."));
     holeTableAction_->setToolTip(
@@ -5194,6 +5202,76 @@ QString MainWindow::addSectionViewCommand(const QString& name, Vec2 fromMm, Vec2
                    .arg(QString::fromStdString(drawing->sectionLetterOf(madeId))));
 }
 
+QString MainWindow::breakViewCommand(double fromMm, double toMm, bool horizontal,
+                                    double gapMm) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Breaks belong to a drawing."));
+    const ObjectId viewId = selectedDrawingView();
+    if (viewId == kInvalidObjectId)
+        return say(QStringLiteral("Select the view to break first."));
+
+    BreakSpan wanted;
+    wanted.active = true;
+    wanted.fromMm = fromMm;
+    wanted.toMm = toMm;
+    wanted.horizontal = horizontal;
+    wanted.gapMm = gapMm;
+    // REFUSED HERE, WITH THE REASON. A break past the end of the part draws
+    // its symbols across empty paper, which reads as a part that runs off the
+    // sheet.
+    const std::string why = drawing->whyBreakRefused(viewId, wanted);
+    if (!why.empty())
+        return say(QStringLiteral("That break was refused: %1")
+                       .arg(QString::fromStdString(why)));
+    if (!drawing->setBreakSpan(viewId, fromMm, toMm, horizontal, gapMm))
+        return say(QStringLiteral("That break was refused."));
+    refreshAll();
+    return say(QStringLiteral("Broke the view, taking out %1 mm -- the dimensions still "
+                              "read the whole part")
+                   .arg(RemovedMm(wanted)));
+}
+
+void MainWindow::onBreakViewRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr || selectedDrawingView() == kInvalidObjectId) return;
+    const DrawingView* view = drawing->findView(selectedDrawingView());
+    if (view == nullptr) return;
+    const ProjectedExtent extent = view->projected().extent;
+
+    bool ok = false;
+    const QStringList axes{QStringLiteral("Across (a long part lying down)"),
+                           QStringLiteral("Up (a long part standing up)")};
+    const QString axis = QInputDialog::getItem(this, QStringLiteral("Break View"),
+                                               QStringLiteral("The part runs:"), axes, 0,
+                                               false, &ok);
+    if (!ok) return;
+    const bool horizontal = axis == axes[0];
+    const double low = horizontal ? extent.min.x : extent.min.y;
+    const double high = horizontal ? extent.max.x : extent.max.y;
+    // A THIRD IN FROM EACH END, which is where a first break usually goes and
+    // is somewhere it can be seen rather than off the part.
+    const double from = QInputDialog::getDouble(
+        this, QStringLiteral("Break View"), QStringLiteral("Take out from (mm):"),
+        low + (high - low) / 3.0, low - 10000.0, high + 10000.0, 2, &ok);
+    if (!ok) return;
+    const double to = QInputDialog::getDouble(
+        this, QStringLiteral("Break View"), QStringLiteral("...to (mm):"),
+        high - (high - low) / 3.0, low - 10000.0, high + 10000.0, 2, &ok);
+    if (!ok) return;
+    // OFFERED FROM THE VIEW'S SCALE, so the gap is about six millimetres of
+    // PAPER whatever the part is drawn at.
+    const double gap = QInputDialog::getDouble(
+        this, QStringLiteral("Break View"), QStringLiteral("Gap left showing (mm):"),
+        drawing->suggestedBreakGapMm(selectedDrawingView()), 0.0, 100000.0, 2, &ok);
+    if (!ok) return;
+    breakViewCommand(from, to, horizontal, gap);
+}
+
 QString MainWindow::addDetailViewCommand(const QString& name, Vec2 centreMm,
                                         double radiusMm, int enlargement, double offsetMm) {
     const auto say = [this](const QString& message) {
@@ -6167,6 +6245,18 @@ std::size_t MainWindow::drawnRevisionRowsForTesting() const {
 
 std::size_t MainWindow::drawnDetailCirclesForTesting() const {
     return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnDetailCirclesForTesting();
+}
+
+void MainWindow::undoForTesting() { onUndoRequested(); }
+
+std::size_t MainWindow::drawnBreakLinesForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnBreakLinesForTesting();
+}
+
+double MainWindow::suggestedBreakGapForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? 0.0
+                              : drawing->suggestedBreakGapMm(selectedDrawingView());
 }
 
 std::size_t MainWindow::drawnSymbolCountForTesting() const {

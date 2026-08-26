@@ -561,6 +561,11 @@ void SnapshotViewExistence(const DrawingView& view, DrawingViewExistenceEdit& ed
     edit.detailCentreXMm = view.detailFrame().centreMm.x;
     edit.detailCentreYMm = view.detailFrame().centreMm.y;
     edit.detailRadiusMm = view.detailFrame().radiusMm;
+    edit.breakActive = view.breakSpan().active;
+    edit.breakFromMm = view.breakSpan().fromMm;
+    edit.breakToMm = view.breakSpan().toMm;
+    edit.breakHorizontal = view.breakSpan().horizontal;
+    edit.breakGapMm = view.breakSpan().gapMm;
 }
 
 } // namespace
@@ -990,6 +995,11 @@ void SnapshotViewInto(const DrawingView& view, DrawingViewPlacementEdit& edit) {
     edit.beforeDetailCentreXMm = edit.afterDetailCentreXMm = view.detailFrame().centreMm.x;
     edit.beforeDetailCentreYMm = edit.afterDetailCentreYMm = view.detailFrame().centreMm.y;
     edit.beforeDetailRadiusMm = edit.afterDetailRadiusMm = view.detailFrame().radiusMm;
+    edit.beforeBreakActive = edit.afterBreakActive = view.breakSpan().active;
+    edit.beforeBreakFromMm = edit.afterBreakFromMm = view.breakSpan().fromMm;
+    edit.beforeBreakToMm = edit.afterBreakToMm = view.breakSpan().toMm;
+    edit.beforeBreakHorizontal = edit.afterBreakHorizontal = view.breakSpan().horizontal;
+    edit.beforeBreakGapMm = edit.afterBreakGapMm = view.breakSpan().gapMm;
 }
 } // namespace
 
@@ -2993,7 +3003,85 @@ Vec2 DrawingDocument::viewPointToSheetMm(ObjectId viewId, Vec2 modelMm) const no
     if (view == nullptr) return modelMm;
     const Vec2 at = viewPositionMm(viewId);
     const double factor = viewScaleFactor(viewId);
-    return Vec2{at.x + modelMm.x * factor, at.y + modelMm.y * factor};
+    // THE BREAK IS PART OF THE MAPPING, NOT PART OF THE MODEL (M50). Folded
+    // here, in the one place model millimetres become paper -- so everything
+    // drawn is short and everything measured, which comes back through
+    // sheetPointToViewMm, is not.
+    const Vec2 folded = FoldPointMm(modelMm, view->breakSpan());
+    return Vec2{at.x + folded.x * factor, at.y + folded.y * factor};
+}
+
+Vec2 DrawingDocument::sheetPointToViewMm(ObjectId viewId, Vec2 sheetMm) const noexcept {
+    const DrawingView* view = findView(viewId);
+    if (view == nullptr) return sheetMm;
+    const Vec2 at = viewPositionMm(viewId);
+    const double factor = viewScaleFactor(viewId);
+    if (std::fabs(factor) < 1e-12) return sheetMm;
+    const Vec2 folded{(sheetMm.x - at.x) / factor, (sheetMm.y - at.y) / factor};
+    return UnfoldPointMm(folded, view->breakSpan());
+}
+
+std::string DrawingDocument::whyBreakRefused(ObjectId viewId, const BreakSpan& span) const {
+    const DrawingView* view = findView(viewId);
+    if (view == nullptr) return "that view is not in this drawing";
+    // AGAINST THE PART'S OWN REACH, along the axis the break runs on. Asked of
+    // the projection, so a break is judged against what is actually drawn
+    // rather than against what somebody remembers the part being.
+    const ProjectedExtent& extent = view->projected().extent;
+    const double from = span.horizontal ? extent.min.x : extent.min.y;
+    const double to = span.horizontal ? extent.max.x : extent.max.y;
+    return WhyBreakRefused(span, from, to);
+}
+
+bool DrawingDocument::setBreakSpan(ObjectId viewId, double fromMm, double toMm,
+                                   bool horizontal, double gapMm) {
+    DrawingView* view = findViewForEdit(viewId);
+    if (view == nullptr) return false;
+    BreakSpan span;
+    span.active = true;
+    span.fromMm = fromMm;
+    span.toMm = toMm;
+    span.horizontal = horizontal;
+    span.gapMm = gapMm;
+    if (!whyBreakRefused(viewId, span).empty()) return false;
+
+    DrawingViewPlacementEdit edit;
+    SnapshotViewInto(*view, edit);
+    edit.afterBreakActive = true;
+    edit.afterBreakFromMm = fromMm;
+    edit.afterBreakToMm = toMm;
+    edit.afterBreakHorizontal = horizontal;
+    edit.afterBreakGapMm = gapMm;
+    view->setBreakSpan(span);
+    recordDelta(edit, "Break " + view->name());
+    // NOTHING IS REPROJECTED. A break changes how the curves reach the paper,
+    // not what they are -- which is the whole point, and why this does not
+    // mark the view dirty.
+    return true;
+}
+
+double DrawingDocument::suggestedBreakGapMm(ObjectId viewId) const noexcept {
+    constexpr double kOnThePaperMm = 6.0;
+    const double factor = viewScaleFactor(viewId);
+    if (std::fabs(factor) < 1e-12) return kOnThePaperMm;
+    return kOnThePaperMm / factor;
+}
+
+std::vector<ProjectedCurve> DrawingDocument::drawableCurves(ObjectId viewId) const {
+    const DrawingView* view = findView(viewId);
+    if (view == nullptr) return {};
+    return SplitAtBreak(view->projected().curves, view->breakSpan());
+}
+
+bool DrawingDocument::clearBreakSpan(ObjectId viewId) {
+    DrawingView* view = findViewForEdit(viewId);
+    if (view == nullptr || !view->breakSpan().active) return false;
+    DrawingViewPlacementEdit edit;
+    SnapshotViewInto(*view, edit);
+    edit.afterBreakActive = false;
+    view->setBreakSpan(BreakSpan{});
+    recordDelta(edit, "Unbreak " + view->name());
+    return true;
 }
 
 SheetFrameGeometry DrawingDocument::frame() const noexcept {
@@ -3260,18 +3348,24 @@ DimensionMeasurement DrawingDocument::measure(const DrawingDimension& dimension)
     // THE MEASUREMENT IS IN MODEL MILLIMETRES, always -- the size of the PART.
     //
     // The anchors come back in sheet millimetres because that is where they
-    // are drawn, so a dimension inside a view has to divide the scale back
-    // out. That division is here and nowhere else, which is the whole reason
-    // ProjectedGeometry keeps model units: one multiplication to draw, one
-    // division to measure, and no third place to get it wrong.
+    // are drawn, so a dimension inside a view has to come back the other way.
+    // THAT IS ONE FUNCTION (M50), not a division: sheetPointToViewMm undoes
+    // the position, the scale AND the break, in the same order the forward
+    // mapping applied them.
+    //
+    // It used to divide by the scale here. That was right until a view could
+    // be BROKEN, and then it would have measured the FOLDED bar: 600 mm of
+    // steel dimensioned as 203, with every other number on the drawing
+    // agreeing. Going back through the inverse is what makes the true length
+    // true by construction rather than by a rule somebody remembers.
     const ObjectId viewId = dimension.first().kind == DimensionAnchorKind::InView
                                 ? dimension.first().viewId
                                 : dimension.second().viewId;
-    // THE SAME READER the multiplication above uses, so the two cannot drift.
-    const double factor = viewScaleFactor(viewId);
+    const Vec2 firstModel = sheetPointToViewMm(viewId, *first);
+    const Vec2 secondModel = sheetPointToViewMm(viewId, *second);
 
-    const double dx = (second->x - first->x) / factor;
-    const double dy = (second->y - first->y) / factor;
+    const double dx = secondModel.x - firstModel.x;
+    const double dy = secondModel.y - firstModel.y;
 
     switch (dimension.kind()) {
         case DimensionKind::Linear:
@@ -4261,6 +4355,18 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
                 frame.radiusMm = edit->detailRadiusMm;
                 back.setDetailFrame(frame);
             }
+            // ...AND SO DOES THE BREAK. Restored without it, a broken view
+            // comes back showing the whole three metres of bar, which reads as
+            // a view somebody forgot to break rather than as a lost edit.
+            if (edit->breakActive) {
+                BreakSpan span;
+                span.active = true;
+                span.fromMm = edit->breakFromMm;
+                span.toMm = edit->breakToMm;
+                span.horizontal = edit->breakHorizontal;
+                span.gapMm = edit->breakGapMm;
+                back.setBreakSpan(span);
+            }
         }
         else
             removeObject(edit->viewId);
@@ -4297,6 +4403,13 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
                               forward ? edit->afterDetailCentreYMm : edit->beforeDetailCentreYMm};
         frame.radiusMm = forward ? edit->afterDetailRadiusMm : edit->beforeDetailRadiusMm;
         view->setDetailFrame(frame);
+        BreakSpan span;
+        span.active = forward ? edit->afterBreakActive : edit->beforeBreakActive;
+        span.fromMm = forward ? edit->afterBreakFromMm : edit->beforeBreakFromMm;
+        span.toMm = forward ? edit->afterBreakToMm : edit->beforeBreakToMm;
+        span.horizontal = forward ? edit->afterBreakHorizontal : edit->beforeBreakHorizontal;
+        span.gapMm = forward ? edit->afterBreakGapMm : edit->beforeBreakGapMm;
+        view->setBreakSpan(span);
         graph_.markDirty(edit->viewId);
         return;
     }
