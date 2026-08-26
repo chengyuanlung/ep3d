@@ -12,6 +12,7 @@ std::string_view toString(TitleBlockSource source) noexcept {
         case TitleBlockSource::SheetSize: return "SheetSize";
         case TitleBlockSource::ProjectionSymbol: return "ProjectionSymbol";
         case TitleBlockSource::SheetCount: return "SheetCount";
+        case TitleBlockSource::LatestRevision: return "LatestRevision";
     }
     return "Free";
 }
@@ -26,6 +27,7 @@ bool ParseTitleBlockSource(std::string_view text, TitleBlockSource& into) noexce
     if (text == "SheetSize") { into = TitleBlockSource::SheetSize; return true; }
     if (text == "ProjectionSymbol") { into = TitleBlockSource::ProjectionSymbol; return true; }
     if (text == "SheetCount") { into = TitleBlockSource::SheetCount; return true; }
+    if (text == "LatestRevision") { into = TitleBlockSource::LatestRevision; return true; }
     return false;
 }
 
@@ -45,6 +47,16 @@ TitleBlock::TitleBlock() {
     fields_.push_back(TitleBlockField{"Size", {}, TitleBlockSource::SheetSize});
     fields_.push_back(TitleBlockField{"Projection", {}, TitleBlockSource::ProjectionSymbol});
     fields_.push_back(TitleBlockField{"Sheet", {}, TitleBlockSource::SheetCount});
+    // ...and the fifth, from the drawing's own history (M48). Seeded rather
+    // than left to be added, because a drawing that HAS a revision history and
+    // nowhere in the corner to print it is the half-answer: the table is on
+    // the sheet somewhere and the block -- which is what a reader checks
+    // first, and often all they check -- says nothing about the issue.
+    //
+    // It prints BLANK until the drawing has been issued, which is what every
+    // drawing office leaves and is not the same as Rev A.
+    fields_.push_back(TitleBlockField{kTitleBlockRevisionLabel, {},
+                                      TitleBlockSource::LatestRevision});
 }
 
 bool TitleBlock::setWidthMm(double widthMm) noexcept {
@@ -121,7 +133,8 @@ double TitleBlock::rowBottomMm(std::size_t index, double blockBottomMm) const no
 }
 
 std::string TitleBlock::valueOf(const TitleBlockField& field, const Sheet& sheet,
-                                int sheetNumber, int sheetTotal) const {
+                                int sheetNumber, int sheetTotal,
+                                const std::string& latestRevision) const {
     switch (field.source) {
         case TitleBlockSource::Free: return field.value;
         case TitleBlockSource::SheetScale: return sheet.scale().toString();
@@ -136,6 +149,11 @@ std::string TitleBlock::valueOf(const TitleBlockField& field, const Sheet& sheet
             return std::string(toString(sheet.projectionAngle())) + " angle";
         case TitleBlockSource::SheetCount:
             return std::to_string(sheetNumber) + " / " + std::to_string(sheetTotal);
+        case TitleBlockSource::LatestRevision:
+            // A DRAWING WITH NO HISTORY PRINTS NOTHING, not "A". An issue
+            // letter on a drawing that has never been issued is a claim, and
+            // the blank is what every drawing office actually leaves.
+            return latestRevision;
     }
     return field.value;
 }

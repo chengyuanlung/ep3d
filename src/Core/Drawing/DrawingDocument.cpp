@@ -202,12 +202,9 @@ std::size_t DrawingDocument::objectsOnSheet(ObjectId sheetId) const {
         const ObjectId where = on == kInvalidObjectId ? pages_.front()->id() : on;
         if (where == sheetId) ++count;
     };
-    for (const std::unique_ptr<DrawingView>& one : views_) tally(one->sheetId());
-    for (const std::unique_ptr<DrawingEntity>& one : entities_) tally(one->sheetId());
-    for (const std::unique_ptr<DrawingDimension>& one : dimensions_) tally(one->sheetId());
-    for (const std::unique_ptr<Annotation>& one : annotations_) tally(one->sheetId());
-    for (const std::unique_ptr<BomTable>& one : bomTables_) tally(one->sheetId());
-    for (const std::unique_ptr<HoleTable>& one : holeTables_) tally(one->sheetId());
+    eachPagedList(*this, [&](const auto& list, const char*) {
+        for (const auto& one : list) tally(one->sheetId());
+    });
     return count;
 }
 
@@ -247,33 +244,31 @@ ObjectId DrawingDocument::sheetOfObject(ObjectId objectId) const {
     const auto resolve = [&](ObjectId on) {
         return on == kInvalidObjectId ? pages_.front()->id() : on;
     };
-    for (const std::unique_ptr<DrawingView>& one : views_)
-        if (one->id() == objectId) return resolve(one->sheetId());
-    for (const std::unique_ptr<DrawingEntity>& one : entities_)
-        if (one->id() == objectId) return resolve(one->sheetId());
-    for (const std::unique_ptr<DrawingDimension>& one : dimensions_)
-        if (one->id() == objectId) return resolve(one->sheetId());
-    for (const std::unique_ptr<Annotation>& one : annotations_)
-        if (one->id() == objectId) return resolve(one->sheetId());
-    for (const std::unique_ptr<BomTable>& one : bomTables_)
-        if (one->id() == objectId) return resolve(one->sheetId());
-    for (const std::unique_ptr<HoleTable>& one : holeTables_)
-        if (one->id() == objectId) return resolve(one->sheetId());
-    return kInvalidObjectId;
+    ObjectId found = kInvalidObjectId;
+    eachPagedList(*this, [&](const auto& list, const char*) {
+        if (found != kInvalidObjectId) return;
+        for (const auto& one : list)
+            if (one->id() == objectId) {
+                found = resolve(one->sheetId());
+                return;
+            }
+    });
+    return found;
 }
 
 bool DrawingDocument::setObjectSheet(ObjectId objectId, ObjectId sheetId) {
     if (findSheetPage(sheetId) == nullptr) return false;
-    const auto put = [&](auto& list) {
+    bool moved = false;
+    eachPagedList(*this, [&](auto& list, const char*) {
+        if (moved) return;
         for (const auto& one : list)
             if (one->id() == objectId) {
                 one->setSheetId(sheetId);
-                return true;
+                moved = true;
+                return;
             }
-        return false;
-    };
-    return put(views_) || put(entities_) || put(dimensions_) || put(annotations_) ||
-           put(bomTables_) || put(holeTables_);
+    });
+    return moved;
 }
 
 std::string DrawingDocument::whyDrawingRefused() const {
@@ -285,19 +280,16 @@ std::string DrawingDocument::whyDrawingRefused() const {
         if (findSheetPage(on) != nullptr) return {};
         return std::string(what) + " is on a sheet that is not in this drawing";
     };
-    for (const std::unique_ptr<DrawingView>& one : views_)
-        if (std::string why = check(one->sheetId(), "a view"); !why.empty()) return why;
-    for (const std::unique_ptr<DrawingEntity>& one : entities_)
-        if (std::string why = check(one->sheetId(), "a line"); !why.empty()) return why;
-    for (const std::unique_ptr<DrawingDimension>& one : dimensions_)
-        if (std::string why = check(one->sheetId(), "a dimension"); !why.empty()) return why;
-    for (const std::unique_ptr<Annotation>& one : annotations_)
-        if (std::string why = check(one->sheetId(), "a symbol"); !why.empty()) return why;
-    for (const std::unique_ptr<BomTable>& one : bomTables_)
-        if (std::string why = check(one->sheetId(), "a parts list"); !why.empty()) return why;
-    for (const std::unique_ptr<HoleTable>& one : holeTables_)
-        if (std::string why = check(one->sheetId(), "a hole table"); !why.empty()) return why;
-    return {};
+    std::string refused;
+    eachPagedList(*this, [&](const auto& list, const char* what) {
+        if (!refused.empty()) return;
+        for (const auto& one : list)
+            if (std::string why = check(one->sheetId(), what); !why.empty()) {
+                refused = std::move(why);
+                return;
+            }
+    });
+    return refused;
 }
 
 bool DrawingDocument::setSheetSize(SheetSize size) {
@@ -2410,6 +2402,143 @@ void SnapshotBomInto(const BomTable& table, BomEdit& edit) {
 
 } // namespace
 
+// --- THE REVISION HISTORY (M48) ---------------------------------------------
+
+std::string DrawingDocument::nextRevisionLetter() const {
+    return NextRevisionLetter(revisions_.empty() ? std::string_view{}
+                                                 : std::string_view(revisions_.back().letter));
+}
+
+std::string DrawingDocument::currentRevision() const {
+    // THE LAST ROW, and nothing when there are none. An unissued drawing is
+    // not at Rev A: it is at no revision, and printing A would be a claim
+    // nobody made about a drawing nobody has released.
+    return revisions_.empty() ? std::string{} : revisions_.back().letter;
+}
+
+std::string DrawingDocument::whyRevisionRefused(const Revision& revision) const {
+    return WhyRevisionRefused(revision, revisions_);
+}
+
+void DrawingDocument::restoreRevision(Revision revision, std::size_t at) {
+    // PUT BACK WHERE IT WAS. Appending on undo would reorder a history without
+    // saying so, and the order is what "the latest issue" means.
+    const std::size_t where = at < revisions_.size() ? at : revisions_.size();
+    revisions_.insert(revisions_.begin() + static_cast<std::ptrdiff_t>(where),
+                      std::move(revision));
+}
+
+bool DrawingDocument::addRevision(Revision revision) {
+    if (!whyRevisionRefused(revision).empty()) return false;
+    RevisionExistenceEdit edit;
+    edit.letter = revision.letter;
+    edit.description = revision.description;
+    edit.date = revision.date;
+    edit.by = revision.by;
+    edit.at = revisions_.size();
+    edit.addedByTheEdit = true;
+    const std::string letter = revision.letter;
+    revisions_.push_back(std::move(revision));
+    recordDelta(edit, "Issue Rev " + letter);
+    return true;
+}
+
+bool DrawingDocument::removeRevision(const std::string& letter) {
+    for (std::size_t i = 0; i < revisions_.size(); ++i) {
+        if (revisions_[i].letter != letter) continue;
+        RevisionExistenceEdit edit;
+        edit.letter = revisions_[i].letter;
+        edit.description = revisions_[i].description;
+        edit.date = revisions_[i].date;
+        edit.by = revisions_[i].by;
+        edit.at = i;
+        edit.addedByTheEdit = false;
+        revisions_.erase(revisions_.begin() + static_cast<std::ptrdiff_t>(i));
+        recordDelta(edit, "Withdraw Rev " + letter);
+        return true;
+    }
+    return false;
+}
+
+RevisionTable& DrawingDocument::addRevisionTable(std::string name, Vec2 positionMm) {
+    if (name.empty())
+        throw std::invalid_argument("addRevisionTable: a revision table needs a name");
+    if (nameIsTaken(name, kInvalidObjectId))
+        throw std::invalid_argument(
+            "addRevisionTable: this drawing already has something called " + name);
+    // NO SOURCE PATH AND NO ROWS. Unlike a parts list, which counts a file,
+    // this reads the drawing it is on -- so there is nothing to name and
+    // nothing that can go missing.
+    auto item = std::make_unique<RevisionTable>(std::move(name), positionMm, currentLayerId_);
+    auto& ref = *item;
+    ref.setSheetId(currentPageId_);
+    RevisionTableExistenceEdit edit;
+    edit.tableId = ref.id();
+    edit.name = ref.name();
+    edit.xMm = positionMm.x;
+    edit.yMm = positionMm.y;
+    edit.widthMm = ref.widthMm();
+    edit.rowHeightMm = ref.rowHeightMm();
+    edit.addedByTheEdit = true;
+    revisionTables_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    recordDelta(edit, "Add revision table " + ref.name());
+    return ref;
+}
+
+RevisionTable& DrawingDocument::restoreRevisionTable(ObjectId id, std::string name,
+                                                     Vec2 positionMm, double widthMm,
+                                                     double rowHeightMm) {
+    requireUnusedId(id, "restoreRevisionTable");
+    auto item = std::make_unique<RevisionTable>(id, std::move(name), positionMm, widthMm,
+                                                rowHeightMm, currentLayerId_);
+    auto& ref = *item;
+    revisionTables_.push_back(std::move(item));
+    registry_.registerObject(ref.id(), &ref);
+    return ref;
+}
+
+std::vector<const RevisionTable*> DrawingDocument::revisionTables() const {
+    std::vector<const RevisionTable*> out;
+    out.reserve(revisionTables_.size());
+    for (const auto& table : revisionTables_) out.push_back(table.get());
+    return out;
+}
+
+const RevisionTable* DrawingDocument::findRevisionTable(ObjectId id) const noexcept {
+    for (const auto& table : revisionTables_)
+        if (table->id() == id) return table.get();
+    return nullptr;
+}
+
+RevisionTable* DrawingDocument::findRevisionTableForEdit(ObjectId id) noexcept {
+    for (auto& table : revisionTables_)
+        if (table->id() == id) return table.get();
+    return nullptr;
+}
+
+bool DrawingDocument::setRevisionTablePosition(ObjectId tableId, Vec2 at) {
+    RevisionTable* table = findRevisionTableForEdit(tableId);
+    if (table == nullptr) return false;
+    RevisionTableEdit edit;
+    edit.tableId = table->id();
+    edit.beforeXMm = table->positionMm().x;
+    edit.beforeYMm = table->positionMm().y;
+    edit.afterXMm = at.x;
+    edit.afterYMm = at.y;
+    table->setPositionMm(at);
+    recordDelta(edit, "Move " + table->name());
+    return true;
+}
+
+std::string DrawingDocument::titleBlockValue(const TitleBlockField& field) const {
+    // THE ONE CALLER. Everything a block derives is known here and nowhere
+    // else all at once, which is what stops a painter, a plot and a DXF write
+    // from printing three different revisions.
+    return titleBlock_.valueOf(field, sheet(), currentSheetNumber(), sheetCount(),
+                               currentRevision());
+}
+
 HoleTable& DrawingDocument::addHoleTable(std::string name, ObjectId viewId, Vec2 positionMm,
                                          Vec2 datumMm) {
     if (name.empty()) throw std::invalid_argument("addHoleTable: a hole table needs a name");
@@ -3808,6 +3937,53 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
                                      : Vec2{edit->beforeXMm, edit->beforeYMm});
         table->setDatumMm(forward ? Vec2{edit->afterDatumXMm, edit->afterDatumYMm}
                                   : Vec2{edit->beforeDatumXMm, edit->beforeDatumYMm});
+        return;
+    }
+
+    if (const auto* edit = std::get_if<RevisionExistenceEdit>(&delta)) {
+        const bool wanted = forward == edit->addedByTheEdit;
+        if (wanted) {
+            Revision one;
+            one.letter = edit->letter;
+            one.description = edit->description;
+            one.date = edit->date;
+            one.by = edit->by;
+            // BACK WHERE IT WAS, letter and all. Re-deriving the letter here
+            // would be the bug Revision.h is about: undo would renumber a
+            // history that other people's paperwork already cites.
+            restoreRevision(std::move(one), edit->at);
+        } else {
+            for (auto it = revisions_.begin(); it != revisions_.end(); ++it) {
+                if (it->letter != edit->letter) continue;
+                revisions_.erase(it);
+                break;
+            }
+        }
+        return;
+    }
+
+    if (const auto* edit = std::get_if<RevisionTableExistenceEdit>(&delta)) {
+        const bool wanted = forward == edit->addedByTheEdit;
+        if (wanted) {
+            if (findRevisionTable(edit->tableId) == nullptr)
+                restoreRevisionTable(edit->tableId, edit->name, Vec2{edit->xMm, edit->yMm},
+                                     edit->widthMm, edit->rowHeightMm);
+        } else {
+            for (auto it = revisionTables_.begin(); it != revisionTables_.end(); ++it) {
+                if ((*it)->id() != edit->tableId) continue;
+                registry_.unregisterObject(edit->tableId);
+                revisionTables_.erase(it);
+                break;
+            }
+        }
+        return;
+    }
+
+    if (const auto* edit = std::get_if<RevisionTableEdit>(&delta)) {
+        RevisionTable* table = findRevisionTableForEdit(edit->tableId);
+        if (table == nullptr) return;
+        table->setPositionMm(forward ? Vec2{edit->afterXMm, edit->afterYMm}
+                                     : Vec2{edit->beforeXMm, edit->beforeYMm});
         return;
     }
 

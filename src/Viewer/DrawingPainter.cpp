@@ -168,9 +168,10 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             painter.setPen(QPen(ink));
             painter.drawText(
                 QPointF(split.x() + 1.0 * page.pixelsPerMm, baseline),
-                QString::fromStdString(block.valueOf(field, document.sheet(),
-                                                     document.currentSheetNumber(),
-                                                     document.sheetCount())));
+                // THROUGH THE DOCUMENT (M48). It is the only thing that knows
+                // every fact a block derives -- which page, how many, and what
+                // issue the drawing is at -- so it is the only caller.
+                QString::fromStdString(document.titleBlockValue(field)));
             ++tally.titleBlockRows;
         }
     }
@@ -764,6 +765,61 @@ DrawnTally PaintDrawing(QPainter& painter, const DrawingDocument& document,
             painter.drawText(at + QPointF(3.0, -3.0), QString::fromStdString(row.tag));
             ++tally.holeTags;
         }
+    }
+
+    // --- THE REVISION TABLE (M48) --------------------------------------------
+    //
+    // Holding none of its rows: they are the drawing's history, asked for
+    // here. So a table cannot show an issue this drawing does not have, and
+    // cannot miss one it does -- which is the same reason the parts list does
+    // not keep its own quantities.
+    for (const RevisionTable* table : document.revisionTables()) {
+        if (!document.isOnCurrentSheet(table->sheetId())) continue;
+        const std::vector<Revision>& history = document.revisions();
+        const Vec2 corner = table->positionMm();
+        const double width = table->widthMm();
+        const std::size_t lines = history.size() + 1;   // the heading is a row
+
+        QFont cell = painter.font();
+        cell.setPixelSize(std::max(5, static_cast<int>(2.2 * page.pixelsPerMm)));
+        painter.setFont(cell);
+        painter.setPen(QPen(ink, 0.9));
+
+        // A REVISION TABLE GROWS UPWARDS: the heading sits on the table's own
+        // corner and the newest issue is at the top, which is where a reader
+        // looks for it. rowBottomMm owns that arithmetic (the title block
+        // taught this the hard way).
+        const std::vector<RevisionColumn>& columns = RevisionColumns();
+        for (std::size_t line = 0; line < lines; ++line) {
+            const double bottom = corner.y + table->rowBottomMm(line);
+            const double top = bottom + table->rowHeightMm();
+            painter.drawLine(page.toScreen(Vec2{corner.x, bottom}),
+                             page.toScreen(Vec2{corner.x + width, bottom}));
+
+            double x = corner.x;
+            for (std::size_t c = 0; c < columns.size(); ++c) {
+                // The description gets the room: it is the only cell with a
+                // sentence in it, and the other three are a letter, a date and
+                // a pair of initials.
+                const double columnWidth =
+                    columns[c] == RevisionColumn::Description ? width * 0.55 : width * 0.15;
+                painter.drawLine(page.toScreen(Vec2{x, top}), page.toScreen(Vec2{x, bottom}));
+                const QString text =
+                    line == 0
+                        ? QString::fromStdString(std::string(toString(columns[c])))
+                        : QString::fromStdString(CellOf(history[line - 1], columns[c]));
+                painter.drawText(page.toScreen(Vec2{x + 1.0, bottom + 1.5}), text);
+                x += columnWidth;
+            }
+            painter.drawLine(page.toScreen(Vec2{x, top}), page.toScreen(Vec2{x, bottom}));
+            if (line > 0) ++tally.revisionRows;
+        }
+        // ...and the rule over the newest row, which the loop draws only the
+        // bottoms of.
+        const double capMm = corner.y + table->rowBottomMm(lines - 1) + table->rowHeightMm();
+        painter.drawLine(page.toScreen(Vec2{corner.x, capMm}),
+                         page.toScreen(Vec2{corner.x + width, capMm}));
+        ++tally.revisionTables;
     }
 
     // --- THE VIEWS -----------------------------------------------------------

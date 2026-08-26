@@ -561,6 +561,24 @@ void MainWindow::buildMenus() {
                        "welds and both draw as one number."));
     connect(weldSymbolAction_, &QAction::triggered, this, &MainWindow::onWeldSymbolRequested);
 
+    QMenu* revisionMenu = drawingMenu_->addMenu(QStringLiteral("&Revisions"));
+    issueRevisionAction_ = revisionMenu->addAction(QStringLiteral("&Issue Revision..."));
+    issueRevisionAction_->setToolTip(
+        QStringLiteral("Adds a row to the drawing's history.\n"
+                       "The LETTER is offered, not derived from where the row sits: other "
+                       "people's paperwork already cites Rev C, so nothing here renumbers "
+                       "it.\n"
+                       "I, O and Q are skipped -- on paper they read as 1, 0 and O."));
+    connect(issueRevisionAction_, &QAction::triggered, this,
+            &MainWindow::onIssueRevisionRequested);
+    revisionTableAction_ = revisionMenu->addAction(QStringLiteral("Revision &Table"));
+    revisionTableAction_->setToolTip(
+        QStringLiteral("The table that SHOWS the history, and holds none of it.\n"
+                       "Withdraw an issue and the table loses that row, because the rows are "
+                       "the drawing's and not the table's."));
+    connect(revisionTableAction_, &QAction::triggered, this,
+            &MainWindow::onRevisionTableRequested);
+
     QMenu* editMenu = drawingMenu_->addMenu(QStringLiteral("&Modify"));
     sheetTrimAction_ = editMenu->addAction(QStringLiteral("&Trim"));
     sheetTrimAction_->setToolTip(
@@ -5767,6 +5785,81 @@ void MainWindow::onWeldSymbolRequested() {
     addSymbolCommand(spec, at, Vec2{at.x + 10.0, at.y + 10.0});
 }
 
+QString MainWindow::issueRevisionCommand(const QString& letter, const QString& what,
+                                         const QString& date, const QString& by) {
+    const auto say = [this](const QString& message) {
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return message;
+    };
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return say(QStringLiteral("Revisions belong to a drawing."));
+
+    Revision revision;
+    revision.letter = letter.toStdString();
+    revision.description = what.toStdString();
+    revision.date = date.toStdString();
+    revision.by = by.toStdString();
+
+    // REFUSED HERE, WITH THE REASON. A row that got in and then could not be
+    // cited is worse than one that was never added.
+    const std::string why = drawing->whyRevisionRefused(revision);
+    if (!why.empty())
+        return say(QStringLiteral("That revision was refused: %1")
+                       .arg(QString::fromStdString(why)));
+    if (!drawing->addRevision(std::move(revision)))
+        return say(QStringLiteral("That revision was refused."));
+    refreshAll();
+    // WHAT THE DRAWING IS AT NOW, asked of the document rather than echoed
+    // back from what was typed -- the title block reads the same answer.
+    return say(QStringLiteral("Issued Rev %1 (the drawing is at %2)")
+                   .arg(letter, QString::fromStdString(drawing->currentRevision())));
+}
+
+void MainWindow::onIssueRevisionRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+
+    bool ok = false;
+    // THE NEXT LETTER IS OFFERED, not imposed: a drawing that came from
+    // another office may be at Rev 2 or Rev AB, and refusing to let the
+    // drafter say so would refuse real drawings.
+    const QString letter = QInputDialog::getText(
+        this, QStringLiteral("Issue Revision"), QStringLiteral("Revision letter:"),
+        QLineEdit::Normal, QString::fromStdString(drawing->nextRevisionLetter()), &ok);
+    if (!ok) return;
+    const QString what = QInputDialog::getText(
+        this, QStringLiteral("Issue Revision"), QStringLiteral("What changed:"),
+        QLineEdit::Normal, QString(), &ok);
+    if (!ok) return;
+    const QString date = QInputDialog::getText(
+        this, QStringLiteral("Issue Revision"), QStringLiteral("Date:"), QLineEdit::Normal,
+        QString(), &ok);
+    if (!ok) return;
+    const QString by = QInputDialog::getText(this, QStringLiteral("Issue Revision"),
+                                             QStringLiteral("By:"), QLineEdit::Normal,
+                                             QString(), &ok);
+    if (!ok) return;
+    issueRevisionCommand(letter, what, date, by);
+}
+
+void MainWindow::onRevisionTableRequested() {
+    DrawingDocument* drawing = AsDrawing(document_);
+    if (drawing == nullptr) return;
+    const Vec2 at = drawingCanvas_ != nullptr ? drawingCanvas_->pointerSheetMm() : Vec2{};
+    try {
+        drawing->addRevisionTable("Revisions", at);
+    } catch (const std::exception& error) {
+        const QString message = QStringLiteral("That table was refused: %1")
+                                    .arg(QString::fromUtf8(error.what()));
+        statusLeft_->setText(message);
+        statusLeft_->setToolTip(message);
+        return;
+    }
+    refreshAll();
+    statusLeft_->setText(QStringLiteral("Added a revision table"));
+}
+
 QString MainWindow::insertStandardPartCommand(const QString& designation,
                                              const QString& name) {
     const auto say = [this](const QString& message) {
@@ -5968,6 +6061,25 @@ BomContents MainWindow::countBomForTesting(ObjectId tableId) const {
     return table == nullptr ? BomContents{} : drawing->countBom(*table);
 }
 
+void MainWindow::addRevisionTableForTesting(Vec2 at) {
+    if (DrawingDocument* drawing = AsDrawing(document_))
+        drawing->addRevisionTable("Revisions", at);
+}
+
+QString MainWindow::currentRevisionForTesting() const {
+    const DrawingDocument* drawing = AsDrawing(document_);
+    return drawing == nullptr ? QString()
+                              : QString::fromStdString(drawing->currentRevision());
+}
+
+std::size_t MainWindow::drawnRevisionTablesForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnRevisionTablesForTesting();
+}
+
+std::size_t MainWindow::drawnRevisionRowsForTesting() const {
+    return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnRevisionRowsForTesting();
+}
+
 std::size_t MainWindow::drawnSymbolCountForTesting() const {
     return drawingCanvas_ == nullptr ? 0u : drawingCanvas_->drawnSymbolCountForTesting();
 }
@@ -6114,7 +6226,12 @@ QString MainWindow::titleBlockValueForTesting(const QString& label) const {
     if (drawing == nullptr) return {};
     const TitleBlockField* field = drawing->titleBlock().findField(label.toStdString());
     if (field == nullptr) return {};
-    return QString::fromStdString(drawing->titleBlock().valueOf(*field, drawing->sheet()));
+    // THROUGH THE DOCUMENT (M48), like the painter. This asked the block
+    // directly and let the defaults stand, so it answered "1 / 1" for the
+    // Sheet row on a three-page drawing while the canvas beside it said
+    // "2 / 3" -- a second reader of the one fact the block exists to keep
+    // single. The defaults are gone now, which is how it was found.
+    return QString::fromStdString(drawing->titleBlockValue(*field));
 }
 
 std::size_t MainWindow::drawnFrameLinesForTesting() const {

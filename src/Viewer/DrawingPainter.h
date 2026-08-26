@@ -105,6 +105,8 @@ struct DrawnTally {
     // with six rows and five tags on the paper is a drawing where one hole is
     // described and not marked, and neither number alone would show it.
     std::size_t holeTableRows = 0;
+    std::size_t revisionTables = 0;
+    std::size_t revisionRows = 0;
     std::size_t holeTags = 0;
     // Tables whose part could not be read. Counted separately for the reason
     // bomUncounted is: a table that came back empty looks exactly like a part

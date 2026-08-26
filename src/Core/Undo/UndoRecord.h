@@ -477,6 +477,46 @@ struct BomExistenceEdit {
     bool addedByTheEdit = false;
 };
 
+// M48. A REVISION IS AN ENTRY IN A HISTORY, and undoing one takes the whole
+// entry back -- letter included. The letter is stored (see Revision.h), so it
+// has to be recorded here too: recomputing it from position on undo is exactly
+// the derivation that would rewrite history.
+struct RevisionExistenceEdit {
+    std::string letter;
+    std::string description;
+    std::string date;
+    std::string by;
+    // WHERE in the history, because a revision may be taken out of the middle
+    // and has to go back where it was. Appending it on undo would reorder the
+    // drawing's history without saying so.
+    std::size_t at = 0;
+    bool addedByTheEdit = false;
+};
+
+// The table that SHOWS that history: a thing on the paper, added, moved,
+// deleted -- and holding none of the rows.
+struct RevisionTableExistenceEdit {
+    ObjectId tableId = kInvalidObjectId;
+    std::string name;
+    double xMm = 0.0;
+    double yMm = 0.0;
+    double widthMm = 0.0;
+    double rowHeightMm = 0.0;
+    bool addedByTheEdit = false;
+};
+
+// MOVING IS ITS OWN EDIT, as it is for the parts list. The first cut of M48
+// tried to carry both on the existence record, and the move then had no before
+// and no after to go back to -- so it was not recorded at all, and dragging the
+// table was the one change on this drawing undo could not take back.
+struct RevisionTableEdit {
+    ObjectId tableId = kInvalidObjectId;
+    double beforeXMm = 0.0;
+    double beforeYMm = 0.0;
+    double afterXMm = 0.0;
+    double afterYMm = 0.0;
+};
+
 // M39.4. A hole table is a thing on the paper: added, moved, deleted.
 //
 // It carries the VIEW it belongs to rather than a file path, because that is
@@ -869,6 +909,7 @@ using UndoDelta =
                  BomExistenceEdit, BomEdit, SymbolExistenceEdit, SymbolPlacementEdit,
                  WireExistenceEdit, WireEdit, DimensionToleranceEdit,
                  GeneralToleranceEdit, HoleTableExistenceEdit, HoleTableEdit,
+                 RevisionExistenceEdit, RevisionTableExistenceEdit, RevisionTableEdit,
                  AnnotationExistenceEdit, AnnotationEdit, SheetPageExistenceEdit>;
 
 // One atomic user-visible operation. Deltas are applied in order and undone in

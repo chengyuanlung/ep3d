@@ -30,6 +30,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/BomTable.cpp
     src/Core/Drawing/Annotation.cpp
     src/Core/Drawing/WeldSymbol.cpp
+    src/Core/Drawing/Revision.cpp
     src/Core/Text/NumberText.cpp
     src/Core/Drawing/HoleTable.cpp
     src/Core/Drawing/SheetEdits.cpp
@@ -565,6 +566,8 @@ if(PARAMCAD_BUILD_TESTS)
         tests/AnnotationTests.cpp
         tests/WeldSymbolTests.cpp
         tests/WeldDocumentTests.cpp
+        tests/RevisionTests.cpp
+        tests/RevisionDocumentTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp

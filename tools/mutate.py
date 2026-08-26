@@ -283,6 +283,13 @@ def main(argv):
     say('The baseline builds. Measuring %d mutation(s).\n' % len(mutations))
 
     survivors = []
+    # A MUTATION THAT WAS NOT APPLIED WAS NOT MEASURED, and that is a third
+    # answer -- not a kill and not a survivor. It is said as each one happens,
+    # but M48 finished a run with two of them and a summary that mentioned
+    # neither, which reads as "nothing survived" and means "nothing survived,
+    # of the ones I looked at". That is the same sentence ADR-M11-013 is about,
+    # so the summary says it out loud now.
+    skipped = []
     for mutation in mutations:
         name = mutation['name']
         path = mutation['path']
@@ -296,6 +303,7 @@ def main(argv):
             # whichever came first, and the result would be a measurement of
             # something nobody chose.
             say('%-62s -> PATTERN MATCHES %d TIMES, skipped' % (name, found))
+            skipped.append(name)
             continue
 
         shutil.copyfile(path, path + '.bak')
@@ -328,10 +336,19 @@ def main(argv):
 
     subprocess.run(['cmake', '--build', 'build', '--config', 'Debug'], capture_output=True)
     say('restored')
+    say('%d measured, %d killed, %d survived, %d NOT MEASURED'
+        % (len(mutations) - len(skipped), len(mutations) - len(skipped) - len(survivors),
+           len(survivors), len(skipped)))
     if survivors:
         say('\n%d SURVIVED -- each is a test gap or an equivalent mutation, and telling '
             'them apart is a reading job:' % len(survivors))
         for name in survivors:
+            say('   ' + name)
+    if skipped:
+        say('\n%d WERE NOT MEASURED AT ALL -- their `old` text is not unique in the file, '
+            'so nothing was changed and nothing was learned. Make the pattern unique and '
+            'run them again; a skipped mutation is not a kill:' % len(skipped))
+        for name in skipped:
             say('   ' + name)
     return 0
 

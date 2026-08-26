@@ -15,6 +15,7 @@
 #include "Core/Drawing/Annotation.h"
 #include "Core/Drawing/SheetPage.h"
 #include "Core/Drawing/HoleTable.h"
+#include "Core/Drawing/Revision.h"
 #include "Core/Electrical/SchematicObjects.h"
 #include "Core/Drawing/DimensionStyle.h"
 #include "Core/Connector/Connector.h"

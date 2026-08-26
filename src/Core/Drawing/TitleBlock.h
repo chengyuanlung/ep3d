@@ -40,6 +40,13 @@ enum class TitleBlockSource {
     SheetSize,        // "A3"
     ProjectionSymbol, // "First angle" / "Third angle"
     SheetCount,       // "1 / 3" -- how many sheets this drawing is
+    // v48 (M48). THE LATEST ISSUE, read from the drawing's revision history.
+    //
+    // Typed in, this is the field that goes stale: somebody adds Rev C to the
+    // table and the block in the corner still says B. Both are neat, both are
+    // complete, and the shop builds to whichever they read first. So it is not
+    // typable -- setField refuses it like every other derived source.
+    LatestRevision,
 };
 
 std::string_view toString(TitleBlockSource source) noexcept;
@@ -59,6 +66,9 @@ struct TitleBlockField {
 // thing they are drawing.
 const char* const kTitleBlockTitleLabel = "Title";
 const char* const kTitleBlockNumberLabel = "Drawing No.";
+// M48. The row that says what the drawing is issued at -- derived, so it can
+// only ever say what the revision table says.
+const char* const kTitleBlockRevisionLabel = "Rev";
 
 class TitleBlock {
 public:
@@ -117,8 +127,18 @@ public:
     // WHAT A FIELD ACTUALLY PRINTS, on this sheet. THE one reader: the canvas,
     // a PDF plot and a DXF write all ask here, so none of them can print a
     // different scale from the one the drawing is at.
-    std::string valueOf(const TitleBlockField& field, const Sheet& sheet,
-                        int sheetNumber = 1, int sheetTotal = 1) const;
+    // NO DEFAULTS (M48). They used to be sheetNumber = 1, sheetTotal = 1, and
+    // a caller that forgot printed "1 / 1" on a three-page drawing -- which is
+    // the half-truth M44 went and fixed everywhere else. A revision default
+    // would be worse: an empty string reads as "no issue yet" on a drawing
+    // that is at Rev C.
+    //
+    // So every fact the block derives has to be handed in, and the compiler
+    // finds the callers rather than a reader finding the wrong number. In a
+    // running program there is exactly one caller: DrawingDocument::
+    // titleBlockValue, which is the only thing that knows all three.
+    std::string valueOf(const TitleBlockField& field, const Sheet& sheet, int sheetNumber,
+                        int sheetTotal, const std::string& latestRevision) const;
 
 private:
     std::vector<TitleBlockField> fields_;

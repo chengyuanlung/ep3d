@@ -196,7 +196,7 @@ TEST(TitleBlockTest, M35_TITLE_002_TheSCALEFieldCannotBeTypedInto) {
 
     Sheet sheet{SheetSize::A3, SheetOrientation::Landscape};
     sheet.setScale(DrawingScale{1, 2});
-    EXPECT_EQ(block.valueOf(*block.findField("Scale"), sheet), "1:2");
+    EXPECT_EQ(block.valueOf(*block.findField("Scale"), sheet, 1, 1, ""), "1:2");
 }
 
 TEST(TitleBlockTest, M35_TITLE_003_TheDerivedFieldsFOLLOWTheSheet) {
@@ -204,16 +204,16 @@ TEST(TitleBlockTest, M35_TITLE_003_TheDerivedFieldsFOLLOWTheSheet) {
     Sheet sheet{SheetSize::A3, SheetOrientation::Landscape};
     sheet.setScale(DrawingScale{1, 2});
     sheet.setProjectionAngle(ProjectionAngle::First);
-    EXPECT_EQ(block.valueOf(*block.findField("Size"), sheet), "A3");
-    EXPECT_EQ(block.valueOf(*block.findField("Projection"), sheet), "First angle");
+    EXPECT_EQ(block.valueOf(*block.findField("Size"), sheet, 1, 1, ""), "A3");
+    EXPECT_EQ(block.valueOf(*block.findField("Projection"), sheet, 1, 1, ""), "First angle");
 
     // The sheet changes. Nothing is told; the block simply reads it again.
     sheet.setSize(SheetSize::A1);
     sheet.setScale(DrawingScale{2, 1});
     sheet.setProjectionAngle(ProjectionAngle::Third);
-    EXPECT_EQ(block.valueOf(*block.findField("Size"), sheet), "A1");
-    EXPECT_EQ(block.valueOf(*block.findField("Scale"), sheet), "2:1");
-    EXPECT_EQ(block.valueOf(*block.findField("Projection"), sheet), "Third angle");
+    EXPECT_EQ(block.valueOf(*block.findField("Size"), sheet, 1, 1, ""), "A1");
+    EXPECT_EQ(block.valueOf(*block.findField("Scale"), sheet, 1, 1, ""), "2:1");
+    EXPECT_EQ(block.valueOf(*block.findField("Projection"), sheet, 1, 1, ""), "Third angle");
 }
 
 TEST(TitleBlockTest, M35_TITLE_004_ACustomSheetPrintsItsSIZEAndNotTheWordCustom) {
@@ -222,7 +222,7 @@ TEST(TitleBlockTest, M35_TITLE_004_ACustomSheetPrintsItsSIZEAndNotTheWordCustom)
     TitleBlock block;
     Sheet sheet;
     ASSERT_TRUE(sheet.setCustomSize(500.0, 250.0));
-    const std::string printed = block.valueOf(*block.findField("Size"), sheet);
+    const std::string printed = block.valueOf(*block.findField("Size"), sheet, 1, 1, "");
     EXPECT_NE(printed, "Custom");
     EXPECT_NE(printed.find("500"), std::string::npos) << printed;
     EXPECT_NE(printed.find("250"), std::string::npos) << printed;
@@ -355,13 +355,13 @@ TEST(TitleBlockTest, M35_DOC_002_TheBLOCKAndTheVIEWSCannotDisagreeAboutTheScale)
     ASSERT_TRUE(document.setSheetScale(DrawingScale{1, 2}));
     const TitleBlockField* scale = document.titleBlock().findField("Scale");
     ASSERT_NE(scale, nullptr);
-    EXPECT_EQ(document.titleBlock().valueOf(*scale, document.sheet()), "1:2");
+    EXPECT_EQ(document.titleBlock().valueOf(*scale, document.sheet(), 1, 1, ""), "1:2");
     EXPECT_FALSE(document.setTitleBlockField("Scale", "1:5"))
         << "a scale was typed into the title block";
 
     ASSERT_TRUE(document.setSheetScale(DrawingScale{1, 5}));
     EXPECT_EQ(document.titleBlock().valueOf(*document.titleBlock().findField("Scale"),
-                                            document.sheet()),
+                                            document.sheet(), 1, 1, ""),
               "1:5")
         << "the sheet was replotted and the corner still claims the old scale";
 }

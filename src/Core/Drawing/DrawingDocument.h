@@ -2,6 +2,7 @@
 
 #include "Core/Document/DocumentBase.h"
 #include "Core/Drawing/BomTable.h"
+#include "Core/Drawing/Revision.h"
 #include "Core/Drawing/Annotation.h"
 #include "Core/Drawing/HoleTable.h"
 #include "Core/Drawing/SheetEdits.h"
@@ -432,6 +433,47 @@ public:
     // disagree about how many bolts there are.
     BomContents countBom(const BomTable& table) const;
 
+    // --- THE REVISION HISTORY (M48) ------------------------------------------
+    //
+    // The drawing's own list, and the one place in this document where a
+    // letter is STORED rather than derived -- Revision.h says why at length.
+    // In one line: a balloon's number points at a row that exists now, and a
+    // revision letter is a fact other people's paperwork already cites.
+    const std::vector<Revision>& revisions() const noexcept { return revisions_; }
+    // The letter to offer next, derived from the last one. This is the half
+    // that MUST be derived: a hand-typed next letter is how a drawing gets two
+    // Rev Cs, or an I.
+    std::string nextRevisionLetter() const;
+    // WHAT THE DRAWING IS AT. Empty when it has never been issued -- which is
+    // not the same as Rev A, and printing A on an unissued drawing is a claim
+    // nobody made.
+    std::string currentRevision() const;
+    std::string whyRevisionRefused(const Revision& revision) const;
+    // Refuses per whyRevisionRefused, and records one undo step.
+    bool addRevision(Revision revision);
+    bool removeRevision(const std::string& letter);
+    // For the loader and for undo: puts the history back exactly, including
+    // where in it a row sat.
+    void restoreRevision(Revision revision, std::size_t at);
+
+    // THE TABLE THAT SHOWS IT. Holds no rows: they are the history above,
+    // asked for at every repaint, so a table cannot show an issue this drawing
+    // does not have and cannot miss one it does.
+    RevisionTable& addRevisionTable(std::string name, Vec2 positionMm);
+    RevisionTable& restoreRevisionTable(ObjectId id, std::string name, Vec2 positionMm,
+                                        double widthMm, double rowHeightMm);
+    std::vector<const RevisionTable*> revisionTables() const;
+    const RevisionTable* findRevisionTable(ObjectId id) const noexcept;
+    bool setRevisionTablePosition(ObjectId tableId, Vec2 at);
+
+    // WHAT A TITLE BLOCK FIELD PRINTS, on this drawing. THE one caller of
+    // TitleBlock::valueOf in a running program, because it is the only thing
+    // that knows all three derived facts at once: which page this is, how many
+    // there are, and what the drawing is issued at. A painter that asked the
+    // block directly would have to supply them itself, and the one it would
+    // get wrong is the revision.
+    std::string titleBlockValue(const TitleBlockField& field) const;
+
     // --- THE HOLE TABLE (M39.4) ---------------------------------------------
     //
     // Every hole in the part a view is of, tagged and measured from a datum
@@ -663,6 +705,34 @@ private:
     DrawingView* findViewForEdit(ObjectId id) noexcept;
     DrawingEntity* findEntityForEdit(ObjectId id) noexcept;
     DrawingDimension* findDimensionForEdit(ObjectId id) noexcept;
+    // EVERY CONTAINER WHOSE OBJECTS SIT ON A PAGE, WRITTEN DOWN ONCE (M48).
+    //
+    // Four functions used to enumerate these by hand -- how many objects are
+    // on a page, which page an object is on, moving one between pages, and the
+    // rule the saver and loader share about pages that are not there. Six
+    // containers, four copies, kept in step by whoever remembered.
+    //
+    // M48 needed a seventh (the revision table) and that is what makes it
+    // worth fixing rather than continuing: forget one copy and the table is on
+    // a page for the purpose of being drawn and on no page for the purpose of
+    // being counted, so deleting that page is allowed and takes the table with
+    // it. Nothing throws. The drawing simply comes back without its history.
+    //
+    // Static, and taking `self`, so the const and non-const callers share ONE
+    // list rather than the usual pair of overloads -- which would be the same
+    // defect one level down.
+    template <class Self, class Fn>
+    static void eachPagedList(Self& self, Fn&& fn) {
+        fn(self.views_, "a view");
+        fn(self.entities_, "a line");
+        fn(self.dimensions_, "a dimension");
+        fn(self.annotations_, "a symbol");
+        fn(self.bomTables_, "a parts list");
+        fn(self.holeTables_, "a hole table");
+        fn(self.revisionTables_, "a revision table");
+    }
+
+    RevisionTable* findRevisionTableForEdit(ObjectId id) noexcept;
     BomTable* findBomTableForEdit(ObjectId id) noexcept;
     HoleTable* findHoleTableForEdit(ObjectId id) noexcept;
     Annotation* findAnnotationForEdit(ObjectId id) noexcept;
@@ -705,6 +775,12 @@ private:
     ObjectId currentStyleId_{kInvalidObjectId};
     std::vector<std::unique_ptr<BomTable>> bomTables_;
     std::vector<std::unique_ptr<HoleTable>> holeTables_;
+    std::vector<std::unique_ptr<RevisionTable>> revisionTables_;
+    // THE HISTORY ITSELF. Not objects with ids: a revision is a row of text,
+    // not something on the paper that can be picked, moved or put on a layer.
+    // Giving it an id would invite a second thing to point at it, and the
+    // pointer would then be the copy that goes stale.
+    std::vector<Revision> revisions_;
     std::vector<std::unique_ptr<Annotation>> annotations_;
     std::vector<std::unique_ptr<SymbolPlacement>> symbols_;
     std::vector<std::unique_ptr<WireEntity>> wires_;

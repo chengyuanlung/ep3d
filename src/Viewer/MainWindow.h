@@ -364,6 +364,15 @@ public:
     // three bodies -- three commands would be three places to forget the
     // leader, and three ideas of what a refused symbol does.
     QString addSymbolCommand(const AnnotationBody& body, Vec2 pointsAtMm, Vec2 positionMm);
+    // Driven by the self test, which is the only thing that starts the
+    // program -- and the issue letter is a fact the TITLE BLOCK reads, so only
+    // a running window proves the corner and the table agree.
+    QString issueRevisionCommand(const QString& letter, const QString& what,
+                                 const QString& date, const QString& by);
+    void addRevisionTableForTesting(Vec2 at);
+    QString currentRevisionForTesting() const;
+    std::size_t drawnRevisionTablesForTesting() const;
+    std::size_t drawnRevisionRowsForTesting() const;
     // THE IDS AND THE PICK ARE ARGUMENTS, not read off a selection.
     //
     // The last id is the object being edited and the rest are what it is
@@ -907,6 +916,8 @@ private slots:
     void onSurfaceFinishRequested();
     void onBalloonRequested();
     void onWeldSymbolRequested();
+    void onIssueRevisionRequested();
+    void onRevisionTableRequested();
     // M40: the sheet editing tools. One handler each, one command each --
     // every one of them a thin shell over a pure function in SheetEdits.h.
     void onSheetTrimRequested();
@@ -1184,6 +1195,8 @@ private:
     QAction* surfaceFinishAction_ = nullptr;
     QAction* balloonAction_ = nullptr;
     QAction* weldSymbolAction_ = nullptr;
+    QAction* issueRevisionAction_ = nullptr;
+    QAction* revisionTableAction_ = nullptr;
     QAction* sheetTrimAction_ = nullptr;
     QAction* sheetExtendAction_ = nullptr;
     QAction* sheetFilletAction_ = nullptr;

@@ -26,6 +26,7 @@ class DrawingEntity;
 class DrawingDimension;
 class BomTable;
 class HoleTable;
+class RevisionTable;
 class Annotation;
 class SheetPage;
 class SymbolPlacement;
@@ -58,7 +59,8 @@ public:
                                    ReferenceFrame*, Connector*, Mate*, NamedPosition*,
                                    ExplodeView*, Relation*, Layer*, Linetype*,
                                    DrawingEntity*, DrawingDimension*, DimensionStyle*,
-                                   BomTable*, HoleTable*, Annotation*, SheetPage*, SymbolPlacement*, WireEntity*,
+                                   BomTable*, HoleTable*, RevisionTable*, Annotation*,
+                                   SheetPage*, SymbolPlacement*, WireEntity*,
                                    IRecomputable*>;
 
     // The same handle with const pointees, for callers that only INSPECT.
@@ -82,7 +84,8 @@ public:
                      const NamedPosition*, const ExplodeView*, const Relation*,
                      const Layer*, const Linetype*, const DrawingEntity*,
                      const DrawingDimension*, const DimensionStyle*, const BomTable*,
-                     const HoleTable*, const Annotation*, const SheetPage*,
+                     const HoleTable*, const RevisionTable*, const Annotation*,
+                     const SheetPage*,
                      const SymbolPlacement*, const WireEntity*, const IRecomputable*>;
 
     // Rejects kInvalidObjectId, duplicate ids, null handles, and handles

@@ -5662,6 +5662,57 @@ int main(int argc, char** argv) {
                             fail("a weld symbol was drawn with nothing in it");
                     }
 
+                    // --- M48's GATE: the corner and the table agree ---------
+                    //
+                    // The Core suite proves the letter is derived. Only
+                    // starting the program can prove the two places a reader
+                    // actually looks -- the block in the corner and the table
+                    // on the sheet -- are showing the same issue, and that
+                    // both of them reached the paper at all.
+                    {
+                        // Clear of the title block: at 150 the two overlapped, which the
+                        // screenshot showed and no tally could.
+                        window.addRevisionTableForTesting(Vec2{25.0, 40.0});
+                        const QString first =
+                            window.issueRevisionCommand("A", "first issue", "2026-08-26",
+                                                        "EP");
+                        if (!first.contains(QStringLiteral("Rev A")))
+                            fail(("issuing a revision did not say so: " + first.toStdString())
+                                     .c_str());
+                        const QString second = window.issueRevisionCommand(
+                            "B", "clearance holes opened to 8.4", "2026-08-26", "EP");
+                        if (!second.contains(QStringLiteral("at B")))
+                            fail(("the drawing did not come back at Rev B: " +
+                                  second.toStdString())
+                                     .c_str());
+
+                        // A LETTER NOBODY CAN READ IS REFUSED, and the drawing
+                        // is unchanged -- O reads as zero on a photocopy.
+                        const QString refused =
+                            window.issueRevisionCommand("O", "misreadable", "", "");
+                        if (!refused.contains(QStringLiteral("refused")))
+                            fail(("Rev O was accepted: " + refused.toStdString()).c_str());
+                        if (window.currentRevisionForTesting() != QStringLiteral("B"))
+                            fail("a refused revision changed what the drawing is issued at");
+
+                        window.repaintDrawingForTesting();
+                        if (window.drawnRevisionTablesForTesting() != 1)
+                            fail("the revision table never reached the canvas");
+                        // TWO ROWS, because the drawing has two issues. A
+                        // table that drew its heading and nothing else looks
+                        // like a drawing that has never been issued.
+                        if (window.drawnRevisionRowsForTesting() != 2)
+                            fail("the revision table drew a different number of rows from "
+                                 "the history it reads");
+                        // ...AND THE CORNER SAYS THE SAME THING. This is the
+                        // whole milestone: two places a reader trusts, one
+                        // answer, with no way to type the second.
+                        if (window.titleBlockValueForTesting(QStringLiteral("Rev")) !=
+                            QStringLiteral("B"))
+                            fail("the title block and the revision table disagree about what "
+                                 "this drawing is issued at");
+                    }
+
                     // A PICTURE OF A DRAWING WITH A PARTS LIST AND A BALLOON.
                     // Whether a table READS -- whether the columns are wide
                     // enough, whether the heading is where a reader expects,

@@ -1034,6 +1034,43 @@ JsonValue toJson(const DrawingDocument& document) {
     }
     root.set("symbols", std::move(symbols));
 
+    // v48 (M48). THE DRAWING'S HISTORY, letters included.
+    //
+    // This is the one list in this file written down as it stands rather than
+    // derived. Revision.h has the argument; the short form is that a balloon's
+    // number points at a row that exists now, and Rev C is a fact somebody
+    // else's purchase order already cites.
+    //
+    // THE ORDER IS THE MEANING: the last row is what the drawing is issued at,
+    // and the title block prints it from here.
+    JsonValue revisions = JsonValue::makeArray();
+    for (const Revision& revision : document.revisions()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("letter", JsonValue::makeString(revision.letter));
+        item.set("description", JsonValue::makeString(revision.description));
+        item.set("date", JsonValue::makeString(revision.date));
+        item.set("by", JsonValue::makeString(revision.by));
+        revisions.add(std::move(item));
+    }
+    root.set("revisions", std::move(revisions));
+
+    // The table that SHOWS it, which holds none of it.
+    JsonValue revisionTables = JsonValue::makeArray();
+    for (const RevisionTable* table : document.revisionTables()) {
+        JsonValue item = JsonValue::makeObject();
+        item.set("id", JsonValue::makeString(idToString(table->id())));
+        item.set("sheetId",
+                 JsonValue::makeString(idToString(document.sheetOfObject(table->id()))));
+        item.set("name", JsonValue::makeString(table->name()));
+        item.set("xMm", JsonValue::makeNumber(table->positionMm().x));
+        item.set("yMm", JsonValue::makeNumber(table->positionMm().y));
+        item.set("widthMm", JsonValue::makeNumber(table->widthMm()));
+        item.set("rowHeightMm", JsonValue::makeNumber(table->rowHeightMm()));
+        item.set("layerId", JsonValue::makeString(idToString(table->layerId())));
+        revisionTables.add(std::move(item));
+    }
+    root.set("revisionTables", std::move(revisionTables));
+
     // v40 (M36). A component stores a SENTENCE -- which symbol, where, which
     // way round -- and not the geometry (ADR-M22-003): copying the shapes in
     // would mean a corrected symbol never reaches the drawings already made.
@@ -2440,6 +2477,91 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         }
     }
 
+    // v48 (M48). The history, and then the tables that show it.
+    std::vector<Revision> revisionData;
+    if (const JsonValue* field = root.find("revisions")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'revisions' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "revisions[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            Revision one;
+            const JsonValue* letter =
+                requireField(entry, "letter", JsonType::String, context, err);
+            if (letter == nullptr) return loadFailure(err.error, err.message);
+            one.letter = letter->asString();
+            const JsonValue* description =
+                requireField(entry, "description", JsonType::String, context, err);
+            if (description == nullptr) return loadFailure(err.error, err.message);
+            one.description = description->asString();
+            if (const JsonValue* date = entry.find("date"))
+                if (date->type() == JsonType::String) one.date = date->asString();
+            if (const JsonValue* by = entry.find("by"))
+                if (by->type() == JsonType::String) one.by = by->asString();
+            // WHAT THE SAVER REFUSES, THE LOADER REFUSES, by calling the same
+            // function (ADR-M3-008) -- and it is asked against the rows read so
+            // far, so a file carrying two Rev Cs is refused rather than opened
+            // with a history nobody can cite.
+            const std::string why = WhyRevisionRefused(one, revisionData);
+            if (!why.empty())
+                return loadFailure(SerializationError::InvalidFieldType, context + ": " + why);
+            revisionData.push_back(std::move(one));
+        }
+    }
+
+    struct RevisionTableData {
+        ObjectId id = kInvalidObjectId;
+        std::string name;
+        Vec2 positionMm{};
+        double widthMm = 0.0;
+        double rowHeightMm = 0.0;
+        ObjectId layerId = kInvalidObjectId;
+    };
+    std::vector<RevisionTableData> revisionTableData;
+    if (const JsonValue* field = root.find("revisionTables")) {
+        if (field->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'revisionTables' is not an array");
+        for (std::size_t i = 0; i < field->items().size(); ++i) {
+            const JsonValue& entry = field->items()[i];
+            const std::string context = "revisionTables[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            RevisionTableData one;
+            const JsonValue* idField = requireField(entry, "id", JsonType::String, context, err);
+            if (idField == nullptr) return loadFailure(err.error, err.message);
+            const auto id = idFromString(idField->asString());
+            if (!id.has_value() || *id == kInvalidObjectId || *id > kMaxObjectId)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": field 'id' is not a valid ObjectId");
+            if (!registerId(*id, context, err)) return loadFailure(err.error, err.message);
+            one.id = *id;
+            noteSheet(entry, one.id);
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            one.name = name->asString();
+            const JsonValue* x = requireField(entry, "xMm", JsonType::Number, context, err);
+            const JsonValue* y = requireField(entry, "yMm", JsonType::Number, context, err);
+            if (x == nullptr || y == nullptr) return loadFailure(err.error, err.message);
+            one.positionMm = Vec2{x->asNumber(), y->asNumber()};
+            one.widthMm = 120.0;
+            one.rowHeightMm = 6.0;
+            if (const JsonValue* width = entry.find("widthMm"))
+                if (width->type() == JsonType::Number) one.widthMm = width->asNumber();
+            if (const JsonValue* height = entry.find("rowHeightMm"))
+                if (height->type() == JsonType::Number) one.rowHeightMm = height->asNumber();
+            if (const JsonValue* layerId = entry.find("layerId"))
+                if (const auto parsed = idFromString(layerId->asString()))
+                    one.layerId = *parsed;
+            revisionTableData.push_back(std::move(one));
+        }
+    }
+
     if (const JsonValue* field = root.find("holeTables")) {
         if (field->type() != JsonType::Array)
             return loadFailure(SerializationError::InvalidFieldType,
@@ -2969,6 +3091,16 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
         document->restoreBomTable(one.id, std::move(one.name), std::move(one.sourcePath),
                                   one.positionMm, one.depth, std::move(one.columns),
                                   one.rowHeightMm, one.growsUpward, one.sourceStamp);
+    // v48 (M48). THE HISTORY FIRST, then the tables that show it -- a table
+    // restored before the rows would draw an empty box on the first repaint
+    // and be right only by the time anybody looked.
+    for (std::size_t i = 0; i < revisionData.size(); ++i)
+        document->restoreRevision(std::move(revisionData[i]), i);
+    for (auto& one : revisionTableData) {
+        RevisionTable& table = document->restoreRevisionTable(
+            one.id, std::move(one.name), one.positionMm, one.widthMm, one.rowHeightMm);
+        table.setLayerId(one.layerId);
+    }
     // AND WHERE EVERYTHING SITS, in one place, now the pages are here.
     //
     // A PAGE THIS DRAWING DOES NOT HAVE IS A REFUSAL. setObjectSheet says no
