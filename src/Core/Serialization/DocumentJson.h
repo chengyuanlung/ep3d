@@ -46,7 +46,7 @@ constexpr std::string_view kFormatName = "ParametricCAD";
 // file format holding different documents, so a second counter would let a
 // reader accept a v29 assembly and refuse a v29 part -- or, worse, disagree
 // about what v29 MEANS.
-constexpr int kSchemaVersion = 50;             // v50 adds the broken view (M50)
+constexpr int kSchemaVersion = 51;             // v51 adds sheet metal (M51)
 constexpr int kMinSupportedSchemaVersion = 1;  // v1 (no edges) and v2 files still load
 
 

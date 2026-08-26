@@ -338,6 +338,21 @@ JsonValue toJson(const PartDocument& document) {
     }
     root.set("parameters", std::move(parameters));
 
+    // v51 (M51). WHAT THE PART IS MADE OF, when it is made of sheet.
+    //
+    // Written only when it IS sheet metal, so an ordinary solid's file does
+    // not carry a thickness of nothing that a later reader could mistake for a
+    // stated one.
+    if (document.sheetMetal().isSheetMetal) {
+        JsonValue sheet = JsonValue::makeObject();
+        sheet.set("thicknessMm", JsonValue::makeNumber(document.sheetMetal().thicknessMm));
+        sheet.set("material",
+                  JsonValue::makeString(std::string(toString(document.sheetMetal().material))));
+        sheet.set("defaultBendRadiusMm",
+                  JsonValue::makeNumber(document.sheetMetal().defaultBendRadiusMm));
+        root.set("sheetMetal", std::move(sheet));
+    }
+
     // Material (v3, ADR-M3-005): a single optional document-level record,
     // null when no material is assigned.
     if (document.material()) {
@@ -3466,6 +3481,42 @@ LoadResult loadPartDocument(std::istream& in) {
             document->rewireParameterExpressions();
         !wiring.ok) {
         return loadFailure(SerializationError::InvalidDependency, wiring.message);
+    }
+    // v51 (M51). SHEET METAL, read as one setting.
+    if (const JsonValue* sheet = root.find("sheetMetal")) {
+        if (sheet->type() != JsonType::Object)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'sheetMetal' is not an object");
+        SheetMetalSettings settings;
+        settings.isSheetMetal = true;
+        const JsonValue* thickness =
+            requireField(*sheet, "thicknessMm", JsonType::Number, "sheetMetal", err);
+        if (thickness == nullptr) return loadFailure(err.error, err.message);
+        settings.thicknessMm = thickness->asNumber();
+        const JsonValue* material =
+            requireField(*sheet, "material", JsonType::String, "sheetMetal", err);
+        if (material == nullptr) return loadFailure(err.error, err.message);
+        // REFUSED, NOT DEFAULTED. A class this build does not know would
+        // become mild steel, whose K is a tenth from spring steel's -- and a
+        // tenth of a K is millimetres across an enclosure.
+        if (!ParseSheetMaterial(material->asString(), settings.material))
+            return loadFailure(SerializationError::InvalidEnumValue,
+                               "sheetMetal: unknown material '" + material->asString() + "'");
+        const JsonValue* radius =
+            requireField(*sheet, "defaultBendRadiusMm", JsonType::Number, "sheetMetal", err);
+        if (radius == nullptr) return loadFailure(err.error, err.message);
+        settings.defaultBendRadiusMm = radius->asNumber();
+        // WHAT THE SAVER REFUSES, THE LOADER REFUSES, by calling the same
+        // function (ADR-M3-008) -- a default radius the material cracks at
+        // would otherwise open as a part every one of whose bends is refused,
+        // one at a time, after it is drawn.
+        const std::string why = document->whySheetMetalRefused(settings);
+        if (!why.empty())
+            return loadFailure(SerializationError::InvalidFieldType, "sheetMetal: " + why);
+        // Straight onto the document, not through the undoable setter: loading
+        // is not an edit, and a freshly opened part with one step of history
+        // is a part somebody can undo into a state the file never held.
+        document->restoreSheetMetal(settings);
     }
     if (materialData.has_value()) {
         document->restoreMaterial(materialData->id, std::move(materialData->name),

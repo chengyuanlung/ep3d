@@ -37,6 +37,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/HoleTable.cpp
     src/Core/Drawing/SheetEdits.cpp
     src/Core/Feature/HoleStandards.cpp
+    src/Core/Feature/SheetMetalStandards.cpp
     src/Core/Electrical/SchematicObjects.cpp
     src/Core/Electrical/SymbolLibrary.cpp
     src/Core/Electrical/Netlist.cpp
@@ -574,6 +575,8 @@ if(PARAMCAD_BUILD_TESTS)
         tests/DetailViewTests.cpp
         tests/BreakFoldTests.cpp
         tests/BreakViewTests.cpp
+        tests/SheetMetalStandardsTests.cpp
+        tests/SheetMetalPartTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp

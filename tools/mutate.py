@@ -16,6 +16,14 @@ oracle turned out to be wrong for the THIRD time in this project's life:
     it was scored as a SURVIVOR. Two of them -- an assembly that contains
     itself, and a recursion chain that never grows -- both stack-overflow, and
     both looked like gaps in the tests when the tests were fine.
+  * M51: not a wrong oracle -- a wrong ASSUMPTION ABOUT WHO ELSE IS HERE. A
+    run rebuilds `build/Debug/ParametricCADViewer.exe` once per mutation, and
+    for the fifteen minutes that takes, the executable sitting on disk is a
+    build with a deliberate defect in it. The owner opened it and it crashed,
+    which is exactly what it was built to do -- and nothing anywhere said so.
+    The harness now leaves a marker file beside the executables while it runs,
+    so "this build cannot be trusted right now" is something a person can SEE
+    rather than something only this script knows.
   * M47: `unlock` renamed the VIEWER aside so the linker could overwrite it,
     but not the five gtest suites. A suite executable that Windows still had
     open -- the run that had just finished, or a scanner reading the freshly
@@ -151,6 +159,40 @@ def unlock(target):
             % (path, problem))
 
 
+# WHAT IS ON DISK WHILE THIS RUNS IS NOT THE PROGRAM (M51).
+#
+# Every mutation rebuilds the viewer, so for the length of a run the executable
+# in build/Debug is whatever the current deliberate defect produced. Anyone who
+# starts it gets a program built to be broken. This file is how they find that
+# out without reading the source of a test tool.
+MARKER = 'build/Debug/DO-NOT-RUN-THESE-BUILDS.txt'
+
+
+def raise_marker(count):
+    try:
+        os.makedirs(os.path.dirname(MARKER), exist_ok=True)
+        io.open(MARKER, 'w', encoding='utf-8').write(
+            'A MUTATION RUN IS IN PROGRESS.\n\n'
+            'The executables in this folder are being rebuilt with a deliberate\n'
+            'defect in them, one at a time -- %d of them -- to check that the\n'
+            'tests notice. A build from this folder WILL misbehave, and that is\n'
+            'what it was made to do.\n\n'
+            'This file is deleted when the run finishes and the tree is rebuilt\n'
+            'clean. If it is still here and nothing is running, the run was\n'
+            'killed: `python tools/mutate.py <file>` puts everything back on its\n'
+            'next start, or `cmake --build build --config Debug` rebuilds now.\n'
+            % count)
+    except OSError:
+        pass   # a marker that cannot be written must not stop the measurement
+
+
+def drop_marker():
+    try:
+        os.remove(MARKER)
+    except OSError:
+        pass
+
+
 def sweep_aside():
     """Deletes the renamed executables that are no longer held."""
     folder = 'build/Debug'
@@ -273,12 +315,16 @@ def main(argv):
     # ADR-M11-013's failure exactly, and it is the one that arrives looking
     # like good news.
     sweep_aside()
+    raise_marker(len(mutations))
+    say('While this runs, the builds in build/Debug are DELIBERATELY BROKEN.\n'
+        'Do not start the viewer from there until it says "restored" below.')
     say('Building the tree as it stands, before changing anything.')
     problem = build()
     if problem is not None:
         say('THE BASELINE DID NOT BUILD, so nothing below would have been measured.\n'
             'Every mutation would have scored as killed for a reason that has nothing\n'
             'to do with the mutation. Fix the build and run again.')
+        drop_marker()
         return 2
     say('The baseline builds. Measuring %d mutation(s).\n' % len(mutations))
 
@@ -335,6 +381,9 @@ def main(argv):
             say('PUT BACK %s on the way out' % mutation['path'])
 
     subprocess.run(['cmake', '--build', 'build', '--config', 'Debug'], capture_output=True)
+    # THE MARKER GOES LAST, after the clean rebuild -- so it is only absent
+    # once the executables on disk are the real ones again.
+    drop_marker()
     say('restored')
     say('%d measured, %d killed, %d survived, %d NOT MEASURED'
         % (len(mutations) - len(skipped), len(mutations) - len(skipped) - len(survivors),

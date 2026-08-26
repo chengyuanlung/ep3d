@@ -896,6 +896,23 @@ struct GeneralToleranceEdit {
     int after = 0;
 };
 
+// M51. WHAT A PART IS MADE OF, when it is made of sheet.
+//
+// The whole setting, both sides, because the three fields are one decision: a
+// thickness without its material has no K factor and a material without a
+// thickness has no minimum radius. Half of this restored is a part whose flat
+// pattern is computed from a number nobody chose.
+struct SheetMetalSettingEdit {
+    bool beforeIsSheet = false;
+    bool afterIsSheet = false;
+    double beforeThicknessMm = 0.0;
+    double afterThicknessMm = 0.0;
+    int beforeMaterial = 0;
+    int afterMaterial = 0;
+    double beforeBendRadiusMm = 0.0;
+    double afterBendRadiusMm = 0.0;
+};
+
 struct DimensionStyleExistenceEdit {
     ObjectId styleId = kInvalidObjectId;
     std::string name;
@@ -949,7 +966,8 @@ using UndoDelta =
                  CurrentDimensionStyleEdit, TitleBlockEdit, SheetFrameEdit,
                  BomExistenceEdit, BomEdit, SymbolExistenceEdit, SymbolPlacementEdit,
                  WireExistenceEdit, WireEdit, DimensionToleranceEdit,
-                 GeneralToleranceEdit, HoleTableExistenceEdit, HoleTableEdit,
+                 GeneralToleranceEdit, SheetMetalSettingEdit, HoleTableExistenceEdit,
+                 HoleTableEdit,
                  RevisionExistenceEdit, RevisionTableExistenceEdit, RevisionTableEdit,
                  AnnotationExistenceEdit, AnnotationEdit, SheetPageExistenceEdit>;
 

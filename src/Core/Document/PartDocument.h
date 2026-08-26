@@ -11,6 +11,7 @@
 #include "Core/Material/Material.h"
 #include "Core/Parameter/ParameterManager.h"
 #include "Core/Feature/BooleanFeature.h"
+#include "Core/Feature/SheetMetalStandards.h"
 #include "Core/Kernel/FaceQuery.h"
 #include "Core/Physics/MassProperties.h"
 #include "Core/Physics/MassPropertiesNode.h"
@@ -60,8 +61,38 @@ class ChamferFeature;
 // graph -> registry -> owner in that order so no dangling reference is
 // reachable through a public path. Registry/graph accessors are const-only;
 // all mutation goes through the facade.
+// M51. WHAT A SHEET METAL PART IS, as three facts that only mean anything
+// together.
+//
+// A thickness with no material has no K factor; a material with no thickness
+// has no minimum bend radius. So they are set as one, refused as one, and
+// restored as one -- see SheetMetalSettingEdit.
+struct SheetMetalSettings {
+    bool isSheetMetal = false;
+    double thicknessMm = 0.0;
+    SheetMaterial material = SheetMaterial::MildSteelAluminium;
+    // WHAT A BEND USES WHEN NOBODY SAYS. Not a constant: a shop bends to the
+    // tools it owns, and the number that matters is that the part states one
+    // rather than every bend inventing its own.
+    double defaultBendRadiusMm = 0.0;
+};
+
 class PartDocument final : public DocumentBase {
 public:
+    // --- SHEET METAL (M51) ---------------------------------------------------
+    //
+    // A part is sheet metal or it is not, and saying so is what gives every
+    // bend in it a K factor to look up. Refused rather than half-set: see
+    // whySheetMetalRefused.
+    const SheetMetalSettings& sheetMetal() const noexcept { return sheetMetal_; }
+    std::string whySheetMetalRefused(const SheetMetalSettings& settings) const;
+    bool setSheetMetal(const SheetMetalSettings& settings);
+    bool clearSheetMetal();
+    // THE RAW PATH, for the loader: sets it and records nothing. Loading is
+    // not an edit, and a freshly opened part with a step of history is one
+    // somebody can undo into a state the file never held.
+    void restoreSheetMetal(const SheetMetalSettings& settings) { sheetMetal_ = settings; }
+
     explicit PartDocument(std::string name);
     // Restore constructor (deserialization): keeps the persisted document id.
     // Frames are not serialized, so the Origin frame is auto-created with a
@@ -829,6 +860,8 @@ public:
 
     // Const-only access; mutation goes through the facade above.
 
+
+    SheetMetalSettings sheetMetal_;
 
 private:
 

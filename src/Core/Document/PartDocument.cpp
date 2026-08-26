@@ -1776,6 +1776,19 @@ void PartDocument::recordFeatureAdded(const Body& body, const Feature& feature) 
 
 
 void PartDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
+    // M51. THE WHOLE SETTING, both ways -- the three fields are one decision
+    // and half of it restored is a part whose flat pattern is computed from a
+    // number nobody chose.
+    if (const auto* edit = std::get_if<SheetMetalSettingEdit>(&delta)) {
+        sheetMetal_.isSheetMetal = forward ? edit->afterIsSheet : edit->beforeIsSheet;
+        sheetMetal_.thicknessMm = forward ? edit->afterThicknessMm : edit->beforeThicknessMm;
+        sheetMetal_.material = static_cast<SheetMaterial>(
+            forward ? edit->afterMaterial : edit->beforeMaterial);
+        sheetMetal_.defaultBendRadiusMm =
+            forward ? edit->afterBendRadiusMm : edit->beforeBendRadiusMm;
+        return;
+    }
+
     // M12 -- sketch geometry and constraints.
     //
     // Both branches go through the SKETCH's restore path, not the add path, so
@@ -3094,5 +3107,53 @@ bool PartDocument::removeOwnObject(ObjectId id) {
     }
     return true;
 }
+
+
+// --- SHEET METAL (M51) -------------------------------------------------------
+
+std::string PartDocument::whySheetMetalRefused(const SheetMetalSettings& settings) const {
+    // TURNING IT OFF IS ALWAYS ALLOWED. A part that stops being sheet metal is
+    // an ordinary solid, and nothing about it needs a thickness.
+    if (!settings.isSheetMetal) return {};
+    // THE THREE FACTS ONLY MEAN ANYTHING TOGETHER. A thickness with no
+    // material has no K factor; a material with no thickness has no minimum
+    // radius. Accepting half of this leaves a part whose flat pattern is
+    // computed from a number nobody chose.
+    if (!(settings.thicknessMm > 0.0))
+        return "sheet metal has to say how thick it is -- there is no K factor without one";
+    if (!(settings.defaultBendRadiusMm > 0.0))
+        return "sheet metal has to say what radius its bends use -- otherwise every bend "
+               "invents its own";
+    // ...AND THE DEFAULT RADIUS HAS TO BE ONE THE MATERIAL TAKES. Set tighter,
+    // every bend that used it would be refused one at a time, after the part
+    // was drawn.
+    SheetBend probe;
+    probe.angleDeg = 90.0;
+    probe.innerRadiusMm = settings.defaultBendRadiusMm;
+    return WhyBendRefused(probe, settings.material, settings.thicknessMm);
+}
+
+bool PartDocument::setSheetMetal(const SheetMetalSettings& settings) {
+    if (!whySheetMetalRefused(settings).empty()) return false;
+    SheetMetalSettingEdit edit;
+    edit.beforeIsSheet = sheetMetal_.isSheetMetal;
+    edit.beforeThicknessMm = sheetMetal_.thicknessMm;
+    edit.beforeMaterial = static_cast<int>(sheetMetal_.material);
+    edit.beforeBendRadiusMm = sheetMetal_.defaultBendRadiusMm;
+    edit.afterIsSheet = settings.isSheetMetal;
+    edit.afterThicknessMm = settings.thicknessMm;
+    edit.afterMaterial = static_cast<int>(settings.material);
+    edit.afterBendRadiusMm = settings.defaultBendRadiusMm;
+    sheetMetal_ = settings;
+    recordDelta(edit, settings.isSheetMetal ? "Make it sheet metal" : "Stop being sheet metal");
+    return true;
+}
+
+bool PartDocument::clearSheetMetal() {
+    if (!sheetMetal_.isSheetMetal) return false;
+    SheetMetalSettings off;
+    return setSheetMetal(off);
+}
+
 
 } // namespace paramcad
