@@ -1414,7 +1414,21 @@ bool AssemblyDocument::solveMates() {
     return true;
 }
 
+const AssemblyDocument::InterferenceReport& AssemblyDocument::recheckInterference() {
+    lastInterference_ = checkInterference();
+    interferenceStale_ = false;
+    return lastInterference_;
+}
+
 DocumentRecomputeReport AssemblyDocument::recompute() {
+    // ANYTHING THAT MOVES THE ASSEMBLY MAKES THE CLASH ANSWER OLD (M46).
+    //
+    // Marked here rather than at every edit, because this is the ONE place
+    // everything that can move a part goes through -- a drag, a drive, a mate,
+    // a changed part file. Marked at the edits instead, the day somebody adds
+    // a ninth way to move something the answer would go on saying "clear".
+    interferenceStale_ = true;
+
     // TWO PASSES, and the reason is worth stating because it looks wasteful.
     //
     // The solve needs each instance's mate connectors, and those live in the

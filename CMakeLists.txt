@@ -712,6 +712,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/Kernel/OcctDrawingViewTests.cpp
         tests/Kernel/OcctHoleStandardTests.cpp
         tests/Kernel/OcctStandardPartTests.cpp
+        tests/Kernel/InterferenceStalenessTests.cpp
         tests/Kernel/OcctEdgeQueryTests.cpp
             tests/Kernel/OcctBooleanTests.cpp
             tests/Kernel/OcctRevolveTests.cpp

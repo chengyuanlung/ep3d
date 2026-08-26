@@ -331,6 +331,49 @@ public:
         std::vector<Interference> overlaps;
     };
     InterferenceReport checkInterference() const;
+
+    // --- IS THAT ANSWER STILL TRUE? (M46) ------------------------------------
+    //
+    // WHY THIS IS HERE AND CONTACT SOLVING IS NOT.
+    //
+    // The obvious next thing is a solver that will not let two parts occupy
+    // the same space -- and it is not a bigger residual vector, it is a
+    // different algorithm. Everything the mate solve does drives residuals to
+    // ZERO; a contact is `gap >= 0`, an INEQUALITY, and least squares cannot
+    // say that. It needs an active set: guess which contacts are touching,
+    // solve those as equalities, check the rest, repeat -- and the guess can
+    // legitimately change mid-drag, which is how such solvers chatter and stop
+    // converging.
+    //
+    // Worse, the residual would need GEOMETRY. Today `evaluate` composes
+    // transforms and never touches the kernel. A contact residual is the
+    // distance between two solids at a configuration, and measureInterference
+    // returns a VOLUME -- which is zero for every pair that is not already
+    // overlapping, so it has no gradient to descend. A signed distance query
+    // is what would be needed, this kernel does not have one, and a B-rep
+    // distance per iteration per drag frame is milliseconds where the mate
+    // solve costs microseconds.
+    //
+    // So what is done instead is the small honest thing. The clash check
+    // already exists and is EXACT. What it lacked was any way to know it was
+    // out of date: a user checked, got "clear", then dragged a link through a
+    // wall, and the answer on the screen still said clear. The same shape as a
+    // drawing view that is behind its model (M32) -- and the same fix: the
+    // answer says WHEN it was true, and anything that moves the assembly makes
+    // it stale.
+    //
+    // A check on every drag was the other option and was rejected: an
+    // all-pairs B-rep intersection per mouse move is a performance cliff, and
+    // a threshold for "small enough to check" would be a number nobody could
+    // defend.
+    bool isInterferenceStale() const noexcept { return interferenceStale_; }
+    // The last answer, and whether it is still about this assembly. Empty
+    // overlaps with `stale` true means "nobody has looked since it moved", not
+    // "clear".
+    const InterferenceReport& lastInterference() const noexcept { return lastInterference_; }
+    // Runs the check and remembers it. checkInterference stays const and
+    // stateless for callers that only want an answer.
+    const InterferenceReport& recheckInterference();
     const MateSolveReport& mateSolveReport() const noexcept { return solveReport_; }
 
     // The solver that closes loops. Injected the same way and for the same
@@ -416,6 +459,11 @@ private:
     std::vector<ObjectId> groundedInstances_;
     MateSolveReport solveReport_;
     IAssemblySolver* assemblySolver_ = nullptr;
+    // M46. The last clash answer and whether the assembly has moved since.
+    // STALE BY DEFAULT: a freshly opened assembly has not been checked, and
+    // "not checked" must never read as "clear".
+    InterferenceReport lastInterference_;
+    bool interferenceStale_ = true;
     std::vector<std::string> sourceChain_;
 };
 

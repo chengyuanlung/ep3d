@@ -471,6 +471,9 @@ public:
 
     // Runs the interference check and reports it. Reading, never writing.
     QString checkInterferenceCommand();
+    // What the window says about clashes when nobody has just asked: the last
+    // answer, or that there is not one for the assembly as it stands now.
+    QString interferenceStandingLine() const;
 
     ObjectId selectedNamedPosition() const;
     ObjectId selectedExplodeView() const;

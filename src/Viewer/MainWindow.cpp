@@ -1601,16 +1601,34 @@ QString MainWindow::showHideSelectedInstance() {
                    : QStringLiteral("%1 shown").arg(name));
 }
 
+QString MainWindow::interferenceStandingLine() const {
+    const AssemblyDocument* assembly = AsAssembly(document_);
+    if (assembly == nullptr) return {};
+    // NOT CHECKED AND CLEAR ARE DIFFERENT ANSWERS, and only one of them is
+    // worth anything. A freshly opened assembly has never been looked at.
+    if (assembly->isInterferenceStale())
+        return QStringLiteral("Clashes: not checked since this moved");
+    const AssemblyDocument::InterferenceReport& last = assembly->lastInterference();
+    if (!last.ok) return QStringLiteral("Clashes: could not be checked");
+    return last.overlaps.empty()
+               ? QStringLiteral("Clashes: none")
+               : QStringLiteral("Clashes: %1").arg(last.overlaps.size());
+}
+
 QString MainWindow::checkInterferenceCommand() {
     const auto say = [this](const QString& message) {
         statusLeft_->setText(message);
         statusLeft_->setToolTip(message);
         return message;
     };
-    const AssemblyDocument* assembly = AsAssembly(document_);
+    AssemblyDocument* assembly = AsAssembly(document_);
     if (assembly == nullptr) return say(QStringLiteral("Only an assembly can interfere."));
 
-    const AssemblyDocument::InterferenceReport report = assembly->checkInterference();
+    // THROUGH THE DOCUMENT, so the answer is REMEMBERED and knows when it stops
+    // being true (M46). Asked the const way, the check would run, print, and
+    // leave nothing behind -- which is how a user came to be looking at "no
+    // interference" over an assembly they had since dragged apart.
+    const AssemblyDocument::InterferenceReport report = assembly->recheckInterference();
     if (!report.ok)
         return say(QStringLiteral("Interference could not be checked: %1")
                        .arg(QString::fromStdString(report.message)));
@@ -2848,11 +2866,15 @@ void MainWindow::updateStatus() {
     if (const auto* assembly = dynamic_cast<const AssemblyDocument*>(document_)) {
         const std::size_t instances = assembly->instances().size();
         const std::size_t mates = assembly->mates().size();
-        statusRight_->setText(QStringLiteral("%1 instance%2   %3 mate%4")
+        // ...AND WHETHER ANYBODY HAS LOOKED FOR CLASHES SINCE IT MOVED (M46).
+        // A count of instances and mates says nothing about whether they pass
+        // through each other, and the answer to that has a shelf life.
+        statusRight_->setText(QStringLiteral("%1 instance%2   %3 mate%4   %5")
                                   .arg(instances)
                                   .arg(instances == 1 ? "" : "s")
                                   .arg(mates)
-                                  .arg(mates == 1 ? "" : "s"));
+                                  .arg(mates == 1 ? "" : "s")
+                                  .arg(interferenceStandingLine()));
         return;
     }
     // A DRAWING COUNTS SHEETS AND VIEWS, not volume. What a status bar says
