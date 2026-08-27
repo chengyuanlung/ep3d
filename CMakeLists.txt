@@ -38,6 +38,8 @@ add_library(ParametricCADCore
     src/Core/Drawing/SheetEdits.cpp
     src/Core/Feature/HoleStandards.cpp
     src/Core/Feature/SheetMetalStandards.cpp
+    src/Core/Feature/SheetContour.cpp
+    src/Core/Feature/SheetContourFeature.cpp
     src/Core/Electrical/SchematicObjects.cpp
     src/Core/Electrical/SymbolLibrary.cpp
     src/Core/Electrical/Netlist.cpp
@@ -577,6 +579,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/BreakViewTests.cpp
         tests/SheetMetalStandardsTests.cpp
         tests/SheetMetalPartTests.cpp
+        tests/SheetContourTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp
@@ -727,6 +730,7 @@ if(PARAMCAD_BUILD_TESTS)
             tests/Kernel/OcctDrawingProjectionTests.cpp
         tests/Kernel/OcctDrawingViewTests.cpp
         tests/Kernel/OcctDetailViewTests.cpp
+        tests/Kernel/OcctSheetContourTests.cpp
         tests/Kernel/OcctHoleStandardTests.cpp
         tests/Kernel/OcctStandardPartTests.cpp
         tests/Kernel/InterferenceStalenessTests.cpp

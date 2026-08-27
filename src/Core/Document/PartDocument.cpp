@@ -1628,6 +1628,42 @@ void PartDocument::wirePadFeature(PadFeature& feature, ObjectId sketchId,
     rewireMassPropertiesSource(feature.id(), materialId);
 }
 
+SheetContourFeature& PartDocument::addSheetContourFeature(Body& body, std::string name,
+                                                          SheetContour contour,
+                                                          ObjectId widthParameterId) {
+    // REFUSED BEFORE IT IS BUILT, not at the first rebuild. A contour on a
+    // part that has not said what it is made of would sit in the tree as a
+    // feature that will not build, pointing at a thickness nobody has chosen.
+    if (!sheetMetal_.isSheetMetal)
+        throw std::invalid_argument("addSheetContourFeature: this part is not sheet metal -- "
+                                    "say what it is made of and how thick before folding it");
+    if (const std::string why =
+            WhyContourRefused(contour, sheetMetal_.material, sheetMetal_.thicknessMm);
+        !why.empty())
+        throw std::invalid_argument("addSheetContourFeature: " + why);
+
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    SheetContourFeature& feature = body.addFeature<SheetContourFeature>(
+        std::move(name), std::move(contour), widthParameterId, materialId);
+    addRecomputableNode(feature);
+    addDependency(feature.id(), widthParameterId);
+    rewireMassPropertiesSource(feature.id(), materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+SheetContourFeature& PartDocument::restoreSheetContourFeature(
+    Body& body, ObjectId id, std::string name, ComputeState state, SheetContour contour,
+    ObjectId widthParameterId, ObjectId materialId) {
+    requireUnusedId(id, "restoreSheetContourFeature");
+    SheetContourFeature& feature = body.addFeature<SheetContourFeature>(
+        id, std::move(name), state, std::move(contour), widthParameterId, materialId);
+    addRecomputableNode(feature);
+    addDependency(feature.id(), widthParameterId);
+    rewireMassPropertiesSource(feature.id(), materialId);
+    return feature;
+}
+
 PadFeature& PartDocument::addPadFeature(Body& body, std::string name, ObjectId sketchId,
                                         ObjectId lengthParameterId) {
     const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;

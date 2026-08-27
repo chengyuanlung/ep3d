@@ -11,6 +11,7 @@
 #include "Core/Material/Material.h"
 #include "Core/Parameter/ParameterManager.h"
 #include "Core/Feature/BooleanFeature.h"
+#include "Core/Feature/SheetContourFeature.h"
 #include "Core/Feature/SheetMetalStandards.h"
 #include "Core/Kernel/FaceQuery.h"
 #include "Core/Physics/MassProperties.h"
@@ -603,6 +604,19 @@ public:
     // Sketch and Length prerequisite edges, and (re)wires the document's
     // MassPropertiesNode to this pad -- giving exactly the graph spec 12
     // requires: Sketch -> Pad -> Mass, Length -> Pad, Material -> Mass.
+    // --- THE CONTOUR FLANGE (M52) --------------------------------------------
+    //
+    // A sheet metal part built from its own section. Refused unless the part
+    // has SAID it is sheet metal -- the thickness is the part's, read every
+    // rebuild, so there is no second copy of it to drift.
+    SheetContourFeature& addSheetContourFeature(Body& body, std::string name,
+                                                SheetContour contour,
+                                                ObjectId widthParameterId);
+    SheetContourFeature& restoreSheetContourFeature(Body& body, ObjectId id, std::string name,
+                                                    ComputeState state, SheetContour contour,
+                                                    ObjectId widthParameterId,
+                                                    ObjectId materialId);
+
     PadFeature& addPadFeature(Body& body, std::string name, ObjectId sketchId,
                               ObjectId lengthParameterId);
     PadFeature& restorePadFeature(Body& body, ObjectId id, std::string name, ComputeState state,
