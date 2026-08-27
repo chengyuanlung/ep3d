@@ -1,5 +1,7 @@
 #pragma once
 
+#include <utility>
+
 #include "Core/Assembly/AssemblyStates.h"
 #include "Core/Document/ObjectId.h"
 #include "Core/Drawing/Annotation.h"
@@ -681,6 +683,9 @@ struct DrawingViewExistenceEdit {
     // comes back as a projection of the folded part -- which for a bracket is
     // a rectangle with lines on it either way.
     bool flatPattern = false;
+    // M54. WHICH SIZE. Restored without it, a view comes back projecting the
+    // part's own numbers under a caption naming a variant.
+    std::string variantName;
     bool breakActive = false;
     double breakFromMm = 0.0;
     double breakToMm = 0.0;
@@ -758,6 +763,8 @@ struct DrawingViewPlacementEdit {
     // the circle are: breaking a view is a change to how it lands on the
     // paper, and splitting it off would let the break come back while the
     // position did not.
+    std::string beforeVariantName;
+    std::string afterVariantName;
     bool beforeBreakActive = false;
     bool afterBreakActive = false;
     double beforeBreakFromMm = 0.0;
@@ -900,6 +907,23 @@ struct GeneralToleranceEdit {
     int after = 0;
 };
 
+// M54. A ROW OF THE VARIANT TABLE, added or taken away.
+//
+// The whole row, both ways: a variant is a set of values that only mean
+// anything together, and half of one restored is a size nobody specified.
+//
+// WHAT IS NOT HERE is "which variant was active". Nothing stores that -- it is
+// answered by comparing (see PartVariant.h) -- so there is nothing for undo to
+// put back, and no way for it to put back something the parameters disagree
+// with. Applying a variant undoes as what it actually was: the parameter
+// changes it made.
+struct VariantExistenceEdit {
+    std::string name;
+    std::vector<std::pair<ObjectId, double>> values;
+    std::size_t at = 0;
+    bool addedByTheEdit = false;
+};
+
 // M51. WHAT A PART IS MADE OF, when it is made of sheet.
 //
 // The whole setting, both sides, because the three fields are one decision: a
@@ -970,7 +994,8 @@ using UndoDelta =
                  CurrentDimensionStyleEdit, TitleBlockEdit, SheetFrameEdit,
                  BomExistenceEdit, BomEdit, SymbolExistenceEdit, SymbolPlacementEdit,
                  WireExistenceEdit, WireEdit, DimensionToleranceEdit,
-                 GeneralToleranceEdit, SheetMetalSettingEdit, HoleTableExistenceEdit,
+                 GeneralToleranceEdit, SheetMetalSettingEdit, VariantExistenceEdit,
+                 HoleTableExistenceEdit,
                  HoleTableEdit,
                  RevisionExistenceEdit, RevisionTableExistenceEdit, RevisionTableEdit,
                  AnnotationExistenceEdit, AnnotationEdit, SheetPageExistenceEdit>;

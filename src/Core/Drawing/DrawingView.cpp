@@ -264,7 +264,10 @@ RecomputeResult DrawingView::recompute(const RecomputeContext& context) {
     // "THAT BODY, IN THAT FILE" -- the same resolver an instance uses, so a
     // view and an instance of the same file cannot disagree about what is in
     // it (M32.2).
-    const SourceShapeResult resolved = ResolveSourceShape(sourcePath_, bodyName_, context);
+    // THE SIZE THIS VIEW IS OF, handed to the resolver so the part is built at
+    // it -- see DrawingView::variantName.
+    const SourceShapeResult resolved =
+        ResolveSourceShape(sourcePath_, bodyName_, context, {}, variantName_);
     if (!resolved) return fail(resolved.message);
 
     // --- A DETAIL IS ITS PARENT'S VIEW, ENLARGED (M49) ----------------------

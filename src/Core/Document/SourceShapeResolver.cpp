@@ -136,7 +136,8 @@ bool IsAssemblySourceFile(const std::string& path) {
 SourceShapeResult ResolveSourceShape(
     const std::string& sourcePath, const std::string& bodyName,
     const RecomputeContext& context,
-    const std::function<void(const DocumentBase&)>& sawDocument) {
+    const std::function<void(const DocumentBase&)>& sawDocument,
+    const std::string& variantName) {
     if (context.kernel == nullptr) return refuse("no geometry kernel configured");
     if (sourcePath.empty()) return refuse("nothing names a model file");
 
@@ -205,6 +206,16 @@ SourceShapeResult ResolveSourceShape(
     PartDocument& part = *loaded.document;
     part.setGeometryKernel(context.kernel);
     part.setSketchSolver(context.sketchSolver);
+    // THE SIZE, BEFORE ANYTHING IS BUILT (M54). Applied here rather than by
+    // the caller afterwards, because "afterwards" would mean a shape built at
+    // one size and a label written from another.
+    if (!variantName.empty() && !part.applyVariant(variantName)) {
+        std::string names;
+        for (const PartVariant& one : part.variants())
+            names += (names.empty() ? "" : ", ") + one.name;
+        return refuse("'" + sourcePath + "' has no variant called '" + variantName + "'" +
+                      (names.empty() ? " -- it has none at all" : "; it has: " + names));
+    }
     const DocumentRecomputeReport built = part.recompute();
     if (!built.success) {
         const std::string why = WhyItDidNotBuild(part, built);

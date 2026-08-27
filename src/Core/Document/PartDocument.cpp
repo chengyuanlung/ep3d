@@ -1815,6 +1815,23 @@ void PartDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
     // M51. THE WHOLE SETTING, both ways -- the three fields are one decision
     // and half of it restored is a part whose flat pattern is computed from a
     // number nobody chose.
+    if (const auto* edit = std::get_if<VariantExistenceEdit>(&delta)) {
+        const bool wanted = forward == edit->addedByTheEdit;
+        if (wanted) {
+            PartVariant variant;
+            variant.name = edit->name;
+            for (const auto& entry : edit->values) variant.values[entry.first] = entry.second;
+            restoreVariant(std::move(variant), edit->at);
+        } else {
+            for (auto it = variants_.begin(); it != variants_.end(); ++it) {
+                if (it->name != edit->name) continue;
+                variants_.erase(it);
+                break;
+            }
+        }
+        return;
+    }
+
     if (const auto* edit = std::get_if<SheetMetalSettingEdit>(&delta)) {
         sheetMetal_.isSheetMetal = forward ? edit->afterIsSheet : edit->beforeIsSheet;
         sheetMetal_.thicknessMm = forward ? edit->afterThicknessMm : edit->beforeThicknessMm;
@@ -3189,6 +3206,100 @@ bool PartDocument::clearSheetMetal() {
     if (!sheetMetal_.isSheetMetal) return false;
     SheetMetalSettings off;
     return setSheetMetal(off);
+}
+
+
+
+// --- VARIANTS (M54) ----------------------------------------------------------
+
+std::string PartDocument::whyVariantRefused(const PartVariant& variant) const {
+    const std::string why = WhyVariantRefused(variant, variants_);
+    if (!why.empty()) return why;
+    // AND EVERY PARAMETER IT NAMES HAS TO BE IN THIS PART. A variant pointing
+    // at a parameter that is gone is a size that cannot be applied, and it
+    // would be found on the day somebody picked it.
+    for (const auto& entry : variant.values)
+        if (parameters().findById(entry.first) == nullptr)
+            return "this variant sets a parameter that is not in this part";
+    return {};
+}
+
+void PartDocument::restoreVariant(PartVariant variant, std::size_t at) {
+    const std::size_t where = at < variants_.size() ? at : variants_.size();
+    variants_.insert(variants_.begin() + static_cast<std::ptrdiff_t>(where),
+                     std::move(variant));
+}
+
+bool PartDocument::addVariant(PartVariant variant) {
+    if (!whyVariantRefused(variant).empty()) return false;
+    VariantExistenceEdit edit;
+    edit.name = variant.name;
+    for (const auto& entry : variant.values) edit.values.emplace_back(entry);
+    edit.at = variants_.size();
+    edit.addedByTheEdit = true;
+    const std::string name = variant.name;
+    variants_.push_back(std::move(variant));
+    recordDelta(edit, "Add variant " + name);
+    return true;
+}
+
+bool PartDocument::removeVariant(const std::string& name) {
+    for (std::size_t i = 0; i < variants_.size(); ++i) {
+        if (variants_[i].name != name) continue;
+        VariantExistenceEdit edit;
+        edit.name = variants_[i].name;
+        for (const auto& entry : variants_[i].values) edit.values.emplace_back(entry);
+        edit.at = i;
+        edit.addedByTheEdit = false;
+        variants_.erase(variants_.begin() + static_cast<std::ptrdiff_t>(i));
+        recordDelta(edit, "Remove variant " + name);
+        return true;
+    }
+    return false;
+}
+
+bool PartDocument::applyVariant(const std::string& name) {
+    const PartVariant* variant = FindVariant(variants_, name);
+    // REFUSED, not ignored. A caller that asked for a size this part does not
+    // have and got a quiet no-op would go on to draw, dimension and order the
+    // size it was already at.
+    if (variant == nullptr) return false;
+
+    // ONE UNDO STEP for the whole row: switching size is one thing the user
+    // did, and a half-applied variant is a part no size ever was.
+    const bool ownsStep = !isTransactionOpen() && !applyingHistory();
+    if (ownsStep) beginTransaction("Apply variant " + name);
+    bool moved = true;
+    for (const auto& entry : variant->values)
+        if (!setParameterValue(entry.first, entry.second)) moved = false;
+    if (ownsStep) {
+        if (!moved) {
+            abortTransaction();
+            return false;
+        }
+        commitTransaction();
+    }
+    // NOTHING IS WRITTEN DOWN ABOUT WHICH ONE THIS WAS. What happened is the
+    // parameter changes; what is true afterwards is whatever the parameters
+    // now say (see activeVariantName).
+    return moved;
+}
+
+std::string PartDocument::activeVariantName() const {
+    if (variants_.empty()) return {};
+    // ONLY THE COLUMNS THIS TABLE VARIES BY -- because that is the question,
+    // not because a bigger map would answer it differently.
+    //
+    // The mutation gate corrected an earlier version of this comment, which
+    // claimed comparing every parameter would make a variant stop matching the
+    // moment anything unrelated was edited. It would not: WhichVariantMatches
+    // walks the VARIANT's values and looks each up, so extra entries are never
+    // read. Building the whole map would cost more and answer the same.
+    std::map<ObjectId, double> current;
+    for (const ObjectId column : VariantColumns(variants_))
+        if (const Parameter* parameter = parameters().findById(column))
+            current[column] = parameter->value();
+    return WhichVariantMatches(variants_, current);
 }
 
 

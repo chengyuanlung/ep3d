@@ -562,6 +562,7 @@ void SnapshotViewExistence(const DrawingView& view, DrawingViewExistenceEdit& ed
     edit.detailCentreYMm = view.detailFrame().centreMm.y;
     edit.detailRadiusMm = view.detailFrame().radiusMm;
     edit.flatPattern = view.showsFlatPattern();
+    edit.variantName = view.variantName();
     edit.breakActive = view.breakSpan().active;
     edit.breakFromMm = view.breakSpan().fromMm;
     edit.breakToMm = view.breakSpan().toMm;
@@ -962,6 +963,52 @@ const DrawingView* DrawingDocument::findViewNamed(const std::string& name) const
 }
 
 namespace {
+// THE OTHER HALF OF THE PAIR (M54), and the third time it was needed.
+//
+// SnapshotViewExistence takes everything a view is; this puts it all back.
+// Until now the putting-back was a hand-written list inside the undo applier,
+// and three milestones in a row shipped a field it did not mention:
+//
+//   M49  the detail circle -- a restored detail projected the whole part
+//   M50  the break span -- a restored broken view showed the whole bar
+//   M54  the variant name -- a restored view drew the part's own numbers
+//        under a caption naming a size
+//
+// Each was found by a mutation, one milestone at a time, which is the pattern
+// this project keeps paying for: two lists of the same fields, each correct
+// when it was written. They are next to each other now, and the next field
+// added is a field somebody has to write down twice IN THE SAME PLACE -- which
+// is not proof against forgetting, but it is the difference between reading
+// one function and remembering another file exists.
+void RestoreViewFromExistence(const DrawingViewExistenceEdit& edit, DrawingView& view) {
+    if (edit.sectionActive) {
+        DrawingView::SectionCut cut;
+        cut.active = true;
+        cut.fromMm = Vec2{edit.sectionFromXMm, edit.sectionFromYMm};
+        cut.toMm = Vec2{edit.sectionToXMm, edit.sectionToYMm};
+        cut.arrowSide = edit.sectionArrowSide;
+        view.setSectionCut(cut);
+    }
+    if (edit.detailActive) {
+        DrawingView::DetailFrame frame;
+        frame.active = true;
+        frame.centreMm = Vec2{edit.detailCentreXMm, edit.detailCentreYMm};
+        frame.radiusMm = edit.detailRadiusMm;
+        view.setDetailFrame(frame);
+    }
+    if (edit.breakActive) {
+        BreakSpan span;
+        span.active = true;
+        span.fromMm = edit.breakFromMm;
+        span.toMm = edit.breakToMm;
+        span.horizontal = edit.breakHorizontal;
+        span.gapMm = edit.breakGapMm;
+        view.setBreakSpan(span);
+    }
+    view.setShowsFlatPattern(edit.flatPattern);
+    view.setVariantName(edit.variantName);
+}
+
 void SnapshotViewInto(const DrawingView& view, DrawingViewPlacementEdit& edit) {
     // The cut, both sides, so an edit that does not touch it puts it back
     // exactly -- see DrawingViewPlacementEdit.
@@ -996,6 +1043,7 @@ void SnapshotViewInto(const DrawingView& view, DrawingViewPlacementEdit& edit) {
     edit.beforeDetailCentreXMm = edit.afterDetailCentreXMm = view.detailFrame().centreMm.x;
     edit.beforeDetailCentreYMm = edit.afterDetailCentreYMm = view.detailFrame().centreMm.y;
     edit.beforeDetailRadiusMm = edit.afterDetailRadiusMm = view.detailFrame().radiusMm;
+    edit.beforeVariantName = edit.afterVariantName = view.variantName();
     edit.beforeBreakActive = edit.afterBreakActive = view.breakSpan().active;
     edit.beforeBreakFromMm = edit.afterBreakFromMm = view.breakSpan().fromMm;
     edit.beforeBreakToMm = edit.afterBreakToMm = view.breakSpan().toMm;
@@ -1097,6 +1145,21 @@ bool DrawingDocument::setSectionCut(ObjectId viewId, Vec2 fromMm, Vec2 toMm, int
     // THE VIEW IS NOW OUT OF DATE. Moving the knife changes what is drawn, and
     // a section that kept its old curves would be a picture of a cut nobody
     // asked for.
+    markDirty(viewId);
+    return true;
+}
+
+bool DrawingDocument::setViewVariant(ObjectId viewId, std::string variantName) {
+    DrawingView* view = findViewForEdit(viewId);
+    if (view == nullptr) return false;
+    DrawingViewPlacementEdit edit;
+    SnapshotViewInto(*view, edit);
+    edit.afterVariantName = variantName;
+    view->setVariantName(std::move(variantName));
+    recordDelta(edit, "Size " + view->name());
+    // THE VIEW IS NOW OUT OF DATE. A different size is different geometry, and
+    // one that kept its old curves would be a picture of the size it used to
+    // be, under a caption naming the new one.
     markDirty(viewId);
     return true;
 }
@@ -1268,6 +1331,9 @@ std::string DrawingDocument::viewLabelText(ObjectId viewId) const {
     // part are both rectangles-with-lines at a glance, and the one that goes
     // to the laser is not the one that goes to the fitter.
     if (view->showsFlatPattern()) label = "FLAT PATTERN  " + view->name();
+    // WHICH SIZE, from the same field the projection was built with. One name,
+    // two uses -- so a caption cannot name a size the picture is not of.
+    if (!view->variantName().empty()) label += "  [" + view->variantName() + "]";
     if (!letter.empty())
         label = view->isDetail() ? "DETAIL " + letter : letter + "-" + letter;
     // The scale is written only when it is NOT the sheet's. Written always, it
@@ -4372,39 +4438,11 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
                             DrawingScale{edit->scaleNumerator, edit->scaleDenominator},
                             edit->ownScale, edit->showHidden, edit->showTangent,
                             edit->parentViewId, edit->alignmentOffsetMm);
-            // THE CUT COMES BACK WITH IT. A restored section with no cut line
-            // projects the WHOLE part and looks entirely reasonable.
-            if (edit->sectionActive) {
-                DrawingView::SectionCut cut;
-                cut.active = true;
-                cut.fromMm = Vec2{edit->sectionFromXMm, edit->sectionFromYMm};
-                cut.toMm = Vec2{edit->sectionToXMm, edit->sectionToYMm};
-                cut.arrowSide = edit->sectionArrowSide;
-                back.setSectionCut(cut);
-            }
-            // ...AND SO DOES THE CIRCLE (M49). A restored detail with no
-            // circle projects the WHOLE part at the enlarged scale, and looks
-            // like a view somebody put there on purpose.
-            if (edit->detailActive) {
-                DrawingView::DetailFrame frame;
-                frame.active = true;
-                frame.centreMm = Vec2{edit->detailCentreXMm, edit->detailCentreYMm};
-                frame.radiusMm = edit->detailRadiusMm;
-                back.setDetailFrame(frame);
-            }
-            // ...AND SO DOES THE BREAK. Restored without it, a broken view
-            // comes back showing the whole three metres of bar, which reads as
-            // a view somebody forgot to break rather than as a lost edit.
-            back.setShowsFlatPattern(edit->flatPattern);
-            if (edit->breakActive) {
-                BreakSpan span;
-                span.active = true;
-                span.fromMm = edit->breakFromMm;
-                span.toMm = edit->breakToMm;
-                span.horizontal = edit->breakHorizontal;
-                span.gapMm = edit->breakGapMm;
-                back.setBreakSpan(span);
-            }
+            // EVERYTHING IT WAS, through the one function that knows what that
+            // is. A restored section with no cut line projects the WHOLE part
+            // and looks entirely reasonable; so does a detail with no circle,
+            // a broken view with no break, and a view whose size went missing.
+            RestoreViewFromExistence(*edit, back);
         }
         else
             removeObject(edit->viewId);
@@ -4448,6 +4486,7 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
         span.horizontal = forward ? edit->afterBreakHorizontal : edit->beforeBreakHorizontal;
         span.gapMm = forward ? edit->afterBreakGapMm : edit->beforeBreakGapMm;
         view->setBreakSpan(span);
+        view->setVariantName(forward ? edit->afterVariantName : edit->beforeVariantName);
         graph_.markDirty(edit->viewId);
         return;
     }

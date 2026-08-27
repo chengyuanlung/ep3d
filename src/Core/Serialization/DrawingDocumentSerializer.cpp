@@ -699,6 +699,9 @@ JsonValue toJson(const DrawingDocument& document) {
         // before this build too, and being right by luck is not the same as
         // being told.
         entry.set("flatPattern", JsonValue::makeBool(view->showsFlatPattern()));
+        // v53 (M54). WHICH SIZE, and empty means the part as its file has it.
+        // The same field the caption reads and the projection is built from.
+        entry.set("variant", JsonValue::makeString(view->variantName()));
         // DRAWING CONVENTIONS, on the view: two views of the same part on one
         // sheet may reasonably differ about them.
         entry.set("showHiddenLines", JsonValue::makeBool(view->showsHiddenLines()));
@@ -1181,6 +1184,8 @@ struct ViewData {
     int sectionArrowSide = 1;
     // v52 (M53): the blank, rather than a projection of the folded part.
     bool flatPattern = false;
+    // v53 (M54): which size.
+    std::string variantName;
     // v49 (M49): the circle on the parent, for the same reason.
     bool detailActive = false;
     Vec2 detailCentreMm{};
@@ -1544,6 +1549,12 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                     one.sectionArrowSide = side->asNumber() >= 0.0 ? 1 : -1;
                 }
                 one.sectionActive = true;
+            }
+            if (const JsonValue* variant = entry.find("variant")) {
+                if (variant->type() != JsonType::String)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'variant' is not a string");
+                one.variantName = variant->asString();
             }
             if (const JsonValue* flat = entry.find("flatPattern")) {
                 if (flat->type() != JsonType::Bool)
@@ -3117,6 +3128,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
             made.setDetailFrame(frame);
         }
         if (one.flatPattern) made.setShowsFlatPattern(true);
+        made.setVariantName(one.variantName);
         if (one.breakSpan.active) made.setBreakSpan(one.breakSpan);
     }
     // ENTITIES AFTER THE TABLES, because each names a layer.

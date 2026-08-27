@@ -224,6 +224,13 @@ public:
                                 Vec2 toMm, int arrowSide, double offsetMm);
     bool setSectionCut(ObjectId viewId, Vec2 fromMm, Vec2 toMm, int arrowSide);
 
+    // --- Which SIZE a view is of (M54) ----------------------------------------
+    //
+    // Empty means the part as its file has it. Named, the part is built at
+    // that size before it is projected -- and the caption reads the same
+    // field, so a view labelled B cannot be a projection of A.
+    bool setViewVariant(ObjectId viewId, std::string variantName);
+
     // --- Flat patterns (M53) --------------------------------------------------
     //
     // The blank, before anything is folded. A KIND OF VIEW rather than a type

@@ -44,10 +44,18 @@ struct SourceShapeResult {
 // goes out of scope. An instance uses it to harvest the part's mate
 // connectors, which are rebuilt from the file every pass for the same reason
 // the solid is. A view has no use for it.
+// `variantName` (M54), when given, is the SIZE to build. It is applied to the
+// loaded part BEFORE it is recomputed, so what comes back is that size and
+// nothing has to be told afterwards.
+//
+// A name this part does not have is REFUSED. Building the default and letting
+// the caller carry on is how a drawing ends up labelled B and projected from
+// A -- both real sizes, every number one the part has had, nothing dangling.
 SourceShapeResult ResolveSourceShape(
     const std::string& sourcePath, const std::string& bodyName,
     const RecomputeContext& context,
-    const std::function<void(const DocumentBase&)>& sawDocument = {});
+    const std::function<void(const DocumentBase&)>& sawDocument = {},
+    const std::string& variantName = {});
 
 // Is this file an assembly? Asked of the header, not the extension.
 bool IsAssemblySourceFile(const std::string& path);

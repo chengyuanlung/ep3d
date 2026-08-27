@@ -255,6 +255,19 @@ public:
     bool showsFlatPattern() const noexcept { return flatPattern_; }
     void setShowsFlatPattern(bool flat) noexcept { flatPattern_ = flat; }
 
+    // WHICH SIZE THIS VIEW IS OF (M54).
+    //
+    // Empty means the part as its file has it. Named, the variant is applied
+    // to the loaded part BEFORE anything is projected -- so the curves, the
+    // extent and every dimension measured against them are all of that size,
+    // because there is only one place the size was chosen.
+    //
+    // The caption reads the same name. One name, two uses: a view labelled B
+    // cannot be a projection of A, because the label and the projection are
+    // the same field.
+    const std::string& variantName() const noexcept { return variantName_; }
+    void setVariantName(std::string name) { variantName_ = std::move(name); }
+
     // THE CURVES, IN MODEL MILLIMETRES (see ProjectedGeometry.h). Derived:
     // no ObjectId, not registered, not undoable, thrown away and rebuilt
     // whenever the model changes.
@@ -314,6 +327,7 @@ private:
     DetailFrame detail_;
     BreakSpan break_;
     bool flatPattern_ = false;
+    std::string variantName_;
     // M44. Set when the object is added, from whichever page was current.
     ObjectId sheetId_ = kInvalidObjectId;
     ComputeState state_{ComputeState::Dirty};

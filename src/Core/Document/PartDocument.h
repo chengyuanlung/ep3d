@@ -12,6 +12,7 @@
 #include "Core/Parameter/ParameterManager.h"
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/SheetContourFeature.h"
+#include "Core/Parameter/PartVariant.h"
 #include "Core/Feature/SheetMetalStandards.h"
 #include "Core/Kernel/FaceQuery.h"
 #include "Core/Physics/MassProperties.h"
@@ -80,6 +81,32 @@ struct SheetMetalSettings {
 
 class PartDocument final : public DocumentBase {
 public:
+    // --- VARIANTS (M54) -------------------------------------------------------
+    //
+    // One part, several sizes. A variant is a NAMED set of parameter values,
+    // and applying one is exactly the parameter edits it names -- nothing
+    // else changes, and nothing remembers that it happened.
+    const std::vector<PartVariant>& variants() const noexcept { return variants_; }
+    std::string whyVariantRefused(const PartVariant& variant) const;
+    bool addVariant(PartVariant variant);
+    bool removeVariant(const std::string& name);
+    // For the loader and for undo: puts a row back exactly, where it was.
+    void restoreVariant(PartVariant variant, std::size_t at);
+
+    // Sets every parameter this variant names. Refused for a name this part
+    // does not have -- rather than leaving the model where it was and letting
+    // the caller believe it moved.
+    bool applyVariant(const std::string& name);
+
+    // WHICH VARIANT THIS PART IS SHOWING, derived by COMPARING the parameters
+    // with the table. Empty when they match none, which is a real answer: a
+    // part nudged off a variant is not still that variant.
+    //
+    // Nothing stores this. A stored answer is a second copy of what the
+    // parameters already hold, and it goes stale the first time a dimension
+    // is touched -- with the document still claiming the old name.
+    std::string activeVariantName() const;
+
     // --- SHEET METAL (M51) ---------------------------------------------------
     //
     // A part is sheet metal or it is not, and saying so is what gives every
@@ -876,6 +903,7 @@ public:
 
 
     SheetMetalSettings sheetMetal_;
+    std::vector<PartVariant> variants_;
 
 private:
 

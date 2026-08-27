@@ -339,6 +339,31 @@ JsonValue toJson(const PartDocument& document) {
     }
     root.set("parameters", std::move(parameters));
 
+    // v53 (M54). THE SIZES THIS PART COMES IN.
+    //
+    // The table, and NOT which row is current: that is answered by comparing
+    // the parameters with the table (see PartVariant.h), so a file carrying it
+    // would be carrying a second copy of what the parameters already say --
+    // and one that could disagree with them the moment the file was hand
+    // edited.
+    if (!document.variants().empty()) {
+        JsonValue variants = JsonValue::makeArray();
+        for (const PartVariant& variant : document.variants()) {
+            JsonValue row = JsonValue::makeObject();
+            row.set("name", JsonValue::makeString(variant.name));
+            JsonValue values = JsonValue::makeArray();
+            for (const auto& entry : variant.values) {
+                JsonValue cell = JsonValue::makeObject();
+                cell.set("parameterId", JsonValue::makeString(idToString(entry.first)));
+                cell.set("value", JsonValue::makeNumber(entry.second));
+                values.add(std::move(cell));
+            }
+            row.set("values", std::move(values));
+            variants.add(std::move(row));
+        }
+        root.set("variants", std::move(variants));
+    }
+
     // v51 (M51). WHAT THE PART IS MADE OF, when it is made of sheet.
     //
     // Written only when it IS sheet metal, so an ordinary solid's file does
@@ -3580,6 +3605,61 @@ LoadResult loadPartDocument(std::istream& in) {
         !wiring.ok) {
         return loadFailure(SerializationError::InvalidDependency, wiring.message);
     }
+    // v53 (M54). THE SIZE TABLE, read row by row and checked as it grows --
+    // so a file whose rows disagree about which columns the table has is
+    // refused rather than opened as a table nothing can compare against.
+    if (const JsonValue* variants = root.find("variants")) {
+        if (variants->type() != JsonType::Array)
+            return loadFailure(SerializationError::InvalidFieldType,
+                               "document: field 'variants' is not an array");
+        std::vector<PartVariant> rows;
+        for (std::size_t i = 0; i < variants->items().size(); ++i) {
+            const JsonValue& entry = variants->items()[i];
+            const std::string context = "variants[" + std::to_string(i) + "]";
+            if (entry.type() != JsonType::Object)
+                return loadFailure(SerializationError::InvalidFieldType,
+                                   context + ": entry is not an object");
+            PartVariant row;
+            const JsonValue* name = requireField(entry, "name", JsonType::String, context, err);
+            if (name == nullptr) return loadFailure(err.error, err.message);
+            row.name = name->asString();
+            const JsonValue* values =
+                requireField(entry, "values", JsonType::Array, context, err);
+            if (values == nullptr) return loadFailure(err.error, err.message);
+            for (const JsonValue& cell : values->items()) {
+                if (cell.type() != JsonType::Object)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a value is not an object");
+                const JsonValue* parameterId =
+                    requireField(cell, "parameterId", JsonType::String, context, err);
+                const JsonValue* value =
+                    requireField(cell, "value", JsonType::Number, context, err);
+                if (parameterId == nullptr || value == nullptr)
+                    return loadFailure(err.error, err.message);
+                const auto parsed = idFromString(parameterId->asString());
+                if (!parsed || *parsed > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": a variant's parameter id is not valid");
+                if (parameterIds.count(*parsed) == 0)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       context + ": this variant sets parameter " +
+                                           idToString(*parsed) +
+                                           ", which is not in this document");
+                row.values[*parsed] = value->asNumber();
+            }
+            // WHAT THE SAVER REFUSES, THE LOADER REFUSES, by calling the same
+            // function (ADR-M3-008) -- asked against the rows read so far, so
+            // a duplicate name or a row with the wrong columns is caught here
+            // rather than becoming a table nothing can compare against.
+            const std::string why = WhyVariantRefused(row, rows);
+            if (!why.empty())
+                return loadFailure(SerializationError::InvalidFieldType, context + ": " + why);
+            rows.push_back(std::move(row));
+        }
+        for (std::size_t i = 0; i < rows.size(); ++i)
+            document->restoreVariant(std::move(rows[i]), i);
+    }
+
     // v51 (M51). SHEET METAL, read as one setting.
     if (const JsonValue* sheet = root.find("sheetMetal")) {
         if (sheet->type() != JsonType::Object)
