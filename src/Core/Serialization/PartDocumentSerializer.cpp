@@ -20,6 +20,7 @@
 #include "Core/Feature/EdgeDressFeatures.h"
 #include "Core/Sketch/Sketch.h"
 #include "Core/Feature/PlaceholderFeature.h"
+#include "Core/Feature/SheetContourFeature.h"
 #include "Core/Material/Material.h"
 #include "Core/Serialization/JsonValue.h"
 #include <algorithm>
@@ -423,6 +424,34 @@ JsonValue toJson(const PartDocument& document) {
                 featureEntry.set("lengthParameterId",
                                  JsonValue::makeString(idToString(pad->lengthParameterId())));
                 featureEntry.set("materialId", JsonValue::makeString(idToString(pad->materialId())));
+            } else if (const auto* folded =
+                           dynamic_cast<const SheetContourFeature*>(feature.get())) {
+                // v52 (M53). THE CHAIN, which is the feature -- not a
+                // reference to one, because it has no identity of its own.
+                //
+                // What is NOT written is the thickness: that is the PART's,
+                // read at every rebuild, and a copy here would be the second
+                // place it lives (M52). Nor the solid: no topology ever
+                // crosses into this file (ADR-M4-004).
+                featureEntry.set("widthParameterId",
+                                 JsonValue::makeString(idToString(folded->widthParameterId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(folded->materialId())));
+                JsonValue steps = JsonValue::makeArray();
+                for (const ContourStep& step : folded->contour().steps) {
+                    JsonValue one = JsonValue::makeObject();
+                    one.set("flangeMm", JsonValue::makeNumber(step.flangeMm));
+                    one.set("angleDeg", JsonValue::makeNumber(step.bend.angleDeg));
+                    one.set("innerRadiusMm", JsonValue::makeNumber(step.bend.innerRadiusMm));
+                    // WHICH WAY IT FOLDS. A Z and a channel are the same three
+                    // lengths and the same two bends, and this is the only
+                    // thing that tells them apart.
+                    one.set("turnsLeft", JsonValue::makeBool(step.turnsLeft));
+                    steps.add(std::move(one));
+                }
+                featureEntry.set("steps", std::move(steps));
+                featureEntry.set("lastFlangeMm",
+                                 JsonValue::makeNumber(folded->contour().lastFlangeMm));
             } else if (const auto* imported =
                            dynamic_cast<const ImportFeature*>(feature.get())) {
                 // v28 (M22). A PATH, which is the first string a feature record
@@ -1215,7 +1244,14 @@ constexpr std::string_view kSolidFeatureTypeNames[] = {"Box",     "Pad",     "Po
                                                        "Mirror",  "Pattern", "Sweep",
                                                        "Loft",    "Shell",   "Draft",
                                                        "Hole",    "Boolean", "CircularPattern",
-                                                       "CurvePattern", "Import"};
+                                                       "CurvePattern", "Import",
+                                                       // M53. A folded section is a solid,
+                                                       // and this table is what decides
+                                                       // whether a pocket may be cut in one.
+                                                       // Left out, M52's feature would have
+                                                       // been a legal thing to make and an
+                                                       // illegal thing to build on.
+                                                       "SheetContour"};
 
 bool IsSolidFeatureTypeName(std::string_view name) {
     for (const std::string_view solid : kSolidFeatureTypeNames)
@@ -2122,6 +2158,68 @@ LoadResult loadPartDocument(std::istream& in) {
                 featureData.sketchId = *sketchRef;
                 featureData.lengthParameterId = *lengthRef;
                 featureData.materialId = *padMaterialId;
+            } else if (featureData.typeName == "SheetContour") {
+                const JsonValue* widthField = requireField(
+                    featureEntry, "widthParameterId", JsonType::String, featureContext, err);
+                if (widthField == nullptr) return loadFailure(err.error, err.message);
+                const JsonValue* foldMaterialField = requireField(
+                    featureEntry, "materialId", JsonType::String, featureContext, err);
+                if (foldMaterialField == nullptr) return loadFailure(err.error, err.message);
+                const auto widthRef = idFromString(widthField->asString());
+                const auto foldMaterialId = idFromString(foldMaterialField->asString());
+                if (!widthRef || !foldMaterialId || *widthRef > kMaxObjectId ||
+                    *foldMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": the folded section's width or "
+                                                        "material id is not a valid ObjectId");
+                if (parameterIds.count(*widthRef) == 0)
+                    return loadFailure(SerializationError::UnknownDependencyId,
+                                       featureContext +
+                                           ": the folded section's width parameter id " +
+                                           idToString(*widthRef) +
+                                           " is not a parameter in this document");
+                featureData.widthParameterId = *widthRef;
+                featureData.materialId = *foldMaterialId;
+
+                const JsonValue* lastField = requireField(featureEntry, "lastFlangeMm",
+                                                          JsonType::Number, featureContext, err);
+                if (lastField == nullptr) return loadFailure(err.error, err.message);
+                featureData.sheetContour.lastFlangeMm = lastField->asNumber();
+                if (const JsonValue* steps = featureEntry.find("steps")) {
+                    if (steps->type() != JsonType::Array)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext + ": field 'steps' is not an array");
+                    for (const JsonValue& entry : steps->items()) {
+                        if (entry.type() != JsonType::Object)
+                            return loadFailure(SerializationError::InvalidFieldType,
+                                               featureContext + ": a step is not an object");
+                        ContourStep step;
+                        const JsonValue* flange = requireField(entry, "flangeMm",
+                                                               JsonType::Number,
+                                                               featureContext, err);
+                        const JsonValue* angle = requireField(entry, "angleDeg",
+                                                              JsonType::Number,
+                                                              featureContext, err);
+                        const JsonValue* radius = requireField(entry, "innerRadiusMm",
+                                                               JsonType::Number,
+                                                               featureContext, err);
+                        if (flange == nullptr || angle == nullptr || radius == nullptr)
+                            return loadFailure(err.error, err.message);
+                        step.flangeMm = flange->asNumber();
+                        step.bend.angleDeg = angle->asNumber();
+                        step.bend.innerRadiusMm = radius->asNumber();
+                        // REQUIRED, not defaulted. Left to fall back to a left
+                        // turn, a Z would open as a channel: same lengths,
+                        // same angles, different part, and nothing on the
+                        // screen would look wrong.
+                        const JsonValue* turns = requireField(entry, "turnsLeft",
+                                                              JsonType::Bool,
+                                                              featureContext, err);
+                        if (turns == nullptr) return loadFailure(err.error, err.message);
+                        step.turnsLeft = turns->asBool();
+                        featureData.sheetContour.steps.push_back(step);
+                    }
+                }
             } else if (featureData.typeName == "Pocket") {
                 const JsonValue* baseField = requireField(featureEntry, "baseFeatureId",
                                                           JsonType::String, featureContext, err);

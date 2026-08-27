@@ -1,6 +1,10 @@
 #include "Core/Drawing/DrawingView.h"
 
 #include "Core/Drawing/DetailClip.h"
+#include "Core/Drawing/FlatPattern.h"
+#include "Core/Feature/SheetContourFeature.h"
+#include "Core/Parameter/Parameter.h"
+#include "Core/Serialization/PartDocumentSerializer.h"
 
 #include "Core/Drawing/DrawingDocument.h"
 
@@ -194,6 +198,66 @@ RecomputeResult DrawingView::recompute(const RecomputeContext& context) {
         diagnostic_ = message;
         return RecomputeResult{RecomputeStatus::Failed, std::move(message)};
     };
+
+    // --- THE FLAT PATTERN IS NOT A PROJECTION (M53) -------------------------
+    //
+    // It is the chain the part was folded from, laid out straight. So this
+    // does not touch the kernel at all: there is nothing to look at the solid
+    // from, and hidden-line removal of a folded part would answer a question
+    // nobody asked.
+    //
+    // AND IT CANNOT FLATTEN WHAT IT DID NOT FOLD. A solid that arrived through
+    // STEP has no chain -- no record of which faces were flanges, which
+    // cylinders were bends, or which way the metal went. Handing back a
+    // rectangle anyway would be a blank somebody would cut.
+    if (flatPattern_) {
+        LoadResult loaded = loadPartDocumentFromFile(sourcePath_);
+        if (!loaded)
+            return fail("the part this flat pattern is of could not be read: " +
+                        loaded.message);
+        const PartDocument& part = *loaded.document;
+        if (!part.sheetMetal().isSheetMetal)
+            return fail("'" + sourcePath_ +
+                        "' is not a sheet metal part, so there is nothing to unfold");
+
+        const SheetContourFeature* contour = nullptr;
+        double widthMm = 0.0;
+        for (const std::unique_ptr<Body>& body : part.bodies()) {
+            if (!bodyName_.empty() && body->name() != bodyName_) continue;
+            for (const std::unique_ptr<Feature>& feature : body->features()) {
+                const auto* folded = dynamic_cast<const SheetContourFeature*>(feature.get());
+                if (folded == nullptr) continue;
+                // MORE THAN ONE IS REFUSED, not silently the first. Two
+                // contours in a body is two blanks, and a drawing that showed
+                // one of them without saying which is a drawing of half a
+                // part.
+                if (contour != nullptr)
+                    return fail("this part has more than one folded section, and a flat "
+                                "pattern can only be of one -- say which body");
+                contour = folded;
+                const Parameter* width = nullptr;
+                for (const std::unique_ptr<Parameter>& one : part.parameters().items())
+                    if (one->id() == folded->widthParameterId()) width = one.get();
+                if (width == nullptr)
+                    return fail("the folded section's width parameter is not in the part");
+                widthMm = width->value();
+            }
+        }
+        if (contour == nullptr)
+            return fail("nothing in this part was folded from a section, so this program "
+                        "has no record of how to unfold it");
+
+        const FlatPatternResultGeometry blank =
+            FlatPatternOf(contour->contour(), part.sheetMetal().material,
+                          part.sheetMetal().thicknessMm, widthMm);
+        if (!blank.ok) return fail(blank.why);
+
+        projected_ = FlatPatternDrawing(blank);
+        sourceStamp_ = SourceFileStamp(sourcePath_);
+        state_ = ComputeState::Valid;
+        diagnostic_.clear();
+        return {RecomputeStatus::Success, {}};
+    }
 
     if (context.kernel == nullptr) return fail("no geometry kernel configured");
 

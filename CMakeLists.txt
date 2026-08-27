@@ -33,6 +33,7 @@ add_library(ParametricCADCore
     src/Core/Drawing/Revision.cpp
     src/Core/Drawing/DetailClip.cpp
     src/Core/Drawing/BreakFold.cpp
+    src/Core/Drawing/FlatPattern.cpp
     src/Core/Text/NumberText.cpp
     src/Core/Drawing/HoleTable.cpp
     src/Core/Drawing/SheetEdits.cpp
@@ -580,6 +581,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/SheetMetalStandardsTests.cpp
         tests/SheetMetalPartTests.cpp
         tests/SheetContourTests.cpp
+        tests/FlatPatternTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp
@@ -731,6 +733,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/Kernel/OcctDrawingViewTests.cpp
         tests/Kernel/OcctDetailViewTests.cpp
         tests/Kernel/OcctSheetContourTests.cpp
+        tests/Kernel/OcctFlatPatternViewTests.cpp
         tests/Kernel/OcctHoleStandardTests.cpp
         tests/Kernel/OcctStandardPartTests.cpp
         tests/Kernel/InterferenceStalenessTests.cpp

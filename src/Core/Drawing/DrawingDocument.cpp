@@ -561,6 +561,7 @@ void SnapshotViewExistence(const DrawingView& view, DrawingViewExistenceEdit& ed
     edit.detailCentreXMm = view.detailFrame().centreMm.x;
     edit.detailCentreYMm = view.detailFrame().centreMm.y;
     edit.detailRadiusMm = view.detailFrame().radiusMm;
+    edit.flatPattern = view.showsFlatPattern();
     edit.breakActive = view.breakSpan().active;
     edit.breakFromMm = view.breakSpan().fromMm;
     edit.breakToMm = view.breakSpan().toMm;
@@ -1100,6 +1101,38 @@ bool DrawingDocument::setSectionCut(ObjectId viewId, Vec2 fromMm, Vec2 toMm, int
     return true;
 }
 
+DrawingView& DrawingDocument::addFlatPatternView(std::string name, std::string sourcePath,
+                                                 std::string bodyName, Vec2 positionMm) {
+    if (name.empty()) throw std::invalid_argument("addFlatPatternView: a view needs a name");
+    if (sourcePath.empty())
+        throw std::invalid_argument("addFlatPatternView: a flat pattern is of a part, and no "
+                                    "part was named");
+    if (nameIsTaken(name, kInvalidObjectId))
+        throw std::invalid_argument("addFlatPatternView: '" + name + "' is already taken");
+
+    // A BASE VIEW WITH A FLAG. The direction is Front and means nothing here:
+    // a blank has no camera, it has a layout. It is set rather than left at
+    // whatever the enum's first value happens to be, because a reader of the
+    // file should see a stated answer and not an accident.
+    auto item = std::make_unique<DrawingView>(std::move(name), std::move(sourcePath),
+                                              std::move(bodyName), ViewDirection::Front,
+                                              positionMm);
+    auto& ref = *item;
+    ref.setShowsFlatPattern(true);
+    // HIDDEN LINES OFF. There is nothing behind a flat sheet, and a blank
+    // drawn with dashes would send a laser cutter looking for them.
+    ref.setShowsHiddenLines(false);
+    ref.setSheetId(currentPageId_);
+    views_.push_back(std::move(item));
+    addRecomputableNode(ref);
+
+    DrawingViewExistenceEdit edit;
+    SnapshotViewExistence(ref, edit);
+    edit.addedByTheEdit = true;
+    recordDelta(edit, "Flat pattern " + ref.name());
+    return ref;
+}
+
 DrawingView& DrawingDocument::addDetailView(std::string name, ObjectId parentViewId,
                                             Vec2 centreMm, double radiusMm,
                                             DrawingScale scale, double offsetMm) {
@@ -1231,6 +1264,10 @@ std::string DrawingDocument::viewLabelText(ObjectId viewId) const {
     // a detail captioned A-A sends the reader hunting for a cut line.
     const std::string letter = viewLetterOf(viewId);
     std::string label = view->name();
+    // A FLAT PATTERN SAYS SO, always. A blank and a folded view of the same
+    // part are both rectangles-with-lines at a glance, and the one that goes
+    // to the laser is not the one that goes to the fitter.
+    if (view->showsFlatPattern()) label = "FLAT PATTERN  " + view->name();
     if (!letter.empty())
         label = view->isDetail() ? "DETAIL " + letter : letter + "-" + letter;
     // The scale is written only when it is NOT the sheet's. Written always, it
@@ -4358,6 +4395,7 @@ void DrawingDocument::applyOwnDelta(const UndoDelta& delta, bool forward) {
             // ...AND SO DOES THE BREAK. Restored without it, a broken view
             // comes back showing the whole three metres of bar, which reads as
             // a view somebody forgot to break rather than as a lost edit.
+            back.setShowsFlatPattern(edit->flatPattern);
             if (edit->breakActive) {
                 BreakSpan span;
                 span.active = true;

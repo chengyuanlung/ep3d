@@ -8,6 +8,7 @@
 #include "Core/Feature/PadFeature.h"
 #include "Core/Feature/PlaceholderFeature.h"
 #include "Core/Feature/PocketFeature.h"
+#include "Core/Feature/SheetContourFeature.h"
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
@@ -120,6 +121,14 @@ FeatureSnapshot SnapshotFeature(const Feature& feature) {
         snapshot.baseFeatureId = transform->baseFeatureId();
         snapshot.frameId = transform->frameId();
         snapshot.materialId = transform->materialId();
+    } else if (const auto* folded = dynamic_cast<const SheetContourFeature*>(&feature)) {
+        // M52's feature was added without this, and nothing said so: the part
+        // saved cleanly, opened cleanly, and came back with no fold in it.
+        // M53's first end-to-end test is what noticed, because it asked the
+        // drawing to unfold a part that had been through a file.
+        snapshot.sheetContour = folded->contour();
+        snapshot.widthParameterId = folded->widthParameterId();
+        snapshot.materialId = folded->materialId();
     } else if (const auto* pocket = dynamic_cast<const PocketFeature*>(&feature)) {
         snapshot.baseFeatureId = pocket->baseFeatureId();
         snapshot.sketchId = pocket->sketchId();
@@ -142,6 +151,11 @@ Feature& RestoreFeatureFromSnapshot(PartDocument& document, Body& body,
         return document.restorePadFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                           snapshot.sketchId, snapshot.lengthParameterId,
                                           snapshot.materialId);
+    if (type == "SheetContour")
+        return document.restoreSheetContourFeature(body, snapshot.id, snapshot.name,
+                                                   snapshot.state, snapshot.sheetContour,
+                                                   snapshot.widthParameterId,
+                                                   snapshot.materialId);
     if (type == "Pocket")
         return document.restorePocketFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                              snapshot.baseFeatureId, snapshot.sketchId,

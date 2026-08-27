@@ -224,6 +224,15 @@ public:
                                 Vec2 toMm, int arrowSide, double offsetMm);
     bool setSectionCut(ObjectId viewId, Vec2 fromMm, Vec2 toMm, int arrowSide);
 
+    // --- Flat patterns (M53) --------------------------------------------------
+    //
+    // The blank, before anything is folded. A KIND OF VIEW rather than a type
+    // of its own: it sits on a sheet, takes dimensions, can be broken, and is
+    // captioned like any other. What differs is where its curves come from --
+    // the chain the part was folded from, not a projection of the solid.
+    DrawingView& addFlatPatternView(std::string name, std::string sourcePath,
+                                    std::string bodyName, Vec2 positionMm);
+
     // --- Broken views (M50) ---------------------------------------------------
     //
     // A long part on a short sheet. NOT a kind of view and NOT a cut: the span

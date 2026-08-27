@@ -677,6 +677,10 @@ struct DrawingViewExistenceEdit {
     double detailRadiusMm = 0.0;
     // M50. And the break, for the same reason again: a broken view restored
     // without it comes back showing the whole three metres of bar.
+    // M53. And whether it is a FLAT PATTERN. Restored without it, a blank
+    // comes back as a projection of the folded part -- which for a bracket is
+    // a rectangle with lines on it either way.
+    bool flatPattern = false;
     bool breakActive = false;
     double breakFromMm = 0.0;
     double breakToMm = 0.0;

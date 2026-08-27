@@ -241,6 +241,20 @@ public:
     void setBreakSpan(BreakSpan span) noexcept { break_ = span; }
     bool isBroken() const noexcept { return break_.usable(); }
 
+    // THE BLANK, BEFORE ANYTHING IS FOLDED (M53).
+    //
+    // A flat pattern is a KIND OF VIEW, like a section and a detail -- it goes
+    // on a sheet, takes dimensions, and can itself be broken. What is
+    // different is where its curves come from: not a projection of the solid,
+    // but the CHAIN the part was folded from (see FlatPattern.h).
+    //
+    // Which is why this is a flag on an ordinary view rather than a separate
+    // type. Everything else about it -- where it sits, what scale it is at,
+    // what it is called -- is what any view has, and a second type would be a
+    // second answer to all of it.
+    bool showsFlatPattern() const noexcept { return flatPattern_; }
+    void setShowsFlatPattern(bool flat) noexcept { flatPattern_ = flat; }
+
     // THE CURVES, IN MODEL MILLIMETRES (see ProjectedGeometry.h). Derived:
     // no ObjectId, not registered, not undoable, thrown away and rebuilt
     // whenever the model changes.
@@ -299,6 +313,7 @@ private:
     SectionCut section_;
     DetailFrame detail_;
     BreakSpan break_;
+    bool flatPattern_ = false;
     // M44. Set when the object is added, from whichever page was current.
     ObjectId sheetId_ = kInvalidObjectId;
     ComputeState state_{ComputeState::Dirty};

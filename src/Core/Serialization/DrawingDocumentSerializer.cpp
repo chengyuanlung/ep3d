@@ -693,6 +693,12 @@ JsonValue toJson(const DrawingDocument& document) {
             span.set("gapMm", JsonValue::makeNumber(view->breakSpan().gapMm));
             entry.set("break", std::move(span));
         }
+        // v52 (M53). WHETHER THIS IS THE BLANK. Written for every view rather
+        // than only when true: a reader that had to infer "not a flat pattern"
+        // from an absent field would be inferring it for every view made
+        // before this build too, and being right by luck is not the same as
+        // being told.
+        entry.set("flatPattern", JsonValue::makeBool(view->showsFlatPattern()));
         // DRAWING CONVENTIONS, on the view: two views of the same part on one
         // sheet may reasonably differ about them.
         entry.set("showHiddenLines", JsonValue::makeBool(view->showsHiddenLines()));
@@ -1173,6 +1179,8 @@ struct ViewData {
     Vec2 sectionFromMm{};
     Vec2 sectionToMm{};
     int sectionArrowSide = 1;
+    // v52 (M53): the blank, rather than a projection of the folded part.
+    bool flatPattern = false;
     // v49 (M49): the circle on the parent, for the same reason.
     bool detailActive = false;
     Vec2 detailCentreMm{};
@@ -1536,6 +1544,12 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
                     one.sectionArrowSide = side->asNumber() >= 0.0 ? 1 : -1;
                 }
                 one.sectionActive = true;
+            }
+            if (const JsonValue* flat = entry.find("flatPattern")) {
+                if (flat->type() != JsonType::Bool)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       context + ": field 'flatPattern' is not a boolean");
+                one.flatPattern = flat->asBool();
             }
             if (const JsonValue* circle = entry.find("detail")) {
                 if (circle->type() != JsonType::Object)
@@ -3102,6 +3116,7 @@ DrawingLoadResult loadDrawingDocument(std::istream& in) {
             frame.radiusMm = one.detailRadiusMm;
             made.setDetailFrame(frame);
         }
+        if (one.flatPattern) made.setShowsFlatPattern(true);
         if (one.breakSpan.active) made.setBreakSpan(one.breakSpan);
     }
     // ENTITIES AFTER THE TABLES, because each names a layer.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Document/ObjectId.h"
+#include "Core/Feature/SheetContour.h"
 #include "Core/Feature/HoleStandards.h"
 #include "Core/Kernel/EdgeQuery.h"
 #include "Core/Feature/ComputeState.h"
@@ -55,6 +56,18 @@ struct FeatureSnapshot {
     ObjectId lengthParameterId = kInvalidObjectId;
     // Pocket / Fillet / Chamfer -- the chain reference (ADR-M8-001)
     ObjectId baseFeatureId = kInvalidObjectId;
+    // SheetContour (M52). THE CHAIN ITSELF, not a reference to one.
+    //
+    // Every other field here is an ObjectId, and this is not -- because the
+    // chain of flanges and bends is not a document object. It has no id, it is
+    // not in the registry, and nothing else points at it: it IS the feature,
+    // the way a boolean's operation is. Making it an object to keep this
+    // struct uniform would give a thing an identity solely so a field could
+    // look like its neighbours.
+    //
+    // It shares widthParameterId with Box, which is what this struct is for --
+    // "a record only ever answers for its own type".
+    SheetContour sheetContour;
     // Revolve
     ObjectId axisEntityId = kInvalidObjectId;
     ObjectId angleParameterId = kInvalidObjectId;
