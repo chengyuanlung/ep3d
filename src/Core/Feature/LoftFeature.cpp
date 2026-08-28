@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/LoftFeature.h"
 
 #include "Core/Document/ObjectRegistry.h"
@@ -17,13 +18,6 @@
 namespace paramcad {
 
 namespace {
-
-const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
-    return sketch != nullptr ? *sketch : nullptr;
-}
 
 } // namespace
 
@@ -62,7 +56,7 @@ RecomputeResult LoftFeature::recompute(const RecomputeContext& context) {
     std::vector<PlanarProfileDefinition> definitions;
     definitions.reserve(sectionSketchIds_.size());
     for (const ObjectId sketchId : sectionSketchIds_) {
-        const Sketch* sketch = resolveSketch(context.registry, sketchId);
+        const Sketch* sketch = ResolveSketch(context.registry, sketchId);
         if (sketch == nullptr) return fail("a loft section sketch was not found");
 
         const ProfileResult profile = BuildProfile(*sketch);

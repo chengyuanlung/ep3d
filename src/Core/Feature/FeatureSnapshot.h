@@ -112,6 +112,9 @@ struct FeatureSnapshot {
     // and it is a reference like every other -- just one to something outside
     // the document.
     std::string importPath;
+    // Import (M59). kInvalidObjectId means the M22 behaviour: a file with no
+    // solid in it is refused rather than having its surfaces thickened.
+    ObjectId importThicknessParameterId = kInvalidObjectId;
     // Curve pattern (M21): `sketchId` above is the path, `countParameterId` the
     // number of instances. Nothing new needed; the fields already existed and
     // mean the same things.

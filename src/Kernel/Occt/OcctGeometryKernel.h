@@ -45,6 +45,10 @@ public:
     KernelInterferenceResult measureInterference(const KernelShape& a,
                                                  const KernelShape& b) override;
     KernelBoundsResult boundsOfShape(const KernelShape& shape) override;
+    ShapeKind kindOfShape(const KernelShape& shape) override;
+    ShapeResult importSurfaces(const std::string& path) override;
+    ShapeResult thickenSurface(const KernelShape& shape, double thicknessMm) override;
+    ShapeResult solidFromSkin(const KernelShape& shape) override;
     ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
                             double radiusMm) override;
     ShapeResult chamferEdges(const KernelShape& shape, const EdgeSelection& selection,

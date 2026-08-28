@@ -307,7 +307,7 @@ footer p { max-width: 74ch; }
 <body>
 <header class="masthead">
   <div class="wrap">
-    <div class="eyebrow">能力對照 · EP3D M58 · 2026-08-28</div>
+    <div class="eyebrow">能力對照 · EP3D M59 · 2026-08-28</div>
     <h1>EP3D 對照 Inventor</h1>
     <p class="sub">
       一份工具列層級的落差清單。上一版寫於 M46，結論是「剩下的差距不再是這張圖不完整，
@@ -318,7 +318,7 @@ footer p { max-width: 74ch; }
       <b>剩下沒有的是曲面建模、模擬、算圖，以及刻意不做的版本管理。</b>
     </p>
     <div class="stamp">
-      <div><span class="n">58</span><span class="l">里程碑</span></div>
+      <div><span class="n">59</span><span class="l">里程碑</span></div>
       <div><span class="n">2407</span><span class="l">測試</span></div>
       <div><span class="n">3</span><span class="l">文件型別 / Inventor 為 5</span></div>
       <div><span class="n">7</span><span class="l">mate 型別 / Inventor 約 12</span></div>
@@ -759,8 +759,18 @@ footer p { max-width: 74ch; }
               折彎補償與折彎扣除、<b>輪廓特徵</b>（一連串的凸緣與折彎，厚度每次重建都從零件的鈑金設定讀），
               以及<b>平板圖</b>——它是一種工程圖視圖，所以尺寸、標註、輸出全部照舊。
               <b>沒有的是</b>：沖壓成形特徵、角落解法、接縫與扣接、展開規則的自訂表。</td></tr>
-          <tr><td class="who">曲面建模</td><td><span class="pill p-none">完全沒有</span></td>
-              <td class="note">曲面是另一套幾何，不是實體的子集。做進去等於再蓋一次特徵樹。</td></tr>
+          <tr><td class="who">曲面建模<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">M59</span></td>
+              <td><span class="pill p-partial">有，讀進來的那一半</span></td>
+              <td class="note">M59 做的不是曲面建模工具，是<b>讓曲面存在而不會被誤讀</b>。
+              在此之前程式裡每一個形狀都是實體，每一個消費者都不問就假設是——
+              而一片殼是完全合法的形狀：建得起來、畫得出來、有邊界框，
+              OCCT 也會給它質量性質，<b>體積是 0</b>。0 是個數字，會一路走進料表變成 0 kg。
+              現在形狀的「種類」是<b>問出來的、從不儲存</b>，量測工具對殼具名拒絕，並說要怎麼辦。<br>
+              而這正好把 M57 那句誠實的話從另一頭關上：IGES 多半沒有實體，
+              現在可以把它的曲面讀進來、縫成皮、<b>封閉的就宣告為實體，開放的就給一個壁厚</b>
+              ——那是機械 CAD 裡最常做的一件曲面操作，把供應商的曲面模型變成零件。<br>
+              <b>沒有的是</b>：曲面的建立工具（掃掠、疊層、修補、邊界曲面）、修剪與延伸、
+              取代面、雕塑。那些才是「曲面建模」，而且是另一套特徵樹。</td></tr>
           <tr><td class="who">標準件庫<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">M45</span></td>
               <td><span class="pill p-partial">有，三種</span></td>
               <td class="note">ISO 4762 內六角螺絲、ISO 4032 六角螺帽、ISO 7089 平墊圈，M3 到 M12。<b>零件沒有檔案</b>：實例存的是 <span class="mono">std:ISO 4762 M8x30</span>，走的是檔案走的同一個解析器，所以組合件、工程圖視圖、材料表、質量計算全都不知道有「目錄」這回事。<b>墊圈的內徑不是抄的</b>——ISO 7089 的 d1 就是 ISO 273 的近配合，M39 已經有那張表。<b>沒有的是</b>：軸承、擋圈、鍵、型鋼，以及 Inventor 那種可自訂的家族表。</td></tr>

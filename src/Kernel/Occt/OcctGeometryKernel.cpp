@@ -1,3 +1,5 @@
+#include "Core/Text/NumberText.h"
+#include "Core/Export/ExchangeFormat.h"
 #include "Kernel/Occt/OcctGeometryKernel.h"
 #include <set>
 #include <gp_Lin.hxx>
@@ -27,10 +29,17 @@
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <Bnd_Box.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <BRepOffset_MakeOffset.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <IGESControl_Controller.hxx>
 #include <IGESControl_Reader.hxx>
 #include <IGESControl_Writer.hxx>
@@ -1296,6 +1305,277 @@ ShapeResult TheOneSolidIn(const std::vector<TopoDS_Shape>& roots, const std::str
 }
 
 } // namespace
+
+ShapeKind OcctGeometryKernel::kindOfShape(const KernelShape& shape) {
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull()) return ShapeKind::Empty;
+
+    // A COMPOUND OF ONE IS THAT ONE. OCCT wraps things in compounds freely --
+    // a boolean that produced a single solid often hands back a compound
+    // holding it -- and reporting "several shapes at once" for a shape that is
+    // plainly one solid would refuse every measurement in the program.
+    TopoDS_Shape here = occt->shape();
+    while (here.ShapeType() == TopAbs_COMPOUND) {
+        TopoDS_Iterator it(here);
+        if (!it.More()) return ShapeKind::Empty;
+        const TopoDS_Shape only = it.Value();
+        it.Next();
+        if (it.More()) return ShapeKind::Compound;
+        here = only;
+    }
+
+    switch (here.ShapeType()) {
+    case TopAbs_SOLID:
+    case TopAbs_COMPSOLID: return ShapeKind::Solid;
+    case TopAbs_SHELL: return ShapeKind::Shell;
+    case TopAbs_FACE: return ShapeKind::Face;
+    case TopAbs_WIRE:
+    case TopAbs_EDGE: return ShapeKind::Wire;
+    case TopAbs_VERTEX: return ShapeKind::Vertex;
+    default: return ShapeKind::Compound;
+    }
+}
+
+ShapeResult OcctGeometryKernel::importSurfaces(const std::string& path) {
+    if (path.empty())
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "no file name to import from"};
+    try {
+        // THE SAME TWO READERS, asked for everything rather than for a solid.
+        // Which one runs is decided by the FILE and not by its name, through
+        // the same function the import feature uses (M57).
+        std::vector<TopoDS_Shape> roots;
+        const std::optional<ExchangeFormat> format = FormatOfContents(path);
+        if (!format)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "could not read '" + path + "': it is neither STEP nor IGES"};
+        if (*format == ExchangeFormat::Iges) {
+            IGESControl_Controller::Init();
+            IGESControl_Reader reader;
+            if (reader.ReadFile(path.c_str()) != IFSelect_RetDone)
+                return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                                   "could not read '" + path + "' as IGES"};
+            reader.TransferRoots();
+            for (Standard_Integer i = 1; i <= reader.NbShapes(); ++i)
+                roots.push_back(reader.Shape(i));
+        } else if (*format == ExchangeFormat::Step) {
+            STEPControl_Reader reader;
+            if (reader.ReadFile(path.c_str()) != IFSelect_RetDone)
+                return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                                   "could not read '" + path + "' as STEP"};
+            reader.TransferRoots();
+            for (Standard_Integer i = 1; i <= reader.NbShapes(); ++i)
+                roots.push_back(reader.Shape(i));
+        } else {
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "'" + path + "' is " + std::string(NameOf(*format)) +
+                                   ", which carries no surfaces to read"};
+        }
+
+        // SEWN, because a surface model arrives as loose faces and a skin is
+        // what anything downstream can use. The tolerance is OCCT's own
+        // default rather than a number chosen here: a file's faces meet to
+        // whatever the system that wrote them held, and inventing a looser one
+        // would join faces that were meant to be apart.
+        BRepBuilderAPI_Sewing sewing;
+        int faces = 0;
+        for (const TopoDS_Shape& one : roots) {
+            if (one.IsNull()) continue;
+            for (TopExp_Explorer it(one, TopAbs_FACE); it.More(); it.Next()) {
+                sewing.Add(it.Current());
+                ++faces;
+            }
+        }
+        if (faces == 0)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "'" + path + "' has no surfaces in it either"};
+        sewing.Perform();
+        const TopoDS_Shape sewn = sewing.SewedShape();
+        if (sewn.IsNull())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the surfaces in '" + path + "' could not be joined up"};
+
+        auto handle = std::make_shared<OcctShape>(sewn);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused the surface import: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
+    }
+}
+
+namespace {
+
+// WHETHER A SKIN HAS HOLES IN IT.
+//
+// Asked of the topology rather than of the shell's `Closed` flag, which is a
+// cached answer that a sewing pass may or may not have set -- and a cached
+// answer to a geometric question is the thing this project trusts least. An
+// edge used by one face is a free boundary; a skin with none of those closes.
+//
+// NOT MEASURED BY THE TEST SUITE, and said here rather than left for somebody
+// to discover. The mutation gate can break this function -- make every skin
+// closed -- without a test noticing, because nothing in this program can
+// produce an OPEN skin: surfaces arrive only from files, and the only surface
+// files the suite can write come from closed solids. The path is reachable
+// from a real supplier file, which is what the whole operation exists for.
+// Hand-writing an IGES file holding a subset of faces would be testing a
+// fixture rather than this code.
+//
+// The empty-map guard below is defensive and unreachable: a shell or a face
+// always has edges.
+bool SkinIsClosed(const TopoDS_Shape& shape) {
+    TopTools_IndexedDataMapOfShapeListOfShape edges;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edges);
+    if (edges.IsEmpty()) return false;
+    for (Standard_Integer i = 1; i <= edges.Extent(); ++i)
+        if (edges.FindFromIndex(i).Extent() < 2) return false;
+    return true;
+}
+
+} // namespace
+
+ShapeResult OcctGeometryKernel::solidFromSkin(const KernelShape& shape) {
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull())
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "there is no skin here to close"};
+    const ShapeKind kind = kindOfShape(shape);
+    if (kind == ShapeKind::Solid)
+        return ShapeResult{shape, KernelError::None, {}};
+    if (kind != ShapeKind::Shell)
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "this wants a skin, and it is " + std::string(NameOf(kind))};
+
+    try {
+        TopoDS_Shape here = occt->shape();
+        while (here.ShapeType() == TopAbs_COMPOUND) {
+            TopoDS_Iterator it(here);
+            here = it.Value();
+        }
+        if (!SkinIsClosed(here))
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "this skin has holes in it, so what it encloses is not a "
+                               "question with an answer -- the faces have to meet all round "
+                               "before it can bound material"};
+        BRepBuilderAPI_MakeSolid maker(TopoDS::Shell(here));
+        if (!maker.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "these faces close, and the kernel would not take them as a "
+                               "solid"};
+        auto handle = std::make_shared<OcctShape>(maker.Shape());
+        KernelShape out(std::move(handle));
+        if (kindOfShape(out) != ShapeKind::Solid)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "the closed skin did not become a solid"};
+        return ShapeResult{std::move(out), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused to close this skin: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
+    }
+}
+
+ShapeResult OcctGeometryKernel::thickenSurface(const KernelShape& shape, double thicknessMm) {
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull())
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "there is no surface here to thicken"};
+    // ZERO IS NOT A THIN PART. An offset of nothing is the surface back again,
+    // and handing that back as a solid is precisely the confusion this whole
+    // milestone exists to remove.
+    if (std::fabs(thicknessMm) < 1e-9)
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "a thickness of zero leaves a surface, not a part"};
+
+    const ShapeKind kind = kindOfShape(shape);
+    if (kind != ShapeKind::Shell && kind != ShapeKind::Face)
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "thickening wants a surface, and this is " +
+                               std::string(NameOf(kind))};
+
+    // A CLOSED SKIN DOES NOT WANT A THICKNESS, and this is the correction the
+    // first draft of M59 needed. Offsetting a closed skin gives another closed
+    // skin -- there is no free boundary to build a wall at -- so the operation
+    // silently produced something that still could not be weighed. A skin that
+    // already encloses a volume wants to be TOLD it does.
+    {
+        TopoDS_Shape here = occt->shape();
+        while (here.ShapeType() == TopAbs_COMPOUND) {
+            TopoDS_Iterator it(here);
+            here = it.Value();
+        }
+        if (SkinIsClosed(here))
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "this skin already closes: it encloses a volume, so it can be "
+                               "made a solid directly rather than given a wall thickness. "
+                               "Hollow it afterwards if a wall is what was wanted"};
+    }
+
+    try {
+        // A THICK SOLID, NOT AN OFFSET SURFACE, and the difference is the whole
+        // operation. MakeOffsetShape in skin mode moves a skin sideways and
+        // hands back another skin -- which for a CLOSED skin looks like it
+        // worked and is still something that cannot be weighed. What is wanted
+        // is the material BETWEEN the skin and its offset, which is what
+        // MakeThickSolidBySimple builds.
+        //
+        // For a closed skin that means a hollow part with walls of this
+        // thickness, which is what "give this skin a thickness" has to mean:
+        // filling it in would be a different operation on a different input.
+        // BY JOIN, with nothing removed. The "simple" variant does not
+        // complete for a sewn skin -- asking it for the shape throws "command
+        // not done" -- and the join variant is the one that walks the faces,
+        // offsets each and builds the sides between. Intersection rather than
+        // arc at the corners, because a box's corners are where an arc join
+        // leaves the two offset faces not quite meeting.
+        BRepOffsetAPI_MakeThickSolid maker;
+        const TopTools_ListOfShape nothingRemoved;
+        maker.MakeThickSolidByJoin(occt->shape(), nothingRemoved, thicknessMm, 1.0e-4,
+                                   BRepOffset_Skin, Standard_True, Standard_False,
+                                   GeomAbs_Intersection);
+        if (!maker.IsDone())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "this surface could not be given a thickness of " +
+                                   ShortNumber(thicknessMm) +
+                                   " mm -- an offset turns itself inside out where the "
+                                   "surface curves tighter than the thickness"};
+        // THE RESULT IS THE ANSWER, NOT IsDone(). The simple algorithm does not
+        // set the done flag -- it builds in the call and hands the shape back --
+        // so asking IsDone() rejects every successful thicken there is. Found by
+        // the first run of these tests, which refused a perfectly good hollow
+        // box with a message about curvature.
+        const TopoDS_Shape made = maker.Shape();
+        if (made.IsNull())
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "this surface could not be given a thickness of " +
+                                   ShortNumber(thicknessMm) +
+                                   " mm -- an offset turns itself inside out where the "
+                                   "surface curves tighter than the thickness"};
+        auto handle = std::make_shared<OcctShape>(made);
+        KernelShape out(std::move(handle));
+        // AND IT HAS TO BE A SOLID AT THE END OF IT. A thicken that produced
+        // another shell would be the silent failure this milestone is about:
+        // the shape looks right, and everything that weighs it gets a zero.
+        if (kindOfShape(out) != ShapeKind::Solid)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "thickening did not produce a solid -- it produced " +
+                                   std::string(NameOf(kindOfShape(out))) +
+                                   ", so the skin has gaps in it and the offset had nothing "
+                                   "closed to bound"};
+        return ShapeResult{std::move(out), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused to thicken this surface: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
+    }
+}
 
 IoResult OcctGeometryKernel::exportIges(const KernelShape& shape, const std::string& path) {
     const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());

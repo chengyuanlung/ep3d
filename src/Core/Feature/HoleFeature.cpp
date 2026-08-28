@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/HoleFeature.h"
 
 #include "Core/Document/ObjectRegistry.h"
@@ -19,30 +20,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
-
-const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
-    return sketch != nullptr ? *sketch : nullptr;
-}
-
-const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    // The const overload yields const pointees (R2R4-M1).
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
-    if (recomputable == nullptr) return nullptr;
-    return dynamic_cast<const ISolidFeature*>(*recomputable);
-}
 
 HoleSizes sizesOf(const HoleFeature& hole, double typedDiameterMm, double depthMm) {
     return hole.sizes(typedDiameterMm, depthMm);
@@ -76,21 +53,21 @@ RecomputeResult HoleFeature::recompute(const RecomputeContext& context) {
 
     if (context.kernel == nullptr) return fail("no geometry kernel configured");
 
-    const ISolidFeature* base = resolveSolidFeature(
+    const ISolidFeature* base = ResolveSolidFeature(
         context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr) return fail("hole base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
         return fail("hole base feature is not in a valid state");
     if (!base->currentShape().isValid()) return fail("hole base feature has no valid shape");
 
-    const Sketch* sketch = resolveSketch(context.registry, sketchId_);
+    const Sketch* sketch = ResolveSketch(context.registry, sketchId_);
     if (sketch == nullptr) return fail("hole sketch not found");
     if (context.part().sketchSupportFrameIsMissing(sketch->id()))
         return fail("hole sketch's support frame is missing");
 
-    const Parameter* diameter = resolveParameter(context.registry, diameterParameterId_);
+    const Parameter* diameter = ResolveParameter(context.registry, diameterParameterId_);
     if (diameter == nullptr) return fail("hole diameter parameter not found");
-    const Parameter* depth = resolveParameter(context.registry, depthParameterId_);
+    const Parameter* depth = ResolveParameter(context.registry, depthParameterId_);
     if (depth == nullptr) return fail("hole depth parameter not found");
     // WHAT SIZE, FROM ONE PLACE (M39).
     //

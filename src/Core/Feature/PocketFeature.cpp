@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/PocketFeature.h"
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Kernel/IGeometryKernel.h"
@@ -15,38 +16,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
-
-const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
-    return sketch != nullptr ? *sketch : nullptr;
-}
-
-// The base is resolved by CAPABILITY, not by concrete type (ADR-M3-007, the
-// same resolution MassPropertiesNode uses): any feature that produces a solid
-// can be pocketed, so tomorrow's Revolve is a legal base with no change here.
-const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
-    if (recomputable == nullptr) return nullptr;
-    return dynamic_cast<const ISolidFeature*>(*recomputable);
-}
 
 } // namespace
 
@@ -111,7 +80,7 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
     // (ADR-M3-001), so resolving to it anyway would cut against geometry the
     // user has switched off and produce a healthy-looking wrong solid -- the
     // exact failure M8 gate E exists to prevent, reached from a new direction.
-    const ISolidFeature* base = resolveSolidFeature(
+    const ISolidFeature* base = ResolveSolidFeature(
         context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr)
         return fail("pocket base feature not found or does not produce a solid");
@@ -119,10 +88,10 @@ RecomputeResult PocketFeature::recompute(const RecomputeContext& context) {
         return fail("pocket base feature is not in a valid state");
     if (!base->currentShape().isValid()) return fail("pocket base feature has no valid shape");
 
-    const Sketch* sketch = resolveSketch(context.registry, sketchId_);
+    const Sketch* sketch = ResolveSketch(context.registry, sketchId_);
     if (sketch == nullptr) return fail("pocket sketch not found");
 
-    const Parameter* depth = resolveParameter(context.registry, depthParameterId_);
+    const Parameter* depth = ResolveParameter(context.registry, depthParameterId_);
     if (depth == nullptr) return fail("pocket depth parameter not found");
 
     // Profile validation is the same pure function Pad runs (ADR-M4-005); the

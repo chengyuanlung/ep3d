@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/RevolveFeature.h"
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Kernel/IGeometryKernel.h"
@@ -16,24 +17,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
-
-const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
-    return sketch != nullptr ? *sketch : nullptr;
-}
 
 } // namespace
 
@@ -60,10 +43,10 @@ RecomputeResult RevolveFeature::recompute(const RecomputeContext& context) {
 
     if (context.kernel == nullptr) return fail("no geometry kernel configured");
 
-    const Sketch* sketch = resolveSketch(context.registry, sketchId_);
+    const Sketch* sketch = ResolveSketch(context.registry, sketchId_);
     if (sketch == nullptr) return fail("revolve sketch not found");
 
-    const Parameter* angle = resolveParameter(context.registry, angleParameterId_);
+    const Parameter* angle = ResolveParameter(context.registry, angleParameterId_);
     if (angle == nullptr) return fail("revolve angle parameter not found");
     // The one unit check a feature performs, and it is here because the failure
     // mode is silent otherwise: 180 stored in a Millimeter parameter reads as

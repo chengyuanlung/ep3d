@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/TransformFeatures.h"
 
 #include "Core/Document/ObjectRegistry.h"
@@ -20,31 +21,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
-
-const Sketch* resolveSketchFor(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
-    return sketch != nullptr ? *sketch : nullptr;
-}
-
-const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
-    if (recomputable == nullptr) return nullptr;
-    return dynamic_cast<const ISolidFeature*>(*recomputable);
-}
 
 } // namespace
 
@@ -84,7 +60,7 @@ RecomputeResult TransformFeature::recompute(const RecomputeContext& context) {
     // are walked past, and a chain that runs out fails loudly rather than
     // building on geometry the user switched off.
     const ISolidFeature* base =
-        resolveSolidFeature(context.registry, context.part().activeChainBase(baseFeatureId_));
+        ResolveSolidFeature(context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr)
         return fail(noun + " base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
@@ -152,11 +128,11 @@ ShapeResult PatternFeature::buildCopies(const RecomputeContext& context,
     std::string why;
     if (!frameWorldOrFail(context, frameWorld, why))
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed, why};
-    const Parameter* count = resolveParameter(context.registry, countParameterId_);
+    const Parameter* count = ResolveParameter(context.registry, countParameterId_);
     if (count == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "pattern count parameter not found"};
-    const Parameter* spacing = resolveParameter(context.registry, spacingParameterId_);
+    const Parameter* spacing = ResolveParameter(context.registry, spacingParameterId_);
     if (spacing == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "pattern spacing parameter not found"};
@@ -220,11 +196,11 @@ ShapeResult CircularPatternFeature::buildCopies(const RecomputeContext& context,
     if (!frameWorldOrFail(context, frameWorld, why))
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed, why};
 
-    const Parameter* count = resolveParameter(context.registry, countParameterId_);
+    const Parameter* count = ResolveParameter(context.registry, countParameterId_);
     if (count == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "circular pattern count parameter not found"};
-    const Parameter* step = resolveParameter(context.registry, stepParameterId_);
+    const Parameter* step = ResolveParameter(context.registry, stepParameterId_);
     if (step == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "circular pattern step parameter not found"};
@@ -290,7 +266,7 @@ CurvePatternFeature::CurvePatternFeature(ObjectId id, std::string name, ComputeS
 
 ShapeResult CurvePatternFeature::buildCopies(const RecomputeContext& context,
                                              const KernelShape& base) {
-    const Parameter* count = resolveParameter(context.registry, countParameterId_);
+    const Parameter* count = ResolveParameter(context.registry, countParameterId_);
     if (count == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "curve pattern count parameter not found"};
@@ -300,7 +276,7 @@ ShapeResult CurvePatternFeature::buildCopies(const RecomputeContext& context,
         return ShapeResult{KernelShape{}, KernelError::NonFinite,
                            "curve pattern count must be a whole number of at least 1"};
 
-    const Sketch* path = resolveSketchFor(context.registry, pathSketchId_);
+    const Sketch* path = ResolveSketch(context.registry, pathSketchId_);
     if (path == nullptr)
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            "curve pattern path sketch not found"};

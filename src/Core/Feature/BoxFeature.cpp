@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/BoxFeature.h"
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Kernel/IGeometryKernel.h"
@@ -10,15 +11,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
 
 } // namespace
 
@@ -45,9 +37,9 @@ RecomputeResult BoxFeature::recompute(const RecomputeContext& context) {
         return {RecomputeStatus::Failed, "no geometry kernel configured"};
     }
 
-    const Parameter* width = resolveParameter(context.registry, widthParameterId_);
-    const Parameter* height = resolveParameter(context.registry, heightParameterId_);
-    const Parameter* depth = resolveParameter(context.registry, depthParameterId_);
+    const Parameter* width = ResolveParameter(context.registry, widthParameterId_);
+    const Parameter* height = ResolveParameter(context.registry, heightParameterId_);
+    const Parameter* depth = ResolveParameter(context.registry, depthParameterId_);
     if (width == nullptr || height == nullptr || depth == nullptr) {
         setState(ComputeState::Failed);
         return {RecomputeStatus::Failed, "width/height/depth parameter not found"};

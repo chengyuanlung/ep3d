@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/PadFeature.h"
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Kernel/IGeometryKernel.h"
@@ -15,24 +16,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
-
-const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
-    return sketch != nullptr ? *sketch : nullptr;
-}
 
 
 } // namespace
@@ -59,10 +42,10 @@ RecomputeResult PadFeature::recompute(const RecomputeContext& context) {
 
     if (context.kernel == nullptr) return fail("no geometry kernel configured");
 
-    const Sketch* sketch = resolveSketch(context.registry, sketchId_);
+    const Sketch* sketch = ResolveSketch(context.registry, sketchId_);
     if (sketch == nullptr) return fail("pad sketch not found");
 
-    const Parameter* length = resolveParameter(context.registry, lengthParameterId_);
+    const Parameter* length = ResolveParameter(context.registry, lengthParameterId_);
     if (length == nullptr) return fail("pad length parameter not found");
 
     // Profile validation is a pure function run here, never a cached node

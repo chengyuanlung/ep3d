@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/BooleanFeature.h"
 
 #include "Core/Document/ObjectRegistry.h"
@@ -14,15 +15,6 @@
 namespace paramcad {
 
 namespace {
-
-const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
-    if (recomputable == nullptr) return nullptr;
-    return dynamic_cast<const ISolidFeature*>(*recomputable);
-}
 
 } // namespace
 
@@ -69,9 +61,9 @@ RecomputeResult BooleanFeature::recompute(const RecomputeContext& context) {
 
     // Both through ACTIVITY, exactly as every other chain feature resolves its
     // base (ADR-M9-002): suppressing a middle feature closes the chain over it.
-    const ISolidFeature* target = resolveSolidFeature(
+    const ISolidFeature* target = ResolveSolidFeature(
         context.registry, context.part().activeChainBase(targetFeatureId_));
-    const ISolidFeature* tool = resolveSolidFeature(
+    const ISolidFeature* tool = ResolveSolidFeature(
         context.registry, context.part().activeChainBase(toolFeatureId_));
     if (target == nullptr) return fail("boolean target feature not found or is not a solid");
     if (tool == nullptr) return fail("boolean tool feature not found or is not a solid");

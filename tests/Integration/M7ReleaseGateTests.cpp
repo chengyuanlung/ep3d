@@ -843,6 +843,18 @@ public:
     ShapeResult importIges(const std::string& path) override {
         return inner.importIges(path);
     }
+    ShapeKind kindOfShape(const KernelShape& shape) override {
+        return inner.kindOfShape(shape);
+    }
+    ShapeResult importSurfaces(const std::string& path) override {
+        return inner.importSurfaces(path);
+    }
+    ShapeResult thickenSurface(const KernelShape& shape, double thicknessMm) override {
+        return inner.thickenSurface(shape, thicknessMm);
+    }
+    ShapeResult solidFromSkin(const KernelShape& shape) override {
+        return inner.solidFromSkin(shape);
+    }
     IoResult exportStl(const KernelShape& shape, const std::string& path,
                        double deflectionMm) override {
         return inner.exportStl(shape, path, deflectionMm);

@@ -7,6 +7,7 @@
 #include "Core/Geometry/MathTypes.h"
 #include "Core/Kernel/DrawingProjection.h"
 #include "Core/Kernel/KernelShape.h"
+#include "Core/Kernel/ShapeKind.h"
 #include "Core/Kernel/KernelTypes.h"
 #include "Core/Kernel/ProfileDefinition.h"
 #include <string>
@@ -325,6 +326,57 @@ public:
     // work until somebody built a part deeper than the guess, and then it
     // would stop part-way with nothing to say.
     virtual KernelBoundsResult boundsOfShape(const KernelShape& shape) = 0;
+
+    // WHAT KIND OF THING THIS IS (M59).
+    //
+    // Asked, never assumed and never stored. Until M59 every shape in this
+    // program was a solid and the assumption could not be wrong; a shell is a
+    // perfectly valid KernelShape that OCCT will happily report a volume of
+    // ZERO for, and a zero is a number every caller downstream will use.
+    virtual ShapeKind kindOfShape(const KernelShape& shape) = 0;
+
+    // --- Surfaces (M59) -----------------------------------------------------
+
+    // THE FACES IN A FILE, SEWN INTO A SKIN.
+    //
+    // The counterpart to importStep/importIges, which want a solid and refuse
+    // anything else. Most IGES in circulation has no solid in it -- the format
+    // was built for trimmed surfaces -- and M57 could only say so. This is what
+    // to do about it.
+    //
+    // Sewing may or may not close the skin, and WHICH IT IS matters: a closed
+    // one can become a solid, an open one has to be thickened. The caller asks
+    // kindOfShape and is told.
+    virtual ShapeResult importSurfaces(const std::string& path) = 0;
+
+    // A SKIN GIVEN A THICKNESS, which is how a supplier's surface model becomes
+    // a part.
+    //
+    // Offsets every face outward (or inward for a negative thickness) and caps
+    // the open edges. It is the one operation that turns something with no
+    // material into something with material, so it is where a surface stops
+    // being a surface -- and it is fragile in exactly the way offsets are: a
+    // skin whose curvature is tighter than the thickness turns itself inside
+    // out, and the kernel refuses rather than producing it.
+    virtual ShapeResult thickenSurface(const KernelShape& shape, double thicknessMm) = 0;
+
+    // A SKIN THAT ALREADY CLOSES, DECLARED TO BOUND MATERIAL.
+    //
+    // A closed shell and a solid are the same faces; what a solid has on top is
+    // the kernel's word that they enclose something. Sewing a surface model
+    // into something watertight is most of the way to a part and is not there,
+    // and this is the step that finishes it.
+    //
+    // AND IT IS A DIFFERENT OPERATION FROM THICKENING, which the first draft of
+    // M59 had to learn: offsetting a CLOSED skin gives another closed skin, not
+    // a wall, because there is no free boundary to build sides at. A closed
+    // skin does not want a thickness -- it wants to be told it is a solid.
+    // Hollowing it out afterwards is shellSolid, and that composition is the
+    // honest way to get a tank wall.
+    //
+    // An open skin is REFUSED by name: it has holes, and what a hole encloses
+    // is not a question with an answer.
+    virtual ShapeResult solidFromSkin(const KernelShape& shape) = 0;
 
     virtual ShapeResult filletEdges(const KernelShape& shape, const EdgeSelection& selection,
                                     double radiusMm) = 0;

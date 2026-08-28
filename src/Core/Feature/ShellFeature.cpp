@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/ShellFeature.h"
 
 #include "Core/Document/ObjectRegistry.h"
@@ -15,23 +16,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
-
-const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    // The const overload yields const pointees (R2R4-M1).
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
-    if (recomputable == nullptr) return nullptr;
-    return dynamic_cast<const ISolidFeature*>(*recomputable);
-}
 
 } // namespace
 
@@ -62,14 +46,14 @@ RecomputeResult ShellFeature::recompute(const RecomputeContext& context) {
     // Through ACTIVITY, exactly as a fillet resolves its base (ADR-M9-002):
     // suppressing a middle feature closes the chain over it, and the stored
     // reference is never rewritten because suppression is a state, not an edit.
-    const ISolidFeature* base = resolveSolidFeature(
+    const ISolidFeature* base = ResolveSolidFeature(
         context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr) return fail("shell base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
         return fail("shell base feature is not in a valid state");
     if (!base->currentShape().isValid()) return fail("shell base feature has no valid shape");
 
-    const Parameter* thickness = resolveParameter(context.registry, thicknessParameterId_);
+    const Parameter* thickness = ResolveParameter(context.registry, thicknessParameterId_);
     if (thickness == nullptr) return fail("shell thickness parameter not found");
 
     // A SHELL WITH NO OPENING is refused here as well as in the kernel, and the

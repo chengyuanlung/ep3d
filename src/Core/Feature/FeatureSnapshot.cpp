@@ -58,6 +58,7 @@ FeatureSnapshot SnapshotFeature(const Feature& feature) {
         snapshot.materialId = loft->materialId();
     } else if (const auto* imported = dynamic_cast<const ImportFeature*>(&feature)) {
         snapshot.importPath = imported->path();
+        snapshot.importThicknessParameterId = imported->thicknessParameterId();
         snapshot.materialId = imported->materialId();
     } else if (const auto* boolean = dynamic_cast<const BooleanFeature*>(&feature)) {
         snapshot.baseFeatureId = boolean->targetFeatureId();
@@ -167,7 +168,8 @@ Feature& RestoreFeatureFromSnapshot(PartDocument& document, Body& body,
             snapshot.materialId);
     if (type == "Import")
         return document.restoreImportFeature(body, snapshot.id, snapshot.name, snapshot.state,
-                                             snapshot.importPath, snapshot.materialId);
+                                            snapshot.importPath, snapshot.materialId,
+                                            snapshot.importThicknessParameterId);
     if (type == "Boolean")
         return document.restoreBooleanFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                               snapshot.booleanOperation, snapshot.baseFeatureId,

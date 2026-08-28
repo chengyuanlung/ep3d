@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Physics/MassPropertiesNode.h"
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Document/PartDocument.h"
@@ -16,25 +17,6 @@
 namespace paramcad {
 
 namespace {
-
-// Resolves the source feature by CAPABILITY, not by concrete type: any
-// feature that produces a solid qualifies (ISolidFeature). Naming BoxFeature
-// here would have needed a second branch for PadFeature and another for every
-// future solid feature -- the heterogeneity trap ADR-M3-007 records.
-//
-// dynamic_cast, never UB on mismatch: a registered IRecomputable that produces
-// no solid (e.g. a test stub reusing this id space) yields a controlled
-// nullptr.
-const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
-    if (recomputable == nullptr) return nullptr;
-    return dynamic_cast<const ISolidFeature*>(*recomputable);
-}
 
 const Material* resolveMaterial(const ObjectRegistry& registry, ObjectId id) {
     if (id == kInvalidObjectId) return nullptr;
@@ -71,7 +53,7 @@ RecomputeResult MassPropertiesNode::failAndMarkStale(const RecomputeContext& con
 }
 
 RecomputeResult MassPropertiesNode::recompute(const RecomputeContext& context) {
-    const ISolidFeature* box = resolveSolidFeature(context.registry, boxFeatureId_);
+    const ISolidFeature* box = ResolveSolidFeature(context.registry, boxFeatureId_);
     if (box == nullptr) return failAndMarkStale(context, "no solid feature configured");
 
     // Defense in depth (ADR-M3-004): the graph normally blocks this node with

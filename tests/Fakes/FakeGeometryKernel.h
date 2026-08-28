@@ -394,6 +394,34 @@ public:
                            "the fake kernel cannot read STEP"};
     }
 
+    ShapeKind kindOfShape(const KernelShape& shape) override {
+        // The fake has no topology, so everything it made is a solid by
+        // construction and everything else is nothing.
+        return shape.isValid() ? ShapeKind::Solid : ShapeKind::Empty;
+    }
+
+    ShapeResult importSurfaces(const std::string& path) override {
+        ++importSurfacesCallCount;
+        (void)path;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel cannot read surfaces"};
+    }
+
+    ShapeResult thickenSurface(const KernelShape& shape, double thicknessMm) override {
+        ++thickenSurfaceCallCount;
+        (void)shape;
+        (void)thicknessMm;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel has no surfaces to thicken"};
+    }
+
+    ShapeResult solidFromSkin(const KernelShape& shape) override {
+        ++solidFromSkinCallCount;
+        (void)shape;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel has no skins to close"};
+    }
+
     IoResult exportIges(const KernelShape& shape, const std::string& path) override {
         ++exportIgesCallCount;
         (void)shape;
@@ -592,6 +620,9 @@ public:
     int intersectShapesCallCount = 0;
     int exportStepCallCount = 0;
     int importStepCallCount = 0;
+    int importSurfacesCallCount = 0;
+    int thickenSurfaceCallCount = 0;
+    int solidFromSkinCallCount = 0;
     int exportIgesCallCount = 0;
     int importIgesCallCount = 0;
     int exportStlCallCount = 0;

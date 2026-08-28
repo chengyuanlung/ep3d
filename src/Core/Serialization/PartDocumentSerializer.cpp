@@ -491,6 +491,13 @@ JsonValue toJson(const PartDocument& document) {
                 // to the machine that saved it, which is the opposite of what a
                 // relative path was chosen for.
                 featureEntry.set("path", JsonValue::makeString(imported->path()));
+                // v54 (M59). WRITTEN ALWAYS, including when it is the invalid
+                // id, so a reader never has to decide what a missing field
+                // means -- the same call ADR-M3-008 makes about every other
+                // optional reference in this format.
+                featureEntry.set("thicknessParameterId",
+                                 JsonValue::makeString(
+                                     idToString(imported->thicknessParameterId())));
                 featureEntry.set("materialId",
                                  JsonValue::makeString(idToString(imported->materialId())));
             } else if (const auto* boolean =
@@ -2301,6 +2308,23 @@ LoadResult loadPartDocument(std::istream& in) {
                     return loadFailure(SerializationError::InvalidFieldType,
                                        featureContext + ": an import names no file");
                 featureData.importPath = pathField->asString();
+                // v54 (M59). OPTIONAL ON READ, because every file written
+                // before v54 lacks it and those imports mean exactly what an
+                // invalid id means here: refuse a file with no solid.
+                const JsonValue* thicknessField =
+                    featureEntry.find("thicknessParameterId");
+                if (thicknessField != nullptr) {
+                    if (thicknessField->type() != JsonType::String)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext +
+                                               ": import thicknessParameterId is not a string");
+                    const auto thicknessId = idFromString(thicknessField->asString());
+                    if (!thicknessId || *thicknessId > kMaxObjectId)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext +
+                                               ": import thicknessParameterId is not a valid id");
+                    featureData.importThicknessParameterId = *thicknessId;
+                }
                 const auto importMaterialId = idFromString(importMaterialField->asString());
                 if (!importMaterialId || *importMaterialId > kMaxObjectId)
                     return loadFailure(SerializationError::InvalidFieldType,

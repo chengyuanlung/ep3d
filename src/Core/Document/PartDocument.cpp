@@ -2190,6 +2190,11 @@ PocketFeature& PartDocument::restorePocketFeature(Body& body, ObjectId id, std::
 
 void PartDocument::wireImportFeature(ImportFeature& feature, ObjectId materialId) {
     addRecomputableNode(feature);
+    // THE THICKNESS IS AN OBJECT IN THIS DOCUMENT (M59), so unlike the file it
+    // CAN be an edge -- change the number and the part rebuilds, which is what
+    // makes it a parameter rather than a setting.
+    if (feature.thicknessParameterId() != kInvalidObjectId)
+        addDependency(feature.id(), feature.thicknessParameterId());
     // NO DEPENDENCY EDGES. An import's input is a FILE, and the graph tracks
     // objects in this document -- it has no node for something outside it.
     //
@@ -2201,10 +2206,11 @@ void PartDocument::wireImportFeature(ImportFeature& feature, ObjectId materialId
     rewireMassPropertiesSource(feature.id(), materialId);
 }
 
-ImportFeature& PartDocument::addImportFeature(Body& body, std::string name, std::string path) {
+ImportFeature& PartDocument::addImportFeature(Body& body, std::string name, std::string path,
+                                              ObjectId thicknessParameterId) {
     const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
-    ImportFeature& feature =
-        body.addFeature<ImportFeature>(std::move(name), std::move(path), materialId);
+    ImportFeature& feature = body.addFeature<ImportFeature>(
+        std::move(name), std::move(path), materialId, thicknessParameterId);
     wireImportFeature(feature, materialId);
     recordFeatureAdded(body, feature);
     return feature;
@@ -2212,10 +2218,12 @@ ImportFeature& PartDocument::addImportFeature(Body& body, std::string name, std:
 
 ImportFeature& PartDocument::restoreImportFeature(Body& body, ObjectId id, std::string name,
                                                   ComputeState state, std::string path,
-                                                  ObjectId materialId) {
+                                                  ObjectId materialId,
+                                                  ObjectId thicknessParameterId) {
     requireUnusedId(id, "restoreImportFeature");
-    ImportFeature& feature = body.addFeature<ImportFeature>(id, std::move(name), state,
-                                                            std::move(path), materialId);
+    ImportFeature& feature =
+        body.addFeature<ImportFeature>(id, std::move(name), state, std::move(path), materialId,
+                                       thicknessParameterId);
     wireImportFeature(feature, materialId);
     return feature;
 }

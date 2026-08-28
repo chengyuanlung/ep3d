@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/SweepFeature.h"
 
 #include "Core/Document/ObjectRegistry.h"
@@ -16,13 +17,6 @@
 namespace paramcad {
 
 namespace {
-
-const Sketch* resolveSketch(const ObjectRegistry& registry, ObjectId id) {
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* sketch = std::get_if<const Sketch*>(&*ref);
-    return sketch != nullptr ? *sketch : nullptr;
-}
 
 } // namespace
 
@@ -57,9 +51,9 @@ RecomputeResult SweepFeature::recompute(const RecomputeContext& context) {
         return fail("a sweep needs two different sketches: a section swept along a path on its "
                     "own plane has no volume");
 
-    const Sketch* profileSketch = resolveSketch(context.registry, profileSketchId_);
+    const Sketch* profileSketch = ResolveSketch(context.registry, profileSketchId_);
     if (profileSketch == nullptr) return fail("sweep profile sketch not found");
-    const Sketch* pathSketch = resolveSketch(context.registry, pathSketchId_);
+    const Sketch* pathSketch = ResolveSketch(context.registry, pathSketchId_);
     if (pathSketch == nullptr) return fail("sweep path sketch not found");
 
     const ProfileResult profile = BuildProfile(*profileSketch);

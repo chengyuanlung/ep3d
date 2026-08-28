@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/SheetContourFeature.h"
 
 #include "Core/Document/ObjectRegistry.h"
@@ -14,13 +15,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
 
 } // namespace
 
@@ -45,7 +39,7 @@ RecomputeResult SheetContourFeature::recompute(const RecomputeContext& context) 
 
     if (context.kernel == nullptr) return fail("no geometry kernel configured");
 
-    const Parameter* width = resolveParameter(context.registry, widthParameterId_);
+    const Parameter* width = ResolveParameter(context.registry, widthParameterId_);
     if (width == nullptr) return fail("this sheet contour's width parameter is not here");
     if (!(width->value() > 0.0))
         return fail("a sheet contour with no width is a section, not a part");

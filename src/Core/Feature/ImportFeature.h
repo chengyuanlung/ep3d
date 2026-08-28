@@ -42,15 +42,36 @@ class ImportFeature final : public Feature,
                             public ISolidFeature,
                             public IMaterialReferencing {
 public:
-    ImportFeature(std::string name, std::string path, ObjectId materialId);
+    ImportFeature(std::string name, std::string path, ObjectId materialId,
+                  ObjectId thicknessParameterId = kInvalidObjectId);
     // Restore constructor (deserialization): keeps the persisted id/state.
     ImportFeature(ObjectId id, std::string name, ComputeState state, std::string path,
-                  ObjectId materialId);
+                  ObjectId materialId, ObjectId thicknessParameterId = kInvalidObjectId);
 
     ObjectId id() const noexcept override { return Feature::id(); }
     std::string_view typeName() const noexcept override { return "Import"; }
 
     const std::string& path() const noexcept { return path_; }
+
+    // A THICKNESS, WHEN THE FILE HAS NO SOLID IN IT (M59).
+    //
+    // M57 established the honest fact about IGES: most of it carries trimmed
+    // surfaces and no volume anywhere, because that is what the format was
+    // built for. Until now this feature could only say so. With a thickness
+    // set, the surfaces are read, sewn into a skin and given that thickness --
+    // which is how a supplier's surface model becomes a part, and it is the
+    // commonest thing anybody does with a surface in mechanical CAD.
+    //
+    // kInvalidObjectId means the M22 behaviour and everything made before this:
+    // a file with no solid is refused. That stays the default because it is the
+    // right answer for STEP, where a missing solid means something went wrong
+    // rather than that the format works this way.
+    //
+    // THE SOLID IS STILL PREFERRED. When the file HAS a solid, the solid is
+    // what is used, thickness or no thickness -- a file that gained a proper
+    // solid should stop being approximated by an offset the moment it does,
+    // without anybody having to notice and clear a field.
+    ObjectId thicknessParameterId() const noexcept { return thicknessParameterId_; }
 
     ObjectId materialId() const noexcept override { return materialId_; }
     void clearMaterialReference() noexcept override { materialId_ = kInvalidObjectId; }
@@ -71,6 +92,7 @@ public:
 private:
     std::string path_;
     ObjectId materialId_;
+    ObjectId thicknessParameterId_;
     KernelShape currentShape_;
 };
 

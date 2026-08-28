@@ -679,10 +679,18 @@ public:
     // Base-capable like Pad: revolves `sketchId`'s profile about the sketch's
     // own line `axisEntityId` by the Radian Parameter `angleParameterId`.
     // AN IMPORT reads a solid from a STEP file. A chain BASE, like a Box.
-    ImportFeature& addImportFeature(Body& body, std::string name, std::string path);
+    //
+    // `thicknessParameterId` (M59) is what to do when the file has NO SOLID in
+    // it -- read its surfaces, sew them and give them that thickness.
+    // kInvalidObjectId keeps the M22 behaviour: a file with no solid is
+    // refused. See ImportFeature.h for why the solid still wins when there is
+    // one.
+    ImportFeature& addImportFeature(Body& body, std::string name, std::string path,
+                                    ObjectId thicknessParameterId = kInvalidObjectId);
     ImportFeature& restoreImportFeature(Body& body, ObjectId id, std::string name,
                                         ComputeState state, std::string path,
-                                        ObjectId materialId);
+                                        ObjectId materialId,
+                                        ObjectId thicknessParameterId = kInvalidObjectId);
 
     // A BOOLEAN combines TWO solids -- the first feature here to consume two.
     BooleanFeature& addBooleanFeature(Body& body, std::string name, BooleanOperation operation,

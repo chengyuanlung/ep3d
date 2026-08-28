@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/EdgeDressFeatures.h"
 #include "Core/Document/ObjectRegistry.h"
 #include "Core/Kernel/IGeometryKernel.h"
@@ -13,26 +14,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
-
-const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    // The const overload yields const pointees (R2R4-M1); these resolvers
-    // already returned const pointers, so the projection matches their intent.
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
-    if (recomputable == nullptr) return nullptr;
-    return dynamic_cast<const ISolidFeature*>(*recomputable);
-}
 
 } // namespace
 
@@ -79,7 +60,7 @@ RecomputeResult EdgeDressFeature::recompute(const RecomputeContext& context) {
     // (ADR-M3-001), so resolving to it anyway would cut against geometry the
     // user has switched off and produce a healthy-looking wrong solid -- the
     // exact failure M8 gate E exists to prevent, reached from a new direction.
-    const ISolidFeature* base = resolveSolidFeature(
+    const ISolidFeature* base = ResolveSolidFeature(
         context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr)
         return fail(noun + " base feature not found or does not produce a solid");
@@ -87,7 +68,7 @@ RecomputeResult EdgeDressFeature::recompute(const RecomputeContext& context) {
         return fail(noun + " base feature is not in a valid state");
     if (!base->currentShape().isValid()) return fail(noun + " base feature has no valid shape");
 
-    const Parameter* size = resolveParameter(context.registry, sizeParameterId_);
+    const Parameter* size = ResolveParameter(context.registry, sizeParameterId_);
     if (size == nullptr) return fail(noun + " size parameter not found");
 
     // Transactional as everywhere: local result, committed only on success --

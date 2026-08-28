@@ -2,6 +2,7 @@
 
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Kernel/KernelShape.h"
+#include "Core/Kernel/ShapeKind.h"
 
 namespace paramcad {
 
@@ -10,6 +11,21 @@ MeasureResult MeasureSolid(IGeometryKernel& kernel, const KernelShape& shape,
     MeasureResult out;
     if (!shape.isValid()) {
         out.message = "there is no solid here to measure";
+        return out;
+    }
+
+    // AND IT HAS TO BE A SOLID (M59).
+    //
+    // Until surfaces existed this could not be wrong, so it was not asked.
+    // A shell is a perfectly valid KernelShape: it builds, it draws, it has a
+    // bounding box -- and OCCT hands back mass properties for it, with a
+    // volume of ZERO. Zero is a number. It would have gone into the items list
+    // as a volume, into a mass as nothing, and onto a cut list as 0 kg, and
+    // the only sign would be a part that weighs nothing.
+    const ShapeKind kind = kernel.kindOfShape(shape);
+    const std::string notSolid = WhyNotASolid(kind);
+    if (!notSolid.empty()) {
+        out.message = notSolid;
         return out;
     }
 
@@ -60,6 +76,15 @@ MeasureResult MeasureBetweenSolids(IGeometryKernel& kernel, const KernelShape& a
     MeasureResult out;
     if (!a.isValid() || !b.isValid()) {
         out.message = "two solids are needed, and one of these is not there";
+        return out;
+    }
+    // TWO SOLIDS, and a shell is not one (M59). An interference between a
+    // solid and a skin is zero however deep the skin is buried in it, because
+    // a skin has no inside -- and zero here reads as "these do not touch".
+    for (const KernelShape* one : {&a, &b}) {
+        const std::string notSolid = WhyNotASolid(kernel.kindOfShape(*one));
+        if (notSolid.empty()) continue;
+        out.message = "two solids are needed, and " + notSolid;
         return out;
     }
 

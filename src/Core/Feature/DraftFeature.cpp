@@ -1,3 +1,4 @@
+#include "Core/Document/ResolveObject.h"
 #include "Core/Feature/DraftFeature.h"
 
 #include "Core/Document/ObjectRegistry.h"
@@ -15,23 +16,6 @@
 namespace paramcad {
 
 namespace {
-
-const Parameter* resolveParameter(const ObjectRegistry& registry, ObjectId id) {
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* parameter = std::get_if<const Parameter*>(&*ref);
-    return parameter != nullptr ? *parameter : nullptr;
-}
-
-const ISolidFeature* resolveSolidFeature(const ObjectRegistry& registry, ObjectId id) {
-    if (id == kInvalidObjectId) return nullptr;
-    // The const overload yields const pointees (R2R4-M1).
-    const std::optional<ObjectRegistry::ConstObjectRef> ref = registry.find(id);
-    if (!ref) return nullptr;
-    auto* const* recomputable = std::get_if<const IRecomputable*>(&*ref);
-    if (recomputable == nullptr) return nullptr;
-    return dynamic_cast<const ISolidFeature*>(*recomputable);
-}
 
 } // namespace
 
@@ -60,14 +44,14 @@ RecomputeResult DraftFeature::recompute(const RecomputeContext& context) {
 
     if (context.kernel == nullptr) return fail("no geometry kernel configured");
 
-    const ISolidFeature* base = resolveSolidFeature(
+    const ISolidFeature* base = ResolveSolidFeature(
         context.registry, context.part().activeChainBase(baseFeatureId_));
     if (base == nullptr) return fail("draft base feature not found or does not produce a solid");
     if (base->currentState() != ComputeState::Valid)
         return fail("draft base feature is not in a valid state");
     if (!base->currentShape().isValid()) return fail("draft base feature has no valid shape");
 
-    const Parameter* angle = resolveParameter(context.registry, angleParameterId_);
+    const Parameter* angle = ResolveParameter(context.registry, angleParameterId_);
     if (angle == nullptr) return fail("draft angle parameter not found");
     // THE UNIT CHECK a revolve makes, for the same reason: 10 stored in a
     // Millimeter parameter reads as 10 RADIANS. A revolve at least gets caught

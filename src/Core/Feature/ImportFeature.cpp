@@ -1,6 +1,8 @@
 #include "Core/Feature/ImportFeature.h"
 
+#include "Core/Document/ResolveObject.h"
 #include "Core/Export/ExchangeFormat.h"
+#include "Core/Parameter/Parameter.h"
 
 #include <fstream>
 
@@ -13,12 +15,15 @@
 
 namespace paramcad {
 
-ImportFeature::ImportFeature(std::string name, std::string path, ObjectId materialId)
-    : Feature(std::move(name)), path_(std::move(path)), materialId_(materialId) {}
+ImportFeature::ImportFeature(std::string name, std::string path, ObjectId materialId,
+                             ObjectId thicknessParameterId)
+    : Feature(std::move(name)), path_(std::move(path)), materialId_(materialId),
+      thicknessParameterId_(thicknessParameterId) {}
 
 ImportFeature::ImportFeature(ObjectId id, std::string name, ComputeState state, std::string path,
-                             ObjectId materialId)
-    : Feature(id, std::move(name), state), path_(std::move(path)), materialId_(materialId) {}
+                             ObjectId materialId, ObjectId thicknessParameterId)
+    : Feature(id, std::move(name), state), path_(std::move(path)), materialId_(materialId),
+      thicknessParameterId_(thicknessParameterId) {}
 
 bool ImportFeature::recompute() {
     return state() != ComputeState::Failed;
@@ -66,6 +71,35 @@ RecomputeResult ImportFeature::recompute(const RecomputeContext& context) {
 
     ShapeResult result = *format == ExchangeFormat::Iges ? context.kernel->importIges(path_)
                                                          : context.kernel->importStep(path_);
+
+    // NO SOLID IN THE FILE, BUT A THICKNESS TO GIVE ITS SURFACES (M59).
+    //
+    // Tried only when the solid path has already failed, so a file that has a
+    // real solid is never approximated by an offset of its skin -- and a file
+    // that gains one later stops being approximated without anybody clearing a
+    // field.
+    if (!result && thicknessParameterId_ != kInvalidObjectId) {
+        const Parameter* thickness = ResolveParameter(context.registry, thicknessParameterId_);
+        if (thickness == nullptr)
+            return fail("the thickness this import offsets its surfaces by is gone");
+        const ShapeResult skin = context.kernel->importSurfaces(path_);
+        if (!skin)
+            return fail(skin.message.empty()
+                            ? "'" + path_ + "' has neither a solid nor surfaces in it"
+                            : skin.message);
+        // A CLOSED SKIN IS A SOLID WAITING TO BE TOLD SO, and an open one is
+        // what the thickness is for. Which it is comes from the file rather
+        // than from a second field, because it is a fact about the geometry
+        // and not a choice: a supplier's closed surface model wants to be the
+        // part it already describes, and a surface model with holes in it
+        // wants a wall.
+        result = context.kernel->solidFromSkin(skin.shape);
+        if (!result) result = context.kernel->thickenSurface(skin.shape, thickness->value());
+        if (!result)
+            return fail(result.message.empty() ? "the surfaces in '" + path_ +
+                                                     "' could not be made into a part"
+                                               : result.message);
+    }
     if (!result)
         return fail(result.message.empty() ? "could not import '" + path_ + "'"
                                            : result.message);
