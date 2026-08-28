@@ -307,21 +307,22 @@ footer p { max-width: 74ch; }
 <body>
 <header class="masthead">
   <div class="wrap">
-    <div class="eyebrow">能力對照 · EP3D M46 · 2026-08-26</div>
+    <div class="eyebrow">能力對照 · EP3D M56 · 2026-08-28</div>
     <h1>EP3D 對照 Inventor</h1>
     <p class="sub">
-      一份工具列層級的落差清單。上一版寫於 M40，結論是「圖印得出來，但那張圖不完整」，
-      而「如果只補一項」指向表面粗糙度與 GD&amp;T。M41–M46 把那份清單整個做完了：
-      符號（粗糙度、幾何公差、基準）、泡泡球、視圖內錨點的收斂、一個檔案多張圖紙、
-      標準件庫，以及最後一項「接觸求解要不要做」——答案是不做，理由寫在下面。
-      <b>剩下的差距第一次不再是「這張圖不完整」，而是「這些模組不存在」。</b>
+      一份工具列層級的落差清單。上一版寫於 M46，結論是「剩下的差距不再是這張圖不完整，
+      而是這些模組不存在」，並排了一個順序：先鈑金。
+      <b>M47–M56 把那份模組清單做掉了大半。</b>熔接符號、修訂表、局部放大與破斷視圖
+      補完了工程圖那一側最後幾格；鈑金從展開語意、K 因子表到平板圖是一整條
+      （M51–M53）；變體（iPart）是 M54；量測工具是 M55；框架產生器與切割清單是 M56。
+      <b>剩下沒有的是曲面建模、模擬、算圖，以及刻意不做的版本管理。</b>
     </p>
     <div class="stamp">
-      <div><span class="n">46</span><span class="l">里程碑</span></div>
-      <div><span class="n">2191</span><span class="l">測試</span></div>
+      <div><span class="n">56</span><span class="l">里程碑</span></div>
+      <div><span class="n">2380</span><span class="l">測試</span></div>
       <div><span class="n">3</span><span class="l">文件型別 / Inventor 為 5</span></div>
       <div><span class="n">7</span><span class="l">mate 型別 / Inventor 約 12</span></div>
-      <div><span class="n">0</span><span class="l">鈑金／曲面</span></div>
+      <div><span class="n">27</span><span class="l">型鋼斷面 · 每一支都秤過</span></div>
     </div>
   </div>
 </header>
@@ -741,22 +742,38 @@ footer p { max-width: 74ch; }
           <tr>
             <td class="who">工程圖<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">.ep3dd</span></td>
             <td><span class="pill p-have">有</span></td>
-            <td class="note">M31 寫「目前最大的一個洞」，M36 寫「剩下的是剖視圖與公差」，M40 寫「剩下的是符號類的標註」。<b>三份清單都做完了。</b>視圖投影與隱線消除、尺寸、公差與配合、剖視圖與剖面線、孔表、GD&amp;T 與粗糙度、泡泡球、多張圖紙、標題欄、框線、材料表、圖紙編修工具、PDF 與 DXF 輸出。剩下的是熔接符號、修訂表、局部放大與破斷視圖 —— 都是「再多幾個符號」，不再是「這張圖不完整」。</td>
+            <td class="note">M31 寫「目前最大的一個洞」，M36 寫「剩下的是剖視圖與公差」，M40 寫「剩下的是符號類的標註」。<b>三份清單都做完了。</b>視圖投影與隱線消除、尺寸、公差與配合、剖視圖與剖面線、孔表、GD&amp;T 與粗糙度、泡泡球、多張圖紙、標題欄、框線、材料表、圖紙編修工具、PDF 與 DXF 輸出。上一版說「剩下的是熔接符號、修訂表、局部放大與破斷視圖」——<b>三項都做完了</b>：
+              熔接符號是 ISO 2553 的 A 制（M47），修訂表連同 A–Z 跳過 I/O/Q 的字母序是 M48，
+              局部放大是 M49、破斷視圖是 M50。破斷視圖那一項值得單獨說：<b>紙變短了，桿沒有</b>，
+              所以跨過破斷量到的尺寸仍然是整根的長度，而不是紙上的長度。</td>
           </tr>
           <tr>
             <td class="who">電氣圖<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">同 .ep3dd</span></td>
             <td><span class="pill p-have">有</span></td>
             <td class="note"><b>這一項 Inventor 沒有。</b>符號庫、導線、導出的 netlist、線號編排。Autodesk 那邊對應的是 AutoCAD Electrical，是另一個要另外買的產品。EP3D 把它放在同一種文件型別上，因為一張電氣圖就是一張圖紙 —— 同樣的紙、框線、標題欄、輸出路徑。</td>
           </tr>
-          <tr><td class="who">鈑金</td><td><span class="pill p-none">完全沒有</span></td>
-              <td class="note">展開、折彎、K 因子、板金專用特徵樹。這是一整套獨立的建模語意，不是實體特徵加幾個按鈕。</td></tr>
+          <tr><td class="who">鈑金<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">M51–M53</span></td>
+              <td><span class="pill p-partial">有，一條完整的路</span></td>
+              <td class="note">上一版把它排在第一位，理由是「最常見的一整類零件，而且展開圖接得上工程圖那側已經蓋好的機制」。
+              做出來的是那一整條：<b>K 因子表</b>（三種材料類別、緊中鬆三檔，含最小折彎半徑），
+              折彎補償與折彎扣除、<b>輪廓特徵</b>（一連串的凸緣與折彎，厚度每次重建都從零件的鈑金設定讀），
+              以及<b>平板圖</b>——它是一種工程圖視圖，所以尺寸、標註、輸出全部照舊。
+              <b>沒有的是</b>：沖壓成形特徵、角落解法、接縫與扣接、展開規則的自訂表。</td></tr>
           <tr><td class="who">曲面建模</td><td><span class="pill p-none">完全沒有</span></td>
               <td class="note">曲面是另一套幾何，不是實體的子集。做進去等於再蓋一次特徵樹。</td></tr>
           <tr><td class="who">標準件庫<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">M45</span></td>
               <td><span class="pill p-partial">有，三種</span></td>
               <td class="note">ISO 4762 內六角螺絲、ISO 4032 六角螺帽、ISO 7089 平墊圈，M3 到 M12。<b>零件沒有檔案</b>：實例存的是 <span class="mono">std:ISO 4762 M8x30</span>，走的是檔案走的同一個解析器，所以組合件、工程圖視圖、材料表、質量計算全都不知道有「目錄」這回事。<b>墊圈的內徑不是抄的</b>——ISO 7089 的 d1 就是 ISO 273 的近配合，M39 已經有那張表。<b>沒有的是</b>：軸承、擋圈、鍵、型鋼，以及 Inventor 那種可自訂的家族表。</td></tr>
-          <tr><td class="who">框架產生器</td><td><span class="pill p-none">完全沒有</span></td>
-              <td class="note">型鋼骨架、接頭處理、切割清單。</td></tr>
+          <tr><td class="who">框架產生器<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">M56</span></td>
+              <td><span class="pill p-partial">有，斜接與切割清單</span></td>
+              <td class="note">27 個 EN 10219／EN 10056 斷面（方管、矩管、圓管、等邊角鋼）。
+              <b>構件沒有檔案</b>：實例存的是 <span class="mono">frm:SHS 40x40x3 L=600 A=45 B=45</span>，
+              和標準件走同一個解析器，所以組合件、視圖、材料表、質量計算都不知道有「框架」這回事。
+              <b>切割清單就是材料表</b>，只是換一組欄位讀——不是第二份計數，所以兩張表不可能對不起來。
+              <b>那張斷面表是秤過的</b>：每一列都建成一公尺實體、用量測工具秤重，和公告的
+              kg/m 比對，所以少寫一個圓角半徑會讓測試紅掉，而不是讓報價少 6%。
+              <b>不猜的地方</b>：三根交於一點時哪一根穿過去、以及端點落在別根跨中要退到哪個面，
+              都是製造決定，程式留方切口並具名說出來。複合斜切（斜接面不在斷面自身軸上）同樣拒絕。</td></tr>
           <tr><td class="who">設計加速器</td><td><span class="pill p-none">完全沒有</span></td>
               <td class="note">齒輪、彈簧、軸承、皮帶的計算＋產生器。EP3D 有齒輪 <b>relation</b>（運動耦合），但不會替你算模數與齒數。</td></tr>
           <tr><td class="who">模擬</td><td><span class="pill p-none">完全沒有</span></td>
@@ -767,8 +784,11 @@ footer p { max-width: 74ch; }
               <td class="note">有爆炸圖與具名姿態，沒有動畫、沒有輸出成說明書。</td></tr>
           <tr><td class="who">算圖</td><td><span class="pill p-none">完全沒有</span></td>
               <td class="note">沒有 Studio、沒有材質貼圖、沒有光源。</td></tr>
-          <tr><td class="who">變體 / 模型狀態</td><td><span class="pill p-none">完全沒有</span></td>
-              <td class="note">iPart、iAssembly、Model States。這在 roadmap 排在工程圖之後，理由是它<b>乘在別的東西上面</b> —— 零件、組合件、圖都還在變的時候做，同一件事要做三遍。</td></tr>
+          <tr><td class="who">變體 / 模型狀態<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">M54</span></td>
+              <td><span class="pill p-partial">有 iPart，沒有 iAssembly</span></td>
+              <td class="note">一個變體是一組參數值，用名字取用。<b>尺寸在零件重算之前就套進去</b>，
+              而不是事後告訴誰——不然會出現「圖上標 B、投影自 A」這種每個數字都是真的、整張圖是錯的狀況。
+              問到不存在的變體名會被拒絕，並列出它有哪些。<b>沒有的是</b> iAssembly 與 Model States。</td></tr>
           <tr><td class="who">版本管理</td><td><span class="pill p-none">刻意不做</span></td>
               <td class="note">Vault、雲端文件、協作、分支。roadmap §52.3 已裁決不做。</td></tr>
         </tbody>
@@ -829,21 +849,22 @@ footer p { max-width: 74ch; }
       <h2>接下來</h2>
     </header>
     <div class="callout">
-      <h3>這一版沒有「如果只補一項」。</h3>
+      <h3>清單第一次短到可以整個唸完。</h3>
       <p>
-        前三版這裡分別寫的是「工程圖」、「公差」、「表面粗糙度與 GD&amp;T」，三項都做完了。
-        剩下的清單第一次<b>不再有那種形狀的項目</b> —— 沒有哪一項是
-        「EP3D 印得出圖，但那張圖不完整」。
+        前四版這裡分別寫的是「工程圖」、「公差」、「表面粗糙度與 GD&amp;T」、「鈑金」，
+        四項都做完了。現在沒有做的是三件事：<b>曲面建模</b>、<b>模擬</b>、<b>算圖</b>，
+        加上刻意不做的<b>版本管理</b>（roadmap §52.3 已裁決）與<b>接觸求解</b>（理由在下面）。
       </p>
       <p style="margin-top:.75rem">
-        剩下的是<b>模組不存在</b>：鈑金、曲面、框架產生器、AnyCAD。
-        每一項都是一整套建模語意，不是加幾個按鈕，而且都不會讓現有的圖變得不完整——
-        它們是<b>做不了那一類零件</b>，不是<b>那一類零件畫不完整</b>。這是不同的處境，
-        也是第一次可以這樣說。
+        如果一定要排順序：<b>IGES 進出</b>是最便宜的一筆（<span class="mono">TKDEIGES</span>
+        已經裝好，STEP 那條路整條可以照抄），然後是<b>曲面建模</b>——它被排到最後不是因為不重要，
+        而是因為曲面是另一套幾何，不是實體的子集，做進去等於再蓋一次特徵樹。
       </p>
       <p style="margin-top:.75rem">
-        如果一定要排一個順序：<b>鈑金</b>，因為它是最常見的一整類零件，而且展開圖是
-        工程圖那一側已經蓋好的機制接得上的東西。
+        <b>設計加速器</b>（齒輪、彈簧、軸承的計算＋產生器）現在的形狀變了：
+        M56 已經證明「一條解析路徑就是一個零件」這件事可以重用第二次，
+        所以一個齒輪產生器是<span class="mono">gear:</span> 加一張表，不是一個模組。
+        缺的是那些設計計算本身，那是資料與公式，不是架構。
       </p>
     </div>
     <div class="callout" style="margin-top:1rem">
@@ -873,15 +894,17 @@ footer p { max-width: 74ch; }
       </p>
     </div>
     <ul style="margin-top:1.25rem;max-width:74ch">
-      <li><b>熔接符號</b>是最便宜的一筆：M41 之後符號、引線、框都在了，缺的只是
-        ISO 2553 的欄位規則。</li>
-      <li><b>修訂表</b>的表格機制早就有（導出的列＋存下來的位置），缺的是修訂本身要存在哪裡 ——
-        那是版本管理的問題。</li>
+      <li><b>兩個實體之間的距離</b>仍然量不出來，而且 M55 把這件事寫在使用者看得到的地方：
+        核心只能回答兩個實體共用多少<b>體積</b>，對所有還沒碰到的組合都是零。
+        報 <span class="mono">0.0 mm</span> 會讓一根頭髮和一公尺得到同一個數字，所以
+        <b>那個問題是被具名拒絕的</b>，不是被省略的。這和接觸求解缺的是同一塊核心能力。</li>
       <li><b>真正的拓樸參照</b>仍然是欠帳。M43 讓視圖內的錨點不會再安靜地跳到別的點上，
         但投影曲線還是不知道自己來自哪條模型邊。做對它需要核心把面的來源
         （<span class="mono">provenance</span>，M17 已經有）帶過 HLR。</li>
+      <li><b>框架的接頭</b>只做斜接。三向接頭與端點落在跨中的 T 接都留方切口並具名說出來，
+        因為「哪一根穿過去」會改變切割清單上的兩個長度，那是製造決定不是計算。</li>
       <li><b>標準件庫再往下</b>是軸承、擋圈、鍵，以及讓使用者自己加家族表 ——
-        資料問題，成本在資料。</li>
+        資料問題，成本在資料。型鋼那一格 M56 已經填上了。</li>
     </ul>
   </div>
 </section>
@@ -889,20 +912,23 @@ footer p { max-width: 74ch; }
 <footer>
   <div class="wrap">
     <p>
-      EP3D 側的每一項都是在 M46 的程式碼裡查證過的，不是憑印象：特徵清單來自
+      EP3D 側的每一項都是在 M56 的程式碼裡查證過的，不是憑印象：特徵清單來自
       <span class="mono">src/Core/Feature/</span>，約束清單來自 <span class="mono">SketchConstraint.h</span>，
       mate 型別來自 <span class="mono">Mate.h</span>，三張工具列是 <span class="mono">--selftest --screenshot</span> 抓的實圖。
-      工程圖那一節的每一格也一樣查過原始碼。上一版說「沒有」的六項現在剩兩項：
-      GD&amp;T 與粗糙度在 <span class="mono">Annotation.h</span>，泡泡球是它的第四種 body，
-      多張圖紙在 <span class="mono">SheetPage.h</span>，標準件在
-      <span class="mono">Library/StandardParts.h</span>；前一批的公差、剖視、孔表與圖紙編修
-      工具分別在 <span class="mono">Tolerance.h</span>、<span class="mono">Hatch.h</span>、
-      <span class="mono">HoleTable.h</span>、<span class="mono">SheetEdits.h</span>。
-      仍然說「沒有」的（熔接符號、修訂表、局部放大與破斷、圖紙集）在
+      工程圖那一節的每一格也一樣查過原始碼。上一版說「沒有」的四項這一版都有了：
+      熔接符號在 <span class="mono">Drawing/WeldSymbol.h</span>，修訂表在
+      <span class="mono">Drawing/Revision.h</span>，局部放大與破斷在
+      <span class="mono">Drawing/DetailClip.h</span> 與 <span class="mono">Drawing/BreakFold.h</span>；
+      鈑金在 <span class="mono">Feature/SheetMetalStandards.h</span>、
+      <span class="mono">Feature/SheetContour.h</span> 與 <span class="mono">Drawing/FlatPattern.h</span>，
+      變體在 <span class="mono">Parameter/PartVariant.h</span>，量測在
+      <span class="mono">Measure/ModelMeasure.h</span>，框架在
+      <span class="mono">Frame/FrameProfile.h</span>、<span class="mono">Frame/FrameLayout.h</span> 與
+      <span class="mono">Frame/CutList.h</span>。仍然說「沒有」的（曲面、模擬、算圖、iAssembly）在
       <span class="mono">src/Core/</span> 裡只出現在註解裡，沒有對應的型別或 API。
-      <b>M38–M46 每個里程碑都跑過變異測試</b>：第一輪共量了 164 個變異，22 個存活；
-      逐一讀過、補上測試再跑之後只剩 6 個 —— 那 6 個是等價變異，或只有截圖看得見的
-      視覺事實，每一個都在程式碼裡寫明為什麼。
+      <b>M38 之後每個里程碑都跑過變異測試</b>，而且它一直比作者自己的測試找到更多：
+      M52 有一個特徵根本沒被序列化、M54 有兩句寫錯的註解，都是閘門找出來的。
+      每一輪的存活變異都逐一讀過——補上測試，或在程式碼裡寫明為什麼它是等價變異。
       Inventor 側的 ribbon 是示意重繪、非截圖，版本之間會有出入。
     </p>
   </div>

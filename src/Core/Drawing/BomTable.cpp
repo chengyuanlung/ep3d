@@ -3,6 +3,7 @@
 #include "Core/Assembly/AssemblyDocument.h"
 #include "Core/Assembly/Instance.h"
 #include "Core/Document/SourceShapeResolver.h"
+#include "Core/Library/LibraryPart.h"
 #include "Core/Serialization/AssemblyDocumentSerializer.h"
 
 #include <algorithm>
@@ -147,6 +148,21 @@ void CountInto(const AssemblyDocument& assembly, BomDepth depth,
         // the first: a sub-assembly whose file had moved was silently counted
         // as a single line, and the parts inside it vanished from the list. A
         // list with parts missing is one somebody orders from.
+        // A LIBRARY PART IS NOT A FILE and never was one -- it is built from
+        // its own path (M45's catalogue, M56's frame members). Counted as the
+        // single part it is, without being opened.
+        //
+        // FOUND BY M56, and it had been wrong since M45: this walk opened
+        // every source path to see what was inside it, and `std:ISO 4762 M8x30`
+        // is not something ifstream can open. An exploded parts list of an
+        // assembly containing one catalogue screw did not come out short -- it
+        // REFUSED, whole, with a message about a file that had never existed.
+        // Frame members would have made it the common case.
+        if (IsLibraryPath(instance->sourcePath())) {
+            Tally(*instance, quantityEach, rows, keys);
+            continue;
+        }
+
         std::ifstream probe(instance->sourcePath(), std::ios::binary);
         if (!probe) {
             out.why = "could not open " +

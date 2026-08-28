@@ -41,6 +41,10 @@ add_library(ParametricCADCore
     src/Core/Feature/SheetMetalStandards.cpp
     src/Core/Parameter/PartVariant.cpp
     src/Core/Measure/ModelMeasure.cpp
+    src/Core/Frame/FrameProfile.cpp
+    src/Core/Frame/FrameLayout.cpp
+    src/Core/Frame/CutList.cpp
+    src/Core/Library/LibraryPart.cpp
     src/Core/Feature/SheetContour.cpp
     src/Core/Feature/SheetContourFeature.cpp
     src/Core/Electrical/SchematicObjects.cpp
@@ -586,6 +590,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/FlatPatternTests.cpp
         tests/PartVariantTests.cpp
         tests/MeasureToolTests.cpp
+        tests/FrameGeneratorTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp
@@ -740,6 +745,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/Kernel/OcctFlatPatternViewTests.cpp
         tests/Kernel/OcctVariantViewTests.cpp
         tests/Kernel/OcctModelMeasureTests.cpp
+        tests/Kernel/OcctFrameMemberTests.cpp
         tests/Kernel/OcctHoleStandardTests.cpp
         tests/Kernel/OcctStandardPartTests.cpp
         tests/Kernel/InterferenceStalenessTests.cpp

@@ -4,7 +4,7 @@
 #include "Core/Assembly/Instance.h"
 #include "Core/Body/Body.h"
 #include "Core/Document/PartDocument.h"
-#include "Core/Library/StandardParts.h"
+#include "Core/Library/LibraryPart.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Recompute/RecomputeContext.h"
@@ -118,9 +118,9 @@ long long SourceFileStamp(const std::string& path) {
 }
 
 bool IsAssemblySourceFile(const std::string& path) {
-    // A CATALOGUE ITEM IS NEVER AN ASSEMBLY, and there is no file to open and
+    // A LIBRARY PART IS NEVER AN ASSEMBLY, and there is no file to open and
     // sniff. Asked without this, every library part costs a failed file open.
-    if (IsStandardPartPath(path)) return false;
+    if (IsLibraryPath(path)) return false;
     // Read from the header rather than from the extension, because the
     // extension is a convention and the header is the format. A file called
     // `.ep3d` that holds an assembly is still an assembly, and guessing from
@@ -150,7 +150,8 @@ SourceShapeResult ResolveSourceShape(
                 return refuse("'" + sourcePath +
                               "' contains itself, so there is no answer to what is inside it");
 
-    // A CATALOGUE ITEM (M45), not a file. Built from its designation here and
+    // A LIBRARY PART (M45's catalogue, M56's frame members), not a file. Built
+    // from its designation here and
     // then treated exactly as a loaded part is -- which is the whole reason
     // the library arrives as a source PATH: an instance, a drawing view, a
     // parts list and a mass calculation all already know how to read one of
@@ -158,30 +159,27 @@ SourceShapeResult ResolveSourceShape(
     //
     // BUILT EVERY PASS, like a file is re-read every pass. There is no copy on
     // disk to go stale and no cache here to be right about (ADR-M22-003).
-    if (IsStandardPartPath(sourcePath)) {
-        const std::optional<FastenerSpec> spec = FastenerOfPath(sourcePath);
-        if (!spec)
-            return refuse("'" + sourcePath +
-                          "' is not a part this library holds -- check the standard, the "
-                          "size and, for a screw, that the length is one that is made");
-        std::unique_ptr<PartDocument> built = BuildStandardPart(*spec);
-        built->setGeometryKernel(context.kernel);
-        built->setSketchSolver(context.sketchSolver);
-        const DocumentRecomputeReport made = built->recompute();
-        if (!made.success) {
-            const std::string why = WhyItDidNotBuild(*built, made);
-            return refuse("'" + spec->designation() + "' did not build" +
+    if (IsLibraryPath(sourcePath)) {
+        LibraryBuild made = BuildLibraryPart(sourcePath);
+        if (!made) return refuse(made.why);
+        PartDocument& built = *made.part;
+        built.setGeometryKernel(context.kernel);
+        built.setSketchSolver(context.sketchSolver);
+        const DocumentRecomputeReport report = built.recompute();
+        if (!report.success) {
+            const std::string why = WhyItDidNotBuild(built, report);
+            return refuse("'" + sourcePath + "' did not build" +
                           (why.empty() ? "" : " -- " + why));
         }
-        const Body* only = built->bodies().empty() ? nullptr : built->bodies().front().get();
+        const Body* only = built.bodies().empty() ? nullptr : built.bodies().front().get();
         const ISolidFeature* tip = nullptr;
         if (only != nullptr)
             for (const auto& feature : only->features())
                 if (const auto* solid = dynamic_cast<const ISolidFeature*>(feature.get()))
                     tip = solid;
         if (tip == nullptr || !tip->currentShape().isValid())
-            return refuse("'" + spec->designation() + "' built no solid");
-        if (sawDocument) sawDocument(*built);
+            return refuse("'" + sourcePath + "' built no solid");
+        if (sawDocument) sawDocument(built);
         SourceShapeResult result;
         result.ok = true;
         result.shape = tip->currentShape();
