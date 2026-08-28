@@ -44,6 +44,7 @@ add_library(ParametricCADCore
     src/Core/Frame/FrameProfile.cpp
     src/Core/Frame/FrameLayout.cpp
     src/Core/Frame/CutList.cpp
+    src/Core/Export/ExchangeFormat.cpp
     src/Core/Library/LibraryPart.cpp
     src/Core/Feature/SheetContour.cpp
     src/Core/Feature/SheetContourFeature.cpp
@@ -591,6 +592,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/PartVariantTests.cpp
         tests/MeasureToolTests.cpp
         tests/FrameGeneratorTests.cpp
+        tests/ExchangeFormatTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp
@@ -746,6 +748,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/Kernel/OcctVariantViewTests.cpp
         tests/Kernel/OcctModelMeasureTests.cpp
         tests/Kernel/OcctFrameMemberTests.cpp
+        tests/Kernel/OcctIgesTests.cpp
         tests/Kernel/OcctHoleStandardTests.cpp
         tests/Kernel/OcctStandardPartTests.cpp
         tests/Kernel/InterferenceStalenessTests.cpp

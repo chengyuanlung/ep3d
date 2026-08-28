@@ -31,6 +31,9 @@
 #include <Bnd_Box.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
+#include <IGESControl_Controller.hxx>
+#include <IGESControl_Reader.hxx>
+#include <IGESControl_Writer.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
 #include <StlAPI_Writer.hxx>
@@ -1246,6 +1249,121 @@ IoResult OcctGeometryKernel::exportStep(const KernelShape& shape, const std::str
     }
 }
 
+namespace {
+
+// THE ONE SOLID IN WHAT WAS READ, or a refusal naming how many there were.
+//
+// Shared by STEP and IGES rather than written twice (M57). Taking the first
+// would import a different part than the file holds, and fusing them would
+// invent material between parts that were deliberately apart -- both look like
+// success, and both would have had to be got right in two places.
+//
+// `formatName` is only in the message, and it earns its place: "holds no
+// solid" means something different for the two formats. A STEP file with no
+// solid is unusual. An IGES file with no solid is the NORMAL case -- the
+// format was built for trimmed surfaces -- and a user told their file is empty
+// will go looking for a fault that is not there.
+ShapeResult TheOneSolidIn(const std::vector<TopoDS_Shape>& roots, const std::string& path,
+                          const char* formatName) {
+    TopoDS_Shape only;
+    int solids = 0;
+    for (const TopoDS_Shape& one : roots) {
+        if (one.IsNull()) continue;
+        for (TopExp_Explorer it(one, TopAbs_SOLID); it.More(); it.Next()) {
+            ++solids;
+            if (solids == 1) only = it.Current();
+        }
+    }
+    if (solids == 0) {
+        const std::string why =
+            std::string(formatName) == std::string("IGES")
+                ? "'" + path +
+                      "' holds no solid. That is the ordinary case for IGES: the format "
+                      "carries trimmed surfaces, and most files written as IGES have no "
+                      "volume anywhere in them. Ask the sender for STEP"
+                : "'" + path +
+                      "' holds no solid -- surfaces and wireframe cannot be imported as a "
+                      "part yet";
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed, why};
+    }
+    if (solids > 1)
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "'" + path + "' holds " + std::to_string(solids) +
+                               " solids, and importing several as one part is not "
+                               "supported yet"};
+    auto handle = std::make_shared<OcctShape>(only);
+    return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+}
+
+} // namespace
+
+IoResult OcctGeometryKernel::exportIges(const KernelShape& shape, const std::string& path) {
+    const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
+    if (occt == nullptr || occt->shape().IsNull())
+        return IoResult{false, "there is no solid to export"};
+    if (path.empty()) return IoResult{false, "no file name to export to"};
+
+    try {
+        // MILLIMETRES, said out loud, for the reason the STEP writer says it:
+        // OCCT's default comes from a static resource file, so a part exported
+        // on one machine could arrive a thousand times too big on another.
+        IGESControl_Controller::Init();
+        Interface_Static::SetCVal("write.iges.unit", "MM");
+        // BREP MODE, which is the whole point of writing IGES from a solid.
+        //
+        // The default is 0 -- faces as trimmed surfaces -- and it is the wrong
+        // default for a program whose only export is a solid. A file written
+        // that way still opens, still looks right on screen, and arrives at the
+        // far end as a bag of surfaces that nothing can cut, fillet or weigh:
+        // the reader has to sew them back into a shell and guess whether it
+        // closed. Mode 1 writes the manifold solid B-rep (entity 186), so what
+        // comes back is what was sent.
+        Interface_Static::SetIVal("write.iges.brep.mode", 1);
+
+        IGESControl_Writer writer("MM", 1);
+        if (!writer.AddShape(occt->shape()))
+            return IoResult{false, "OCCT could not translate that solid into IGES"};
+        writer.ComputeModel();
+        if (!writer.Write(path.c_str()))
+            return IoResult{false, "OCCT could not write '" + path + "'"};
+        return IoResult{true, {}};
+    } catch (const Standard_Failure& failure) {
+        return IoResult{false, std::string("OCCT refused the IGES export: ") +
+                                   (failure.GetMessageString() != nullptr
+                                        ? failure.GetMessageString()
+                                        : "no message")};
+    }
+}
+
+ShapeResult OcctGeometryKernel::importIges(const std::string& path) {
+    if (path.empty())
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "no file name to import from"};
+    try {
+        IGESControl_Controller::Init();
+        IGESControl_Reader reader;
+        if (reader.ReadFile(path.c_str()) != IFSelect_RetDone)
+            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                               "could not read '" + path + "' as IGES"};
+        // SEW THE SURFACES UP BEFORE LOOKING FOR A SOLID. An IGES file written
+        // in surface mode by anything -- including this program, if the brep
+        // mode above were ever lost -- arrives as loose faces, and OCCT will
+        // only build a solid from them if it is asked to stitch first.
+        reader.SetReadVisible(Standard_True);
+        reader.TransferRoots();
+        std::vector<TopoDS_Shape> roots;
+        for (Standard_Integer i = 1; i <= reader.NbShapes(); ++i)
+            roots.push_back(reader.Shape(i));
+        return TheOneSolidIn(roots, path, "IGES");
+    } catch (const Standard_Failure& failure) {
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           std::string("OCCT refused the IGES import: ") +
+                               (failure.GetMessageString() != nullptr
+                                    ? failure.GetMessageString()
+                                    : "no message")};
+    }
+}
+
 ShapeResult OcctGeometryKernel::importStep(const std::string& path) {
     if (path.empty())
         return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
@@ -1261,33 +1379,10 @@ ShapeResult OcctGeometryKernel::importStep(const std::string& path) {
                                "'" + path + "' holds no geometry"};
         reader.TransferRoots();
 
-        // ONE SOLID, or a refusal naming how many there were.
-        //
-        // Taking the first would import a different part than the file holds,
-        // and fusing them would invent material between parts that were
-        // deliberately apart. Both look like success.
-        TopoDS_Shape only;
-        int solids = 0;
-        for (Standard_Integer i = 1; i <= reader.NbShapes(); ++i) {
-            const TopoDS_Shape one = reader.Shape(i);
-            if (one.IsNull()) continue;
-            for (TopExp_Explorer it(one, TopAbs_SOLID); it.More(); it.Next()) {
-                ++solids;
-                if (solids == 1) only = it.Current();
-            }
-        }
-        if (solids == 0)
-            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
-                               "'" + path + "' holds no solid -- surfaces and wireframe cannot "
-                               "be imported as a part yet"};
-        if (solids > 1)
-            return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
-                               "'" + path + "' holds " + std::to_string(solids) +
-                                   " solids, and importing several as one part is not "
-                                   "supported yet"};
-
-        auto handle = std::make_shared<OcctShape>(only);
-        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+        std::vector<TopoDS_Shape> roots_;
+        for (Standard_Integer i = 1; i <= reader.NbShapes(); ++i)
+            roots_.push_back(reader.Shape(i));
+        return TheOneSolidIn(roots_, path, "STEP");
     } catch (const Standard_Failure& failure) {
         return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
                            std::string("OCCT refused the STEP import: ") +

@@ -4,7 +4,9 @@
 // drives the SAME path a mouse does, so checking it against anything but a real
 // document, a real solver and a real kernel would be checking it against a stub.
 
+#include <fstream>
 #include <cstdio>
+#include "Core/Export/ExchangeFormat.h"
 #include "Core/Serialization/AssemblyDocumentSerializer.h"
 #include "Cli/SketchScript.h"
 #include "Core/Feature/DraftFeature.h"
@@ -1058,14 +1060,42 @@ TEST(CliScriptTest, M22_CLI_002_TheEXTENSIONChoosesTheFormat) {
 
 TEST(CliScriptTest, M22_CLI_003_AnUnknownExtensionIsREFUSED) {
     // Guessing STEP would write a file the name says is something else.
-    ScratchIo odd{"mystery.iges"};
+    //
+    // THIS TEST USED .iges AS ITS "UNKNOWN" EXTENSION, and M57 made that a
+    // format -- so it started passing an export it was written to refuse. The
+    // unknown extension has to be one nothing claims, and .sat is a format
+    // this program has no plans for.
+    ScratchIo odd{"mystery.sat"};
     ScriptRun run;
     const ScriptOutcome outcome =
         run(std::string("sketch A\ntool rect\nclick -30 -30\nclick 30 30\npad Block 40\n"
                         "solve\nexport Block ") + odd.path + "\n");
     EXPECT_FALSE(outcome.ok);
-    EXPECT_NE(outcome.message.find("use .step or .stl"), std::string::npos) << outcome.message;
+    EXPECT_NE(outcome.message.find(".step"), std::string::npos) << outcome.message;
+    EXPECT_NE(outcome.message.find(".iges"), std::string::npos) << outcome.message;
     EXPECT_FALSE(odd.exists());
+}
+
+TEST(CliScriptTest, M57_CLI_001_IGESIsWrittenFromTheSameCommand) {
+    // The point of one place deciding what a name means: nothing in the export
+    // command had to learn about IGES for this to work.
+    ScratchIo iges{"block.igs"};
+    ScriptRun run;
+    const ScriptOutcome outcome =
+        run(std::string("sketch A\ntool rect\nclick -30 -30\nclick 30 30\npad Block 40\n"
+                        "solve\nexport Block ") + iges.path + "\n");
+    ASSERT_TRUE(outcome.ok) << outcome.message;
+    EXPECT_TRUE(LogMentions(outcome, "(IGES 5.3 B-rep, mm)")) << outcome.message;
+    EXPECT_TRUE(iges.exists());
+
+    // AND THE FILE IS IGES INSIDE, which the log line and the file's existence
+    // do not say. Found by the mutation gate: writing every export as STEP
+    // passed this test, because the note beside the call still said IGES and a
+    // STEP file exists just as hard as an IGES one. The name would have lied
+    // and the log would have agreed with the name.
+    ASSERT_TRUE(FormatOfContents(iges.path).has_value());
+    EXPECT_EQ(*FormatOfContents(iges.path), ExchangeFormat::Iges)
+        << "the export wrote something other than what its own log said";
 }
 
 TEST(CliScriptTest, M22_CLI_004_ExportingBeforeSolvingSaysSo) {
@@ -1081,15 +1111,34 @@ TEST(CliScriptTest, M22_CLI_004_ExportingBeforeSolvingSaysSo) {
         << outcome.message;
 }
 
-TEST(CliScriptTest, M22_CLI_005_OnlySTEPCanBeImported) {
+TEST(CliScriptTest, M22_CLI_005_STLIsNotImportedBECAUSEItIsTriangles) {
     // STL is triangles: importing one would give a faceted mesh pretending to
     // be a solid, and every downstream face query would then find hundreds of
     // faces where the part has six.
+    //
+    // AND THIS TEST HAD BEEN PASSING FOR THE WRONG REASON. It named
+    // `parts/thing.stl`, which does not exist -- so what was refused was a
+    // missing file, and the refusal it asserted would have held for any name
+    // at all. M57 found it by changing the message. A real STL file is written
+    // here, so the refusal is the one the test is about.
+    ScratchIo mesh{"real.stl"};
+    {
+        std::ofstream out(mesh.path, std::ios::binary);
+        out << "solid part\n facet normal 0 0 1\n  outer loop\n"
+               "   vertex 0 0 0\n   vertex 1 0 0\n   vertex 0 1 0\n"
+               "  endloop\n endfacet\nendsolid part\n";
+    }
     ScriptRun run;
-    const ScriptOutcome outcome = run("import parts/thing.stl as Ghost\n");
+    const ScriptOutcome outcome =
+        run(std::string("import ") + mesh.path + " as Ghost\n");
     EXPECT_FALSE(outcome.ok);
-    EXPECT_NE(outcome.message.find("only STEP can be imported"), std::string::npos)
-        << outcome.message;
+    EXPECT_NE(outcome.message.find("triangles"), std::string::npos) << outcome.message;
+
+    // ...and a file that is not there says THAT, which is a different sentence
+    // and a different next move for whoever reads it.
+    const ScriptOutcome absent = run("import parts/nowhere.step as Ghost\n");
+    EXPECT_FALSE(absent.ok);
+    EXPECT_NE(absent.message.find("it is not there"), std::string::npos) << absent.message;
 }
 
 TEST(CliScriptTest, M22_CLI_006_AnSTLDeflectionIsOnlyForSTL) {

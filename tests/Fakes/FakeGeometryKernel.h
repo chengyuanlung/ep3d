@@ -394,6 +394,20 @@ public:
                            "the fake kernel cannot read STEP"};
     }
 
+    IoResult exportIges(const KernelShape& shape, const std::string& path) override {
+        ++exportIgesCallCount;
+        (void)shape;
+        (void)path;
+        return IoResult{false, "the fake kernel has no representation to export"};
+    }
+
+    ShapeResult importIges(const std::string& path) override {
+        ++importIgesCallCount;
+        (void)path;
+        return ShapeResult{KernelShape{}, KernelError::GeometryConstructionFailed,
+                           "the fake kernel cannot read IGES"};
+    }
+
     IoResult exportStl(const KernelShape& shape, const std::string& path,
                        double deflectionMm) override {
         ++exportStlCallCount;
@@ -578,6 +592,8 @@ public:
     int intersectShapesCallCount = 0;
     int exportStepCallCount = 0;
     int importStepCallCount = 0;
+    int exportIgesCallCount = 0;
+    int importIgesCallCount = 0;
     int exportStlCallCount = 0;
     int loftProfilesCallCount = 0;
     int filletCallCount = 0;

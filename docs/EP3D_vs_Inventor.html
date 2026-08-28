@@ -307,7 +307,7 @@ footer p { max-width: 74ch; }
 <body>
 <header class="masthead">
   <div class="wrap">
-    <div class="eyebrow">能力對照 · EP3D M56 · 2026-08-28</div>
+    <div class="eyebrow">能力對照 · EP3D M57 · 2026-08-28</div>
     <h1>EP3D 對照 Inventor</h1>
     <p class="sub">
       一份工具列層級的落差清單。上一版寫於 M46，結論是「剩下的差距不再是這張圖不完整，
@@ -318,8 +318,8 @@ footer p { max-width: 74ch; }
       <b>剩下沒有的是曲面建模、模擬、算圖，以及刻意不做的版本管理。</b>
     </p>
     <div class="stamp">
-      <div><span class="n">56</span><span class="l">里程碑</span></div>
-      <div><span class="n">2380</span><span class="l">測試</span></div>
+      <div><span class="n">57</span><span class="l">里程碑</span></div>
+      <div><span class="n">2392</span><span class="l">測試</span></div>
       <div><span class="n">3</span><span class="l">文件型別 / Inventor 為 5</span></div>
       <div><span class="n">7</span><span class="l">mate 型別 / Inventor 約 12</span></div>
       <div><span class="n">27</span><span class="l">型鋼斷面 · 每一支都秤過</span></div>
@@ -809,8 +809,16 @@ footer p { max-width: 74ch; }
       <div class="note-card">
         <h3>檔案交換</h3>
         <p>
-          EP3D：<b>STEP 進出、STL 出、DXF 進出、PDF 出</b>。<br>
-          沒有 IGES、SAT、Parasolid，也沒有 Inventor 的 <b>AnyCAD</b> —— 直接讀 SolidWorks / CATIA / NX / Creo 的原生檔並保持關聯更新。
+          EP3D：<b>STEP 進出、IGES 進出（M57）、STL 出、DXF 進出、PDF 出</b>。<br>
+          IGES 那一項有兩件事值得說。第一，寫出去的是<b>實體</b>不是曲面：
+          OCCT 預設寫成修剪曲面，那種檔案打得開、看起來也對，到對方手上卻是一袋面，
+          切不了、倒不了角、秤不了重——而且要等到對方要用時才發現。
+          第二，讀進來時<b>看檔案本身而不是看副檔名</b>：交換檔在工廠裡被改名的次數比任何檔案都多，
+          供應商寄來的 <span class="mono">housing.stp</span> 裡面是 IGES 是常態，
+          相信名字就會對一個完全正常的 IGES 檔報 STEP 語法錯誤。<br>
+          <b>而 IGES 常常沒有實體</b>——那個格式本來就是為曲面設計的——所以「這個檔沒有實體」在這裡是
+          <b>常態而非異常</b>，訊息會直說是格式的關係，不然使用者會去找一個不存在的毛病。<br>
+          沒有的是 SAT、Parasolid，以及 Inventor 的 <b>AnyCAD</b> —— 直接讀 SolidWorks / CATIA / NX / Creo 的原生檔並保持關聯更新。
           在一條有外包的供應鏈上，這一項比看起來重要。
         </p>
       </div>
@@ -856,8 +864,10 @@ footer p { max-width: 74ch; }
         加上刻意不做的<b>版本管理</b>（roadmap §52.3 已裁決）與<b>接觸求解</b>（理由在下面）。
       </p>
       <p style="margin-top:.75rem">
-        如果一定要排順序：<b>IGES 進出</b>是最便宜的一筆（<span class="mono">TKDEIGES</span>
-        已經裝好，STEP 那條路整條可以照抄），然後是<b>曲面建模</b>——它被排到最後不是因為不重要，
+        <b>IGES 已經做掉了（M57）</b>，而且它不是「照抄 STEP 那條路」——照抄正是問題所在：
+        「這個副檔名是什麼格式」在程式裡答了<b>三次</b>（腳本的 export、腳本的 import、viewer 的另存），
+        三份靠人手同步。加第三種格式到三條鏈上，程式就會變成指令列寫得出 IGES、選單寫不出。
+        現在只有一份。剩下的是<b>曲面建模</b>——它被排到最後不是因為不重要，
         而是因為曲面是另一套幾何，不是實體的子集，做進去等於再蓋一次特徵樹。
       </p>
       <p style="margin-top:.75rem">

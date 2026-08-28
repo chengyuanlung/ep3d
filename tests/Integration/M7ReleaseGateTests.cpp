@@ -837,6 +837,12 @@ public:
     ShapeResult importStep(const std::string& path) override {
         return inner.importStep(path);
     }
+    IoResult exportIges(const KernelShape& shape, const std::string& path) override {
+        return inner.exportIges(shape, path);
+    }
+    ShapeResult importIges(const std::string& path) override {
+        return inner.importIges(path);
+    }
     IoResult exportStl(const KernelShape& shape, const std::string& path,
                        double deflectionMm) override {
         return inner.exportStl(shape, path, deflectionMm);

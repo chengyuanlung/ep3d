@@ -1,3 +1,4 @@
+#include "Core/Export/ExchangeFormat.h"
 #include "Cli/SketchScript.h"
 
 #include "Core/Assembly/Mate.h"
@@ -11,6 +12,7 @@
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Measure/SketchMeasure.h"
 
+#include <fstream>
 #include <iomanip>
 
 #include "Core/Body/Body.h"
@@ -823,6 +825,10 @@ private:
         // is going to be read as at the far end. Asking for it separately would
         // let a .step be written as STL, which every reader would then refuse
         // for a reason that names neither this program nor the choice.
+        //
+        // WHICH extension means what lives in Core/Export/ExchangeFormat.h, so
+        // this command and the viewer's Save As cannot come to offer different
+        // formats.
         if (tokens.size() != 3 && tokens.size() != 4)
             return fail("export needs a body and a file name");
         Body* body = document_.findBodyNamed(tokens[1]);
@@ -840,9 +846,14 @@ private:
         if (kernel == nullptr) return fail("no geometry kernel configured");
 
         const std::string& path = tokens[2];
-        const std::string suffix = LowerSuffix(path);
+        // WHICH FORMAT THE NAME ASKS FOR, decided in the one place that knows
+        // (M57). This was an if/else over extensions here and another one in
+        // the viewer, and adding IGES to two of them is how a program comes to
+        // write a format from the command line and not from the menu.
+        const std::optional<ExchangeFormat> format = FormatOfName(path);
+        if (!format || !CanExport(*format)) return fail(WhyNameRefused(path, true));
         IoResult written;
-        if (suffix == "stl") {
+        if (*format == ExchangeFormat::Stl) {
             // A DEFAULT DEFLECTION, said out loud in the log rather than
             // silent: STL is triangles and the number decides how many, so a
             // file written at a deflection nobody chose is a file nobody can
@@ -853,13 +864,16 @@ private:
             written = kernel->exportStl(solid->currentShape(), path, deflection);
             if (written) note("export " + tokens[1] + " -> " + path + " (STL, deflection " +
                               FormatNumber(deflection) + " mm)");
-        } else if (suffix == "step" || suffix == "stp") {
+        } else if (*format == ExchangeFormat::Step) {
             if (tokens.size() == 4)
                 return fail("only an STL export takes a deflection");
             written = kernel->exportStep(solid->currentShape(), path);
             if (written) note("export " + tokens[1] + " -> " + path + " (STEP AP214, mm)");
         } else {
-            return fail("'" + path + "' has no extension this can write; use .step or .stl");
+            if (tokens.size() == 4)
+                return fail("only an STL export takes a deflection");
+            written = kernel->exportIges(solid->currentShape(), path);
+            if (written) note("export " + tokens[1] + " -> " + path + " (IGES 5.3 B-rep, mm)");
         }
         if (!written) return fail(written.message);
         return true;
@@ -869,9 +883,23 @@ private:
         // import FILE as BODY
         if (tokens.size() != 4 || tokens[2] != "as")
             return fail("import needs `import FILE as BODY`");
-        const std::string suffix = LowerSuffix(tokens[1]);
-        if (suffix != "step" && suffix != "stp")
-            return fail("'" + tokens[1] + "' is not a STEP file; only STEP can be imported");
+        // ASKED OF THE FILE, not of its name -- and asked with the SAME
+        // function the import feature will use when it rebuilds (M57).
+        //
+        // This was a third copy of the extension chain, and it was already the
+        // one that would have gone wrong: it hard-refused anything but .step,
+        // so IGES could be read by the kernel, read by the feature, offered in
+        // the viewer's dialog, and still refused here. Checking the name would
+        // also have been STRICTER than what actually gets read, which is the
+        // shape ADR-M3-008 rules out from the other direction.
+        const std::optional<ExchangeFormat> format = FormatOfContents(tokens[1]);
+        if (!format) {
+            std::ifstream probe(tokens[1], std::ios::binary);
+            if (!probe) return fail("could not read '" + tokens[1] + "': it is not there");
+            return fail("'" + tokens[1] +
+                        "' is not a file this can read: it is neither STEP nor IGES");
+        }
+        if (!CanImport(*format)) return fail(WhyNameRefused(tokens[1], false));
         Body& body = bodyNamed(tokens[3]);
         // THE PATH IS STORED, not the geometry: the file is the source of
         // truth and is read again on every rebuild.
@@ -1065,16 +1093,11 @@ private:
     int draftCount_{0};
     int holeCount_{0};
 
-    // A file's extension, lower-cased, or empty. One place, so `export` and
-    // `import` cannot disagree about what a `.STEP` is.
-    static std::string LowerSuffix(const std::string& path) {
-        const std::size_t dot = path.rfind('.');
-        if (dot == std::string::npos || dot + 1 >= path.size()) return {};
-        std::string suffix = path.substr(dot + 1);
-        for (char& c : suffix)
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return suffix;
-    }
+    // A file's extension used to be worked out here, with a comment saying it
+    // was one place so that `export` and `import` could not disagree about what
+    // a `.STEP` is. It WAS one place -- inside this file. The viewer had its
+    // own, and the two agreed only because somebody kept them so. Both now ask
+    // Core/Export/ExchangeFormat.h, and "one place" means the program.
 
     // WHAT A READER CALLED IT. An id in a failure message names nothing a
     // person typed, so every failure that can name a feature or a sketch does.

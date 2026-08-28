@@ -288,6 +288,27 @@ public:
     // not this one.
     virtual ShapeResult importStep(const std::string& path) = 0;
 
+    // Writes `shape` as IGES 5.3 (M57).
+    //
+    // WHY BOTH, when STEP is better in every way: because a shop does not
+    // choose its suppliers' CAD systems. IGES is what comes out of older
+    // seats and out of the machine-tool side, and a program that cannot read
+    // one is a program somebody has to open another program to use.
+    virtual IoResult exportIges(const KernelShape& shape, const std::string& path) = 0;
+
+    // Reads an IGES file back as ONE solid, refusing anything else exactly as
+    // importStep does -- through the same function, so the two cannot come to
+    // disagree about what "several solids" means.
+    //
+    // AND MOST IGES FILES HAVE NO SOLID IN THEM. IGES 5.3 can carry a
+    // manifold solid B-rep (entity 186), but the overwhelming majority of
+    // IGES in circulation is trimmed surfaces with no volume anywhere: that
+    // is what the format was for. So "this file holds no solid" is the
+    // ORDINARY answer here rather than an unusual one, and the message says
+    // which it is, because a user who is told their file is empty will go
+    // looking for a fault that is not there.
+    virtual ShapeResult importIges(const std::string& path) = 0;
+
     // Writes `shape` as binary STL, tessellated to `deflectionMm`.
     //
     // LOSSY BY CONSTRUCTION, and the deflection says how lossy: STL is

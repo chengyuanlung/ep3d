@@ -95,6 +95,12 @@ public:
     ShapeResult importStep(const std::string& path) override {
         return inner_.importStep(path);
     }
+    IoResult exportIges(const KernelShape& shape, const std::string& path) override {
+        return inner_.exportIges(shape, path);
+    }
+    ShapeResult importIges(const std::string& path) override {
+        return inner_.importIges(path);
+    }
     IoResult exportStl(const KernelShape& shape, const std::string& path,
                        double deflectionMm) override {
         return inner_.exportStl(shape, path, deflectionMm);

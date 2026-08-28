@@ -1,5 +1,9 @@
 #include "Core/Feature/ImportFeature.h"
 
+#include "Core/Export/ExchangeFormat.h"
+
+#include <fstream>
+
 #include "Core/Kernel/IGeometryKernel.h"
 #include "Core/Recompute/RecomputeContext.h"
 
@@ -38,7 +42,30 @@ RecomputeResult ImportFeature::recompute(const RecomputeContext& context) {
     // file changed -- needs a second thing to be right about when that is, and
     // the two would disagree the first time somebody edited the file without
     // touching the model.
-    ShapeResult result = context.kernel->importStep(path_);
+    // WHICH FORMAT THE FILE ACTUALLY IS, read from its own first lines and not
+    // from its name (M57).
+    //
+    // This is IsAssemblySourceFile's rule applied where it bites hardest.
+    // Exchange files are renamed more than any other kind in a shop: a supplier
+    // sends `housing.stp` that is IGES inside, or `part.igs` that a
+    // pass-through wrote as STEP. Trusting the name means reporting a STEP
+    // syntax error about a perfectly good IGES file, and the reader then goes
+    // looking for a fault in the file rather than in the name.
+    // A FILE THAT IS NOT THERE AND A FILE THAT IS NOT A CAD FILE ARE DIFFERENT
+    // SENTENCES, and the reader's next move differs: one goes looking for the
+    // file, the other goes back to whoever sent it. Found by M22's own test,
+    // which had been checking for "could not read" and got told about formats.
+    const std::optional<ExchangeFormat> format = FormatOfContents(path_);
+    if (!format) {
+        std::ifstream probe(path_, std::ios::binary);
+        if (!probe) return fail("could not read '" + path_ + "': it is not there");
+        return fail("'" + path_ + "' is not a file this can read: it is neither STEP nor IGES");
+    }
+    if (!CanImport(*format))
+        return fail(WhyNameRefused(path_, false));
+
+    ShapeResult result = *format == ExchangeFormat::Iges ? context.kernel->importIges(path_)
+                                                         : context.kernel->importStep(path_);
     if (!result)
         return fail(result.message.empty() ? "could not import '" + path_ + "'"
                                            : result.message);

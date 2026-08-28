@@ -1,3 +1,4 @@
+#include "Core/Export/ExchangeFormat.h"
 #include "Viewer/MainWindow.h"
 
 #include <cstdio>
@@ -4088,23 +4089,31 @@ QString MainWindow::exportCurrentSolid() {
     // .step written as STL is a file whose name lies about it.
     const QString path = QFileDialog::getSaveFileName(
         this, QStringLiteral("Export solid"), QString(),
-        QStringLiteral("STEP (*.step *.stp);;STL (*.stl)"));
+        QString::fromStdString(FileDialogFilter(true)));
     if (path.isEmpty()) return QStringLiteral("Export cancelled");
 
-    const QString lower = path.toLower();
+    // ONE PLACE DECIDES WHAT A NAME MEANS (M57). The filter above and the
+    // branch below are built from the same list, so a format cannot be offered
+    // in the dialog and then refused by the writer -- which is what would have
+    // happened the moment IGES was added to one of the two chains that used to
+    // do this.
+    const std::optional<ExchangeFormat> format = FormatOfName(path.toStdString());
+    if (!format || !CanExport(*format)) {
+        const QString message =
+            QString::fromStdString(WhyNameRefused(path.toStdString(), true));
+        statusLeft_->setText(message);
+        return message;
+    }
     IoResult written;
-    if (lower.endsWith(QStringLiteral(".stl"))) {
+    if (*format == ExchangeFormat::Stl) {
         // The same default deflection the script uses, and said out loud for
         // the same reason: a mesh written at a tolerance nobody chose is a mesh
         // nobody can reproduce.
         written = kernel->exportStl(solid->currentShape(), path.toStdString(), 0.05);
-    } else if (lower.endsWith(QStringLiteral(".step")) || lower.endsWith(QStringLiteral(".stp"))) {
+    } else if (*format == ExchangeFormat::Step) {
         written = kernel->exportStep(solid->currentShape(), path.toStdString());
     } else {
-        const QString message =
-            QStringLiteral("'%1' has no extension this can write; use .step or .stl").arg(path);
-        statusLeft_->setText(message);
-        return message;
+        written = kernel->exportIges(solid->currentShape(), path.toStdString());
     }
     const QString message =
         written ? QStringLiteral("Exported %1").arg(QFileInfo(path).fileName())
@@ -4117,7 +4126,7 @@ QString MainWindow::exportCurrentSolid() {
 QString MainWindow::importSolidAsFeature() {
     const QString path = QFileDialog::getOpenFileName(
         this, QStringLiteral("Import STEP"), QString(),
-        QStringLiteral("STEP (*.step *.stp)"));
+        QString::fromStdString(FileDialogFilter(false)));
     if (path.isEmpty()) return QStringLiteral("Import cancelled");
 
     if (part().bodies().empty()) part().addBody("Body001");
