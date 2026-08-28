@@ -34,6 +34,11 @@ struct LibraryBuild {
 
     explicit operator bool() const noexcept { return part != nullptr; }
 };
-LibraryBuild BuildLibraryPart(std::string_view path);
+//
+// `kernel` is needed only by the springs (M60), whose geometry is a helix and
+// therefore cannot come from a sketch the way every other library part's does.
+// Passed to all of them rather than to one, because a caller should not have
+// to know which kinds need it.
+LibraryBuild BuildLibraryPart(std::string_view path, class IGeometryKernel& kernel);
 
 } // namespace paramcad

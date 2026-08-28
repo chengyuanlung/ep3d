@@ -115,6 +115,17 @@ struct FeatureSnapshot {
     // Import (M59). kInvalidObjectId means the M22 behaviour: a file with no
     // solid in it is refused rather than having its surfaces thickened.
     ObjectId importThicknessParameterId = kInvalidObjectId;
+    // Helix (M60). FOUR IDS OF ITS OWN rather than borrowing Box's width,
+    // height and depth: a wire diameter is not a width, and a field that
+    // means one thing for one type and something else for another is a field
+    // somebody reads wrong exactly once.
+    struct HelixFields {
+        ObjectId wireDiameterParameterId = kInvalidObjectId;
+        ObjectId meanDiameterParameterId = kInvalidObjectId;
+        ObjectId pitchParameterId = kInvalidObjectId;
+        ObjectId turnsParameterId = kInvalidObjectId;
+    };
+    HelixFields helix;
     // Curve pattern (M21): `sketchId` above is the path, `countParameterId` the
     // number of instances. Nothing new needed; the fields already existed and
     // mean the same things.

@@ -394,6 +394,28 @@ public:
                            "the fake kernel cannot read STEP"};
     }
 
+    ShapeResult createHelicalWire(const HelixDefinition& helix) override {
+        ++createHelicalWireCallCount;
+        if (!IsValidHelixDefinition(helix))
+            return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                               "the fake kernel refuses a helix that cannot clear itself"};
+        // THE WIRE'S OWN VOLUME, worked out rather than faked, so a caller that
+        // only wants a number gets the right one without OCCT: the length of a
+        // helix is turns * sqrt((2*pi*R)^2 + pitch^2), and the wire is a
+        // cylinder of that length.
+        constexpr double kPi = 3.14159265358979323846;
+        const double round = 2.0 * kPi * helix.helixRadiusMm;
+        const double length =
+            helix.turns * std::sqrt(round * round + helix.pitchMm * helix.pitchMm);
+        KernelMassProperties properties;
+        properties.volumeMm3 = kPi * helix.wireRadiusMm * helix.wireRadiusMm * length;
+        properties.centerOfMassMm = Vec3{0.0, 0.0,
+                                         helix.startHeightMm +
+                                             helix.pitchMm * helix.turns / 2.0};
+        return ShapeResult{KernelShape(std::make_shared<FakeShapeHandle>(properties)),
+                           KernelError::None, {}};
+    }
+
     ShapeKind kindOfShape(const KernelShape& shape) override {
         // The fake has no topology, so everything it made is a solid by
         // construction and everything else is nothing.
@@ -620,6 +642,7 @@ public:
     int intersectShapesCallCount = 0;
     int exportStepCallCount = 0;
     int importStepCallCount = 0;
+    int createHelicalWireCallCount = 0;
     int importSurfacesCallCount = 0;
     int thickenSurfaceCallCount = 0;
     int solidFromSkinCallCount = 0;

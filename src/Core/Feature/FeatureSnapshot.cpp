@@ -12,6 +12,8 @@
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
+#include "Core/Feature/HelixFeature.h"
+#include "Core/Feature/HelixFeature.h"
 #include "Core/Feature/ImportFeature.h"
 #include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/ShellFeature.h"
@@ -56,6 +58,12 @@ FeatureSnapshot SnapshotFeature(const Feature& feature) {
     } else if (const auto* loft = dynamic_cast<const LoftFeature*>(&feature)) {
         snapshot.sectionSketchIds = loft->sectionSketchIds();
         snapshot.materialId = loft->materialId();
+    } else if (const auto* coil = dynamic_cast<const HelixFeature*>(&feature)) {
+        snapshot.helix.wireDiameterParameterId = coil->wireDiameterParameterId();
+        snapshot.helix.meanDiameterParameterId = coil->meanDiameterParameterId();
+        snapshot.helix.pitchParameterId = coil->pitchParameterId();
+        snapshot.helix.turnsParameterId = coil->turnsParameterId();
+        snapshot.materialId = coil->materialId();
     } else if (const auto* imported = dynamic_cast<const ImportFeature*>(&feature)) {
         snapshot.importPath = imported->path();
         snapshot.importThicknessParameterId = imported->thicknessParameterId();
@@ -148,6 +156,13 @@ Feature& RestoreFeatureFromSnapshot(PartDocument& document, Body& body,
         return document.restoreBoxFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                           snapshot.widthParameterId, snapshot.heightParameterId,
                                           snapshot.depthParameterId, snapshot.materialId);
+    if (type == "Helix")
+        return document.restoreHelixFeature(body, snapshot.id, snapshot.name, snapshot.state,
+                                            snapshot.helix.wireDiameterParameterId,
+                                            snapshot.helix.meanDiameterParameterId,
+                                            snapshot.helix.pitchParameterId,
+                                            snapshot.helix.turnsParameterId,
+                                            snapshot.materialId);
     if (type == "Pad")
         return document.restorePadFeature(body, snapshot.id, snapshot.name, snapshot.state,
                                           snapshot.sketchId, snapshot.lengthParameterId,

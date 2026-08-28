@@ -149,6 +149,18 @@ public:
     // than two is an InvalidDimension, not an extrusion by another name.
     virtual ShapeResult loftProfiles(const std::vector<PlanarProfileDefinition>& profiles) = 0;
 
+    // A ROUND WIRE WOUND INTO A HELIX, about the world Z axis (M60).
+    //
+    // The one shape sweepProfile cannot make: its path is planar and a helix is
+    // exactly the curve that is not. Built as a true helical edge on a
+    // cylindrical surface rather than approximated by segments, so the wire
+    // length -- and therefore the spring rate that depends on it -- is exact.
+    //
+    // ABOUT Z, and not about an arbitrary axis. A spring is placed by the
+    // instance that holds it, the way every other library part is, and an axis
+    // argument here would be a second way to say where something sits.
+    virtual ShapeResult createHelicalWire(const HelixDefinition& helix) = 0;
+
     virtual ShapeResult revolveProfile(const PlanarProfileDefinition& profile,
                                        const Vec3& axisOriginMm, const Vec3& axisDirection,
                                        double angleRad) = 0;

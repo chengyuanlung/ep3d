@@ -843,6 +843,9 @@ public:
     ShapeResult importIges(const std::string& path) override {
         return inner.importIges(path);
     }
+    ShapeResult createHelicalWire(const HelixDefinition& helix) override {
+        return inner.createHelicalWire(helix);
+    }
     ShapeKind kindOfShape(const KernelShape& shape) override {
         return inner.kindOfShape(shape);
     }

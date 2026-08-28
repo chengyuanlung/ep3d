@@ -331,6 +331,21 @@ public:
     // edges first so the graph never accumulates stale prerequisites.
     BoxFeature& addBoxFeature(Body& body, std::string name, ObjectId widthParameterId,
                               ObjectId heightParameterId, ObjectId depthParameterId);
+
+    // A ROUND WIRE WOUND INTO A HELIX (M60) -- a chain BASE, like a Box.
+    // Plain helix vocabulary: a wire, a mean diameter, a pitch and a turn
+    // count. A spring is one caller of it; an auger and a worm are the same
+    // four numbers.
+    class HelixFeature& addHelixFeature(Body& body, std::string name,
+                                        ObjectId wireDiameterParameterId,
+                                        ObjectId meanDiameterParameterId,
+                                        ObjectId pitchParameterId, ObjectId turnsParameterId);
+    class HelixFeature& restoreHelixFeature(Body& body, ObjectId id, std::string name,
+                                            ComputeState state,
+                                            ObjectId wireDiameterParameterId,
+                                            ObjectId meanDiameterParameterId,
+                                            ObjectId pitchParameterId,
+                                            ObjectId turnsParameterId, ObjectId materialId);
     // Restore path (deserialization): same wiring, keeps the persisted
     // id/state and the persisted materialId (ADR-M3-005 Option B: this edge
     // is always re-derived from the semantic id field, never replayed from
@@ -915,6 +930,9 @@ public:
 
 private:
 
+    void wireHelixFeature(class HelixFeature& feature, ObjectId wireDiameterParameterId,
+                          ObjectId meanDiameterParameterId, ObjectId pitchParameterId,
+                          ObjectId turnsParameterId, ObjectId materialId);
     // Shared box-feature registration/wiring logic for addBoxFeature and
     // restoreBoxFeature (single registration path, spec 13).
     void wireBoxFeature(BoxFeature& feature, ObjectId widthParameterId,

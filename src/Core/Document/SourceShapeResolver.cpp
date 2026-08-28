@@ -160,7 +160,7 @@ SourceShapeResult ResolveSourceShape(
     // BUILT EVERY PASS, like a file is re-read every pass. There is no copy on
     // disk to go stale and no cache here to be right about (ADR-M22-003).
     if (IsLibraryPath(sourcePath)) {
-        LibraryBuild made = BuildLibraryPart(sourcePath);
+        LibraryBuild made = BuildLibraryPart(sourcePath, *context.kernel);
         if (!made) return refuse(made.why);
         PartDocument& built = *made.part;
         built.setGeometryKernel(context.kernel);

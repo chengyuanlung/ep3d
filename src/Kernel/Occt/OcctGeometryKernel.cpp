@@ -34,7 +34,14 @@
 #include <Bnd_Box.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepLib.hxx>
+#include <GCE2d_MakeSegment.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Lin2d.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <BRepOffset_MakeOffset.hxx>
@@ -1306,6 +1313,121 @@ ShapeResult TheOneSolidIn(const std::vector<TopoDS_Shape>& roots, const std::str
 
 } // namespace
 
+ShapeResult OcctGeometryKernel::createHelicalWire(const HelixDefinition& helix) {
+    // THE VALIDITY RULE LIVES IN ONE PLACE (ADR-M3-001), and it is the rule
+    // that matters: a pitch under the wire's thickness winds thickness onto
+    // thickness, and OCCT builds a self-intersecting pipe rather than failing.
+    // What comes back looks like a solid and has the wrong volume.
+    if (!IsValidHelixDefinition(helix))
+        return ShapeResult{KernelShape{}, KernelError::InvalidDimension,
+                           "a helix needs a wire, a radius clear of the axis, and a pitch at "
+                           "least as big as the wire is thick -- otherwise the coil winds "
+                           "through itself"};
+
+    const auto fail = [](KernelError code, std::string message) {
+        return ShapeResult{KernelShape{}, code, std::move(message)};
+    };
+
+    try {
+        // A TRUE HELIX, not a polyline pretending to be one.
+        //
+        // A line in the (u, v) parameter space of a CYLINDER is a helix on it,
+        // exactly: u is the angle round and v is the height up. So the curve is
+        // analytic, its length is exact, and a spring's rate -- which depends
+        // on the wire's length -- is not a function of how finely somebody
+        // chose to chop it up.
+        // THE X DIRECTION IS GIVEN, NOT LEFT TO OCCT.
+        //
+        // gp_Ax3(point, direction) picks some perpendicular for X on its own,
+        // and the surface's u = 0 is wherever that lands. The section below is
+        // placed at u = 0 by hand, on +X -- so an X the kernel chose differently
+        // puts the section a chord away from the spine's own start, and
+        // MakePipeShell faithfully sweeps it round a helix of the wrong radius.
+        // The wire comes out exactly the right LENGTH, which is why a volume
+        // check passes and only the envelope says anything is wrong.
+        const gp_Ax3 axis(gp_Pnt(0.0, 0.0, helix.startHeightMm), gp_Dir(0.0, 0.0, 1.0),
+                          gp_Dir(1.0, 0.0, 0.0));
+        Handle(Geom_CylindricalSurface) cylinder =
+            new Geom_CylindricalSurface(axis, helix.helixRadiusMm);
+
+        constexpr double kTwoPi = 6.28318530717958647692;
+        const double sweep = kTwoPi * helix.turns;
+        // Between two POINTS in (u, v) rather than along a direction: a
+        // gp_Dir2d is normalised, so a direction plus a length would need the
+        // parameterisation unpicked, and getting that wrong shortens the coil
+        // by a factor of cos(the helix angle) -- which looks like a spring.
+        const Handle(Geom2d_TrimmedCurve) inParameterSpace = GCE2d_MakeSegment(
+            gp_Pnt2d(helix.startAngleRad, 0.0),
+            gp_Pnt2d(helix.startAngleRad + sweep, helix.pitchMm * helix.turns));
+        if (inParameterSpace.IsNull())
+            return fail(KernelError::GeometryConstructionFailed,
+                        "the helix could not be laid out on its cylinder");
+
+        BRepBuilderAPI_MakeEdge edgeMaker(inParameterSpace, cylinder);
+        if (!edgeMaker.IsDone())
+            return fail(KernelError::GeometryConstructionFailed,
+                        "OCCT could not build the helix edge");
+        TopoDS_Edge helixEdge = edgeMaker.Edge();
+        // WITHOUT THIS the edge has only a curve ON the surface and no 3D one,
+        // and everything downstream -- the sweep, the bounding box, the
+        // measurement -- quietly gets nothing.
+        BRepLib::BuildCurve3d(helixEdge);
+
+        BRepBuilderAPI_MakeWire spineMaker(helixEdge);
+        if (!spineMaker.IsDone())
+            return fail(KernelError::GeometryConstructionFailed,
+                        "the helix edge would not make a wire");
+        const TopoDS_Wire spine = spineMaker.Wire();
+
+        // THE SECTION SITS SQUARE TO THE WIRE where the wire starts. A circle
+        // laid in some fixed plane instead would be swept as an ellipse -- a
+        // spring with wire thicker one way than the other, which weighs too
+        // much and looks right.
+        const double startAngle = helix.startAngleRad;
+        const gp_Pnt start(helix.helixRadiusMm * std::cos(startAngle),
+                           helix.helixRadiusMm * std::sin(startAngle), helix.startHeightMm);
+        // dP/du, where u is the ANGLE: the circumferential part is R and the
+        // rise per radian is pitch/2pi. Multiplying the first by 2pi instead of
+        // dividing the second tilts the section by a few degrees -- which is
+        // wrong, and small enough that only a measurement would say so.
+        const gp_Vec along(-helix.helixRadiusMm * std::sin(startAngle),
+                           helix.helixRadiusMm * std::cos(startAngle),
+                           helix.pitchMm / kTwoPi);
+        const gp_Circ section(gp_Ax2(start, gp_Dir(along)), helix.wireRadiusMm);
+        BRepBuilderAPI_MakeWire sectionMaker(BRepBuilderAPI_MakeEdge(section).Edge());
+        if (!sectionMaker.IsDone())
+            return fail(KernelError::GeometryConstructionFailed,
+                        "the wire's own section would not close");
+
+        // SQUARED UP BY OCCT, not by the caller. The shared sweep adds its
+        // section as it stands; here the section is asked to be corrected onto
+        // the spine, because a helix's tangent turns continuously and a
+        // section that starts a couple of degrees out stays out all the way
+        // round.
+        BRepOffsetAPI_MakePipeShell pipe(spine);
+        pipe.Add(sectionMaker.Wire(), Standard_False, Standard_True);
+        pipe.Build();
+        if (!pipe.IsDone())
+            return fail(KernelError::GeometryConstructionFailed,
+                        "the wire could not be wound along the helix");
+        if (!pipe.MakeSolid())
+            return fail(KernelError::GeometryConstructionFailed,
+                        "the wound wire did not close into a solid");
+        const TopoDS_Shape wound = pipe.Shape();
+        if (wound.IsNull())
+            return fail(KernelError::GeometryConstructionFailed,
+                        "the wound wire came back empty");
+
+        auto handle = std::make_shared<OcctShape>(wound);
+        return ShapeResult{KernelShape(std::move(handle)), KernelError::None, {}};
+    } catch (const Standard_Failure& failure) {
+        return fail(KernelError::GeometryConstructionFailed,
+                    std::string("OCCT refused to wind this helix: ") +
+                        (failure.GetMessageString() != nullptr ? failure.GetMessageString()
+                                                               : "no message"));
+    }
+}
+
 ShapeKind OcctGeometryKernel::kindOfShape(const KernelShape& shape) {
     const auto* occt = dynamic_cast<const OcctShape*>(shape.handle());
     if (occt == nullptr || occt->shape().IsNull()) return ShapeKind::Empty;
@@ -1755,8 +1877,29 @@ KernelBoundsResult OcctGeometryKernel::boundsOfShape(const KernelShape& shape) {
         return out;
     }
     try {
+        // OPTIMAL, NOT THE CHEAP ONE, and M60 is what showed why.
+        //
+        // BRepBndLib::Add bounds a surface by its CONTROL POINTS. For a plane,
+        // a cylinder or a cone those lie on the surface and the box is exact,
+        // and every shape this program made until a helix arrived was one of
+        // those -- so the looseness never showed. A pipe swept along a helix is
+        // a B-spline, whose poles sit well outside it: a spring 18 mm across
+        // measured 28, and M55's "Extent X" would have printed that to a user
+        // asking whether it fits in a bore.
+        //
+        // AddOptimal walks the surfaces instead of their poles. IT COSTS, and
+        // the cost is measured rather than waved at: the kernel test suite
+        // went from 28.5 to 44.6 seconds on the tests that existed before M60.
+        // Every one of those shapes is analytic, so every one of them paid for
+        // a precision it did not need.
+        //
+        // Taken anyway, and NOT behind a "use the cheap one for analytic
+        // surfaces" test, because that test is a second thing that has to be
+        // right about which shapes are which -- and when it is wrong it is
+        // wrong silently, with a number that looks like a measurement. That is
+        // the trade this codebase has made every time it has come up.
         Bnd_Box box;
-        BRepBndLib::Add(occt->shape(), box);
+        BRepBndLib::AddOptimal(occt->shape(), box);
         if (box.IsVoid()) {
             out.message = "that shape has no extent";
             return out;

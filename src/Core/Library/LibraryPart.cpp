@@ -2,6 +2,7 @@
 
 #include "Core/Document/PartDocument.h"
 #include "Core/Frame/FrameProfile.h"
+#include "Core/Library/CompressionSpring.h"
 #include "Core/Library/SpurGear.h"
 #include "Core/Library/StandardParts.h"
 
@@ -10,10 +11,11 @@
 namespace paramcad {
 
 bool IsLibraryPath(std::string_view path) noexcept {
-    return IsStandardPartPath(path) || IsFrameMemberPath(path) || IsSpurGearPath(path);
+    return IsStandardPartPath(path) || IsFrameMemberPath(path) || IsSpurGearPath(path) ||
+           IsCompressionSpringPath(path);
 }
 
-LibraryBuild BuildLibraryPart(std::string_view path) {
+LibraryBuild BuildLibraryPart(std::string_view path, IGeometryKernel& kernel) {
     LibraryBuild out;
     if (IsStandardPartPath(path)) {
         const std::optional<FastenerSpec> spec = FastenerOfPath(path);
@@ -62,6 +64,25 @@ LibraryBuild BuildLibraryPart(std::string_view path) {
             return out;
         }
         out.part = BuildSpurGear(*gear);
+        if (!out.part) out.why = std::string(path) + " could not be built";
+        return out;
+    }
+    if (IsCompressionSpringPath(path)) {
+        const std::optional<CompressionSpring> spring = CompressionSpringOfPath(path);
+        if (!spring) {
+            // THE REASON, WHEN THERE IS ONE -- M58's split, for M58's reason.
+            // "Not a spring" would send somebody to check their typing about a
+            // spring index that is the real problem.
+            const std::optional<CompressionSpring> read =
+                ParseSpringDesignation(path.substr(kCompressionSpringScheme.size()));
+            out.why = read ? std::string(path) + ": " + WhySpringRefused(*read)
+                           : std::string(path) +
+                                 " is not written the way a spring is -- it wants a wire, a "
+                                 "mean diameter, a coil count and a free length, as in "
+                                 "spr:d2 D16 n8 L50";
+            return out;
+        }
+        out.part = BuildCompressionSpring(*spring, kernel);
         if (!out.part) out.why = std::string(path) + " could not be built";
         return out;
     }

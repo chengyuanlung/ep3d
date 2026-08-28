@@ -19,6 +19,7 @@ public:
     ShapeResult sweepProfile(const PlanarProfileDefinition& profile,
                              const PlanarPathDefinition& path) override;
     ShapeResult loftProfiles(const std::vector<PlanarProfileDefinition>& profiles) override;
+    ShapeResult createHelicalWire(const HelixDefinition& helix) override;
     ShapeResult revolveProfile(const PlanarProfileDefinition& profile, const Vec3& axisOriginMm,
                                const Vec3& axisDirection, double angleRad) override;
     FaceQueryResult resolveFace(const KernelShape& shape, const FaceQuery& query) override;

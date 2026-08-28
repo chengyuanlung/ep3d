@@ -12,6 +12,7 @@
 #include "Core/Feature/BooleanFeature.h"
 #include "Core/Feature/DraftFeature.h"
 #include "Core/Feature/HoleFeature.h"
+#include "Core/Feature/HelixFeature.h"
 #include "Core/Feature/ImportFeature.h"
 #include "Core/Feature/LoftFeature.h"
 #include "Core/Feature/ShellFeature.h"
@@ -441,6 +442,22 @@ JsonValue toJson(const PartDocument& document) {
                 featureEntry.set("depthParameterId",
                                  JsonValue::makeString(idToString(box->depthParameterId())));
                 featureEntry.set("materialId", JsonValue::makeString(idToString(box->materialId())));
+            } else if (const auto* coil = dynamic_cast<const HelixFeature*>(feature.get())) {
+                // v55 (M60). Four semantic references and nothing else -- no
+                // curve, no wire, no topology (ADR-M4-004). The coil is built
+                // again from these four numbers on every rebuild.
+                featureEntry.set(
+                    "wireDiameterParameterId",
+                    JsonValue::makeString(idToString(coil->wireDiameterParameterId())));
+                featureEntry.set(
+                    "meanDiameterParameterId",
+                    JsonValue::makeString(idToString(coil->meanDiameterParameterId())));
+                featureEntry.set("pitchParameterId",
+                                 JsonValue::makeString(idToString(coil->pitchParameterId())));
+                featureEntry.set("turnsParameterId",
+                                 JsonValue::makeString(idToString(coil->turnsParameterId())));
+                featureEntry.set("materialId",
+                                 JsonValue::makeString(idToString(coil->materialId())));
             } else if (const auto* pad = dynamic_cast<const PadFeature*>(feature.get())) {
                 // Semantic references only (ADR-M4-004): the Sketch, the Length
                 // Parameter and the Material, each by ObjectId. No OCCT
@@ -1276,7 +1293,7 @@ constexpr std::string_view kSolidFeatureTypeNames[] = {"Box",     "Pad",     "Po
                                                        "Mirror",  "Pattern", "Sweep",
                                                        "Loft",    "Shell",   "Draft",
                                                        "Hole",    "Boolean", "CircularPattern",
-                                                       "CurvePattern", "Import",
+                                                       "CurvePattern", "Import", "Helix",
                                                        // M53. A folded section is a solid,
                                                        // and this table is what decides
                                                        // whether a pocket may be cut in one.
@@ -2107,7 +2124,49 @@ LoadResult loadPartDocument(std::istream& in) {
 
             FeatureData featureData{*featureId, featureName->asString(), featureType->asString(),
                                     *stateValue};
-            if (featureData.typeName == "Box") {
+            if (featureData.typeName == "Helix") {
+                // v55 (M60). REQUIRED, not optional: no file written before
+                // v55 can contain a Helix at all, so a missing field here is a
+                // damaged file rather than an older one -- which is the
+                // difference between the import thickness (v54, optional
+                // because older imports exist) and this.
+                const char* const names[4] = {"wireDiameterParameterId",
+                                              "meanDiameterParameterId", "pitchParameterId",
+                                              "turnsParameterId"};
+                ObjectId* const into[4] = {&featureData.helix.wireDiameterParameterId,
+                                           &featureData.helix.meanDiameterParameterId,
+                                           &featureData.helix.pitchParameterId,
+                                           &featureData.helix.turnsParameterId};
+                for (int i = 0; i < 4; ++i) {
+                    const JsonValue* field =
+                        requireField(featureEntry, names[i], JsonType::String, featureContext,
+                                     err);
+                    if (field == nullptr) return loadFailure(err.error, err.message);
+                    const auto id = idFromString(field->asString());
+                    if (!id || *id > kMaxObjectId)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext + ": helix " + names[i] +
+                                               " is not a valid id");
+                    // EVERY ONE HAS TO BE A PARAMETER THIS DOCUMENT HAS. A
+                    // helix whose pitch points at nothing builds nothing, and
+                    // the place to say so is here rather than at the first
+                    // rebuild after the file is opened.
+                    if (parameterIds.count(*id) == 0)
+                        return loadFailure(SerializationError::InvalidFieldType,
+                                           featureContext + ": helix " + names[i] +
+                                               " names no parameter in this document");
+                    *into[i] = *id;
+                }
+                const JsonValue* materialField = requireField(featureEntry, "materialId",
+                                                              JsonType::String, featureContext,
+                                                              err);
+                if (materialField == nullptr) return loadFailure(err.error, err.message);
+                const auto helixMaterialId = idFromString(materialField->asString());
+                if (!helixMaterialId || *helixMaterialId > kMaxObjectId)
+                    return loadFailure(SerializationError::InvalidFieldType,
+                                       featureContext + ": helix materialId is not a valid id");
+                featureData.materialId = *helixMaterialId;
+            } else if (featureData.typeName == "Box") {
                 // Feature type dispatch (which concrete type to construct) is
                 // keyed by this string, not dynamic_cast probing
                 // (ADR-M3-005).

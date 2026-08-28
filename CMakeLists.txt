@@ -49,6 +49,8 @@ add_library(ParametricCADCore
     src/Core/Library/GearMesh.cpp
     src/Core/Kernel/ShapeKind.cpp
     src/Core/Document/ResolveObject.cpp
+    src/Core/Feature/HelixFeature.cpp
+    src/Core/Library/CompressionSpring.cpp
     src/Core/Library/LibraryPart.cpp
     src/Core/Feature/SheetContour.cpp
     src/Core/Feature/SheetContourFeature.cpp
@@ -599,6 +601,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/ExchangeFormatTests.cpp
         tests/SpurGearTests.cpp
         tests/GearMeshTests.cpp
+        tests/CompressionSpringTests.cpp
         tests/BalloonTests.cpp
         tests/ViewAnchorTests.cpp
         tests/SheetPageTests.cpp
@@ -757,6 +760,7 @@ if(PARAMCAD_BUILD_TESTS)
         tests/Kernel/OcctIgesTests.cpp
         tests/Kernel/OcctSpurGearTests.cpp
         tests/Kernel/OcctSurfaceTests.cpp
+        tests/Kernel/OcctSpringTests.cpp
         tests/Kernel/OcctHoleStandardTests.cpp
         tests/Kernel/OcctStandardPartTests.cpp
         tests/Kernel/InterferenceStalenessTests.cpp

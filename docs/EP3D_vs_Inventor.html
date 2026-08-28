@@ -307,7 +307,7 @@ footer p { max-width: 74ch; }
 <body>
 <header class="masthead">
   <div class="wrap">
-    <div class="eyebrow">能力對照 · EP3D M59 · 2026-08-28</div>
+    <div class="eyebrow">能力對照 · EP3D M60 · 2026-08-28</div>
     <h1>EP3D 對照 Inventor</h1>
     <p class="sub">
       一份工具列層級的落差清單。上一版寫於 M46，結論是「剩下的差距不再是這張圖不完整，
@@ -318,8 +318,8 @@ footer p { max-width: 74ch; }
       <b>剩下沒有的是曲面建模、模擬、算圖，以及刻意不做的版本管理。</b>
     </p>
     <div class="stamp">
-      <div><span class="n">59</span><span class="l">里程碑</span></div>
-      <div><span class="n">2418</span><span class="l">測試</span></div>
+      <div><span class="n">60</span><span class="l">里程碑</span></div>
+      <div><span class="n">2431</span><span class="l">測試</span></div>
       <div><span class="n">3</span><span class="l">文件型別 / Inventor 為 5</span></div>
       <div><span class="n">7</span><span class="l">mate 型別 / Inventor 約 12</span></div>
       <div><span class="n">27</span><span class="l">型鋼斷面 · 每一支都秤過</span></div>
@@ -785,7 +785,7 @@ footer p { max-width: 74ch; }
               <b>不猜的地方</b>：三根交於一點時哪一根穿過去、以及端點落在別根跨中要退到哪個面，
               都是製造決定，程式留方切口並具名說出來。複合斜切（斜接面不在斷面自身軸上）同樣拒絕。</td></tr>
           <tr><td class="who">設計加速器<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">M58</span></td>
-              <td><span class="pill p-partial">有，正齒輪</span></td>
+              <td><span class="pill p-partial">有，正齒輪與壓縮彈簧</span></td>
               <td class="note">上一版寫「EP3D 有齒輪 relation，但不會替你算模數與齒數」——那正是缺口的形狀：
               <b>耦合的傳動比是用打的</b>，而一對做出來的齒輪本身就有傳動比，那是齒數，不是別的。
               兩份就會漂：把小齒輪從 20 齒改成 24，模型嚙合方式變了、機構還是照舊的比率在轉，
@@ -796,7 +796,15 @@ footer p { max-width: 74ch; }
               <b>不猜的地方</b>：齒數低於不根切下限（20° 是 18 齒，14.5° 是 32 齒）直接拒絕——
               根切的齒還是一顆齒，看起來也正常，只是比圖上說的弱而且吵。模數不在 ISO 54 表裡也拒絕：
               模數是刀具，不是可以挑的數字。<br>
-              <b>沒有的是</b>：彈簧、軸承、皮帶鏈條、軸的計算，以及螺栓接合的強度計算。</td></tr>
+              <b>壓縮彈簧是 M60</b>：<span class="mono">spr:d2 D16 n8 L50</span>，
+              剛度、實高、最大行程、Wahl 修正後的剪應力都是推出來的。
+              拒絕的是<b>捲不出來的彈簧比</b>（D/d 低於 4 線材在心軸上會裂，高於 12 會纏在一起）
+              ——那種彈簧在任何一張圖上看起來都完全正常。<br>
+              <b>而彈簧問了一個前四種零件沒問過的身分問題</b>：型鋼的長度<b>就是</b>它的身分，
+              600 和 400 是兩根要鋸的料；彈簧的裝配長度<b>不是</b>——同一支在架上 50 長、
+              在機器裡 38 長，是一個料號。所以路徑帶的是彈簧，幾何永遠建在自由長度，
+              工作點是計算。代價講明白：<b>EP3D 畫不出壓縮狀態的彈簧</b>。<br>
+              <b>沒有的是</b>：拉伸與扭轉彈簧、軸承、皮帶鏈條、軸的計算，以及螺栓接合的強度計算。</td></tr>
           <tr><td class="who">模擬</td><td><span class="pill p-none">完全沒有</span></td>
               <td class="note">應力分析、動態模擬、模具流動。</td></tr>
           <tr><td class="who">iLogic / API</td><td><span class="pill p-partial">只有腳本</span></td>

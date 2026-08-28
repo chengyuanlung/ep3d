@@ -5,6 +5,7 @@
 #include "Core/Feature/IMaterialReferencing.h"
 #include "Core/Feature/ISketchConsuming.h"
 #include "Core/Feature/FeatureSnapshot.h"
+#include "Core/Feature/HelixFeature.h"
 #include "Core/Geometry/Transform.h"
 #include "Core/Feature/ISolidFeature.h"
 #include "Core/Feature/PadFeature.h"
@@ -2685,6 +2686,50 @@ ChamferFeature& PartDocument::restoreChamferFeature(Body& body, ObjectId id, std
     ChamferFeature& feature = body.addFeature<ChamferFeature>(
         id, std::move(name), state, baseFeatureId, distanceParameterId, materialId);
     wireEdgeDressFeature(feature, baseFeatureId, distanceParameterId, materialId);
+    return feature;
+}
+
+void PartDocument::wireHelixFeature(HelixFeature& feature, ObjectId wireDiameterParameterId,
+                                   ObjectId meanDiameterParameterId, ObjectId pitchParameterId,
+                                   ObjectId turnsParameterId, ObjectId materialId) {
+    addRecomputableNode(feature);
+    // ALL FOUR ARE EDGES. Change any of them and the coil is a different coil,
+    // which is what makes a spring parametric rather than a picture of one.
+    addDependency(feature.id(), wireDiameterParameterId);
+    addDependency(feature.id(), meanDiameterParameterId);
+    addDependency(feature.id(), pitchParameterId);
+    addDependency(feature.id(), turnsParameterId);
+    rewireMassPropertiesSource(feature.id(), materialId);
+}
+
+HelixFeature& PartDocument::addHelixFeature(Body& body, std::string name,
+                                            ObjectId wireDiameterParameterId,
+                                            ObjectId meanDiameterParameterId,
+                                            ObjectId pitchParameterId,
+                                            ObjectId turnsParameterId) {
+    const ObjectId materialId = material_ ? material_->id() : kInvalidObjectId;
+    HelixFeature& feature = body.addFeature<HelixFeature>(
+        std::move(name), wireDiameterParameterId, meanDiameterParameterId, pitchParameterId,
+        turnsParameterId, materialId);
+    wireHelixFeature(feature, wireDiameterParameterId, meanDiameterParameterId,
+                     pitchParameterId, turnsParameterId, materialId);
+    recordFeatureAdded(body, feature);
+    return feature;
+}
+
+HelixFeature& PartDocument::restoreHelixFeature(Body& body, ObjectId id, std::string name,
+                                                ComputeState state,
+                                                ObjectId wireDiameterParameterId,
+                                                ObjectId meanDiameterParameterId,
+                                                ObjectId pitchParameterId,
+                                                ObjectId turnsParameterId,
+                                                ObjectId materialId) {
+    requireUnusedId(id, "restoreHelixFeature");
+    HelixFeature& feature = body.addFeature<HelixFeature>(
+        id, std::move(name), state, wireDiameterParameterId, meanDiameterParameterId,
+        pitchParameterId, turnsParameterId, materialId);
+    wireHelixFeature(feature, wireDiameterParameterId, meanDiameterParameterId,
+                     pitchParameterId, turnsParameterId, materialId);
     return feature;
 }
 
