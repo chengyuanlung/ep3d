@@ -30,7 +30,18 @@ class Sketch;
 // to type a Parameter, and no parameter in this program is an area. Reusing
 // Millimeter for it printed "2827.4 mm" for the area of a 30 mm circle: a
 // plausible number with the wrong unit on it, which is worse than no number.
-enum class MeasureUnit { Millimetre, SquareMillimetre, Radian, Count };
+// M55 adds the two a SOLID needs. The same reason M18 gave for the square
+// millimetre: a volume printed as "mm" is a plausible number with the wrong
+// unit on it, and a mass printed as a length is worse -- somebody puts it in a
+// lifting calculation.
+enum class MeasureUnit {
+    Millimetre,
+    SquareMillimetre,
+    CubicMillimetre,
+    Kilogram,
+    Radian,
+    Count
+};
 
 const char* MeasureUnitSuffix(MeasureUnit unit) noexcept;
 

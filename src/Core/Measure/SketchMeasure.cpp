@@ -11,6 +11,8 @@ const char* MeasureUnitSuffix(MeasureUnit unit) noexcept {
     switch (unit) {
     case MeasureUnit::Millimetre: return "mm";
     case MeasureUnit::SquareMillimetre: return "mm^2";
+    case MeasureUnit::CubicMillimetre: return "mm^3";
+    case MeasureUnit::Kilogram: return "kg";
     case MeasureUnit::Radian: return "rad";
     case MeasureUnit::Count: break;
     }

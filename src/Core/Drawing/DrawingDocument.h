@@ -718,6 +718,32 @@ public:
     // write and a "is anything dangling" check all ask here, so none of them
     // can disagree about what the drawing says.
     DimensionMeasurement measure(const DrawingDimension& dimension) const;
+
+    // --- MEASURING, WHICH IS DIMENSIONING WITHOUT KEEPING IT (M55) -----------
+    //
+    // The same two anchors, the same resolution, the same unfold through a
+    // break, the same division back out of the view's scale. A measure tool
+    // with its own idea of where a point is would answer one number while a
+    // dimension on the SAME TWO POINTS answered another -- and the one the
+    // user trusts is whichever they looked at last.
+    //
+    // So there is one measurement in this program, and `measure(dimension)`
+    // above is a caller of it rather than the other way round.
+    //
+    // Nothing here is a document object: no id, no undo, no file. Ask again
+    // after a rebuild and the answer is the new one, which is the whole
+    // difference between measuring and a dimension that happens to be
+    // read-only.
+    // `vertexMm` is where an ANGLE is measured about, in sheet millimetres.
+    // A dimension's is where its arc was dragged to; a measure tool's is the
+    // point the user picked as the corner. It is asked for rather than
+    // guessed, because an angle between two points has no vertex of its own
+    // and any default would be a corner nobody chose.
+    DimensionMeasurement measureBetween(const DimensionAnchor& first,
+                                        const DimensionAnchor& second,
+                                        DimensionKind kind = DimensionKind::Linear,
+                                        LinearDirection direction = LinearDirection::Aligned,
+                                        Vec2 vertexMm = Vec2{}) const;
     // The text it shows: the override if there is one, otherwise the
     // measurement through its style.
     std::string dimensionText(const DrawingDimension& dimension) const;

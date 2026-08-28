@@ -3438,9 +3438,22 @@ DrawingDocument::DimensionProposal DrawingDocument::proposeDimension(
 }
 
 DimensionMeasurement DrawingDocument::measure(const DrawingDimension& dimension) const {
+    // A DIMENSION IS A REMEMBERED MEASUREMENT (M55). It names two points and a
+    // kind, and so does the measure tool -- so this hands both to the one
+    // place that turns them into a number. Two implementations would answer
+    // differently about the same two points the day either learned something.
+    return measureBetween(dimension.first(), dimension.second(), dimension.kind(),
+                          dimension.direction(), dimension.linePositionMm());
+}
+
+DimensionMeasurement DrawingDocument::measureBetween(const DimensionAnchor& firstAnchor,
+                                                     const DimensionAnchor& secondAnchor,
+                                                     DimensionKind kind,
+                                                     LinearDirection direction,
+                                                     Vec2 vertexMm) const {
     DimensionMeasurement out;
-    const std::optional<Vec2> first = resolveAnchor(dimension.first());
-    const std::optional<Vec2> second = resolveAnchor(dimension.second());
+    const std::optional<Vec2> first = resolveAnchor(firstAnchor);
+    const std::optional<Vec2> second = resolveAnchor(secondAnchor);
     if (!first.has_value() || !second.has_value()) {
         out.why = "this dimension has lost what it was measuring";
         return out;
@@ -3461,18 +3474,18 @@ DimensionMeasurement DrawingDocument::measure(const DrawingDimension& dimension)
     // steel dimensioned as 203, with every other number on the drawing
     // agreeing. Going back through the inverse is what makes the true length
     // true by construction rather than by a rule somebody remembers.
-    const ObjectId viewId = dimension.first().kind == DimensionAnchorKind::InView
-                                ? dimension.first().viewId
-                                : dimension.second().viewId;
+    const ObjectId viewId = firstAnchor.kind == DimensionAnchorKind::InView
+                                ? firstAnchor.viewId
+                                : secondAnchor.viewId;
     const Vec2 firstModel = sheetPointToViewMm(viewId, *first);
     const Vec2 secondModel = sheetPointToViewMm(viewId, *second);
 
     const double dx = secondModel.x - firstModel.x;
     const double dy = secondModel.y - firstModel.y;
 
-    switch (dimension.kind()) {
+    switch (kind) {
         case DimensionKind::Linear:
-            switch (dimension.direction()) {
+            switch (direction) {
                 case LinearDirection::Aligned: out.valueMm = std::hypot(dx, dy); break;
                 case LinearDirection::Horizontal: out.valueMm = std::fabs(dx); break;
                 case LinearDirection::Vertical: out.valueMm = std::fabs(dy); break;
@@ -3490,7 +3503,7 @@ DimensionMeasurement DrawingDocument::measure(const DrawingDimension& dimension)
             // BETWEEN THE TWO ANCHORS, ABOUT THE DIMENSION LINE'S POSITION.
             // The vertex is where the user dragged the arc to, which is how
             // AutoCAD's DIMANGULAR behaves for two points.
-            const Vec2 vertex = dimension.linePositionMm();
+            const Vec2 vertex = vertexMm;
             const double a = std::atan2(first->y - vertex.y, first->x - vertex.x);
             const double b = std::atan2(second->y - vertex.y, second->x - vertex.x);
             double between = std::fabs(b - a);
