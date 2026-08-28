@@ -307,7 +307,7 @@ footer p { max-width: 74ch; }
 <body>
 <header class="masthead">
   <div class="wrap">
-    <div class="eyebrow">能力對照 · EP3D M57 · 2026-08-28</div>
+    <div class="eyebrow">能力對照 · EP3D M58 · 2026-08-28</div>
     <h1>EP3D 對照 Inventor</h1>
     <p class="sub">
       一份工具列層級的落差清單。上一版寫於 M46，結論是「剩下的差距不再是這張圖不完整，
@@ -318,8 +318,8 @@ footer p { max-width: 74ch; }
       <b>剩下沒有的是曲面建模、模擬、算圖，以及刻意不做的版本管理。</b>
     </p>
     <div class="stamp">
-      <div><span class="n">57</span><span class="l">里程碑</span></div>
-      <div><span class="n">2392</span><span class="l">測試</span></div>
+      <div><span class="n">58</span><span class="l">里程碑</span></div>
+      <div><span class="n">2407</span><span class="l">測試</span></div>
       <div><span class="n">3</span><span class="l">文件型別 / Inventor 為 5</span></div>
       <div><span class="n">7</span><span class="l">mate 型別 / Inventor 約 12</span></div>
       <div><span class="n">27</span><span class="l">型鋼斷面 · 每一支都秤過</span></div>
@@ -774,8 +774,19 @@ footer p { max-width: 74ch; }
               kg/m 比對，所以少寫一個圓角半徑會讓測試紅掉，而不是讓報價少 6%。
               <b>不猜的地方</b>：三根交於一點時哪一根穿過去、以及端點落在別根跨中要退到哪個面，
               都是製造決定，程式留方切口並具名說出來。複合斜切（斜接面不在斷面自身軸上）同樣拒絕。</td></tr>
-          <tr><td class="who">設計加速器</td><td><span class="pill p-none">完全沒有</span></td>
-              <td class="note">齒輪、彈簧、軸承、皮帶的計算＋產生器。EP3D 有齒輪 <b>relation</b>（運動耦合），但不會替你算模數與齒數。</td></tr>
+          <tr><td class="who">設計加速器<br><span class="mono" style="font-size:.78rem;color:var(--ink-3)">M58</span></td>
+              <td><span class="pill p-partial">有，正齒輪</span></td>
+              <td class="note">上一版寫「EP3D 有齒輪 relation，但不會替你算模數與齒數」——那正是缺口的形狀：
+              <b>耦合的傳動比是用打的</b>，而一對做出來的齒輪本身就有傳動比，那是齒數，不是別的。
+              兩份就會漂：把小齒輪從 20 齒改成 24，模型嚙合方式變了、機構還是照舊的比率在轉，
+              每個數字都合理、沒有東西懸空、機器是錯的。<br>
+              現在齒輪走 <span class="mono">gear:m2 z20 b10</span> 這條解析路徑（和標準件、型鋼同一個），
+              <b>傳動比、中心距、接觸比都是從兩條路徑推出來的</b>，而 relation 存下來的比率
+              可以被問「還跟齒輪一致嗎」，不一致就把兩個數字都說出來。<br>
+              <b>不猜的地方</b>：齒數低於不根切下限（20° 是 18 齒，14.5° 是 32 齒）直接拒絕——
+              根切的齒還是一顆齒，看起來也正常，只是比圖上說的弱而且吵。模數不在 ISO 54 表裡也拒絕：
+              模數是刀具，不是可以挑的數字。<br>
+              <b>沒有的是</b>：彈簧、軸承、皮帶鏈條、軸的計算，以及螺栓接合的強度計算。</td></tr>
           <tr><td class="who">模擬</td><td><span class="pill p-none">完全沒有</span></td>
               <td class="note">應力分析、動態模擬、模具流動。</td></tr>
           <tr><td class="who">iLogic / API</td><td><span class="pill p-partial">只有腳本</span></td>
@@ -871,10 +882,11 @@ footer p { max-width: 74ch; }
         而是因為曲面是另一套幾何，不是實體的子集，做進去等於再蓋一次特徵樹。
       </p>
       <p style="margin-top:.75rem">
-        <b>設計加速器</b>（齒輪、彈簧、軸承的計算＋產生器）現在的形狀變了：
-        M56 已經證明「一條解析路徑就是一個零件」這件事可以重用第二次，
-        所以一個齒輪產生器是<span class="mono">gear:</span> 加一張表，不是一個模組。
-        缺的是那些設計計算本身，那是資料與公式，不是架構。
+        <b>設計加速器的齒輪那一半做掉了（M58）</b>，而且正如預料，它是
+        <span class="mono">gear:</span> 加一張表，不是一個模組——解析路徑這個機制第三次被重用，
+        組合件、視圖、材料表、質量計算都不知道有「齒輪」這回事。
+        真正的收穫是那個舊缺口：傳動比本來是用打的，現在是從齒數推的。
+        剩下的加速器是彈簧、軸承、皮帶與軸的計算，那些是公式與資料，不是架構。
       </p>
     </div>
     <div class="callout" style="margin-top:1rem">

@@ -2,6 +2,7 @@
 
 #include "Core/Document/PartDocument.h"
 #include "Core/Frame/FrameProfile.h"
+#include "Core/Library/SpurGear.h"
 #include "Core/Library/StandardParts.h"
 
 #include <optional>
@@ -9,7 +10,7 @@
 namespace paramcad {
 
 bool IsLibraryPath(std::string_view path) noexcept {
-    return IsStandardPartPath(path) || IsFrameMemberPath(path);
+    return IsStandardPartPath(path) || IsFrameMemberPath(path) || IsSpurGearPath(path);
 }
 
 LibraryBuild BuildLibraryPart(std::string_view path) {
@@ -41,6 +42,26 @@ LibraryBuild BuildLibraryPart(std::string_view path) {
             return out;
         }
         out.part = BuildFrameMember(*spec);
+        if (!out.part) out.why = std::string(path) + " could not be built";
+        return out;
+    }
+    if (IsSpurGearPath(path)) {
+        const std::optional<SpurGear> gear = SpurGearOfPath(path);
+        if (!gear) {
+            // THE REASON, WHEN THERE IS ONE. A gear path fails for two
+            // unrelated reasons -- it is not written the way a gear path is
+            // written, or it names a gear nobody can cut -- and undercut is
+            // the second kind. Saying only "not a gear" would send somebody to
+            // check their typing about a tooth count that is the real problem.
+            const std::optional<SpurGear> shape =
+                ParseGearDesignation(path.substr(kSpurGearScheme.size()));
+            out.why = shape ? std::string(path) + ": " + WhyGearRefused(*shape)
+                            : std::string(path) +
+                                  " is not written the way a gear is -- it wants a module, a "
+                                  "tooth count and a width, as in gear:m2 z20 b10";
+            return out;
+        }
+        out.part = BuildSpurGear(*gear);
         if (!out.part) out.why = std::string(path) + " could not be built";
         return out;
     }
